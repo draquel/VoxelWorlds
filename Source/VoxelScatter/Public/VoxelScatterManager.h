@@ -307,6 +307,24 @@ public:
 	const TMap<FIntVector, FChunkScatterData>& GetScatterDataCache() const { return ScatterDataCache; }
 
 	/**
+	 * Chunks handed off with every scatter type out of range and so not extracted yet (world modes review G79): the
+	 * distance pass asks for their hand-off again once they come within the scatter horizon. For tests and audits.
+	 */
+	int32 GetChunksAwaitingFirstExtractionCount() const { return ChunksAwaitingFirstExtraction.Num(); }
+
+	/** The chunks awaiting their first extraction (GetChunksAwaitingFirstExtractionCount), for tests and audits. */
+	TArray<FIntVector> GetChunksAwaitingFirstExtraction() const { return ChunksAwaitingFirstExtraction.Array(); }
+
+	/** Hand-offs the distance pass asked for (G79: a chunk's first extraction once within the scatter horizon), since Initialize. */
+	int64 GetTotalDeferredFirstExtractions() const { return TotalDeferredFirstExtractions; }
+
+	/**
+	 * The scatter horizon: the largest distance any enabled scatter type spawns at (its SpawnDistance, or ScatterRadius
+	 * when 0; VoxelInjection types the tree mode rules out left out). A chunk beyond it has nothing to extract.
+	 */
+	float GetScatterHorizon() const;
+
+	/**
 	 * The renderer holding the HISM instances per chunk and scatter type, for tests and tools.
 	 * @return The renderer; null before Initialize and after Shutdown.
 	 */
@@ -701,6 +719,20 @@ public:
 		EditLayerSource = MoveTemp(InSource);
 	}
 
+	/**
+	 * How to hand a chunk off again (the chunk manager's HandOffChunkScatter: its edit-merged voxels through
+	 * OnChunkMeshDataReady), for a chunk whose hand-off found every type out of range (world modes review G79). A chunk
+	 * is handed off only when it submits a mesh, and while walking every chunk arrives at the window's front beyond every
+	 * spawn distance, so without this its scatter waited for its next mesh, the LOD refine near the viewer, and popped
+	 * there. The distance pass calls it on the game thread for the chunks awaiting their first extraction that have come
+	 * within the scatter horizon, nearest first, MaxDistanceSpawnChunksPerPass a pass. Returns false when the chunk has
+	 * no voxel data any more (it is dropped). Unset: those chunks wait for their next mesh (the behaviour before).
+	 */
+	void SetChunkHandOffRequester(TFunction<bool(const FIntVector& /*ChunkCoord*/)> InRequester)
+	{
+		ChunkHandOffRequester = MoveTemp(InRequester);
+	}
+
 	// ==================== Debug ====================
 
 	/**
@@ -809,6 +841,30 @@ protected:
 
 	/** A chunk's edit layer (see SetEditLayerSource). */
 	TFunction<const FChunkEditLayer*(const FIntVector&)> EditLayerSource;
+
+	/** How to hand a chunk off again (see SetChunkHandOffRequester). */
+	TFunction<bool(const FIntVector&)> ChunkHandOffRequester;
+
+	/**
+	 * Chunks handed off with every type out of range and nothing cached (G79). The distance pass hands them off again
+	 * once within the scatter horizon (ProcessDeferredFirstExtractions); an unload or a regeneration drops them.
+	 */
+	TSet<FIntVector> ChunksAwaitingFirstExtraction;
+
+	/** Hand-offs the distance pass asked for (GetTotalDeferredFirstExtractions). */
+	int64 TotalDeferredFirstExtractions = 0;
+
+	/** A type's spawn distance: its SpawnDistance, or ScatterRadius when 0. */
+	float GetEffectiveSpawnDistance(const FScatterDefinition& Def) const
+	{
+		return Def.SpawnDistance > 0.0f ? Def.SpawnDistance : ScatterRadius;
+	}
+
+	/** Whether the hand-off's tree-mode rule lets a type spawn at this distance (VoxelInjection types only). */
+	bool PassesTreeModeRule(const FScatterDefinition& Def, float ChunkDistance) const;
+
+	/** G79: hand off the chunks awaiting their first extraction that have come within the scatter horizon, nearest first. */
+	void ProcessDeferredFirstExtractions();
 
 	/** Build the cross-chunk classification context from the world mode + configuration (water level, noise params). */
 	FScatterExtractionContext MakeExtractionContext(const FIntVector& ChunkCoord) const;

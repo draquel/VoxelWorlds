@@ -754,11 +754,37 @@ Created automatically if no configuration is provided:
 
 ### Distance-Based Loading
 
-- Per-definition `SpawnDistance` allows different ranges per scatter type
+- Per-definition `SpawnDistance` allows different ranges per scatter type; a definition with `SpawnDistance` 0 spawns at
+  the world configuration's `ScatterRadius`
 - Trees can have larger spawn distance to prevent pop-in
 - Grass can have smaller distance for performance
 - Out-of-range cleanup releases instances to pool via `ReleaseChunkScatterType()` (in place: no tree rebuild)
 - Returning to an area recycles from pool — faster than initial load since instances already exist in HISM
+
+### The First Extraction and the Scatter Horizon (world modes review G79)
+
+A chunk is handed to the scatter manager when it submits a mesh (`UVoxelChunkManager::HandOffChunkScatter`: its first
+mesh and every LOD re-mesh), and the hand-off generates only the types whose spawn distance covers the chunk. The
+**scatter horizon** (`GetScatterHorizon`) is the largest of those distances. While walking, every chunk arrives at the
+window's front, which on most worlds lies beyond the horizon (`VoxelDemo`: a 40,000 uu view distance against trees at
+25,000), so its first hand-off finds nothing in range. Until G79 that hand-off extracted nothing and cached nothing,
+the distance pass (which reads only chunks with a surface cache) never saw the chunk, and its scatter waited for its
+next mesh: the LOD refine near the viewer (8,200 uu on `VoxelDemo`), where every type landed at once, the trees inside
+their fade band. Scatter looked as if it existed only on the finest LOD and popped in front of the player.
+
+Now such a chunk is remembered (`ChunksAwaitingFirstExtraction`; an unload or a regeneration drops it) and the
+distance pass hands it off again once it comes within the horizon, nearest first, `MaxDistanceSpawnChunksPerPass` a
+pass, through the chunk manager's requester (`SetChunkHandOffRequester`: `HandOffChunkScatter` from the chunk's
+edit-merged voxels, the far-compressed snapshot path included). Its first extraction then runs at the horizon with the
+types in range there, and the distance pass streams the rest in at their own distances; types with `SpawnDistance` 0
+stream at `ScatterRadius` like the others (and are released past it like the others, where before they stayed once
+spawned). A hand-off that finds a type in range takes the chunk out of the set, so a chunk whose next mesh comes first
+is handled as before. `voxel.Scatter.FirstExtractionAtHorizon` (1; 0 = the behaviour before), `voxel.Scatter.Stats`
+reports the chunks awaiting, the deferred hand-offs and the horizon.
+
+With the horizon in place the distances a definition needs are only the ones `ValidateScatterDistances` already
+checks: `LODStartDistance < CullDistance` (a fade band) and `CullDistance` below the effective spawn distance (a
+generated margin behind the visible edge, so streaming latency never shows at it).
 
 ## Debug Visualization
 

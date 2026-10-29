@@ -10545,14 +10545,15 @@ the far field's absence changes nothing on the voxel side, and the window still 
 | ID | Finding | Status |
 |----|---------|--------|
 | G78 | D38's gate (the cut-over only while a far field is on, `FLODQueryContext::bFarFieldActive`) is applied on heightmap worlds only; a planet with `voxel.World.FarField 0` still suspends its window above the cut-over, so from orbit nothing draws the planet but the ocean shell at small radii (P6.4 builds none at scale). The cvar is a debug switch, so the hole is QA-only; the gate could cover planets in one line (`bHeightmapCutoverAllowed` → every mode) if a planet without a far field is ever wanted | **Fixed 2026-10-26 (§23.13)** |
+| G79 | Scatter pop-in in front of the player on `VoxelDemo` (reported 2026-10-29): the scatter manager is handed a chunk only when it submits a mesh and generates only the types whose spawn distance covers it; a chunk first meshed at the window's front (35,000-45,000 uu, beyond the trees' 25,000) extracted nothing and cached nothing, the distance pass reads only cached chunks, so every type landed at the chunk's next mesh, the LOD0 refine at 8,200 (7,000 + 0.25 x 4,800), the trees inside their fade band. Measured over a 90 s walk: 825 front arrivals with nothing, 69 chunks taking all 17 types at 6,000-10,000. The fade itself works (`M_Foliage` has `PerInstanceFadeAmount`) and the config's distance invariants hold | **Fixed 2026-10-29 (§23.15)** |
 
 **Docs (WM-MP14).** `Features/WORLD_MODES.md` gains a "Mode parity" section (what every mode shares after §23, one
 code path per row, and what stays planet-only); `LOD_SYSTEM.md` (the far field and the cut-over per mode),
 `RENDERING_SYSTEM.md` (regions in every mode), `NOISE_LIBRARY.md` (one noise), `Research/TRAVERSAL_LIMITS.md` (no known
 ceiling on heightmap worlds after WM-MP5 and MP4) and the plugin instructions were brought up to date by MP2-MP4 and
 checked here; the parent's doc map and `vox.*` table carry the exit's summary; §23.11's parity table corrected (above).
-§23 is closed: every item done, every §23.6 row met, G78 (§23.13) and G77 (§23.14) fixed the same day. Next free
-finding G79, decision D42.
+§23 is closed: every item done, every §23.6 row met, G78 (§23.13) and G77 (§23.14) fixed the same day. G79 (scatter's
+first extraction, found 2026-10-29) is fixed in §23.15. Next free finding G80, decision D42.
 
 ### 23.13 G78 fixed: the far-field gate on the cut-over in every mode (2026-10-26)
 
@@ -10635,3 +10636,58 @@ draws advancing with the frames; before the fix 0 draws with the relevance compu
 450 x 300 window of that view where the block sat, 25,043 in the exit's shot (`mp3_demo_x_high_e4_a.png`) and 25,034
 on the merged build the same day, are 117-127 on the fix (`g77i_high{1,2,3}.png`: the lake's water edge to edge). No
 fall-through line, nothing else in the frame changed.
+
+### 23.15 G79 fixed: scatter's first extraction at the scatter horizon (2026-10-29)
+
+**What it was.** Reported as "scatter only on the denser LODs, popping in right in front of the player" on `VoxelDemo`.
+Scatter is handed a chunk only when the chunk submits a mesh (`UVoxelChunkManager::HandOffChunkScatter`: its first
+mesh and each LOD re-mesh), and the hand-off generated only the types whose spawn distance covered the chunk; with none
+in range `UVoxelScatterManager::OnChunkMeshDataReady` returned before queueing anything, so the chunk had no surface
+cache, and the distance pass (`PerformDistanceSpawn`, which streams the distance-limited types in and out) iterates
+only chunks with one. The demo streams to 40,000 uu with two LOD bands (LOD0 to 7,000, LOD1 from 7,000 to the
+horizon: `GetLODLevelForDistance` returns the last band's level beyond it) and its largest spawn distance is the trees'
+`ScatterRadius` of 25,000 (grass 12,000, the plants 10,000), so while walking every chunk is first meshed at the window's
+front, 35,000-45,000 uu out, beyond every type; its next mesh is the LOD0 refine at 8,200 (7,000 + 0.25 x 4,800), and
+there all 17 types landed at once, the trees fully opaque (their fade band is 15,000-22,000), grass at the top of its
+band (8,000-10,000), the plants at their cull edge (7,500-8,000). After a spawn or teleport the chunks near the player
+hand off inside 25,000 and the first kilometres look right; past them every chunk is a front arrival, which is why it
+read as "only on LOD0". Measured over a 90 s `vox.AutoRun` at 900 uu/s with `LogVoxelScatter` verbose: 825 chunks
+first handed off at 35,000-45,000 with every type out of range (nothing extracted), 69 chunks taking all 17 types at
+6,000-10,000, 107 near-band chunks (layers above and below the viewer) taking the trees alone at 12,000-20,000. The
+fade itself works (every demo mesh uses `M_Foliage`, which has `PerInstanceFadeAmount`) and the config's distance
+invariants hold; `ValidateScatterDistances` never compared a spawn distance with the load horizon. A second, smaller
+path found while measuring the fix: a mesh landing after its chunk was re-queued (a LOD change decided while the mesh
+was on a worker) went to the renderer through the chunk manager's "submitted despite state change" path and never to
+scatter, so such a chunk's first extraction also waited for its next mesh (15-23 ground chunks a walk along the pawn's
+own rows, with or without the horizon rule).
+
+**Fix** (VoxelWorlds, `fix/g79-scatter-first-extraction-horizon`). A chunk handed off with every type out of range and
+nothing cached is remembered (`UVoxelScatterManager::ChunksAwaitingFirstExtraction`; an unload or a regeneration drops
+it), and the distance pass hands it off again once it comes within the **scatter horizon** (`GetScatterHorizon`: the
+largest effective spawn distance of the enabled types, the tree-mode rule applied), nearest first,
+`MaxDistanceSpawnChunksPerPass` a pass (`ProcessDeferredFirstExtractions`), through the chunk manager's requester
+(`SetChunkHandOffRequester`: `HandOffChunkScatter` from the chunk's edit-merged voxels, the far-compressed snapshot path
+included). Its first extraction then runs at the horizon with the types in range there and the distance pass streams
+the rest in at their own distances. Types with `SpawnDistance` 0 now stream at `ScatterRadius` like the others and are
+released past it (before they stayed once spawned, and were only ever generated by the hand-off that found them in
+range). The second submit path hands the chunk off too (a chunk on its way out excepted). `voxel.Scatter.FirstExtractionAtHorizon`
+(1; 0 = before), `voxel.Scatter.Stats` reports the chunks awaiting, the deferred hand-offs and the horizon.
+
+**Tests.** `Scatter.FirstExtraction.Horizon` (new, the manager alone with a requester standing in for the chunk
+manager's): a chunk loaded 40,000 away extracts nothing and waits; with the viewer at 15,000 the distance pass hands it
+off and it holds the trees and no grass; near, the same spawn points as a chunk loaded near from the start; far again
+every type released, the surface kept, and an unloaded chunk is never asked for. `Scatter.FirstExtraction.RuleBefore`
+(the cvar at 0: nothing until the next mesh, the radius types kept once spawned). `Streaming.Plane.ScatterFirstExtractionAtHorizon`
+(new, the chunk manager: a plane with LOD off, so a chunk submits one mesh in its life, a window of 6,000, trees at
+2,500 and the radius types at 1,500; a viewer walks 16,000 in steps of 800): with the rule 78 chunks handed off by the
+distance pass, 26 with scatter and 10 with trees at the end, no chunk within the horizon waiting, none holding spawn
+points past the release distance; with the rule before 0 chunks that arrived during the walk were ever extracted.
+Headless, the four suites (`VoxelWorlds`, `VoxelCharacter`, `WorldClock`, `Dungeon`): **673 of 673** (670 before, the three new tests). No meshing or generation code changed, so the in-editor GPU parity run was not repeated.
+
+**Live** (`VoxelDemo`, the same 90 s walk, three runs: the first measurement, the rule before by cvar and the fix;
+`Saved/ClaudeScripts` and the session scratchpad's `scatter_walk2.sh` / `analyze_walk.py`): with the fix
+515 chunks take their first extraction at 24,000-26,000 (the trees, at the horizon), 821 (495 still waiting at the end) front
+arrivals wait beyond it, the distance pass streams the grass and plants into 221 chunks at their own
+distances, and ground chunks taking all 17 types under 10,000 go 23 (the rule before, the same run) -> 0. The
+editor must be at 60 FPS for the walk (`disable_bg_throttle.py` after every relaunch): at the throttled 3 FPS the pawn
+outran the window and the measurement was meaningless.
