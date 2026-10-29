@@ -1739,6 +1739,20 @@ void UVoxelChunkManager::Initialize(
 		{
 			return EditManager ? EditManager->GetEditLayer(ChunkCoord) : nullptr;
 		});
+		// A chunk handed off with every type out of range (it arrived at the window's front) is handed off again by the
+		// scatter manager's distance pass once within the scatter horizon (world modes review G79), from its voxels as the
+		// mesh submit hands them off.
+		ScatterManager->SetChunkHandOffRequester([this](const FIntVector& ChunkCoord) -> bool
+		{
+			FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+			if (!State || !State->Descriptor.HasVoxelDataAvailable()
+				|| State->State == EChunkState::PendingUnload || State->State == EChunkState::Unloaded)
+			{
+				return false;
+			}
+			HandOffChunkScatter(ChunkCoord, *State);
+			return true;
+		});
 
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelScatterManager created (Radius=%.0f)"),
 			Configuration->ScatterRadius);
@@ -8149,6 +8163,19 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			{
 				if (MeshRenderer && State)
 				{
+					// Scatter hears of this submit too (world modes review G79): a chunk whose first mesh landed after it was
+					// re-queued (a LOD change decided while the mesh was on a worker) went to the renderer here and never to
+					// scatter, so its first extraction waited for its next mesh on the path below, the LOD refine near the
+					// viewer, with every type landing at once. The hand-off reads the chunk's voxels, not this mesh, and a
+					// chunk whose types are done takes nothing from it. A chunk on its way out is left alone.
+					if (ScatterManager && Configuration && Configuration->bEnableScatter
+						&& State->State != EChunkState::PendingUnload && State->State != EChunkState::Unloaded)
+					{
+						const double ScatT0 = FPlatformTime::Seconds();
+						HandOffChunkScatter(ChunkCoord, *State);
+						SubmitScatterSecondsThisTick += FPlatformTime::Seconds() - ScatT0;
+					}
+
 					// R24: an LOD change (or a faded-in first appearance, P3) holds the swap until its seams land (see BeginSeamHold).
 					const bool bHoldForSeams = ShouldHoldForSeams(ChunkCoord, PreviousMeshedLOD,
 						PendingMeshQueue[i].LODLevel, PendingMeshQueue[i].MeshData);

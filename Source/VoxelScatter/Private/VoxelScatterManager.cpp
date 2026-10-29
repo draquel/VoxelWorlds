@@ -53,6 +53,15 @@ static TAutoConsoleVariable<int32> CVarVoxelScatterPlanetFaceCaves(
 	TEXT("such a voxel was read as rock. Read when a chunk's extraction context is built."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarVoxelScatterFirstExtractionAtHorizon(
+	TEXT("voxel.Scatter.FirstExtractionAtHorizon"),
+	1,
+	TEXT("World modes review G79: 1 = a chunk handed off with every scatter type out of range (it arrived at the window's front)\n")
+	TEXT("is handed off again by the distance pass once it comes within the scatter horizon (the largest spawn distance), and\n")
+	TEXT("types with SpawnDistance 0 stream at ScatterRadius like the others; 0 = such a chunk waits for its next mesh, the LOD\n")
+	TEXT("refine near the viewer, where every type lands at once (before). Read each distance pass."),
+	ECVF_Default);
+
 /** The scatter HISM regions by default (voxel.Scatter.RegionChunks -1), every world mode: a quarter of the render regions' edge. */
 static constexpr int32 DefaultScatterRegionChunks = 4;
 
@@ -385,6 +394,8 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 	TotalChunksProcessed = 0;
 	TotalExtractionsLaunched = 0;
 	TotalRegenerations = 0;
+	TotalDeferredFirstExtractions = 0;
+	ChunksAwaitingFirstExtraction.Empty();
 	TotalSurfacePointsExtracted = 0;
 	TotalSpawnPointsGenerated = 0;
 
@@ -508,6 +519,7 @@ void UVoxelScatterManager::Shutdown()
 	ScatterDataCache.Empty();
 	CompletedScatterTypes.Empty();
 	ScatterDefinitions.Empty();
+	ChunksAwaitingFirstExtraction.Empty();
 	ClearedVolumesPerChunk.Empty();
 	ExclusionVolumes.Empty();
 	PendingExclusionRegrow.Empty();
@@ -754,8 +766,19 @@ void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, co
 
 	if (DefsToGenerate.Num() == 0)
 	{
+		// Every type out of range and nothing cached: the chunk arrived at the window's front (G79). The distance pass hands
+		// it off again once it comes within the scatter horizon, so its scatter does not wait for its next mesh.
+		if (CVarVoxelScatterFirstExtractionAtHorizon.GetValueOnGameThread() != 0 && !SurfaceDataCache.Contains(ChunkCoord)
+			&& !ScatterDataCache.Contains(ChunkCoord) && !AsyncScatterInProgress.Contains(ChunkCoord) && !PendingQueueSet.Contains(ChunkCoord)
+			&& ChunkDistance > GetScatterHorizon())
+		{
+			ChunksAwaitingFirstExtraction.Add(ChunkCoord);
+			UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): every type out of range at %.0f, awaiting its first extraction"),
+				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, ChunkDistance);
+		}
 		return;
 	}
+	ChunksAwaitingFirstExtraction.Remove(ChunkCoord);
 
 	// Build pending request
 	auto MakePendingRequest = [&]() -> FPendingScatterGeneration
@@ -845,6 +868,9 @@ void UVoxelScatterManager::OnChunkUnloaded(const FIntVector& ChunkCoord)
 	// A queued exclusion regrow is obsolete too: the reload's first pass reads the current volume set
 	PendingExclusionRegrow.Remove(ChunkCoord);
 
+	// An unloaded chunk waits for nothing (G79)
+	ChunksAwaitingFirstExtraction.Remove(ChunkCoord);
+
 	RemoveChunkScatter(ChunkCoord);
 }
 
@@ -874,6 +900,9 @@ void UVoxelScatterManager::RegenerateChunkScatter(const FIntVector& ChunkCoord)
 	// Clear cleared volumes and completed types so scatter can fully regenerate
 	ClearedVolumesPerChunk.Remove(ChunkCoord);
 	CompletedScatterTypes.Remove(ChunkCoord);
+
+	// The hand-off that follows a regeneration decides again whether the chunk waits (G79)
+	ChunksAwaitingFirstExtraction.Remove(ChunkCoord);
 
 	// Drop cached surface/scatter data so the re-extraction is treated as a fresh first pass (a full
 	// replace, not a supplemental append). Deliberately keep the rendered HISM instances: the completed
@@ -1574,6 +1603,7 @@ FString UVoxelScatterManager::GetDebugStats() const
 		TEXT("Pending Queue: %d\n")
 		TEXT("Async In-Flight: %d / %d\n")
 		TEXT("Distance Stream In-Flight: %d / %d\n")
+		TEXT("Awaiting First Extraction: %d (handed off by the distance pass: %lld, horizon %.0f)\n")
 		TEXT("Total Surface Points: %lld\n")
 		TEXT("Total Spawn Points: %lld\n")
 		TEXT("Avg Surface/Chunk: %.1f\n")
@@ -1588,6 +1618,7 @@ FString UVoxelScatterManager::GetDebugStats() const
 		PendingGenerationQueue.Num(),
 		AsyncScatterInProgress.Num(), MaxAsyncScatterTasks,
 		DistanceStreamInProgress.Num(), MaxDistanceStreamTasks,
+		ChunksAwaitingFirstExtraction.Num(), TotalDeferredFirstExtractions, GetScatterHorizon(),
 		Stats.TotalSurfacePoints,
 		Stats.TotalSpawnPoints,
 		Stats.GetAverageSurfacePointsPerChunk(),
@@ -1728,21 +1759,135 @@ void UVoxelScatterManager::ProcessPendingGenerationQueue()
 	}
 }
 
+bool UVoxelScatterManager::PassesTreeModeRule(const FScatterDefinition& Def, float ChunkDistance) const
+{
+	if (!Configuration || Def.MeshType != EScatterMeshType::VoxelInjection)
+	{
+		return true;
+	}
+	// As the hand-off: a VoxelInjection type is HISM scatter only in HISM mode, or in Both mode past the voxel trees' reach.
+	if (Configuration->TreeMode == EVoxelTreeMode::VoxelData)
+	{
+		return false;
+	}
+	return Configuration->TreeMode != EVoxelTreeMode::Both || ChunkDistance > Configuration->VoxelTreeMaxDistance;
+}
+
+float UVoxelScatterManager::GetScatterHorizon() const
+{
+	float Horizon = 0.0f;
+	for (const FScatterDefinition& Def : ScatterDefinitions)
+	{
+		if (Def.bEnabled && PassesTreeModeRule(Def, FLT_MAX))
+		{
+			Horizon = FMath::Max(Horizon, GetEffectiveSpawnDistance(Def));
+		}
+	}
+	return Horizon;
+}
+
+void UVoxelScatterManager::ProcessDeferredFirstExtractions()
+{
+	if (ChunksAwaitingFirstExtraction.Num() == 0 || !Configuration)
+	{
+		return;
+	}
+	if (CVarVoxelScatterFirstExtractionAtHorizon.GetValueOnGameThread() == 0 || !ChunkHandOffRequester)
+	{
+		// The rule before: such a chunk waits for its next mesh. Drop the set so it does not grow for nothing.
+		ChunksAwaitingFirstExtraction.Empty();
+		return;
+	}
+
+	const float Horizon = GetScatterHorizon();
+	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+
+	// The chunks within the horizon, nearest first (the candidates are collected first: a hand-off edits the set)
+	struct FCandidate
+	{
+		FIntVector ChunkCoord;
+		float Distance;
+	};
+	TArray<FCandidate> Candidates;
+	for (const FIntVector& ChunkCoord : ChunksAwaitingFirstExtraction)
+	{
+		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) + FVector(ChunkWorldSize * 0.5f);
+		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+		if (ChunkDistance <= Horizon)
+		{
+			Candidates.Add({ ChunkCoord, ChunkDistance });
+		}
+	}
+	if (Candidates.Num() == 0)
+	{
+		return;
+	}
+	Candidates.Sort([](const FCandidate& A, const FCandidate& B) { return A.Distance < B.Distance; });
+
+	int32 Launched = 0;
+	for (const FCandidate& Candidate : Candidates)
+	{
+		if (Launched >= MaxDistanceSpawnChunksPerPass)
+		{
+			break;
+		}
+		// The hand-off runs OnChunkMeshDataReady, which queues the extraction and takes the chunk out of the set; a chunk
+		// without voxel data any more is dropped.
+		ChunksAwaitingFirstExtraction.Remove(Candidate.ChunkCoord);
+		++TotalDeferredFirstExtractions;
+		if (ChunkHandOffRequester(Candidate.ChunkCoord))
+		{
+			++Launched;
+		}
+	}
+	if (Launched > 0)
+	{
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Deferred first extraction: handed off %d of %d chunks within the scatter horizon (%.0f), %d still waiting"),
+			Launched, Candidates.Num(), Horizon, ChunksAwaitingFirstExtraction.Num());
+	}
+}
+
 void UVoxelScatterManager::PerformDistanceSpawn()
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_DistanceSpawn);
-	if (!Configuration || SurfaceDataCache.Num() == 0)
+	if (!Configuration)
 	{
 		return;
 	}
 
-	// Collect definitions that have per-definition SpawnDistance
-	TArray<const FScatterDefinition*> DistanceLimitedDefs;
+	// G79: the chunks that arrived beyond every type's reach, once within the scatter horizon (before the cache check: they
+	// have nothing cached yet)
+	ProcessDeferredFirstExtractions();
+
+	if (SurfaceDataCache.Num() == 0)
+	{
+		return;
+	}
+
+	// Collect the definitions the distance pass streams, each with its spawn distance: those with a SpawnDistance of their
+	// own and, since G79, those at ScatterRadius too (their spawn is no longer tied to the hand-off that happened to find
+	// them in range; the hand-off's tree-mode rule applies to them as it would there)
+	const bool bRadiusTypesStream = CVarVoxelScatterFirstExtractionAtHorizon.GetValueOnGameThread() != 0;
+	struct FDistanceLimitedDef
+	{
+		const FScatterDefinition* Def;
+		float SpawnDistance;
+		bool bTreeModeRule;
+	};
+	TArray<FDistanceLimitedDef> DistanceLimitedDefs;
 	for (const FScatterDefinition& Def : ScatterDefinitions)
 	{
-		if (Def.bEnabled && Def.SpawnDistance > 0.0f)
+		if (!Def.bEnabled)
 		{
-			DistanceLimitedDefs.Add(&Def);
+			continue;
+		}
+		if (Def.SpawnDistance > 0.0f)
+		{
+			DistanceLimitedDefs.Add({ &Def, Def.SpawnDistance, false });
+		}
+		else if (bRadiusTypesStream && PassesTreeModeRule(Def, FLT_MAX))
+		{
+			DistanceLimitedDefs.Add({ &Def, ScatterRadius, true });
 		}
 	}
 
@@ -1769,12 +1914,12 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
 
 		TArray<int32> TypesToRemove;
-		for (const FScatterDefinition* Def : DistanceLimitedDefs)
+		for (const FDistanceLimitedDef& Limited : DistanceLimitedDefs)
 		{
-			const float CleanupDistance = Def->SpawnDistance * (1.0f + DistanceCleanupHysteresis);
-			if (ChunkDistance > CleanupDistance && CompletedTypeIDs.Contains(Def->ScatterID))
+			const float CleanupDistance = Limited.SpawnDistance * (1.0f + DistanceCleanupHysteresis);
+			if (ChunkDistance > CleanupDistance && CompletedTypeIDs.Contains(Limited.Def->ScatterID))
 			{
-				TypesToRemove.Add(Def->ScatterID);
+				TypesToRemove.Add(Limited.Def->ScatterID);
 			}
 		}
 
@@ -1861,16 +2006,20 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 
 		// Find definitions that are now in range but haven't been generated
 		TArray<FScatterDefinition> NewlyInRangeDefs;
-		for (const FScatterDefinition* Def : DistanceLimitedDefs)
+		for (const FDistanceLimitedDef& Limited : DistanceLimitedDefs)
 		{
-			if (CompletedTypes && CompletedTypes->Contains(Def->ScatterID))
+			if (CompletedTypes && CompletedTypes->Contains(Limited.Def->ScatterID))
+			{
+				continue;
+			}
+			if (Limited.bTreeModeRule && !PassesTreeModeRule(*Limited.Def, ChunkDistance))
 			{
 				continue;
 			}
 
-			if (ChunkDistance <= Def->SpawnDistance)
+			if (ChunkDistance <= Limited.SpawnDistance)
 			{
-				NewlyInRangeDefs.Add(*Def);
+				NewlyInRangeDefs.Add(*Limited.Def);
 			}
 		}
 
