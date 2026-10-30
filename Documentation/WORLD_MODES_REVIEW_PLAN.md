@@ -10546,6 +10546,8 @@ the far field's absence changes nothing on the voxel side, and the window still 
 |----|---------|--------|
 | G78 | D38's gate (the cut-over only while a far field is on, `FLODQueryContext::bFarFieldActive`) is applied on heightmap worlds only; a planet with `voxel.World.FarField 0` still suspends its window above the cut-over, so from orbit nothing draws the planet but the ocean shell at small radii (P6.4 builds none at scale). The cvar is a debug switch, so the hole is QA-only; the gate could cover planets in one line (`bHeightmapCutoverAllowed` → every mode) if a planet without a far field is ever wanted | **Fixed 2026-10-26 (§23.13)** |
 | G79 | Scatter pop-in in front of the player on `VoxelDemo` (reported 2026-10-29): the scatter manager is handed a chunk only when it submits a mesh and generates only the types whose spawn distance covers it; a chunk first meshed at the window's front (35,000-45,000 uu, beyond the trees' 25,000) extracted nothing and cached nothing, the distance pass reads only cached chunks, so every type landed at the chunk's next mesh, the LOD0 refine at 8,200 (7,000 + 0.25 x 4,800), the trees inside their fade band. Measured over a 90 s walk: 825 front arrivals with nothing, 69 chunks taking all 17 types at 6,000-10,000. The fade itself works (`M_Foliage` has `PerInstanceFadeAmount`) and the config's distance invariants hold | **Fixed 2026-10-29 (§23.15)** |
+| G80 | The LOD ribs (`VISUAL_POLISH_PLAN.md` VP5, reported on `PlanetTest` 2026-10-29): steps a stride apart in the LOD 1 and 2 terrain, shown by its own shadows under a low sun. Generated density saturates a voxel either side of the surface, so a strided edge interpolated between its two samples put its crossing toward the edge's middle by where the surface crossed the strided grid (both smooth meshers, every world with an LOD 2 band; LOD 2 vertices 0.40-0.62 voxels RMS off a gentle surface, banded 0.7-1.8 voxels over the phase in the cell) | **Fixed 2026-10-29 (§23.16)** |
+| G81 | Dual Contouring's QEF solve, found measuring G80: its Jacobi decomposition left the matrix asymmetric (wrong eigenpairs: a direction the SVD threshold should have dropped was kept) and it solved for the position about the chunk's origin (a dropped direction went there), so some vertices sat a voxel or more off a flat surface, at every LOD (3% of LOD 2 vertices on a planet's tangent plane, 1.3-3.2 voxels) | **Fixed 2026-10-29 (§23.16)** |
 
 **Docs (WM-MP14).** `Features/WORLD_MODES.md` gains a "Mode parity" section (what every mode shares after §23, one
 code path per row, and what stays planet-only); `LOD_SYSTEM.md` (the far field and the cut-over per mode),
@@ -10553,7 +10555,8 @@ code path per row, and what stays planet-only); `LOD_SYSTEM.md` (the far field a
 ceiling on heightmap worlds after WM-MP5 and MP4) and the plugin instructions were brought up to date by MP2-MP4 and
 checked here; the parent's doc map and `vox.*` table carry the exit's summary; §23.11's parity table corrected (above).
 §23 is closed: every item done, every §23.6 row met, G78 (§23.13) and G77 (§23.14) fixed the same day. G79 (scatter's
-first extraction, found 2026-10-29) is fixed in §23.15. Next free finding G80, decision D42.
+first extraction, found 2026-10-29) is fixed in §23.15; G80 and G81 (the LOD ribs and the QEF solve, found 2026-10-29) in §23.16. Next free finding G82,
+decision D42.
 
 ### 23.13 G78 fixed: the far-field gate on the cut-over in every mode (2026-10-26)
 
@@ -10691,3 +10694,122 @@ arrivals wait beyond it, the distance pass streams the grass and plants into 221
 distances, and ground chunks taking all 17 types under 10,000 go 23 (the rule before, the same run) -> 0. The
 editor must be at 60 FPS for the walk (`disable_bg_throttle.py` after every relaunch): at the throttled 3 FPS the pawn
 outran the window and the measurement was meaningless.
+
+### 23.16 G80 and G81 fixed: LOD crossings at voxel resolution, and the QEF solve (2026-10-29)
+
+**The report** (`VISUAL_POLISH_PLAN.md` VP5): "steps/ribs clearly visible in the mid/far field which clearly smooth as the
+LODs come closer to 0", seen on `PlanetTest`, thought to be the planet's shaping.
+
+**What it was (G80).** Generation ignores LOD: every chunk's voxels are made at voxel resolution and the density is the
+signed distance's one-voxel ramp (`SignedDistanceToDensity`), 0 or 255 beyond it. A strided cell edge (2 voxels at LOD 1,
+4 at LOD 2) interpolated between its two samples reads them saturated, so its crossing sits toward the edge's middle
+whatever the surface does between them: the vertex error runs with where the surface crosses the strided grid, and LOD 1
+and 2 are terraced a stride apart. The vertex normals were already LOD 0's (G44, G61, G62), so the terraces show only in
+the terrain's own dynamic shadows under a low sun: on `PlanetTest` at 30°N 20°E, 16:30 local, from 7 km up, the ribs are
+concentric arcs on the north slope and a checkerboard on the south one, and with `ShowFlag.DynamicShadows 0` they are
+gone. Not planet shaping: every configuration with an LOD 2 band (stride 4 from 14,000 to 40,000 uu) has them, the
+planets, the islands, cubic's smooth controls and `DemoSmoothWorldConfig` on main; a local `DemoSmoothWorldConfig`
+without its LOD 2 band showed none, which is why they looked planet-only.
+
+**G81, found measuring G80.** With voxel crossings Marching Cubes' strided vertices lay on an exact plane (0.004 voxels)
+but 3% of Dual Contouring's LOD 2 vertices sat 1.3-3.2 voxels off it, inside their cells, on a planet's flat tangent
+plane. The QEF solve (`QEFSolver.h`) had two faults, at every LOD: its Jacobi decomposition zeroed each rotation's pivot
+above the diagonal only, and the next rotation's update read the stale element below it, so the decomposition converged
+to wrong eigenpairs (three crossings with one normal at 45°N, a rank-1 matrix 3 n nᵀ, gave eigenvalues 3.16, 0 and -0.16
+for 3, 0 and 0: a direction the SVD threshold should have dropped was kept, and the vertex went 1.6 voxels off the
+plane); and the pseudoinverse solved for the position itself, so a dropped direction went to the frame's origin (a flat
+cell's vertex was the plane's point nearest the chunk's corner, pulled back toward the mass point by the bias blend only
+part of the way when it lay within a cell of the cell). The retired GPU Dual Contouring port zeroed both sides.
+
+**Fix** (VoxelWorlds, `fix/g80-lod-voxel-crossings`).
+- **Dual Contouring (G80).** At a stride a crossing is LOD 0's on the edge: the first voxel step along it that changes
+  sign, interpolated within that step (`VoxelDCShading::FindVoxelCrossing`, already G44's), and its QEF normal is the
+  fitted gradient there (`CalculateShadingNormal`, the seam samplers' `ShadingNormal`: exact for a plane, where the
+  central difference tilts with the voxel phase over a whole stride). A strided cell's vertex normal is then LOD 0's
+  estimator over its own crossings (their fitted normals summed), nearer the analytic normals than G44's one voxel cell
+  (gentle relief at LOD 2: 0.98° against 2.09° at 45°N, 2.61° against 6.22° on the plane), which stays for the cvar at 0.
+  The interior pass and the seam template (`ComputeCellVertex`) run one op sequence.
+- **Marching Cubes (G80).** At stride > 1 an edge vertex is the voxel crossing on its edge (`FindEdgeVoxelCrossing`: the
+  crossing nearest the strided interpolation, walked from the edge's min end, the point G61's normal already read), in
+  regular cells, seam bands and the transition ribbon (its coarse corner-corner edges are the coarser neighbour's, its
+  face-face ones the fine mesh's; one-voxel edges keep `InterpolateEdge`, so LOD 0 is bit for bit as before). The
+  boundary geomorph's target follows the coarse cells' new vertices: the voxel crossings on the four coarse edge columns
+  along the morph axis around the vertex, blended bilinearly (`ComputeCoarseCrossingsAlongAxis`; on a column, that
+  column's coarse vertex), in place of the trilinear coarse density's crossing. The GPU shader the same
+  (`MarchingCubesMeshGeneration.usf`: one `[loop]` of edge walks per pass, F2.13's rule; `ComputeCoarseCrossingsZ`).
+- **The QEF (G81).** Each rotation zeroes its pivot on both sides; the solve is for the offset from the mass point
+  (`ATb - ATA * MassPoint`), so a dropped direction stays at the mass point; a result still outside the cell after the
+  bias blend is cut back along the segment from the mass point at the cell's faces (the vertex in its own cell, #44's
+  law: before, a result just outside stayed outside); and at LOD 0 the QEF's normals are the fitted gradient too (already
+  computed for the shading normal: the solve now uses the normals, which the old one dropped for flat cells).
+- `voxel.Mesh.VoxelLODCrossings` (1; 0 = the strided crossings, normals and morph target, both meshers) and
+  `voxel.Mesh.QEFSolve` (1; 0 = the old solve and LOD 0's central-difference QEF normals).
+
+**Tests.** `Meshing.LODCrossings.Planes` (the G62 ramp planes: LOD 1 and 2 vertices against the plane, mean / band over
+the phase in the LOD's cell, voxels):
+
+| Mesher, LOD | Strided crossings | Voxel crossings |
+|---|---|---|
+| DC LOD 1 | 0.048 / 0.106 | 0.004 / 0.0003 |
+| DC LOD 2 | 0.308 / 0.644 (max 1.56) | 0.004 / 0.0003 (max 0.008) |
+| MC LOD 1 | 0.052 / 0.222 | 0.004 / 0.0002 |
+| MC LOD 2 | 0.376 / 1.491 | 0.004 / 0.0004 |
+
+LOD 0 is the same in either setting (DC 0.004 with G81, MC bit for bit). `Meshing.QEF.Solve`: the cell above onto its
+plane at its mass point (0.0000 voxels; 1.64 before), a corner exact either way, a plane in 16 cells out to 1,900 voxels.
+`Streaming.{Planet,Plane}.LODPositions` (new): every rendered vertex's distance from the analytic surface along local up
+and every triangle's tilt from the analytic normal, per LOD, at 45°N 20°E, the equator and near the pole and on the
+plane, gentle relief (400 uu, the surface every LOD resolves) and the streaming tests' rolling relief (1,600 uu). LOD 2,
+RMS error (voxels) / band / triangle tilt, Dual Contouring: before, G80 alone, G81 alone, both:
+
+| Place | Before | G80 | G81 | Both |
+|---|---|---|---|---|
+| 45°N, gentle | 0.395 / 0.311 / 7.49° | 0.304 / 0.074 / 3.96° | 0.271 / 0.358 / 6.04° | **0.059 / 0.018 / 1.78°** |
+| Equator, gentle | 0.482 / 0.754 / 9.12° | 0.200 / 0.031 / 2.90° | 0.507 / 0.800 / 10.52° | **0.060 / 0.025 / 1.86°** |
+| Near the pole, gentle | 0.495 / 0.726 / 9.50° | 0.129 / 0.032 / 2.47° | 0.531 / 0.787 / 10.91° | **0.061 / 0.031 / 1.87°** |
+| Plane, gentle | 0.511 / 0.701 / 12.41° | 0.253 / 0.136 / 6.62° | 0.654 / 0.764 / 12.08° | **0.143 / 0.071 / 4.23°** |
+| 45°N, rolling | 0.647 / 0.327 / 16.00° | 0.474 / 0.245 / 12.90° | 0.663 / 0.320 / 15.61° | **0.256 / 0.053 / 7.79°** |
+| Plane, rolling | 1.474 / 0.637 / 31.55° | 1.166 / 0.538 / 27.93° | 1.384 / 0.596 / 30.23° | **0.745 / 0.150 / 19.69°** |
+
+Neither alone is enough: the strided crossings are wrong whatever the solve, and with them right the old solve moved
+some vertices off. Both: LOD 1 RMS 0.073-0.131 → 0.015-0.044 on gentle relief, LOD 0 0.008-0.020 → 0.006-0.009, triangle
+tilt at LOD 0 0.58-1.44° → 0.53-1.29°. Marching Cubes, before and after (LOD 2): gentle relief 0.36-0.62 → 0.017-0.058
+voxels RMS, band 1.06-1.76 → 0.003-0.014, tilt 9.8-13.7° → 1.7-4.2°; rolling 0.65-1.15 → 0.05-0.28, tilt 16.4-28.2° →
+9.0-22.8°. What is left on rolling relief is LOD 2 not resolving the finest octave, which is its job. Dual Contouring's
+surface is closed in every case under both settings; Marching Cubes' open edges (its ribbon's v1 gaps at mixed-LOD face
+edges, `VoxelCPUMarchingCubesSeams.cpp`) fall in every case (300 → 185 at 45°N gentle).
+
+Earlier tests whose A/B G80 and G81 change: `LODNormals` / `LODNormalsMC` (G44, G61) compare against the whole old
+pipeline now (`VoxelShadingNormals 0` and `VoxelLODCrossings 0`: with G80 a strided Dual Contouring normal sums its
+crossings' fitted normals whatever the first says), and their vertex counts are no longer equal across the A/B (G80
+moves vertices): gentle relief at LOD 2, 45°N 13.67° → 0.98°, the plane 14.45° → 2.61°. `GradientBands` (G62) keeps "no
+vertex moves" for Marching Cubes only (Dual Contouring's QEF takes the fit since G81), and Dual Contouring's LOD 2
+within a quarter degree of the central difference's (an average over a 4-voxel cell evens the two out; LOD 0 and 1
+still fall, 2.89° → 0.64° and 2.32° → 1.08° on the plane). `Meshing.CrossingGradient.Planes` (G62) the same for Dual
+Contouring's positions. `MarchingCubes.LODBoundary.T13_BoundaryMorphStep` measures the morph on the strided vertices
+(the LOD step it existed for: 19.3 → 1.9 units) and checks that voxel crossings leave none with or without it (1.5 and
+1.5). Two test heuristics that assumed where a vertex sits: `CountOpenEdges` excuses the loaded region's edge per axis
+(a missing edge seam's open edges lie two cells off each of two axes, up to 566 uu by Euclidean distance at LOD 2 on a
+50 uu grid, past the 400 it allowed), and `MS4_MixedFaceClosureNoise`'s probe is the open box (a vertex on a rim
+cell's face is the rim's).
+
+Headless, the six suites (`VoxelWorlds`, `VoxelWorldSave`, `VoxelCharacter`, `WorldClock`, `InteractionPlugin`, `Dungeon`):
+**678 of 678**. In the editor (a worktree editor, Claudius on 8082, background throttling off): **678 of 678**; the GPU
+Marching Cubes mesher's vertices are within 0.0002 uu of the CPU's in both settings at LOD 0, 1 and 2
+(`LODCrossings.Planes`), its normals within 0.16° (`CrossingGradient.Planes`), and `MarchingCubes.CPUvsGPU`, the GPU
+parity tests and the renderer tests pass (generation is untouched).
+
+**Live** (`PlanetTest` in PIE in the worktree editor, the pawn at 30°N 20°E, 16:30 local with the clock stopped, a
+camera 7,000 uu up pitched 14° down toward the north and toward the south; one build, by the two cvars, `voxel.RemeshAll`
+before each pair of shots; `Saved/ClaudeScripts/g80_live.sh`, images `g80_dc_compare.png` and `g80_mc_compare.png`): with
+both cvars at 0 the north slope shows the report's concentric arcs and the south slope its checkerboard; with both at 1
+both are gone, and so is the faint trace that voxel crossings alone left on the north slope. Marching Cubes
+(`PlanetWorldConfig` switched in memory, reloaded from disk after, never saved) showed deeper terraces before (no QEF to
+soften its strided vertices) and none after; a small dark speck on the south slope is in both shots (its ribbon's gaps),
+not new.
+
+**Cost** (`voxel.RemeshAll` there: 1,075 chunk meshes and 5,528 seam jobs, `voxel.Edit.MeshWork`, three runs per
+setting, alternating): Dual Contouring's chunk meshes 4.60, 5.32 and 4.94 s of worker time before against 4.39, 4.43 and
+4.67 s after, its seam jobs 3.33, 3.51 and 3.49 s against 3.08, 3.14 and 3.16 s; Marching Cubes' chunk meshes 2.39, 2.45
+and 2.53 s against 2.65, 2.46 and 2.46 s, its seam jobs 1.15, 1.10 and 1.17 s against 1.18, 1.17 and 1.14 s. No cost: the
+walk reads at most a stride of voxels an edge, and LOD 0's fitted normals were already computed for the shading.

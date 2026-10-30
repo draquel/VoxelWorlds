@@ -32,6 +32,9 @@ TAutoConsoleVariable<float> CVarMCBoundaryMorphWidth(
 // voxel.Mesh.VoxelShadingNormals (VoxelCPUDualContourMesher.cpp): both smooth meshers' vertex normals at LOD > 0.
 extern TAutoConsoleVariable<int32> CVarVoxelShadingNormals;
 
+// voxel.Mesh.VoxelLODCrossings (VoxelCPUDualContourMesher.cpp): both smooth meshers' edge crossings at LOD > 0 (G80).
+extern TAutoConsoleVariable<int32> CVarVoxelLODCrossings;
+
 /**
  * Vertex normals of strided cells (G61, WORLD_MODES_REVIEW_PLAN.md §14.1 and §20.9; Dual Contouring's G44 in §20.8).
  *
@@ -40,7 +43,14 @@ extern TAutoConsoleVariable<int32> CVarVoxelShadingNormals;
  * them: at stride 4 each component becomes a sign and the normal snaps toward the nearest of the 26 cube directions (LOD 2
  * leaning toward the cube diagonals on a planet, snapped slopes on a heightmap). Every LOD's data is at voxel resolution,
  * so an edge vertex's normal at stride > 1 is LOD 0's at the voxel crossing on its edge nearest it
- * (CalculateEdgeShadingNormal). Positions are unchanged, so seams and the boundary geomorph are unaffected.
+ * (CalculateEdgeShadingNormal).
+ *
+ * Vertex positions at stride > 1 (G80, WORLD_MODES_REVIEW_PLAN.md §23.16, voxel.Mesh.VoxelLODCrossings): interpolated between the two samples a stride
+ * apart, the same saturation put a strided edge's vertex toward the edge's middle by where the surface crosses the
+ * strided grid, so LOD 1 and 2 were terraced a stride apart (ribs in the terrain's own shadows under a low sun). The
+ * vertex is now that voxel crossing (FindEdgeVoxelCrossing), a function of the edge, so regular cells, seam frames and
+ * the transition ribbon still agree on every shared edge; the boundary geomorph's target follows the coarse cells' new
+ * vertices (ComputeCoarseCrossingsAlongAxis).
  */
 namespace VoxelMCShading
 {
@@ -48,6 +58,15 @@ namespace VoxelMCShading
 	static bool UseVoxelShadingNormals(int32 Stride)
 	{
 		return Stride > 1 && CVarVoxelShadingNormals.GetValueOnAnyThread() != 0;
+	}
+
+	/**
+	 * voxel.Mesh.VoxelLODCrossings for an edge this many voxels long (always false for a one-voxel edge, whose crossing
+	 * is InterpolateEdge's: LOD 0, and a ribbon's fine side against LOD 0, stay bit for bit as they were).
+	 */
+	static bool UseVoxelLODCrossings(int32 EdgeLength)
+	{
+		return EdgeLength > 1 && CVarVoxelLODCrossings.GetValueOnAnyThread() != 0;
 	}
 }
 
@@ -682,6 +701,8 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 	const uint16* VertexDataRow = TransvoxelTables::RegularVertexData[CaseIndex];
 	FVector3f CellVertices[12];
 	int32 VertexCorners[12][2];
+	// G80: at a stride, the vertex at the voxel crossing on its edge (the point G61's normal reads).
+	const bool bVoxelCrossings = VoxelMCShading::UseVoxelLODCrossings(Stride);
 
 	for (int32 i = 0; i < VertexCount; i++)
 	{
@@ -702,6 +723,13 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 				CornerPositions[CornerA], CornerPositions[CornerB],
 				IsoLevel
 			);
+			FVector3f Crossing;
+			if (bVoxelCrossings && FindEdgeVoxelCrossing(Request,
+				FIntVector(X, Y, Z) + LengyelCornerOffsets[CornerA] * Stride, FIntVector(X, Y, Z) + LengyelCornerOffsets[CornerB] * Stride,
+				CornerDensities[CornerA], CornerDensities[CornerB], Crossing))
+			{
+				CellVertices[i] = Crossing * VoxelSize;
+			}
 		}
 	}
 
@@ -1227,6 +1255,74 @@ bool FVoxelCPUMarchingCubesMesher::ComputeCoarseSurfaceAlongAxis(
 	return bFound;
 }
 
+bool FVoxelCPUMarchingCubesMesher::ComputeCoarseCrossingsAlongAxis(
+	const FVoxelMeshingRequest& Request,
+	const FVector3f& V, int32 Axis,
+	int32 CoarserStride,
+	float& OutCoord) const
+{
+	// The coarse cells' vertices on the four coarse edge columns along Axis around the line (ComputeCoarseSurfaceAlongAxis'
+	// lattice, its clamp and search band), blended bilinearly: on a column, that column's coarse vertex.
+	const float IsoLevel = Config.IsoLevel;
+	const int32 E = FMath::Max(1, CoarserStride);
+	const float Ef = static_cast<float>(E);
+	const int32 ChunkSize = Request.ChunkSize;
+	const int32 AxisB = (Axis + 1) % 3;
+	const int32 AxisC = (Axis + 2) % 3;
+	const int32 B0 = FMath::FloorToInt(V[AxisB] / Ef) * E;
+	const int32 C0 = FMath::FloorToInt(V[AxisC] / Ef) * E;
+	const float Fb = (V[AxisB] - static_cast<float>(B0)) / Ef;
+	const float Fc = (V[AxisC] - static_cast<float>(C0)) / Ef;
+	const int32 Bs[2] = { FMath::Clamp(B0, 0, ChunkSize), FMath::Clamp(B0 + E, 0, ChunkSize) };
+	const int32 Cs[2] = { FMath::Clamp(C0, 0, ChunkSize), FMath::Clamp(C0 + E, 0, ChunkSize) };
+	const float Near = V[Axis];
+	const int32 SearchCells = 4;
+	const int32 ABase = FMath::FloorToInt(Near / Ef) * E;
+
+	float Sum = 0.0f;
+	for (int32 Column = 0; Column < 4; ++Column)
+	{
+		const float Weight = ((Column & 1) ? Fb : 1.0f - Fb) * ((Column & 2) ? Fc : 1.0f - Fc);
+		if (Weight <= 0.0f)
+		{
+			continue;
+		}
+		FIntVector At;
+		At[AxisB] = Bs[Column & 1];
+		At[AxisC] = Cs[(Column >> 1) & 1];
+		float BestDist = TNumericLimits<float>::Max();
+		float Best = 0.0f;
+		bool bFound = false;
+		for (int32 k = -SearchCells; k < SearchCells; ++k)
+		{
+			FIntVector EndA = At;
+			FIntVector EndB = At;
+			EndA[Axis] = ABase + k * E;
+			EndB[Axis] = EndA[Axis] + E;
+			const float Da = GetDensityAt(Request, EndA.X, EndA.Y, EndA.Z);
+			const float Db = GetDensityAt(Request, EndB.X, EndB.Y, EndB.Z);
+			FVector3f Crossing;
+			if ((Da >= IsoLevel) != (Db >= IsoLevel) && FindEdgeVoxelCrossing(Request, EndA, EndB, Da, Db, Crossing))
+			{
+				const float Dist = FMath::Abs(Crossing[Axis] - Near);
+				if (Dist < BestDist)
+				{
+					BestDist = Dist;
+					Best = Crossing[Axis];
+					bFound = true;
+				}
+			}
+		}
+		if (!bFound)
+		{
+			return false; // a column the blend leans on has no coarse vertex near: no morph, never worse than the wall
+		}
+		Sum += Weight * Best;
+	}
+	OutCoord = Sum;
+	return true;
+}
+
 void FVoxelCPUMarchingCubesMesher::MorphVertexToCoarse(
 	const FVoxelMeshingRequest& Request,
 	int32 SelfStride,
@@ -1300,7 +1396,10 @@ void FVoxelCPUMarchingCubesMesher::MorphVertexToCoarse(
 			return;
 		}
 		float SecCoord;
-		if (ComputeCoarseSurfaceAlongAxis(Request, V, Axis, BestE, SecCoord))
+		const bool bFound = VoxelMCShading::UseVoxelLODCrossings(BestE)
+			? ComputeCoarseCrossingsAlongAxis(Request, V, Axis, BestE, SecCoord)
+			: ComputeCoarseSurfaceAlongAxis(Request, V, Axis, BestE, SecCoord);
+		if (bFound)
 		{
 			Vertex[Axis] = FMath::Lerp(V[Axis], SecCoord, BestW) * VoxelSize;
 		}
@@ -1330,7 +1429,10 @@ void FVoxelCPUMarchingCubesMesher::MorphVertexToCoarse(
 	// height-function / INFINITE_PLANE terrain). If no coarse crossing is found nearby, leave
 	// the vertex untouched (never worse than the current wall).
 	float SecVz;
-	if (ComputeCoarseSurfaceZ(Request, Vx, Vy, Vz, BestE, SecVz))
+	const bool bFound = VoxelMCShading::UseVoxelLODCrossings(BestE)
+		? ComputeCoarseCrossingsAlongAxis(Request, FVector3f(Vx, Vy, Vz), 2, BestE, SecVz)
+		: ComputeCoarseSurfaceZ(Request, Vx, Vy, Vz, BestE, SecVz);
+	if (bFound)
 	{
 		Vertex.Z = FMath::Lerp(Vz, SecVz, BestW) * VoxelSize;
 	}
@@ -1493,13 +1595,27 @@ FVector3f FVoxelCPUMarchingCubesMesher::CalculateEdgeShadingNormal(
 	const FVector3f& FallbackPosition,
 	int32 FallbackStride) const
 {
+	FVector3f Crossing;
+	if (!FindEdgeVoxelCrossing(Request, EndA, EndB, DensityA, DensityB, Crossing))
+	{
+		return CalculateGradientNormalLOD(Request, FallbackPosition.X, FallbackPosition.Y, FallbackPosition.Z, FallbackStride);
+	}
+	return CalculateShadingNormal(Request, Crossing.X, Crossing.Y, Crossing.Z);
+}
+
+bool FVoxelCPUMarchingCubesMesher::FindEdgeVoxelCrossing(
+	const FVoxelMeshingRequest& Request,
+	const FIntVector& EndA, const FIntVector& EndB,
+	float DensityA, float DensityB,
+	FVector3f& OutCrossing) const
+{
 	const FIntVector Delta = EndB - EndA;
 	const int32 Axis = (Delta.X != 0) ? 0 : (Delta.Y != 0) ? 1 : 2;
 	const int32 Length = FMath::Abs(Delta[Axis]);
 	const int32 OffAxes = (Delta.X != 0 ? 1 : 0) + (Delta.Y != 0 ? 1 : 0) + (Delta.Z != 0 ? 1 : 0);
 	if (Length == 0 || OffAxes != 1)
 	{
-		return CalculateGradientNormalLOD(Request, FallbackPosition.X, FallbackPosition.Y, FallbackPosition.Z, FallbackStride);
+		return false;
 	}
 
 	// Walk from the edge's min end, so every cell sharing the edge reads it in one order.
@@ -1540,12 +1656,12 @@ FVector3f FVoxelCPUMarchingCubesMesher::CalculateEdgeShadingNormal(
 	}
 	if (BestAlong < 0.0f)
 	{
-		return CalculateGradientNormalLOD(Request, FallbackPosition.X, FallbackPosition.Y, FallbackPosition.Z, FallbackStride);
+		return false;
 	}
 
-	FVector3f Crossing(static_cast<float>(Lo.X), static_cast<float>(Lo.Y), static_cast<float>(Lo.Z));
-	Crossing[Axis] += BestAlong;
-	return CalculateShadingNormal(Request, Crossing.X, Crossing.Y, Crossing.Z);
+	OutCrossing = FVector3f(static_cast<float>(Lo.X), static_cast<float>(Lo.Y), static_cast<float>(Lo.Z));
+	OutCrossing[Axis] += BestAlong;
+	return true;
 }
 
 FVector3f FVoxelCPUMarchingCubesMesher::CalculateShadingNormal(
@@ -2724,6 +2840,18 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	VertexOnOuterFace.Reserve(VertexCount);
 	bool bHasClampedVertices = false;
 
+	// A sample's voxel (GetTransitionCellDensities' sampling: the depth axis pinned to the boundary plane, offsets of
+	// 0, 0.5 and 1 coarse cells on the face axes, integers since CoarserStride is even).
+	auto SampleVoxel = [&](int32 Sample) -> FIntVector
+	{
+		const FVector3f& Offset = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][Sample];
+		FIntVector V(X + FMath::RoundToInt32(Offset.X * static_cast<float>(Stride)),
+			Y + FMath::RoundToInt32(Offset.Y * static_cast<float>(Stride)),
+			Z + FMath::RoundToInt32(Offset.Z * static_cast<float>(Stride)));
+		V[DepthAxis] = BoundaryDepthCoord;
+		return V;
+	};
+
 	// IMPORTANT: Index by CASE, not by class! The vertex data is pre-transformed per case.
 	const uint16* VertexData = TransvoxelTables::TransitionVertexData[CaseIndex];
 	for (int32 i = 0; i < VertexCount; i++)
@@ -2817,6 +2945,19 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 			}
 
 			VertexPos = InterpolateEdge(DensityA, DensityB, PosA, PosB, IsoLevel);
+
+			// G80: a strided edge's vertex at its voxel crossing, as the coincident fine or coarse MC cell on the edge
+			// puts it (corner-corner edges are the coarser neighbour's, face-face ones the fine mesh's).
+			const FIntVector EndA = SampleVoxel(SampleA);
+			const FIntVector EndB = SampleVoxel(SampleB);
+			const FIntVector EdgeDelta = EndB - EndA;
+			const int32 EdgeLength = FMath::Abs(EdgeDelta.X) + FMath::Abs(EdgeDelta.Y) + FMath::Abs(EdgeDelta.Z);
+			FVector3f Crossing;
+			if (VoxelMCShading::UseVoxelLODCrossings(EdgeLength)
+				&& FindEdgeVoxelCrossing(Request, EndA, EndB, DensityA, DensityB, Crossing))
+			{
+				VertexPos = Crossing * VoxelSize;
+			}
 		}
 
 		// Validate vertex position is finite
@@ -2880,18 +3021,6 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	const FColor VertexColor = bDebugColorTransitionCells
 		? FColor(255, 128, 0, 255)  // Orange for transition cells
 		: FColor(MaterialID, BiomeID, 0, 255);
-
-	// A sample's voxel (GetTransitionCellDensities' sampling: the depth axis pinned to the boundary plane, offsets of
-	// 0, 0.5 and 1 coarse cells on the face axes, integers since CoarserStride is even).
-	auto SampleVoxel = [&](int32 Sample) -> FIntVector
-	{
-		const FVector3f& Offset = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][Sample];
-		FIntVector V(X + FMath::RoundToInt32(Offset.X * static_cast<float>(Stride)),
-			Y + FMath::RoundToInt32(Offset.Y * static_cast<float>(Stride)),
-			Z + FMath::RoundToInt32(Offset.Z * static_cast<float>(Stride)));
-		V[DepthAxis] = BoundaryDepthCoord;
-		return V;
-	};
 
 	// Add vertices to mesh
 	const uint32 BaseIndex = OutMeshData.Positions.Num();

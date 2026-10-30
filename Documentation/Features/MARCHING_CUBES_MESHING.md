@@ -202,6 +202,17 @@ boundary geomorph (which moves vertices) does not change it. Positions are uncha
 (`MarchingCubesMeshGeneration.usf`) does the same. `voxel.Mesh.VoxelShadingNormals 0` (shared with Dual Contouring's
 G44) restores the stride-scale normals (`CalculateGradientNormalLOD`) for A/B. See `WORLD_MODES_REVIEW_PLAN.md` §20.9.
 
+**Vertices at a stride (G80).** The same saturation put an interpolated strided vertex toward the edge's middle, whatever
+the surface did between the two samples, so LOD 1 and 2 were terraced a stride apart (ribs in the terrain's own shadows
+under a low sun). At stride > 1 an edge vertex is now the voxel crossing on its edge (`FindEdgeVoxelCrossing`, the point
+G61's normal reads), so regular cells, seam bands and the transition ribbon (its coarse corner-corner edges are the coarser
+neighbour's, its face-face ones the fine mesh's; one-voxel edges keep `InterpolateEdge`) still agree on every shared edge.
+The boundary geomorph's target follows the coarse cells' new vertices: the voxel crossings on the four coarse edge columns
+along the morph axis around the vertex, blended bilinearly (`ComputeCoarseCrossingsAlongAxis`; on a column, that column's
+coarse vertex), in place of the trilinear coarse density's crossing. The GPU shader does the same (`ComputeCoarseCrossingsZ`).
+`voxel.Mesh.VoxelLODCrossings 0` (shared with Dual Contouring) restores the interpolated vertices and the trilinear
+target. See `WORLD_MODES_REVIEW_PLAN.md` §23.16.
+
 ---
 
 ## LOD Support

@@ -1,4 +1,4 @@
-# Visual polish plan (VP1-VP3)
+# Visual polish plan (VP1-VP5)
 
 Three reports from a run around `PlanetTest` (2026-10-24), to fix before making media of the project:
 
@@ -21,6 +21,7 @@ root; line numbers in the findings are as of VoxelWorlds `952d4ae`, WorldClockPl
 | VP2 | Terrain materials noisy | Every terrain texture sampled at mip 0 at every distance (F2.1); roughness 0, a mirror (F2.7) | F2.1 **fixed** (VP2-O1, `voxel.Material.GradientSampling`); F2.7 **fixed** (VP2-O6, `voxel.Material.ConstantRoughness`); F2.8 **fixed** (VP2-O2, `voxel.Material.TileVariation`, `MacroVariation`) | Every smooth mode (DC, MC); the cubic atlas too | VoxelWorlds (materials) | S, then M for the look |
 | VP3 | Hill shadows come and go | The voxel scene proxy culled shadow casters with the camera's frustum (F3.1) | **Fixed** (VP3-O1, `voxel.Render.ShadowCullFrustum`); F3.2 and F3.3 open | Every mode | VoxelWorlds (VoxelRendering) | S; the shadow range and Lumen items M-L |
 | VP4 | Fast terrain flicker as you move | A far-field patch waiting for a build where nothing of it would show was stood in for by its nearest built ancestor, often a cube face's root, drawn over the voxel terrain and the horizon for a frame (F4.1) | **Fixed** (VP4-O1, `voxel.World.FarFieldAvoidStandIns`); F4.2 (no far field for an update after a teleport onto a face never seen) **fixed** (`voxel.World.FarFieldBuildAllRoots`); F4.3 (the far field a frame behind the camera after a cut) **fixed** (`voxel.World.FarFieldCameraUpdate`); see "VP4 terrain flicker" | Planets | VoxelWorlds (VoxelStreaming) | S |
+| VP5 | Steps (ribs) in the mid and far terrain that smooth out near | LOD 1 and 2 interpolated each cell edge's crossing between two samples a stride apart, saturated, so the surface was terraced a stride apart, seen in its own shadows (G80); Dual Contouring's QEF solve put some vertices off the surface at every LOD (G81) | **Fixed** (`voxel.Mesh.VoxelLODCrossings`, `voxel.Mesh.QEFSolve`); see "VP5 LOD ribs" | Every world with an LOD 2 band (both smooth meshers) | VoxelWorlds (VoxelMeshing) | S-M |
 
 ## Milestone 1 results (2026-10-24)
 
@@ -687,6 +688,31 @@ as the frame after it did before).
 
 Tests: `VoxelWorlds.FarField` 9/9 headless and in the editor; `VoxelWorlds.Streaming.Planet.CutoverDescent` and
 `CutoverDescentStop` headless.
+
+## VP5 LOD ribs (2026-10-29)
+
+The user's report on `PlanetTest`: "steps/ribs clearly visible in the mid/far field which clearly smooth as the LODs come
+closer to 0. This only effects planet mode so i expect this is related to the planet shaping."
+
+**Cause** (G80 in `WORLD_MODES_REVIEW_PLAN.md` §23.16). Not the planet: the strided meshing. Every chunk's voxels are
+generated at voxel resolution and the density saturates a voxel either side of the surface, so a LOD 1 or 2 cell edge
+interpolated between its two samples (2 or 4 voxels apart) put its crossing toward the edge's middle, by where the
+surface crossed the strided grid: terraces a stride apart. The vertex normals were already LOD 0's (G44, G61, G62), so the
+terraces showed only in the terrain's own shadows under a low sun (gone with `ShowFlag.DynamicShadows 0`). Every world
+with an LOD 2 band has them; the user's local `DemoSmoothWorldConfig` has none, which is why only the planet showed them.
+Measuring the fix found G81: Dual Contouring's QEF solve kept a direction it should have dropped (a Jacobi rotation left
+its matrix asymmetric) and solved for the position about the chunk's origin, so some vertices sat a voxel or more off a
+flat surface at every LOD.
+
+**Fix.** At LOD > 0 both meshers take the crossing at voxel resolution (Dual Contouring with the fitted gradient as its
+QEF normal, Marching Cubes with its geomorph toward the coarse cells' crossings, the GPU mesher the same), and the QEF is
+solved about the mass point with a symmetric decomposition and its vertex kept in its cell. `voxel.Mesh.VoxelLODCrossings`
+and `voxel.Mesh.QEFSolve` (both 1; 0 = before).
+
+**Results.** LOD 2 on gentle relief, RMS distance from the analytic surface and triangle tilt: Dual Contouring 0.40-0.51
+→ 0.06-0.14 voxels and 7.5-12.4° → 1.8-4.2°, Marching Cubes 0.36-0.62 → 0.02-0.06 voxels and 9.8-13.7° → 1.7-4.2°.
+Live on `PlanetTest` (30°N 20°E, 16:30, 7 km up) the arcs and the checkerboard are gone in both meshers, at no meshing
+cost; images `Saved/ClaudeScripts/g80_dc_compare.png` and `g80_mc_compare.png` in the worktree that made them.
 
 ## The setup as found
 

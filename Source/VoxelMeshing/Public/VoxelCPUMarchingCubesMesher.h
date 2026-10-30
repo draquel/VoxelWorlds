@@ -361,6 +361,27 @@ private:
 		float& OutCoord) const;
 
 	/**
+	 * The morph target with voxel.Mesh.VoxelLODCrossings (G80): the coarse cells' vertices lie at the voxel crossings on
+	 * their edges (FindEdgeVoxelCrossing), so the coarse surface along the line along Axis through V is the bilinear
+	 * blend, over the coarse lattice, of the crossings on the four coarse edges along Axis around the line (each the
+	 * crossing nearest V within ComputeCoarseSurfaceAlongAxis's search band). On a coarse edge column it is that edge's
+	 * vertex, as the coarser neighbour and the ribbon's outer contour have it. Face-parallel columns are clamped to the
+	 * chunk as ComputeCoarseSurfaceAlongAxis clamps its samples.
+	 *
+	 * @param Request The meshing request
+	 * @param V Vertex position in voxel units (fine resolution)
+	 * @param Axis 0 = X, 1 = Y, 2 = Z
+	 * @param CoarserStride The coarse neighbour's stride (E)
+	 * @param OutCoord Out: the coarse surface's coordinate along Axis, voxel units
+	 * @return true if every column with a share of the blend has a crossing within the search band
+	 */
+	bool ComputeCoarseCrossingsAlongAxis(
+		const FVoxelMeshingRequest& Request,
+		const FVector3f& V, int32 Axis,
+		int32 CoarserStride,
+		float& OutCoord) const;
+
+	/**
 	 * The LOD material scan's per-corner walk along a non-vertical local up (spherical SP-D1): from the corner, along the
 	 * digital line in Request.LocalUp's direction, to the last solid voxel before air; its material or biome and how far
 	 * along up it lies.
@@ -409,6 +430,24 @@ private:
 		float DensityA, float DensityB,
 		const FVector3f& FallbackPosition,
 		int32 FallbackStride) const;
+
+	/**
+	 * The voxel-resolution crossing on a strided edge (G61's normal point, G80's vertex): of the voxel steps along the
+	 * edge whose ends differ in sign, the one whose crossing lies nearest the place InterpolateEdge gives the vertex (the
+	 * first on a tie). Walked from the edge's min end, so every cell, seam frame and ribbon sharing the edge finds the
+	 * same point. Reads only the voxels on the edge.
+	 *
+	 * @param Request The meshing request with voxel data
+	 * @param EndA, EndB The edge's endpoints (voxels); they differ along one axis
+	 * @param DensityA, DensityB The densities at EndA and EndB
+	 * @param OutCrossing Out: the crossing (voxels)
+	 * @return false for an edge that is not axis-aligned or has no voxel crossing
+	 */
+	bool FindEdgeVoxelCrossing(
+		const FVoxelMeshingRequest& Request,
+		const FIntVector& EndA, const FIntVector& EndB,
+		float DensityA, float DensityB,
+		FVector3f& OutCrossing) const;
 
 	/**
 	 * Get dominant material for an LOD cube from strided corners.

@@ -115,6 +115,11 @@ uint VoxelShadingNormals;
 // voxels on the ramp around the point (TryFitShadingNormal), 0 = the central difference about the voxel it floors to.
 uint CrossingGradientNormals;
 
+// Edge crossings at stride > 1 (G80; voxel.Mesh.VoxelLODCrossings): 1 = a strided edge's vertex at the voxel crossing on
+// it (FindEdgeShadingPoint), the geomorph toward the coarse cells' crossings (ComputeCoarseCrossingsZ); 0 = interpolated
+// between the edge's two samples, as before.
+uint VoxelLODCrossings;
+
 // Output buffer capacities (overflow protection — mirrors the DC mesher). Cave-riddled chunks have far
 // more interior surface than the fixed triangle-soup buffers hold; without this guard the atomic counters
 // run past the buffer end, out-of-bounds writes are dropped, and in-bounds index slots end up referencing
@@ -446,6 +451,12 @@ bool UseVoxelShadingNormals(int Stride)
     return VoxelShadingNormals != 0u && Stride > 1;
 }
 
+/** voxel.Mesh.VoxelLODCrossings for an edge this many voxels long (G80; a one-voxel edge keeps InterpolateEdge's vertex). */
+bool UseVoxelLODCrossings(int EdgeLength)
+{
+    return VoxelLODCrossings != 0u && EdgeLength > 1;
+}
+
 /**
  * G61: where an edge vertex at stride > 1 takes its normal, mirroring FVoxelCPUMarchingCubesMesher::CalculateEdgeShadingNormal.
  * The generated density saturates a voxel either side of the surface, so the stride-scale gradient's taps read 0 or 255 and
@@ -499,15 +510,17 @@ bool FindEdgeShadingPoint(int3 EndA, int3 EndB, float DensityA, float DensityB, 
 
 /**
  * A vertex's normal (G61, G62). At a stride > 1 with voxel.Mesh.VoxelShadingNormals: the fitted normal at the voxel crossing
- * on the vertex's edge EndA-EndB (FindEdgeShadingPoint), the stride-scale gradient at the vertex where the edge has none;
- * at stride 1: the fitted normal at the vertex; otherwise the stride-scale gradient at the vertex. A fit that falls back
- * takes the central difference about the voxel its point floors to. One inlined copy each of the edge walk, the fit and the
- * gradient, for both passes (F2.13).
+ * on the vertex's edge (FindEdgeShadingPoint's, found by the caller), the stride-scale gradient at the vertex where the edge
+ * has none; at stride 1: the fitted normal at the vertex; otherwise the stride-scale gradient at the vertex. A fit that
+ * falls back takes the central difference about the voxel its point floors to. One inlined copy each of the fit and the
+ * gradient, for both passes; each pass walks its edges in one loop of its own (F2.13).
  *
  * @param VertexVoxelPos The vertex in voxel units of the chunk (its world position less ChunkWorldPosition, / VoxelSize)
  * @param Stride The stride of the mesh the vertex belongs to
+ * @param bHasCrossing Whether the vertex's edge has a voxel crossing (FindEdgeShadingPoint's result)
+ * @param Crossing That crossing (voxels)
  */
-float3 CalculateVertexNormal(float3 VertexVoxelPos, int Stride, int3 EndA, int3 EndB, float DensityA, float DensityB)
+float3 CalculateVertexNormal(float3 VertexVoxelPos, int Stride, bool bHasCrossing, float3 Crossing)
 {
     int3 GradientPos = (int3)VertexVoxelPos;
     int GradientStride = Stride;
@@ -515,7 +528,8 @@ float3 CalculateVertexNormal(float3 VertexVoxelPos, int Stride, int3 EndA, int3 
     bool bFit = (Stride == 1);
     if (UseVoxelShadingNormals(Stride))
     {
-        bFit = FindEdgeShadingPoint(EndA, EndB, DensityA, DensityB, FitPoint);
+        bFit = bHasCrossing;
+        FitPoint = Crossing;
     }
     if (bFit)
     {
@@ -655,6 +669,73 @@ bool ComputeCoarseSurfaceZ(float Vx, float Vy, float NearVz, uint Eu, out float 
 }
 
 /**
+ * ComputeCoarseSurfaceZ with voxel.Mesh.VoxelLODCrossings (G80), mirroring the CPU mesher's
+ * ComputeCoarseCrossingsAlongAxis along Z: the coarse cells' vertices on the four coarse edge columns around (Vx,Vy)
+ * (the same clamp and search band), each the voxel crossing nearest NearVz, blended bilinearly. Returns false if a
+ * column with a share of the blend has none.
+ */
+bool ComputeCoarseCrossingsZ(float Vx, float Vy, float NearVz, uint Eu, out float OutVz)
+{
+    OutVz = NearVz;
+    int E = (int)Eu;
+    float Ef = (float)E;
+    int CS = (int)ChunkSize;
+
+    int X0 = (int)floor(Vx / Ef) * E;
+    int Y0 = (int)floor(Vy / Ef) * E;
+    float Fx = (Vx - (float)X0) / Ef;
+    float Fy = (Vy - (float)Y0) / Ef;
+    int ZBase = (int)floor(NearVz / Ef) * E;
+
+    float Sum = 0.0f;
+    bool bAll = true;
+    [loop]
+    for (int Column = 0; Column < 4; Column++)
+    {
+        float Weight = (((Column & 1) != 0) ? Fx : 1.0f - Fx) * (((Column & 2) != 0) ? Fy : 1.0f - Fy);
+        if (Weight <= 0.0f)
+        {
+            continue;
+        }
+        int CX = clamp(X0 + (((Column & 1) != 0) ? E : 0), 0, CS);
+        int CY = clamp(Y0 + (((Column & 2) != 0) ? E : 0), 0, CS);
+        float BestDist = 1e30f;
+        float Best = 0.0f;
+        bool bFound = false;
+        [loop]
+        for (int k = -4; k < 4; k++)
+        {
+            int3 EndA = int3(CX, CY, ZBase + k * E);
+            int3 EndB = int3(CX, CY, ZBase + k * E + E);
+            float Da = GetDensityAt(EndA);
+            float Db = GetDensityAt(EndB);
+            float3 Crossing;
+            if ((Da >= IsoLevel) != (Db >= IsoLevel) && FindEdgeShadingPoint(EndA, EndB, Da, Db, Crossing))
+            {
+                float Dist = abs(Crossing.z - NearVz);
+                if (Dist < BestDist)
+                {
+                    BestDist = Dist;
+                    Best = Crossing.z;
+                    bFound = true;
+                }
+            }
+        }
+        if (!bFound)
+        {
+            bAll = false;
+            break;
+        }
+        Sum += Weight * Best;
+    }
+    if (bAll)
+    {
+        OutVz = Sum;
+    }
+    return bAll;
+}
+
+/**
  * Geomorph one (world-space) vertex toward the coarse-LOD surface. Mask = active transition
  * faces to ramp against. Skips steep (non-height-function) surfaces. Pure function of position,
  * so coincident fine-MC / ribbon vertices morph identically and stay watertight.
@@ -702,8 +783,18 @@ void MorphVertexToCoarse(uint SelfStride, uint Mask, inout float3 Vertex)
     float GMag = sqrt(Gx * Gx + Gy * Gy + Gz * Gz);
     if (GMag < 1e-5f || abs(Gz) < 0.5f * GMag) { return; }
 
+    // if/else, not ?: (which evaluates both calls, each writing SecVz, before HLSL 2021).
     float SecVz;
-    if (ComputeCoarseSurfaceZ(Vx, Vy, Vz, BestE, SecVz))
+    bool bFound;
+    if (UseVoxelLODCrossings((int)BestE))
+    {
+        bFound = ComputeCoarseCrossingsZ(Vx, Vy, Vz, BestE, SecVz);
+    }
+    else
+    {
+        bFound = ComputeCoarseSurfaceZ(Vx, Vy, Vz, BestE, SecVz);
+    }
+    if (bFound)
     {
         float MorphedVz = lerp(Vz, SecVz, BestW);
         Vertex.z = ChunkWorldPosition.z + MorphedVz * VoxelSize;
@@ -796,6 +887,31 @@ void MainCS(
         }
     }
 
+    // The voxel crossing on each vertex's edge (G61's normal point; G80: the vertex itself at a stride), in one [loop]:
+    // one inlined copy of the edge walk (F2.13).
+    float3 CellCrossings[12];
+    uint CrossingMask = 0u;
+    if (UseVoxelShadingNormals(Stride) || UseVoxelLODCrossings(Stride))
+    {
+        [loop]
+        for (uint ci = 0; ci < VertexCount; ci++)
+        {
+            uint CA = VertexCorners[ci] & 0x0Fu;
+            uint CB = (VertexCorners[ci] >> 4) & 0x0Fu;
+            float3 Crossing = float3(0.0f, 0.0f, 0.0f);
+            if (CA != CB && FindEdgeShadingPoint(CubePos + LengyelCornerOffsets[CA] * Stride, CubePos + LengyelCornerOffsets[CB] * Stride,
+                CornerDensities[CA], CornerDensities[CB], Crossing))
+            {
+                CrossingMask |= (1u << ci);
+                if (UseVoxelLODCrossings(Stride))
+                {
+                    CellVertices[ci] = ChunkWorldPosition + Crossing * VoxelSize;
+                }
+            }
+            CellCrossings[ci] = Crossing;
+        }
+    }
+
     // LOD-seam geomorph: ramp the fine boundary-slab vertices toward the coarse surface so the
     // LOD step collapses (no-op unless this cube borders a coarser neighbour). Mirrors the CPU
     // ApplyBoundaryMorph; the ribbon (TransitionCS) morphs its fine side the same way.
@@ -815,11 +931,8 @@ void MainCS(
     [loop]
     for (uint ni = 0; ni < VertexCount; ni++)
     {
-        uint CA = VertexCorners[ni] & 0x0Fu;
-        uint CB = (VertexCorners[ni] >> 4) & 0x0Fu;
         CellNormals[ni] = CalculateVertexNormal((CellVertices[ni] - ChunkWorldPosition) / VoxelSize, Stride,
-            CubePos + LengyelCornerOffsets[CA] * Stride, CubePos + LengyelCornerOffsets[CB] * Stride,
-            CornerDensities[CA], CornerDensities[CB]);
+            (CrossingMask & (1u << ni)) != 0u, CellCrossings[ni]);
     }
 
     // Atomically allocate vertices and indices
@@ -1018,6 +1131,38 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         VertexOnOuterFace[i] = (SampleA >= 9u && SampleB >= 9u);
     }
 
+    // The voxel crossing on each vertex's edge (G61's normal point at the adjacent mesh's stride; G80: the vertex itself on
+    // a strided edge, as the coincident fine or coarse MC vertex has it), in one [loop] (F2.13).
+    float3 CellCrossings[12];
+    uint CrossingMask = 0u;
+    [loop]
+    for (uint ci = 0; ci < VertexCount; ci++)
+    {
+        int NS = VertexOnOuterFace[ci] ? CoarserStride : CurrentStride;
+        uint SA = VertexSamples[ci] & 0x0Fu;
+        uint SB = (VertexSamples[ci] >> 4) & 0x0Fu;
+        float3 OffA = Tv_TransitionSampleOffset(Face, SA);
+        float3 OffB = Tv_TransitionSampleOffset(Face, SB);
+        int3 EA = int3(CellX, CellY, CellZ) + (int3)round(OffA * (float)CoarserStride);
+        int3 EB = int3(CellX, CellY, CellZ) + (int3)round(OffB * (float)CoarserStride);
+        if (DepthAxis == 0) { EA.x = BoundaryDepthCoord; EB.x = BoundaryDepthCoord; }
+        else if (DepthAxis == 1) { EA.y = BoundaryDepthCoord; EB.y = BoundaryDepthCoord; }
+        else { EA.z = BoundaryDepthCoord; EB.z = BoundaryDepthCoord; }
+        int3 EdgeDelta = abs(EB - EA);
+        int EdgeLength = EdgeDelta.x + EdgeDelta.y + EdgeDelta.z;
+        float3 Crossing = float3(0.0f, 0.0f, 0.0f);
+        if (SA != SB && (UseVoxelShadingNormals(NS) || UseVoxelLODCrossings(EdgeLength))
+            && FindEdgeShadingPoint(EA, EB, Densities[SA], Densities[SB], Crossing))
+        {
+            CrossingMask |= (1u << ci);
+            if (UseVoxelLODCrossings(EdgeLength))
+            {
+                CellVertices[ci] = ChunkWorldPosition + Crossing * VoxelSize;
+            }
+        }
+        CellCrossings[ci] = Crossing;
+    }
+
     // Geomorph the ribbon's FINE-side vertices toward the coarse surface, matching the (also
     // morphed) fine-MC boundary so they stay coincident -> the vertical wall collapses while the
     // seam stays watertight. OUTER (coarse-corner) vertices are left on the coarse contour so the
@@ -1043,17 +1188,8 @@ void TransitionCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     for (uint ni = 0; ni < VertexCount; ni++)
     {
         int NS = VertexOnOuterFace[ni] ? CoarserStride : CurrentStride;
-        uint SA = VertexSamples[ni] & 0x0Fu;
-        uint SB = (VertexSamples[ni] >> 4) & 0x0Fu;
-        float3 OffA = Tv_TransitionSampleOffset(Face, SA);
-        float3 OffB = Tv_TransitionSampleOffset(Face, SB);
-        int3 EA = int3(CellX, CellY, CellZ) + (int3)round(OffA * (float)CoarserStride);
-        int3 EB = int3(CellX, CellY, CellZ) + (int3)round(OffB * (float)CoarserStride);
-        if (DepthAxis == 0) { EA.x = BoundaryDepthCoord; EB.x = BoundaryDepthCoord; }
-        else if (DepthAxis == 1) { EA.y = BoundaryDepthCoord; EB.y = BoundaryDepthCoord; }
-        else { EA.z = BoundaryDepthCoord; EB.z = BoundaryDepthCoord; }
-        CellNormals[ni] = CalculateVertexNormal((CellVertices[ni] - ChunkWorldPosition) / VoxelSize, NS, EA, EB,
-            Densities[SA], Densities[SB]);
+        CellNormals[ni] = CalculateVertexNormal((CellVertices[ni] - ChunkWorldPosition) / VoxelSize, NS,
+            (CrossingMask & (1u << ni)) != 0u, CellCrossings[ni]);
     }
 
     // ---- Material / biome from the first solid face sample (found first, then read once: F2.13) ----
