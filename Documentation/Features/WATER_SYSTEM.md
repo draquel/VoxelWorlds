@@ -276,11 +276,10 @@ the sea (the underside's test) is the camera's position, not the streaming viewe
 **File**: `VoxelMeshing/Public/VoxelWaterMesher.h`, `VoxelMeshing/Private/VoxelWaterMesher.cpp`
 **Class**: `FVoxelWaterMesher` (static utility)
 
-### Two Operating Modes
+### Operating Mode
 
-**Per-Chunk Mode** (`GenerateWaterMesh`): Scans a single chunk's voxel data, emits top-face quads at water surface boundaries. Used for simple cases.
-
-**2D Tile Mode** (preferred): Two-step process used by the tile system:
+**2D Tile Mode**: a two-step process used by the tile system (the per-chunk `GenerateWaterMesh` had no caller and was
+deleted in CR1, MESH-24):
 
 #### Step 1: Build Column Mask
 

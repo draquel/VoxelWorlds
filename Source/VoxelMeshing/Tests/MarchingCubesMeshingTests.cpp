@@ -205,7 +205,6 @@ namespace MarchingCubesMeshingTestHelpers
 	FVoxelMeshingConfig CreateMCConfig()
 	{
 		FVoxelMeshingConfig Config;
-		Config.bUseSmoothMeshing = true;
 		Config.IsoLevel = 0.5f;
 		Config.bGenerateUVs = true;
 		Config.bCalculateAO = false;  // MarchingCubes meshing doesn't use AO
