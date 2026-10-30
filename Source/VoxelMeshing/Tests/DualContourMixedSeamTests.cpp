@@ -250,6 +250,8 @@ namespace VoxelMixedSeamTestUtils
 		AccumulateEdges(InteriorB, ShiftB, EdgeUse);
 		AccumulateEdges(Seam, FVector3f::ZeroVector, EdgeUse);
 
+		// The open box: a vertex stays in its own cell (G81), on its faces included, so one on a margin's plane may be a
+		// rim cell's.
 		const float S = static_cast<float>(1 << FMath::Max(LODA, LODB)) * TestVoxelSize;
 		auto InProbe = [&](const FVector3f& P)
 		{
@@ -257,7 +259,7 @@ namespace VoxelMixedSeamTestUtils
 			{
 				const float Lo = (i == Axis) ? Face - 2.5f * S : 2.0f * S;
 				const float Hi = (i == Axis) ? Face + 2.5f * S : Face - 2.0f * S;
-				if (P[i] < Lo || P[i] > Hi)
+				if (P[i] <= Lo || P[i] >= Hi)
 				{
 					return false;
 				}

@@ -130,6 +130,19 @@ same op sequence, so ring recomputes stay bit-identical. `voxel.Mesh.VoxelShadin
 vertex normals for A/B (the cvar also covers Marching Cubes' equivalent, G61); `voxel.Mesh.ScaleClampedGradients 0` the
 unscaled clamp.
 
+**Crossings at a stride (G80).** The same saturation put an interpolated strided crossing toward the edge's middle,
+whatever the surface did between the two samples, so the error ran with where the surface crossed the strided grid: LOD 1
+and 2 were terraced a stride apart, and under a low sun the terraces shadowed themselves (the "ribs" of the mid and far
+field, on every world mode with an LOD 2 band). At a stride the crossing is now LOD 0's on the edge: the first voxel step
+along it that changes sign, interpolated within that step (`FindVoxelCrossing`), and its QEF normal is the fitted gradient
+there (`CalculateShadingNormal`, the samplers' `ShadingNormal`; exact for a plane, where the central difference tilts with
+the voxel phase over a whole stride). Every LOD's crossings then lie on LOD 0's surface; LOD 2 still drops the detail its
+cells cannot hold. The vertex normal of a strided cell is then LOD 0's estimator over the cell's own crossings, their
+fitted normals summed (nearer the analytic normals than G44's one voxel cell, which stays for
+`voxel.Mesh.VoxelLODCrossings 0`). The interior pass and `ComputeCellVertex` run the same op sequence.
+`voxel.Mesh.VoxelLODCrossings 0` restores the strided crossings and normals (shared with Marching Cubes). See
+`WORLD_MODES_REVIEW_PLAN.md` §23.16.
+
 **Shading normals at voxel resolution (G62).** The central difference about the voxel a crossing floors to reads the
 saturated rock under a surface a fraction of a voxel above that voxel, so its normals tilted by 1.0-1.8 times the slope
 with the surface's phase in the voxel layer: bands a voxel layer apart, and on a planet errors of a degree or more on flat
@@ -138,7 +151,8 @@ ramp (`VoxelCrossingGradient::FitNormal`: weighted least squares over the 3x3x3 
 0 < density < 255, tent weights, a free offset; exact for any plane), over the voxels the view holds (the interior pass's
 box, each seam sampler's `GetBox`: skipped, not clamped). LOD 0's vertex normal sums them at the cell's crossings
 (`FDCEdgeCrossing::ShadingNormal`), and G44's voxel-cell normal and G17's fallback vertex use them too
-(`CalculateShadingNormal`, the samplers' `ShadingNormal`). The QEF keeps the central difference, so no vertex moves. Where
+(`CalculateShadingNormal`, the samplers' `ShadingNormal`). At LOD 0 the QEF keeps the central difference, so no vertex
+moves (at a stride it takes the fitted gradient, G80). Where
 the voxels on the ramp do not span three directions (the surface through a voxel layer) the central difference is used,
 which is exact there. `voxel.Mesh.CrossingGradientNormals 0` restores the central difference (shared with Marching Cubes).
 See `WORLD_MODES_REVIEW_PLAN.md` §20.12.
@@ -226,11 +240,18 @@ The 3x3 symmetric matrix `A^T*A` is decomposed using iterative Givens rotations 
 3. Accumulate the rotation into the eigenvector matrix
 4. Repeat until convergence
 
-The pseudoinverse solution is then:
+Each rotation zeroes its pivot on both sides of the diagonal (G81: before, only above it; the next rotation read the stale
+element below and the decomposition converged to wrong eigenpairs).
+
+The pseudoinverse solves for the offset from the mass point (G81):
 ```
-v = V * S^-1 * V^T * ATb
+v = MassPoint + V * S^-1 * V^T * (ATb - ATA * MassPoint)
 ```
-where eigenvalues below `SVDThreshold` are treated as zero (degenerate axes).
+where eigenvalues below `SVDThreshold` are treated as zero (degenerate axes), so a degenerate axis stays at the mass point:
+a flat cell's vertex is the mass point on its plane. Before G81 it solved for `v` itself (`V * S^-1 * V^T * ATb`), so a
+degenerate axis went to the frame's origin: a flat cell's vertex was the plane's point nearest the chunk's corner, then
+pulled back toward the mass point by the clamp below, only part of the way when it lay within a cell of the cell.
+`voxel.Mesh.QEFSolve 0` restores that solve and the one-sided rotation for A/B. See `WORLD_MODES_REVIEW_PLAN.md` §23.16.
 
 ### Out-of-Bounds Clamping
 
@@ -241,7 +262,7 @@ float Blend = saturate(DistOutside / CellSize * BiasStrength * 2.0);
 Result = lerp(QEFResult, MassPoint, Blend);
 ```
 
-This prevents vertices from drifting too far from their cells while still allowing feature-preserving placement when the solution is within bounds.
+This prevents vertices from drifting too far from their cells while still allowing feature-preserving placement when the solution is within bounds. With G81's solve a result still outside the cell after the blend is cut back along the segment from the mass point (inside the cell: its crossings are on the cell's edges) at the cell's faces, so every vertex stays in its own cell.
 
 ---
 
