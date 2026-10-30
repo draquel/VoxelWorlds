@@ -623,8 +623,6 @@ protected:
 	FVector LastRebuildViewerPosition = FVector::ZeroVector;
 	FIntVector LastRebuildViewerChunk = FIntVector::ZeroValue;
 	FVector LastRebuildWorldOrigin = FVector::ZeroVector;
-	int32 LastRebuildBalanceCVar = INDEX_NONE;
-	int32 LastRebuildDiagonalCVar = INDEX_NONE;
 
 	/** Set by Initialize, SetLODBands and SetViewDistance: the next Update rebuilds whatever the viewer did. */
 	bool bBalancedLODCacheDirty = true;

@@ -103,7 +103,7 @@ float3 ChunkWorldPosition;   // the chunk origin in the mesher's frame: zero sin
 float IsoLevel;
 uint LODStride;  // 2^LODLevel (1, 2, 4, 8...)
 
-// LOD-seam geomorph (mirrors VoxelCPUMarchingCubesMesher; voxel.MCBoundaryMorph / *Width).
+// LOD-seam geomorph (mirrors VoxelCPUMarchingCubesMesher; voxel.MCBoundaryMorphWidth).
 uint MCBoundaryMorph;        // 1 = ramp the fine surface to the coarse height near transition faces
 float MCBoundaryMorphWidth;  // ramp width in coarse cells
 

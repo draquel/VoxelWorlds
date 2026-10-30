@@ -1453,10 +1453,9 @@ public:
 		float SeamMs = 0.0f;
 
 		// Far-chunk compression sweep (ProcessFarCompressionSweep total): the candidate scan, free
-		// re-applies, copies for async encodes and installs of finished ones. With
-		// voxel.FarCompression.Async 0 it also holds the encodes themselves.
+		// re-applies, copies for async encodes and installs of finished ones.
 		float FarCompressMs = 0.0f;
-		int32 FarCompressDispatchCount = 0; // fresh encodes started (async) or run (sync) this tick
+		int32 FarCompressDispatchCount = 0; // fresh encodes started this tick
 
 		// Far ocean (WM-E1): finding the open columns and, when they changed, rebuilding the grid water
 		float FarOceanMs = 0.0f;
@@ -1738,7 +1737,7 @@ protected:
 	 * (see voxel.FarCompression.* cvars); access transparently re-materializes via EnsureResident().
 	 * "Far" means the chunk's distance band has reached voxel.FarCompression.MinStride, which also
 	 * holds with the LOD system off (cubic worlds).
-	 * A fresh encode runs on a background worker from a copy of the array (voxel.FarCompression.Async);
+	 * A fresh encode runs on a background worker from a copy of the array;
 	 * the sweep installs finished encodes whose chunk array is unchanged (FChunkDescriptor::AsyncCompactTicket).
 	 *
 	 * @param Context This tick's query context, used to place LOD-off chunks in a distance band.

@@ -183,13 +183,6 @@ public:
 		const FVoxelBiomeSnapshot* BiomeSnapshot);
 
 	/**
-	 * Whether analytic height queries apply continentalness (cvar voxel.Height.AnalyticContinentalness,
-	 * default on). Callers that capture their own biome snapshot honour it the way GetTerrainHeightAt does.
-	 * @return False when the cvar reverts analytic heights to the raw base terrain
-	 */
-	static bool IsAnalyticContinentalnessEnabled();
-
-	/**
 	 * Convert terrain noise to height.
 	 *
 	 * @param NoiseValue Noise sample in range [-1, 1]

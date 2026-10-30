@@ -424,7 +424,7 @@ so the fade itself exposes a gap along the boundary until the rebuilt seams land
 disappears and reappears"). With `voxel.MeshFade 0` no gap was caught. R24 keeps the crossfade and
 makes the boundary fade with it:
 
-- Seam buckets crossfade like interiors (`voxel.MeshFade.Seams`, default 1); an emptied bucket fades
+- Seam buckets crossfade like interiors (under `voxel.MeshFade`); an emptied bucket fades
   out. Fade timing for interiors and buckets lives in `FVoxelCrossfadeScheduler`, one keyspace.
 - An LOD change holds the new interior at alpha 0 until its rebuilt seams land, holds those buckets
   too, and releases them together (`FVoxelSeamTransitionHolds`, cap `voxel.MeshFade.SeamHoldMs`).
@@ -433,7 +433,7 @@ makes the boundary fade with it:
   the bucket waits for that submit.
 - First appearances (R24 P3): a fade state may have no Previous set. A new chunk interior or a new
   seam bucket whose chunk cell lies at least `voxel.MeshFade.AppearMinDistance` (default 7000, the
-  LOD 0 band edge) from the streaming viewer fades in from nothing (`voxel.MeshFade.Appear`); nearer
+  LOD 0 band edge) from the streaming viewer fades in from nothing; nearer
   geometry still appears at once. A new interior that fades in is held, invisible, until its ready
   seams land and then fades in with them (`voxel.MeshFade.AppearHold`, same holds and cap as an LOD
   change). A resubmit during an appearance replaces the mesh in place on the same alpha.

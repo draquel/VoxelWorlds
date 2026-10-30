@@ -42,26 +42,11 @@ static TAutoConsoleVariable<float> CVarVoxelMeshFadeDuration(
 	TEXT("Chunk mesh-swap crossfade duration in seconds (default 0.35)."),
 	ECVF_Default);
 
-static TAutoConsoleVariable<int32> CVarVoxelMeshFadeSeams(
-	TEXT("voxel.MeshFade.Seams"),
-	1,
-	TEXT("Crossfade seam bucket swaps like chunk swaps (R24): 1 = on (default), 0 = seams swap instantly\n")
-	TEXT("(the pre-R24 behaviour, for A/B). Requires voxel.MeshFade."),
-	ECVF_Default);
-
 static TAutoConsoleVariable<int32> CVarVoxelMeshFadeMaxConcurrent(
 	TEXT("voxel.MeshFade.MaxConcurrent"),
 	512,
 	TEXT("Cap on concurrent mesh-swap fades (chunk interiors + seam buckets). Swaps beyond it are instant;\n")
 	TEXT("the fade MID pools grow with this number."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarVoxelMeshFadeAppear(
-	TEXT("voxel.MeshFade.Appear"),
-	1,
-	TEXT("Fade new chunks and new seam buckets in from nothing instead of popping them in (R24 P3), beyond\n")
-	TEXT("voxel.MeshFade.AppearMinDistance: 1 = on (default), 0 = they appear at once (for A/B). Requires voxel.MeshFade\n")
-	TEXT("(and voxel.MeshFade.Seams for seam buckets)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarVoxelMeshFadeAppearMinDistance(
@@ -991,7 +976,7 @@ bool UVoxelWorldComponent::CanCrossfade() const
 
 bool UVoxelWorldComponent::CanCrossfadeSeams() const
 {
-	return CVarVoxelMeshFadeSeams.GetValueOnGameThread() != 0 && CanCrossfade();
+	return CanCrossfade();
 }
 
 void UVoxelWorldComponent::SetFadeViewerPosition(const FVector& ViewerPosition)
@@ -1000,7 +985,7 @@ void UVoxelWorldComponent::SetFadeViewerPosition(const FVector& ViewerPosition)
 	bHasFadeViewer = true;
 }
 
-/** voxel.MeshFade.AppearMinDistance, never negative (the cvar voxel.MeshFade.Appear is the off switch). */
+/** voxel.MeshFade.AppearMinDistance, never negative (voxel.MeshFade is the off switch). */
 static double GetVoxelAppearMinDistance()
 {
 	return FMath::Max(0.0, static_cast<double>(CVarVoxelMeshFadeAppearMinDistance.GetValueOnGameThread()));
@@ -1017,7 +1002,7 @@ double UVoxelWorldComponent::GetFadeViewerDistance(const FIntVector& ChunkCoord)
 
 bool UVoxelWorldComponent::WillFadeInChunk(const FIntVector& ChunkCoord) const
 {
-	if (!bHasFadeViewer || CVarVoxelMeshFadeAppear.GetValueOnGameThread() == 0 || !CanCrossfade() || IsChunkLoaded(ChunkCoord))
+	if (!bHasFadeViewer || !CanCrossfade() || IsChunkLoaded(ChunkCoord))
 	{
 		return false;
 	}
@@ -1059,11 +1044,11 @@ bool UVoxelWorldComponent::StartAppearFade(const FIntVector4& Key, bool bBypassG
 	}
 
 	// A bucket joining a held transition fades in with it wherever it is (it must stay hidden until the
-	// release). Anything else needs the appear switch, a known viewer and the distance gate.
+	// release). Anything else needs a known viewer and the distance gate.
 	double Distance = TNumericLimits<double>::Max();
 	if (!bBypassGate)
 	{
-		if (CVarVoxelMeshFadeAppear.GetValueOnGameThread() == 0 || !bHasFadeViewer)
+		if (!bHasFadeViewer)
 		{
 			return false;
 		}

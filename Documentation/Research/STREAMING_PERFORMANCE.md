@@ -78,7 +78,7 @@ with **commas**, not semicolons.
 **Sweep runner:** `Scripts/voxel_bench_sweep.ps1` runs a fresh headless process per
 velocity (cold + focus-immune). `-Config` passes `-VoxelConfig=`, `-BenchArgs` passes
 `key=value` bench arguments, `-Distance` fixes the traverse length, `-PreCmds` runs console commands
-before the bench (a cvar A/B, e.g. `-PreCmds "voxel.FarCompression.Async 0"`), and `-ExtraArgs` passes
+before the bench (a cvar A/B, e.g. `-PreCmds "voxel.World.FarField 0"`), and `-ExtraArgs` passes
 anything else. It records the VoxelWorlds commit as the report's build label and defaults to
 the UE 5.8 install on D:.
 
@@ -98,7 +98,7 @@ the UE 5.8 install on D:.
 | `unloadLagMean/MaxMs` | Enqueue -> actual-unload dwell (drain latency) |
 | `unloadDistMean/MaxUU` | Viewer distance when a chunk is finally removed (lingering) |
 | `effMax*` | Resulting scheduler caps (after overrides/adaptive throttle) |
-| `run` | What was measured: map, world type, build label, engine, RHI, viewport, `-Voxel*` switches, config path and override, world and meshing mode, mesher, GPU generation/meshing/scatter flags, seed, voxel and chunk size, view distance, LOD band count, `lodEnabled` (effective: false for cubic), `farCompression` / `farCompressionAsync` (the cvars), `WorldOrigin`, island or planet params, path shape and parameters |
+| `run` | What was measured: map, world type, build label, engine, RHI, viewport, `-Voxel*` switches, config path and override, world and meshing mode, mesher, GPU generation/meshing/scatter flags, seed, voxel and chunk size, view distance, LOD band count, `lodEnabled` (effective: false for cubic), `farCompression` (the cvar), `WorldOrigin`, island or planet params, path shape and parameters |
 | `warmupSec` / `warmupDrained` | How long the initial load took to settle, and whether it drained (vs hit the warmup timeout) |
 | `memory` | Peak and end-of-run MB for voxel data, renderer GPU/CPU, collision, scatter and the process; `peakVoxelSystemsMB` (all voxel systems together); end-of-run resident/uniform/compressed/empty chunk counts |
 | `auditFindings` / `auditReport` | `AuditResidency` at the end of catch-up, taken from where the run ended (0 = healthy) |
@@ -190,7 +190,7 @@ band radii** (the fine-LOD reach). So "widening" bands outward *increases* thras
 only band-tuning thrash lever is pulling fine detail inward (coarser sooner), which is
 a detail/render-distance tradeoff. Width-*equalizing* the bands was tested and
 regressed (+39%). The current band layout is already near the tight end. The 2:1
-adjacency balance + hysteresis (cvar `voxel.LODBalance`) is a churn **damper** — it
+adjacency balance + hysteresis (`FDistanceBandLODStrategy::RebuildBalancedLODCache`) is a churn **damper** — it
 already removes ~25% of raw transitions and cannot be removed without reintroducing
 LOD seams.
 
@@ -272,7 +272,7 @@ they land, those of a tick in parallel, so the result still frees its generation
 stored collapsed (`CollapseToUniform`, no `ContentVersion` change). Nothing expands it again: its
 readers take the shared uniform snapshot (G69), and a point query answers its value (`GetVoxelResident`).
 
-**The encode runs on a worker thread** (`voxel.FarCompression.Async`, default 1). An Oodle encode of
+**The encode runs on a worker thread** (G6; the game-thread encode retired under CR1 D-CR2). An Oodle encode of
 a 1 MB chunk costs about 3.5 ms in PIE and cannot be split, so the sweep does not run it on the game
 thread. For each chunk that needs a fresh encode (at most `voxel.FarCompression.MaxScansPerTick`, 4,
 per tick) it starts a background `UE::Tasks` task that runs `FChunkDescriptor::ComputeCompactForm` on

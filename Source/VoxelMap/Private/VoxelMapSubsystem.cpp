@@ -37,13 +37,6 @@
 #include "Serialization/MemoryWriter.h"
 #include "VoxelResidencyStats.h"
 
-static TAutoConsoleVariable<int32> CVarMapEditOverlay(
-	TEXT("voxel.Map.EditOverlay"),
-	1,
-	TEXT("Draw voxel edits (digs, builds, POI stamps) on the map from per-tile edit overlays (QA R22). 0 = analytic ")
-	TEXT("terrain only. Takes effect on the next tile redraw (voxel.Map.Redraw)."),
-	ECVF_Default);
-
 static TAutoConsoleVariable<float> CVarMapEditRefreshSeconds(
 	TEXT("voxel.Map.EditRefreshSeconds"),
 	0.5f,
@@ -1468,14 +1461,13 @@ FString UVoxelMapSubsystem::GetDebugStats() const
 	}
 	constexpr double MB = 1024.0 * 1024.0;
 	return FString::Printf(
-		TEXT("tiles cached=%d explored=%d (outside the world %d) waiting=%d drawing=%d | images detail=%d %.1f/%.0f MB overview=%d %.1f/%.0f MB evicted detail=%lld overview=%lld | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d | overlay=%s"),
+		TEXT("tiles cached=%d explored=%d (outside the world %d) waiting=%d drawing=%d | images detail=%d %.1f/%.0f MB overview=%d %.1f/%.0f MB evicted detail=%lld overview=%lld | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d"),
 		TileStore.Num(), ExploredTiles.Num(), ExploredOutside, TileQueue.NumWaiting(), TileQueue.NumDrawing(),
 		TileStore.NumDetail(), TileStore.GetDetailBytes() / MB, TileStore.GetDetailBudget() / MB,
 		TileStore.Num(), TileStore.GetOverviewBytes() / MB, TileStore.GetOverviewBudget() / MB,
 		TileStore.GetDetailEvictions(), TileStore.GetOverviewEvictions(),
 		EditOverlays.Num(), MaskedColumns, Bytes, TileEditedChunkZ.Num() + PlanetTileEditedChunks.Num(), OverlayDirtyTiles.Num(),
-		OverlayAwaitingTiles.Num(), OverlayRebuildTiles.Num(),
-		CVarMapEditOverlay.GetValueOnGameThread() != 0 ? TEXT("on") : TEXT("off"));
+		OverlayAwaitingTiles.Num(), OverlayRebuildTiles.Num());
 }
 
 bool UVoxelMapSubsystem::CaptureMapImage(const FVector& Center, int32 RadiusTiles, const FString& FilePath, bool bHighlightOverlay) const
@@ -1979,11 +1971,10 @@ void UVoxelMapSubsystem::LaunchWaitingTiles()
 	// At most one overlay rebuild gathers chunk data per frame: a gather shares snapshots and walks edit layers on the
 	// game thread (0.1-2.5 ms per tile measured in VoxelDemo), and four in one frame would hitch. A skipped rebuild
 	// keeps waiting; a next-tick retry starts it (a completion cannot be relied on: it may land in this same frame).
-	const bool bOverlaysOn = CVarMapEditOverlay.GetValueOnGameThread() != 0;
 	bool bDeferredRebuild = false;
-	auto CanStart = [this, bOverlaysOn, &bDeferredRebuild](uint64 Key)
+	auto CanStart = [this, &bDeferredRebuild](uint64 Key)
 	{
-		if (bOverlaysOn && LastOverlayGatherFrame == GFrameCounter && OverlayRebuildTiles.Contains(Key))
+		if (LastOverlayGatherFrame == GFrameCounter && OverlayRebuildTiles.Contains(Key))
 		{
 			bDeferredRebuild = true;
 			return false;
@@ -2073,28 +2064,24 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord, uint32 Generatio
 
 	// Edit overlays (R22): this tile's and its eight neighbours' (index (DY + 1) * 3 + DX + 1; the hillshade apron
 	// reads their border columns), plus, when the tile is due an overlay rebuild, its chunk stack gathered now.
-	const bool bUseOverlays = CVarMapEditOverlay.GetValueOnGameThread() != 0;
 	TArray<TSharedPtr<const FVoxelMapEditOverlay>, TFixedAllocator<9>> TileOverlays;
 	TileOverlays.SetNum(9);
 	TSharedPtr<FVoxelMapOverlayBuildInput> RebuildInput;
-	if (bUseOverlays)
+	for (int32 DY = -1; DY <= 1; ++DY)
 	{
-		for (int32 DY = -1; DY <= 1; ++DY)
+		for (int32 DX = -1; DX <= 1; ++DX)
 		{
-			for (int32 DX = -1; DX <= 1; ++DX)
-			{
-				TileOverlays[(DY + 1) * 3 + DX + 1] = EditOverlays.FindRef(PackTileKey(TileCoord + FIntPoint(DX, DY)));
-			}
+			TileOverlays[(DY + 1) * 3 + DX + 1] = EditOverlays.FindRef(PackTileKey(TileCoord + FIntPoint(DX, DY)));
 		}
-		if (OverlayRebuildTiles.Remove(TileKey) > 0)
-		{
-			const double GatherStart = FPlatformTime::Seconds();
-			LastOverlayGatherFrame = GFrameCounter;
-			RebuildInput = GatherOverlayInput(TileCoord);
-			UE_LOG(LogVoxelMap, Verbose, TEXT("Overlay gather (%d,%d): %d chunk(s) in %.3f ms on the game thread."),
-				TileCoord.X, TileCoord.Y, RebuildInput.IsValid() ? RebuildInput->Chunks.Num() : 0,
-				(FPlatformTime::Seconds() - GatherStart) * 1000.0);
-		}
+	}
+	if (OverlayRebuildTiles.Remove(TileKey) > 0)
+	{
+		const double GatherStart = FPlatformTime::Seconds();
+		LastOverlayGatherFrame = GFrameCounter;
+		RebuildInput = GatherOverlayInput(TileCoord);
+		UE_LOG(LogVoxelMap, Verbose, TEXT("Overlay gather (%d,%d): %d chunk(s) in %.3f ms on the game thread."),
+			TileCoord.X, TileCoord.Y, RebuildInput.IsValid() ? RebuildInput->Chunks.Num() : 0,
+			(FPlatformTime::Seconds() - GatherStart) * 1000.0);
 	}
 	const bool bRebuild = RebuildInput.IsValid();
 
@@ -2471,36 +2458,31 @@ void UVoxelMapSubsystem::GeneratePlanetTileAsync(FIntPoint TileCoord, uint32 Gen
 
 	// Edit overlays: this tile's, its eight neighbours' (the hillshade apron reads their border pixels; across a face edge
 	// the neighbour is turned, so apron pixels are found by direction), and the rebuild input when one is due.
-	const bool bUseOverlays = CVarMapEditOverlay.GetValueOnGameThread() != 0;
-	TSharedPtr<const FVoxelMapEditOverlay> OwnOverlay;
+	TSharedPtr<const FVoxelMapEditOverlay> OwnOverlay = EditOverlays.FindRef(TileKey);
 	TArray<TPair<FIntPoint, TSharedPtr<const FVoxelMapEditOverlay>>, TInlineAllocator<8>> NeighbourOverlays;
 	TSharedPtr<FVoxelMapPlanetOverlayInput> RebuildInput;
-	if (bUseOverlays)
+	for (int32 DY = -1; DY <= 1; ++DY)
 	{
-		OwnOverlay = EditOverlays.FindRef(TileKey);
-		for (int32 DY = -1; DY <= 1; ++DY)
+		for (int32 DX = -1; DX <= 1; ++DX)
 		{
-			for (int32 DX = -1; DX <= 1; ++DX)
+			const FIntPoint Neighbour = GetNeighbourTile(TileCoord, DX, DY);
+			if ((DX != 0 || DY != 0) && Neighbour != TileCoord)
 			{
-				const FIntPoint Neighbour = GetNeighbourTile(TileCoord, DX, DY);
-				if ((DX != 0 || DY != 0) && Neighbour != TileCoord)
+				if (TSharedPtr<const FVoxelMapEditOverlay> Found = EditOverlays.FindRef(PackTileKey(Neighbour)))
 				{
-					if (TSharedPtr<const FVoxelMapEditOverlay> Found = EditOverlays.FindRef(PackTileKey(Neighbour)))
-					{
-						NeighbourOverlays.Add({ Neighbour, Found });
-					}
+					NeighbourOverlays.Add({ Neighbour, Found });
 				}
 			}
 		}
-		if (OverlayRebuildTiles.Remove(TileKey) > 0)
-		{
-			const double GatherStart = FPlatformTime::Seconds();
-			LastOverlayGatherFrame = GFrameCounter;
-			RebuildInput = GatherPlanetOverlayInput(TileCoord);
-			UE_LOG(LogVoxelMap, Verbose, TEXT("Planet overlay gather (%d,%d): %d chunk(s) in %.3f ms on the game thread."),
-				TileCoord.X, TileCoord.Y, RebuildInput.IsValid() ? RebuildInput->Chunks.Num() : 0,
-				(FPlatformTime::Seconds() - GatherStart) * 1000.0);
-		}
+	}
+	if (OverlayRebuildTiles.Remove(TileKey) > 0)
+	{
+		const double GatherStart = FPlatformTime::Seconds();
+		LastOverlayGatherFrame = GFrameCounter;
+		RebuildInput = GatherPlanetOverlayInput(TileCoord);
+		UE_LOG(LogVoxelMap, Verbose, TEXT("Planet overlay gather (%d,%d): %d chunk(s) in %.3f ms on the game thread."),
+			TileCoord.X, TileCoord.Y, RebuildInput.IsValid() ? RebuildInput->Chunks.Num() : 0,
+			(FPlatformTime::Seconds() - GatherStart) * 1000.0);
 	}
 	const bool bRebuild = RebuildInput.IsValid();
 
