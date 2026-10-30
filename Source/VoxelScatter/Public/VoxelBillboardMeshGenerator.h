@@ -42,11 +42,6 @@ public:
 	 */
 	static UMaterialInstanceDynamic* CreateBillboardMaterial(UTexture2D* Texture, UObject* Outer);
 
-	/**
-	 * Clear all cached meshes. Call on shutdown.
-	 */
-	static void ClearCache();
-
 private:
 	/** Cache key from width/height */
 	static int64 MakeCacheKey(float Width, float Height);

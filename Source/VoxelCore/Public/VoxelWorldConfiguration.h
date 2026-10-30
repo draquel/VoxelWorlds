@@ -516,16 +516,6 @@ public:
 	float ScatterRadius = 10000.0f;
 
 	/**
-	 * Retired (world modes review G27): ignored. Scatter extracts surface points from the chunk's voxels on the CPU in
-	 * every world. The GPU extractor read the chunk's interior mesh, which since seam ownership has no vertex in the
-	 * cells along the chunk's max faces, so it left strips without scatter there; it was also not deterministic. Kept so
-	 * existing assets load; the scatter manager logs once when it is set.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter", AdvancedDisplay,
-		meta = (EditCondition = "bEnableScatter", DeprecatedProperty, DeprecationMessage = "Ignored: scatter extracts on the CPU (world modes review G27)."))
-	bool bUseGPUScatterExtraction = false;
-
-	/**
 	 * Automatically override scatter definitions to use BlockFaceSnap placement
 	 * and cubic-appropriate defaults when MeshingMode is Cubic.
 	 */
