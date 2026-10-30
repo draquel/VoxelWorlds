@@ -60,21 +60,17 @@ Marching Cubes and [Dual Contouring](DUAL_CONTOURING.md) are both **smooth meshi
 
 | Component | Smooth (MC + DC) | Cubic |
 |-----------|------------------|-------|
-| Rendering mode | Triplanar texturing (`bUseSmoothMeshing = true`) | UV-atlas per face |
+| Rendering mode | Triplanar texturing | UV-atlas per face |
 | Vertex format | `FVoxelVertex` (28 bytes) | Same format, different UV usage |
 | Material parameter | `bSmoothTerrain = 1` in shader | `bSmoothTerrain = 0` |
 | Normal source | Density gradient (central differences) | Face normals |
 | UV computation | Triplanar projection (dominant axis) | Per-face atlas lookup |
 
-### The `bUseSmoothMeshing` Flag
+### Algorithm and rendering style
 
-The `FVoxelMeshingConfig::bUseSmoothMeshing` property controls the **rendering style**, not the meshing algorithm. When `true`, both renderers (Custom VF and PMC) use triplanar texturing. The specific algorithm (MarchingCubes vs DualContouring) is selected separately via `EMeshingMode` in the world configuration.
-
-```
-EMeshingMode::MarchingCubes  + bUseSmoothMeshing=true  →  MC algorithm, triplanar rendering
-EMeshingMode::DualContouring + bUseSmoothMeshing=true  →  DC algorithm, triplanar rendering
-EMeshingMode::Cubic          + bUseSmoothMeshing=false →  Cubic algorithm, atlas rendering
-```
+The algorithm (MarchingCubes, DualContouring or Cubic) is selected by `EMeshingMode` in the world configuration; the
+renderer derives the rendering style from it (triplanar for the two smooth modes, atlas for cubic). `FVoxelMeshingConfig`
+carries no mode flag of its own (its `bUseSmoothMeshing` was read by nothing and was deleted in CR1, MESH-06).
 
 ### Shared Mesh Types
 
@@ -101,7 +97,6 @@ The two smooth meshers handle LOD boundaries differently:
 | Mechanism | Transvoxel transition cells | Boundary cell merging |
 | Lookup tables | 512-entry tables (56 classes) | None |
 | Config | `bUseTransvoxel`, `TransitionFaces` | `NeighborLODLevels` |
-| Fallback | Skirt generation | N/A (merging always works) |
 
 ---
 
@@ -324,11 +319,9 @@ for (int i = 0; i < 6; i++) {
 **In MarchingCubes Mesher:**
 ```cpp
 for each cell:
-    if (IsTransitionCell(X, Y, Z, TransitionMask, FaceIndex)) {
-        ProcessTransitionCell(X, Y, Z, FaceIndex);
-    } else {
-        ProcessCubeLOD(X, Y, Z);  // Standard Marching Cubes
-    }
+    ProcessCubeLOD(X, Y, Z);  // Standard Marching Cubes over the interior domain
+// the transition ribbon along a coarser neighbour is emitted by the seam jobs
+// (ProcessTransitionCell), not by the chunk mesh
 ```
 
 ### Transition Cell Tables
@@ -348,37 +341,21 @@ for each cell:
 ### FVoxelMeshingConfig
 
 ```cpp
-// Enable smooth/triplanar meshing (vs cubic)
-bool bUseSmoothMeshing = false;
-
 // Isosurface threshold (0.0-1.0, default 0.5 = density 127)
 float IsoLevel = 0.5f;
 
 // Use Transvoxel for seamless LOD transitions (recommended)
 bool bUseTransvoxel = true;
-
-// Fallback: skirts (vertical geometry to hide seams)
-// Only used when Transvoxel is disabled
-bool bGenerateSkirts = true;
-float SkirtDepth = 2.0f;
 ```
+
+The skirt fallback (`bGenerateSkirts`, `SkirtDepth`) was unreachable from every production path since seam
+ownership and was deleted in CR1 (MESH-05).
 
 ### Recommended Settings
 
-**For Production (Transvoxel enabled):**
 ```cpp
-Config.bUseSmoothMeshing = true;
 Config.IsoLevel = 0.5f;
 Config.bUseTransvoxel = true;
-Config.bGenerateSkirts = false;  // Not needed with Transvoxel
-```
-
-**For Debugging (simpler, but with seams):**
-```cpp
-Config.bUseSmoothMeshing = true;
-Config.bUseTransvoxel = false;
-Config.bGenerateSkirts = true;
-Config.SkirtDepth = 2.0f;
 ```
 
 ---
@@ -506,7 +483,7 @@ Marching Cubes meshing typically produces more triangles than cubic:
 ### Optimization Strategies
 
 1. **LOD**: Use aggressive LOD to reduce distant triangle counts
-2. **Transvoxel**: Avoids expensive skirt geometry
+2. **Transvoxel**: seamless transitions with no extra geometry
 3. **GPU Meshing**: 10-20x faster than CPU
 4. **Early-Out**: Skip empty cubes (EdgeTable[cubeIndex] == 0)
 5. **Pre-allocated Buffers**: Reserve based on estimates
@@ -615,4 +592,4 @@ Planets mesh with Dual Contouring by default, so these run only on an MC planet.
 
 ---
 
-**Status**: Implemented - CPU Marching Cubes with LOD material fix, skirts enabled by default, Transvoxel available but disabled
+**Status**: Implemented - CPU Marching Cubes with LOD material fix; the skirt fallback and the non-LOD `ProcessCube` path were deleted in CR1 (MESH-04, MESH-05)

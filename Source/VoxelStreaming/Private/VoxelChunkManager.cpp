@@ -1449,7 +1449,6 @@ void UVoxelChunkManager::Initialize(
 	if (Configuration->MeshingMode == EMeshingMode::MarchingCubes)
 	{
 		FVoxelMeshingConfig MeshConfig;
-		MeshConfig.bUseSmoothMeshing = true;
 		MeshConfig.IsoLevel = 0.5f;
 		MeshConfig.bCalculateAO = Configuration->bCalculateAO;
 		MeshConfig.UVScale = Configuration->UVScale;
@@ -1468,7 +1467,6 @@ void UVoxelChunkManager::Initialize(
 		if (!Configuration->bEnableLODSeams)
 		{
 			MeshConfig.bUseTransvoxel = false;
-			MeshConfig.bGenerateSkirts = false;
 		}
 
 		if (bUseGPU)
@@ -1495,14 +1493,12 @@ void UVoxelChunkManager::Initialize(
 	else if (Configuration->MeshingMode == EMeshingMode::DualContouring)
 	{
 		FVoxelMeshingConfig MeshConfig;
-		MeshConfig.bUseSmoothMeshing = true;
 		MeshConfig.IsoLevel = 0.5f;
 		MeshConfig.bCalculateAO = Configuration->bCalculateAO;
 		MeshConfig.UVScale = Configuration->UVScale;
 
 		// DC uses its own LOD boundary merging, not Transvoxel transition cells
 		MeshConfig.bUseTransvoxel = false;
-		MeshConfig.bGenerateSkirts = Configuration->bEnableLODSeams;
 
 		if (bUseGPU)
 		{

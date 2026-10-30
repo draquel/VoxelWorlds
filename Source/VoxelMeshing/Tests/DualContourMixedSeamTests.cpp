@@ -52,11 +52,9 @@ namespace VoxelMixedSeamTestUtils
 	static FVoxelMeshingConfig MakeConfig()
 	{
 		FVoxelMeshingConfig Config;
-		Config.bUseSmoothMeshing = true;
 		Config.IsoLevel = 0.5f;
 		Config.bGenerateUVs = true;
 		Config.bCalculateAO = false;
-		Config.bGenerateSkirts = false;
 		Config.QEFSVDThreshold = 0.1f;
 		return Config;
 	}

@@ -651,11 +651,9 @@ bool FVoxelPlanetCollisionWindingTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("The chunk generates"), Generator.GenerateChunkCPU(GenRequest, MeshRequest.VoxelData));
 
 	FVoxelMeshingConfig MeshConfig;
-	MeshConfig.bUseSmoothMeshing = true;
 	MeshConfig.IsoLevel = 0.5f;
 	MeshConfig.bGenerateUVs = false;
 	MeshConfig.bCalculateAO = false;
-	MeshConfig.bGenerateSkirts = false;
 	MeshConfig.QEFSVDThreshold = 0.1f;
 	FVoxelCPUDualContourMesher Mesher;
 	Mesher.Initialize();

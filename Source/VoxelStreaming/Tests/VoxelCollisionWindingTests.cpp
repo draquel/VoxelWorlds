@@ -54,11 +54,9 @@ namespace VoxelCollisionWindingTestUtils
 	static bool MeshFlatGround(FChunkMeshData& Out)
 	{
 		FVoxelMeshingConfig Config;
-		Config.bUseSmoothMeshing = true;
 		Config.IsoLevel = 0.5f;
 		Config.bGenerateUVs = false;
 		Config.bCalculateAO = false;
-		Config.bGenerateSkirts = false;
 		Config.QEFSVDThreshold = 0.1f;
 
 		FVoxelCPUDualContourMesher Mesher;

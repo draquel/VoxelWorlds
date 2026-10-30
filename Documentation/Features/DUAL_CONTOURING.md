@@ -385,7 +385,6 @@ float QEFBiasStrength = 0.5f;
 ```
 
 DC also uses these shared smooth meshing fields:
-- `bUseSmoothMeshing` — Must be `true` (DC is a smooth meshing algorithm)
 - `IsoLevel` — Isosurface threshold (default 0.5 = density 127)
 - `MaxVerticesPerChunk` / `MaxIndicesPerChunk` — Buffer capacity limits
 

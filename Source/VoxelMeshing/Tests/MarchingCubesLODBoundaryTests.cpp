@@ -234,7 +234,6 @@ namespace MarchingCubesLODBoundaryTestHelpers
 	FVoxelMeshingConfig MakeConfig(bool bUseTransvoxel)
 	{
 		FVoxelMeshingConfig Config;
-		Config.bUseSmoothMeshing = true;
 		Config.IsoLevel = 0.5f;
 		Config.bGenerateUVs = true;
 		Config.bCalculateAO = false;
@@ -242,7 +241,6 @@ namespace MarchingCubesLODBoundaryTestHelpers
 		// Skirts would drape extra geometry over the boundary plane and pollute
 		// the watertightness measurement; production "seams off" symptoms in the
 		// investigation are about the core mesh, not the skirt patches.
-		Config.bGenerateSkirts = false;
 		return Config;
 	}
 

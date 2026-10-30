@@ -131,21 +131,6 @@ private:
 	// ============================================================================
 
 	/**
-	 * Process a single cube at position (X, Y, Z).
-	 * Generates triangles for the isosurface crossing this cube.
-	 *
-	 * @param Request The meshing request with voxel data
-	 * @param X, Y, Z Cube position (cube occupies from (X,Y,Z) to (X+1,Y+1,Z+1))
-	 * @param OutMeshData Output mesh data
-	 * @param OutTriangleCount Counter for generated triangles
-	 */
-	void ProcessCube(
-		const FVoxelMeshingRequest& Request,
-		int32 X, int32 Y, int32 Z,
-		FChunkMeshData& OutMeshData,
-		uint32& OutTriangleCount);
-
-	/**
 	 * Get density value at position (normalized 0-1 scale).
 	 * Handles chunk boundaries using neighbor data.
 	 *
@@ -232,33 +217,6 @@ private:
 	bool IsVoxelHeld(
 		const FVoxelMeshingRequest& Request,
 		int32 X, int32 Y, int32 Z) const;
-
-	/**
-	 * Get the dominant material ID for a cube.
-	 * Uses the material from the majority of solid corners.
-	 *
-	 * @param Request The meshing request with voxel data
-	 * @param X, Y, Z Cube position
-	 * @param CubeIndex The cube configuration index
-	 * @return Material ID from dominant solid corner
-	 */
-	uint8 GetDominantMaterial(
-		const FVoxelMeshingRequest& Request,
-		int32 X, int32 Y, int32 Z,
-		uint8 CubeIndex) const;
-
-	/**
-	 * Get the dominant biome ID for a cube.
-	 *
-	 * @param Request The meshing request with voxel data
-	 * @param X, Y, Z Cube position
-	 * @param CubeIndex The cube configuration index
-	 * @return Biome ID from dominant solid corner
-	 */
-	uint8 GetDominantBiome(
-		const FVoxelMeshingRequest& Request,
-		int32 X, int32 Y, int32 Z,
-		uint8 CubeIndex) const;
 
 	// ============================================================================
 	// LOD Support
@@ -561,22 +519,6 @@ private:
 	uint8 GetTransitionFaces(const FVoxelMeshingRequest& Request) const;
 
 	/**
-	 * Check if a cell position is on a transition boundary.
-	 *
-	 * @param X, Y, Z Cell position
-	 * @param ChunkSize Size of chunk
-	 * @param Stride Current chunk's LOD stride
-	 * @param TransitionMask Bitmask from GetTransitionFaces()
-	 * @param OutFaceIndex Set to the face index if on boundary
-	 * @return True if this cell needs transition geometry
-	 */
-	bool IsTransitionCell(
-		int32 X, int32 Y, int32 Z,
-		int32 ChunkSize, int32 Stride,
-		uint8 TransitionMask,
-		int32& OutFaceIndex) const;
-
-	/**
 	 * Get the stride to use for a transition cell on a given face.
 	 * The transition cell stride should match the coarser neighbor's stride.
 	 *
@@ -589,23 +531,6 @@ private:
 		const FVoxelMeshingRequest& Request,
 		int32 FaceIndex,
 		int32 CurrentStride) const;
-
-	/**
-	 * Check if a cell falls within the footprint of any transition cell.
-	 * Used to skip regular cell processing for positions covered by transition cells.
-	 *
-	 * @param Request The meshing request containing neighbor LOD levels
-	 * @param X, Y, Z Cell position
-	 * @param ChunkSize Size of chunk
-	 * @param CurrentStride Current chunk's LOD stride
-	 * @param TransitionMask Bitmask of faces needing transitions
-	 * @return True if this cell is covered by a transition cell
-	 */
-	bool IsInTransitionRegion(
-		const FVoxelMeshingRequest& Request,
-		int32 X, int32 Y, int32 Z,
-		int32 ChunkSize, int32 CurrentStride,
-		uint8 TransitionMask) const;
 
 public:
 	// ============================================================================
@@ -697,22 +622,6 @@ private:
 	// ============================================================================
 	// Skirt Generation (Fallback for LOD Seam Hiding)
 	// ============================================================================
-
-	/**
-	 * Generate skirts along chunk boundaries to hide LOD seams.
-	 * This is a fallback method when Transvoxel is disabled.
-	 * Post-processes the generated mesh to find boundary edges and extend them outward.
-	 *
-	 * @param Request The meshing request with voxel data
-	 * @param Stride LOD stride
-	 * @param OutMeshData Output mesh data (modified in place)
-	 * @param OutTriangleCount Counter for generated triangles
-	 */
-	void GenerateSkirts(
-		const FVoxelMeshingRequest& Request,
-		int32 Stride,
-		FChunkMeshData& OutMeshData,
-		uint32& OutTriangleCount);
 
 	// ============================================================================
 	// State

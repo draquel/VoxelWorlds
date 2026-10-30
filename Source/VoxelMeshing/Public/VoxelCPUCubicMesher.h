@@ -300,9 +300,6 @@ private:
 	/** Quad vertex offsets for each face (4 vertices per face) */
 	static const FVector3f QuadVertices[6][4];
 
-	/** UV coordinates for quad vertices (legacy, use FaceUVs instead) */
-	static const FVector2f QuadUVs[4];
-
 	/** Per-face UV coordinates to ensure consistent texture orientation */
 	static const FVector2f FaceUVs[6][4];
 
