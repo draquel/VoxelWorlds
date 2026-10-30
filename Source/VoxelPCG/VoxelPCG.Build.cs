@@ -27,16 +27,16 @@ public class VoxelPCG : ModuleRules
 				// PCG engine plugin — isolated to this module so no other VoxelWorlds
 				// module pulls in a hard PCG dependency.
 				"PCG",
-				"VoxelCore",
-				"VoxelGeneration",
 			}
 		);
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				// The public headers (PCG settings / elements, the biome mapping asset) include no voxel header
+				"VoxelCore",
+				"VoxelGeneration",
 				"VoxelStreaming",
-				"VoxelMap",
 			}
 		);
 

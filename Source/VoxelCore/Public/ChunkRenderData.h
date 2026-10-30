@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "RenderGraphResources.h"
+#include "RHIResources.h" // FBufferRHIRef, FShaderResourceViewRHIRef (RHI types only; nothing here is an RDG resource)
 #include "ChunkRenderData.generated.h"
 
 /**

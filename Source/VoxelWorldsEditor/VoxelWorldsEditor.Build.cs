@@ -22,27 +22,20 @@ public class VoxelWorldsEditor : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
-			"Slate",
-			"SlateCore",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			// Editor framework
-			"UnrealEd",
-			"InputCore",
+			// Editor framework (the public module header only forward-declares SDockTab / FSpawnTabArgs)
+			"Slate",
+			"SlateCore",
 			"PropertyEditor",
 			"ToolMenus",
 			"WorkspaceMenuStructure",
-			"AssetRegistry",
 
-			// Voxel runtime modules the tooling samples / renders through
+			// Voxel runtime modules the tooling samples through
 			"VoxelCore",
 			"VoxelGeneration",
-			"VoxelMeshing",
-			"VoxelRendering",
-			"VoxelStreaming",
-			"VoxelMap",
 		});
 	}
 }

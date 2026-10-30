@@ -15,7 +15,6 @@
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelTerrainConditioning.h"
 #include "IVoxelWorldMode.h"
-#include "InfinitePlaneWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelWorldModeFactory.h"
 #include "VoxelEditManager.h"

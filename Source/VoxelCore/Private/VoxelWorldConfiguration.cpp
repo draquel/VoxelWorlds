@@ -6,6 +6,7 @@
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelBiomeSnapshot.h"
 #include "VoxelTreeTypes.h"
+#include "Materials/MaterialParameterCollection.h" // the header forward-declares it (LODParameterCollection)
 #include "HAL/IConsoleManager.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"

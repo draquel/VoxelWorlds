@@ -24,8 +24,7 @@ public class VoxelGeneration : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
-				"RenderCore",
-				"RHI",
+				"RHI", // VoxelGPUNoiseGenerator.h: FRHIGPUBufferReadback (RHIFwd.h)
 				"VoxelCore",
 			}
 		);
@@ -33,8 +32,9 @@ public class VoxelGeneration : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"Projects",
-				"Renderer",
+				// RDG / FGlobalShader in the GPU noise generator's .cpp and the tests; the public header only
+				// forward-declares FRDGPooledBuffer
+				"RenderCore",
 			}
 		);
 
