@@ -21,6 +21,7 @@ public class VoxelStreaming : ModuleRules
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
+			"ChaosCore", // linked, not included: Chaos:: symbols reached through Chaos/TriangleMeshImplicitObject.h
 				"Core",
 				"CoreUObject",
 				"Engine",
