@@ -26,6 +26,7 @@ public class VoxelWorldsEditor : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
+			"InputCore", // linked, not included: EKeys through the Slate widgets
 			// Editor framework (the public module header only forward-declares SDockTab / FSpawnTabArgs)
 			"Slate",
 			"SlateCore",

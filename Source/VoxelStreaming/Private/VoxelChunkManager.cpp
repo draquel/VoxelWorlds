@@ -31,6 +31,7 @@
 #include "Async/ParallelFor.h"
 #include "VoxelNeighborSliceExtraction.h"
 #include "VoxelCPUNoiseGenerator.h"
+#include "RenderGraphResources.h" // FRDGPooledBuffer: the GPU generator and meshers hold TRefCountPtrs to it
 #include "VoxelGPUNoiseGenerator.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
