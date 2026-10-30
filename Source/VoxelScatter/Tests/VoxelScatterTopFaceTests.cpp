@@ -109,7 +109,7 @@ namespace VoxelScatterTopFaceTestUtils
 		{
 			for (int32 X = Min; X <= Max; ++X)
 			{
-				Layer.ApplyEdit(FVoxelEdit(FIntVector(X, Y, 0), NewData, FVoxelData::Air(), EEditMode::Set));
+				Layer.ApplyEdit(FVoxelEdit(FIntVector(X, Y, 0), NewData, EEditMode::Set));
 			}
 		}
 		return Layer;
@@ -764,7 +764,7 @@ bool FVoxelScatterTopFaceBuriedCavesTest::RunTest(const FString& Parameters)
 			{
 				const FIntVector Local(I % ChunkSize, I / ChunkSize, 0);
 				const bool bSolid = Pair.UpperVoxels[I].IsSolid();
-				Edits.Add(I, FVoxelEdit(Local, bSolid ? FVoxelData::Air() : FVoxelData::Solid(EVoxelMaterial::Stone), FVoxelData::Air(), EEditMode::Set));
+				Edits.Add(I, FVoxelEdit(Local, bSolid ? FVoxelData::Air() : FVoxelData::Solid(EVoxelMaterial::Stone), EEditMode::Set));
 				(bSolid ? Dug : Filled) += 1;
 			}
 			const TSharedPtr<const TMap<int32, FVoxelEdit>> Shared = MakeShared<const TMap<int32, FVoxelEdit>>(Edits);

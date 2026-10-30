@@ -7,7 +7,7 @@
 // [asfloat(cell), 0][frac, 0]), and the shader adds the voxel's small offset in noise units, so every float here is of
 // the size of a lattice cell, at any radius or distance from the origin. The names are from spherical Phase 6, when
 // planets alone had it; the heightmap branch of GenerateVoxelDensity.usf samples through PlanetFBM3D too (the classic
-// FBMNoise.ush functions are no longer called by generation).
+// table noise shaders were deleted in CR1, CORE-03).
 //
 // Include AFTER the generation globals (GenerateVoxelDensity.usf): reads NoiseOrigins and SimplexContinuous.
 
@@ -203,7 +203,7 @@ float PlanetNoiseSample(uint3 Cell, float3 Frac, float3 Offset, int NoiseType, i
 /**
  * FVoxelPlanetNoise::FBM3D(Origin, Offset, Params): fBm at a field's origin (its splits at NoiseOrigins[OriginBase +
  * octave], uploaded by the CPU) + OffsetUU, the sample's offset from the origin in uu, scaled by each octave's frequency.
- * The octave loop is FBM3D's (FBMNoise.ush): frequencies multiplied in float, amplitudes, normalisation.
+ * The octave loop is the classic FBM3D's: frequencies multiplied in float, amplitudes, normalisation.
  */
 float PlanetFBM3D(int OriginBase, float3 OffsetUU, int NoiseType, int Seed, int Octaves, float Frequency, float Amplitude,
     float Lacunarity, float Persistence)

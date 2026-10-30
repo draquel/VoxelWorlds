@@ -730,8 +730,8 @@ carries the full pipeline (biomes + materials + metadata) at LOD 0/1/2. All gree
 | Water on (underwater materials + water-fill flag) | `GPUvsCPUWaterParity` | 100% all channels |
 | Ore veins (**streak** shape + **per-biome** ranges) | `GPUvsCPUOreVariantParity` | 100% all channels |
 
-Ports are deliberate mirrors: cave noise/threshold/depth-fade, the Perlin-permutation `Hash3D` behind
-Cellular/Voronoi, the underwater-material gate (`WaterLevelEnabled && EnableUnderwaterMaterials &&
+Ports are deliberate mirrors: cave noise/threshold/depth-fade, the Perlin-permutation hash behind
+Cellular/Voronoi (the classic shaders, deleted in CR1 CORE-03), the underwater-material gate (`WaterLevelEnabled && EnableUnderwaterMaterials &&
 TerrainHeight < WaterLevel`), and the per-biome ore bake (`GetOreVeinsForBiome` → `OreStart/OreCount`) are
 identical CPU↔shader, so Phase D added **no** shader changes — it locked the existing behaviour with tests.
 Known limit (documented): ore veins with `Rarity < 1` use a precision-sensitive position hash (double on

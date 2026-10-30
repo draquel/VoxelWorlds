@@ -65,7 +65,6 @@ namespace IslandCullProbe
 		FLODQueryContext Context;
 		Context.WorldOrigin = Config.WorldOrigin;
 		Context.WorldMode = EWorldMode::IslandBowl;
-		Context.ViewDistance = Config.ViewDistance;
 		Context.ViewerPosition = Config.WorldOrigin;
 		Strategy.Update(Context, 1.0f / 60.0f);
 

@@ -87,8 +87,7 @@ it ends the source, brush centre and radius it broadcast. The history (undo and 
   around a site held 94 MB of history, and an undo took back the last of them. As with the flood, undoing a player's
   edit made before a stamp puts back that edit's voxels as they were before it, the stamp's there with them.
 - A clear (`ClearChunkEdits`, `ClearAllEdits`) is outside the history; a load (`LoadEditsFromFile`) clears it.
-- `FVoxelEdit::OriginalData` (the previous edit's voxel, or air) is still written to the edits file but undo does not
-  read it.
+- `FVoxelEdit::OriginalData` deleted in CR1 (CORE-12): the edits file is version 3 without it (version 2 still loads).
 
 Until 2026-10-20 the record was the operation's list of edits with their `OriginalData`: undo took the first of the
 operation's chunks holding an edit at the voxel's local index and set `OriginalData` on it (removing it when that was
@@ -141,9 +140,8 @@ struct FVoxelEdit
     
     /** Density change (for Add/Subtract) */
     int8 DensityDelta;
-    
-    /** Timestamp */
-    double Timestamp;
+
+    // Timestamp deleted in CR1 (CORE-13)
 };
 ```
 
@@ -264,9 +262,7 @@ void UVoxelEditManager::ApplyEditToChunk(
                         NewData.MaterialID = Edit.MaterialID;
                         break;
                         
-                    case EEditMode::Smooth:
-                        NewData.Density = SmoothVoxel(ChunkCoord, LocalVoxel, EffectiveStrength);
-                        break;
+                    // EEditMode::Smooth deleted in CR1 (CORE-11)
                 }
                 
                 // Store modified voxel

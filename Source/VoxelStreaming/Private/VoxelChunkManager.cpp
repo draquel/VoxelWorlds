@@ -1215,10 +1215,6 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	ProcessFarCompressionSweep(Context, Timing);
 	Timing.FarCompressMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
-	// === Subsystem deferral check ===
-	const int32 DeferThreshold = Configuration ? Configuration->DeferSubsystemsThreshold : 20;
-	bSubsystemsDeferred = (DeferThreshold > 0 && GenerationQueue.Num() > DeferThreshold);
-
 	// === Collision manager ===
 	// Always update collision (drains async results, creates physics bodies).
 	// Skipping Update() when deferred blocks the async pipeline and prevents
@@ -1398,7 +1394,6 @@ void UVoxelChunkManager::Initialize(
 	// Reset adaptive throttle state
 	SmoothedFrameTimeMs = 16.67f;
 	ObservedFrameFloorMs = 16.67f;
-	bSubsystemsDeferred = false;
 	EffectiveMaxAsyncGenerationTasks = (SchedOverrideAsyncGen >= 0) ? SchedOverrideAsyncGen : Configuration->MaxAsyncGenerationTasks;
 	EffectiveMaxAsyncMeshTasks = (SchedOverrideAsyncMesh >= 0) ? SchedOverrideAsyncMesh : Configuration->MaxAsyncMeshTasks;
 	EffectiveMaxLODRemeshPerFrame = (SchedOverrideLODRemesh >= 0) ? SchedOverrideLODRemesh : Configuration->MaxLODRemeshPerFrame;
@@ -1869,7 +1864,6 @@ void UVoxelChunkManager::Shutdown()
 	LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	bForceStreamingUpdate = false;
 	LODEvalSchedule.Reset();
-	bSubsystemsDeferred = false;
 
 	// Clean up LOD strategy (we own it)
 	if (LODStrategy)
@@ -3047,26 +3041,14 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 	{
 		Context.ViewerPosition = BenchmarkViewPosition;
 		Context.ViewerForward = FVector::ForwardVector;
-		Context.ViewerRight = FVector::RightVector;
-		Context.ViewerUp = FVector::UpVector;
 		Context.FieldOfView = 90.0f;
-		if (const UWorld* World = GetWorld())
-		{
-			Context.GameTime = World->GetTimeSeconds();
-			Context.DeltaTime = World->GetDeltaSeconds();
-		}
 		if (Configuration)
 		{
-			Context.ViewDistance = Configuration->ViewDistance;
 			Context.WorldOrigin = Configuration->WorldOrigin;
 			Context.WorldMode = Configuration->WorldMode;
-			Context.WorldRadius = Configuration->WorldRadius;
-			Context.MaxChunksToLoadPerFrame = Configuration->MaxChunksToLoadPerFrame;
 			Context.MaxChunksToUnloadPerFrame = Configuration->MaxChunksToUnloadPerFrame;
-			Context.TimeSliceMS = Configuration->StreamingTimeSliceMS;
 		}
 		Context.bFarFieldActive = FarField.IsValid();
-		Context.FrameNumber = CurrentFrame;
 		return Context;
 	}
 
@@ -3091,8 +3073,6 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 
 			Context.ViewerPosition = Location;
 			Context.ViewerForward = Rotation.Vector();
-			Context.ViewerRight = Rotation.RotateVector(FVector::RightVector);
-			Context.ViewerUp = Rotation.RotateVector(FVector::UpVector);
 			bFoundViewer = true;
 
 			if (PC->PlayerCameraManager)
@@ -3126,9 +3106,6 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 			}
 		}
 #endif
-
-		Context.GameTime = World->GetTimeSeconds();
-		Context.DeltaTime = World->GetDeltaSeconds();
 	}
 
 	// Fallback: If no viewer found, use the owning actor's location
@@ -3155,18 +3132,12 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 	// Configuration values
 	if (Configuration)
 	{
-		Context.ViewDistance = Configuration->ViewDistance;
 		Context.WorldOrigin = Configuration->WorldOrigin;
 		Context.WorldMode = Configuration->WorldMode;
-		Context.WorldRadius = Configuration->WorldRadius;
-		Context.MaxChunksToLoadPerFrame = Configuration->MaxChunksToLoadPerFrame;
 		Context.MaxChunksToUnloadPerFrame = Configuration->MaxChunksToUnloadPerFrame;
-		Context.TimeSliceMS = Configuration->StreamingTimeSliceMS;
 	}
 	// The cut-over applies only with a far field (WM-MP2, D38; every mode since G78).
 	Context.bFarFieldActive = FarField.IsValid();
-
-	Context.FrameNumber = CurrentFrame;
 
 	return Context;
 }

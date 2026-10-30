@@ -54,10 +54,7 @@ enum class EEditMode : uint8
 	Subtract,
 
 	/** Change material without affecting density */
-	Paint,
-
-	/** Smooth terrain by averaging nearby densities */
-	Smooth
+	Paint
 };
 
 /**

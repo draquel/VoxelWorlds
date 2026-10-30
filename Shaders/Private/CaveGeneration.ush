@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include "FBMNoise.ush"
+#include "VoxelNoiseCommon.ush"
 
 // Maximum number of cave layers supported on GPU
 #define MAX_GPU_CAVE_LAYERS 4

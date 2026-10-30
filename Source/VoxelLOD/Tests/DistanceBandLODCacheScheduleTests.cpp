@@ -43,7 +43,6 @@ namespace LODCacheScheduleTestHelpers
 	{
 		FLODQueryContext Context;
 		Context.ViewerPosition = ViewerPosition;
-		Context.ViewDistance = 40000.0f;
 		Context.WorldMode = EWorldMode::InfinitePlane;
 		return Context;
 	}

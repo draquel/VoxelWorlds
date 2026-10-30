@@ -89,15 +89,6 @@ public:
 	// ==================== Buffer Access ====================
 
 	/**
-	 * Get the GPU buffer for a completed generation request.
-	 * Only valid after GenerateChunkAsync completes.
-	 *
-	 * @param Handle Handle from GenerateChunkAsync
-	 * @return Pointer to the GPU buffer, or nullptr if not available
-	 */
-	virtual FRHIBuffer* GetGeneratedBuffer(const FVoxelGenerationHandle& Handle) = 0;
-
-	/**
 	 * Read back generated voxel data from GPU to CPU.
 	 * This is a blocking operation that stalls the GPU.
 	 *

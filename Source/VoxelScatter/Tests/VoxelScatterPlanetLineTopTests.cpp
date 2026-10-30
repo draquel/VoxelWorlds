@@ -140,7 +140,7 @@ namespace VoxelScatterLineTopTestUtils
 			if (Offsets.Contains(Offset))
 			{
 				const FIntVector Local(X, Y, Z);
-				Map.Add(Local, FVoxelEdit(Local - Offset * ChunkSize, FVoxelData::Air(), FVoxelData::Air(), EEditMode::Set));
+				Map.Add(Local, FVoxelEdit(Local - Offset * ChunkSize, FVoxelData::Air(), EEditMode::Set));
 			}
 		}
 		return MakeShared<const TMap<FIntVector, FVoxelEdit>>(MoveTemp(Map));
@@ -552,7 +552,7 @@ namespace VoxelScatterLineTopTestUtils
 			const FIntVector Coord(FMath::FloorToInt32(Column.X / static_cast<float>(ChunkSize)), FMath::FloorToInt32(Column.Y / static_cast<float>(ChunkSize)), ChunkLayer);
 			FChunkEditLayer& Layer = Edits.FindOrAdd(Coord, FChunkEditLayer(Coord, ChunkSize));
 			const FIntVector Local(Column.X - Coord.X * ChunkSize, Column.Y - Coord.Y * ChunkSize, LocalZ);
-			Layer.ApplyEdit(FVoxelEdit(Local, NewData, FVoxelData::Air(), EEditMode::Set));
+			Layer.ApplyEdit(FVoxelEdit(Local, NewData, EEditMode::Set));
 		}
 		return Edits;
 	}
@@ -772,8 +772,8 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 					FVoxelEdit Edit;
 					switch (N++ % 4)
 					{
-					case 0: Edit = FVoxelEdit(FIntVector(X, Y, Z), FVoxelData::Air(), FVoxelData::Air(), EEditMode::Set); break;
-					case 1: Edit = FVoxelEdit(FIntVector(X, Y, Z), FVoxelData::Solid(EVoxelMaterial::Stone), FVoxelData::Air(), EEditMode::Set); break;
+					case 0: Edit = FVoxelEdit(FIntVector(X, Y, Z), FVoxelData::Air(), EEditMode::Set); break;
+					case 1: Edit = FVoxelEdit(FIntVector(X, Y, Z), FVoxelData::Solid(EVoxelMaterial::Stone), EEditMode::Set); break;
 					case 2: Edit = FVoxelEdit(FIntVector(X, Y, Z), EEditMode::Subtract, 90, 0); break;
 					default: Edit = FVoxelEdit(FIntVector(X, Y, Z), EEditMode::Add, 90, EVoxelMaterial::Stone); break;
 					}
@@ -794,7 +794,7 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 						Local[Axis] = Unread[Axis] < 0 ? ChunkSize - 1 : 0;
 					}
 				}
-				UnreadLayer.ApplyEdit(FVoxelEdit(Local, FVoxelData::Air(), FVoxelData::Air(), EEditMode::Set));
+				UnreadLayer.ApplyEdit(FVoxelEdit(Local, FVoxelData::Air(), EEditMode::Set));
 			}
 
 			FScatterExtractionContext Context;

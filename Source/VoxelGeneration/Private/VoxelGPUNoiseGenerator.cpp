@@ -1285,25 +1285,6 @@ float FVoxelGPUNoiseGenerator::SampleNoiseAt(
 	return FVoxelCPUNoiseGenerator::FBM3D(WorldPosition, Params);
 }
 
-FRHIBuffer* FVoxelGPUNoiseGenerator::GetGeneratedBuffer(const FVoxelGenerationHandle& Handle)
-{
-	if (!Handle.IsValid())
-	{
-		return nullptr;
-	}
-
-	FScopeLock Lock(&ResultsLock);
-	if (TSharedPtr<FGenerationResult>* ResultPtr = GenerationResults.Find(Handle.RequestId))
-	{
-		if ((*ResultPtr)->OutputBuffer.IsValid())
-		{
-			return (*ResultPtr)->OutputBuffer->GetRHI();
-		}
-	}
-
-	return nullptr;
-}
-
 bool FVoxelGPUNoiseGenerator::ReadbackToCPU(
 	const FVoxelGenerationHandle& Handle,
 	TArray<FVoxelData>& OutVoxelData)
@@ -1408,18 +1389,4 @@ void FVoxelGPUNoiseGenerator::ReleaseHandle(const FVoxelGenerationHandle& Handle
 	// ReleaseAllHandles-style teardown paths still flush.
 	FScopeLock Lock(&ResultsLock);
 	GenerationResults.Remove(Handle.RequestId);
-}
-
-FBufferRHIRef FVoxelGPUNoiseGenerator::CreateOutputBuffer(int32 ChunkSize)
-{
-	// This function is no longer used - buffer creation happens via RDG
-	// Kept for interface compatibility
-	return nullptr;
-}
-
-FBufferRHIRef FVoxelGPUNoiseGenerator::CreateStagingBuffer(int32 ChunkSize)
-{
-	// This function is no longer used - buffer creation happens via RDG
-	// Kept for interface compatibility
-	return nullptr;
 }

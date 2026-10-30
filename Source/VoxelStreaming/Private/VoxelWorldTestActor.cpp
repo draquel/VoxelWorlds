@@ -1905,7 +1905,6 @@ void AVoxelWorldTestActor::DrawPerformanceHUD() const
 		const int32 EffAsync = ChunkManager->GetEffectiveMaxAsyncMeshTasks();
 		const int32 EffLOD = ChunkManager->GetEffectiveMaxLODRemeshPerFrame();
 		const int32 EffPending = ChunkManager->GetEffectiveMaxPendingMeshes();
-		const bool bDeferred = ChunkManager->AreSubsystemsDeferred();
 
 		UVoxelWorldConfiguration* Config = ChunkManager->GetConfiguration();
 		const int32 CfgGen = Config ? Config->MaxAsyncGenerationTasks : 2;
@@ -1916,9 +1915,8 @@ void AVoxelWorldTestActor::DrawPerformanceHUD() const
 		const bool bThrottled = (EffGen < CfgGen || EffAsync < CfgAsync || EffLOD < CfgLOD || EffPending < CfgPending);
 		const FColor ThrottleColor = bThrottled ? FColor::Yellow : FColor::White;
 		GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, ThrottleColor,
-			FString::Printf(TEXT("Throttle: Gen=%d/%d Mesh=%d/%d LOD=%d/%d Pend=%d/%d%s"),
-				EffGen, CfgGen, EffAsync, CfgAsync, EffLOD, CfgLOD, EffPending, CfgPending,
-				bDeferred ? TEXT(" [DEFERRED]") : TEXT("")));
+			FString::Printf(TEXT("Throttle: Gen=%d/%d Mesh=%d/%d LOD=%d/%d Pend=%d/%d"),
+				EffGen, CfgGen, EffAsync, CfgAsync, EffLOD, CfgLOD, EffPending, CfgPending));
 	}
 
 	// Scatter stats (if available)

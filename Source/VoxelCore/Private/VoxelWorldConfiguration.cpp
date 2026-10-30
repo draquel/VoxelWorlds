@@ -100,50 +100,6 @@ UVoxelWorldConfiguration::UVoxelWorldConfiguration()
 	}
 }
 
-float UVoxelWorldConfiguration::GetChunkWorldSizeAtLOD(int32 LODLevel) const
-{
-	for (const FLODBand& Band : LODBands)
-	{
-		if (Band.LODLevel == LODLevel)
-		{
-			return Band.ChunkSize * Band.VoxelStride * VoxelSize;
-		}
-	}
-
-	// Fallback to base chunk size
-	return GetChunkWorldSize();
-}
-
-const FLODBand* UVoxelWorldConfiguration::GetLODBandForDistance(float Distance) const
-{
-	for (const FLODBand& Band : LODBands)
-	{
-		if (Band.ContainsDistance(Distance))
-		{
-			return &Band;
-		}
-	}
-
-	return nullptr;
-}
-
-int32 UVoxelWorldConfiguration::GetLODLevelForDistance(float Distance) const
-{
-	const FLODBand* Band = GetLODBandForDistance(Distance);
-	if (Band)
-	{
-		return Band->LODLevel;
-	}
-
-	// Beyond all bands - return coarsest LOD
-	if (LODBands.Num() > 0)
-	{
-		return LODBands.Last().LODLevel;
-	}
-
-	return 0;
-}
-
 bool UVoxelWorldConfiguration::ValidateConfiguration() const
 {
 	bool bValid = true;

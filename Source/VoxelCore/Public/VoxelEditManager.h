@@ -381,22 +381,6 @@ protected:
 	FVector LocalToWorldPos(const FIntVector& ChunkCoord, const FIntVector& LocalPos) const;
 
 	/**
-	 * Apply a single edit internally, tracking it in the current operation.
-	 *
-	 * @param ChunkCoord Chunk coordinate
-	 * @param LocalPos Local position within chunk
-	 * @param NewData New voxel data
-	 * @param OriginalData The voxel's previous edit's data, or air (FVoxelEdit::OriginalData; undo restores the change's Before)
-	 * @param Mode Edit mode
-	 */
-	void ApplyEditInternal(
-		const FIntVector& ChunkCoord,
-		const FIntVector& LocalPos,
-		const FVoxelData& NewData,
-		const FVoxelData& OriginalData,
-		EEditMode Mode);
-
-	/**
 	 * Apply a pre-constructed edit internally, tracking it in the current operation.
 	 *
 	 * @param ChunkCoord Chunk coordinate
@@ -407,12 +391,6 @@ protected:
 		const FIntVector& ChunkCoord,
 		const FIntVector& LocalPos,
 		const FVoxelEdit& Edit);
-
-	/**
-	 * The voxel's previous edit's data, or air if it has none (procedural data is not accessible here), for
-	 * FVoxelEdit::OriginalData. Undo does not depend on it (FVoxelEditChange keeps the whole previous edit).
-	 */
-	FVoxelData GetOriginalVoxelData(const FIntVector& ChunkCoord, const FIntVector& LocalPos) const;
 
 	/**
 	 * Trim the undo stack, oldest operations first, while it holds more than MaxUndoHistory operations or the history is
