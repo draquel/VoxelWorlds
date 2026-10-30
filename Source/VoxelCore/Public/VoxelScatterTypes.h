@@ -12,22 +12,6 @@ class UTexture2D;
 class UMaterialInterface;
 
 /**
- * DEPRECATED — retained only so existing assets can be migrated in
- * UVoxelScatterConfiguration::PostLoad. Superseded by EScatterSurfaceLocationFlags,
- * which lets a scatter type opt into any combination of surface categories.
- */
-UENUM(BlueprintType)
-enum class EScatterSurfaceLocation : uint8
-{
-	/** Spawn on any surface — both open sky and underground */
-	Any           UMETA(DisplayName = "Any"),
-	/** Only spawn on open-sky surfaces (exclude caves/underground) */
-	SurfaceOnly   UMETA(DisplayName = "Surface Only"),
-	/** Only spawn underground (caves, enclosed spaces) */
-	UndergroundOnly UMETA(DisplayName = "Underground Only")
-};
-
-/**
  * Which surface categories a scatter type may spawn on, as an independent bitmask.
  *
  * Every surface point falls into exactly one category, chosen by precedence
@@ -145,18 +129,6 @@ struct VOXELCORE_API FVoxelSurfacePoint
 		const float CosAngle = FMath::Clamp(FVector::DotProduct(Normal, FVector::UpVector), -1.0f, 1.0f);
 		return FMath::RadiansToDegrees(FMath::Acos(CosAngle));
 	}
-
-	/** Is this a horizontal surface? (slope less than threshold) */
-	bool IsHorizontal(float MaxSlopeDegrees = 30.0f) const
-	{
-		return GetSlopeAngle() <= MaxSlopeDegrees;
-	}
-
-	/** Is this a vertical surface? (slope greater than threshold) */
-	bool IsVertical(float MinSlopeDegrees = 60.0f) const
-	{
-		return GetSlopeAngle() >= MinSlopeDegrees;
-	}
 };
 
 /**
@@ -174,10 +146,6 @@ struct VOXELCORE_API FChunkSurfaceData
 
 	/** All extracted surface points (downsampled from mesh) */
 	TArray<FVoxelSurfacePoint> SurfacePoints;
-
-	/** LOD level this was extracted from */
-	UPROPERTY()
-	int32 LODLevel = 0;
 
 	/** Whether data is valid */
 	bool bIsValid = false;
@@ -199,14 +167,6 @@ struct VOXELCORE_API FChunkSurfaceData
 	SIZE_T GetAllocatedSize() const
 	{
 		return SurfacePoints.GetAllocatedSize();
-	}
-
-	/** Clear all data */
-	void Reset()
-	{
-		SurfacePoints.Empty();
-		bIsValid = false;
-		SurfaceAreaEstimate = 0.0f;
 	}
 };
 
@@ -337,10 +297,6 @@ struct VOXELCORE_API FScatterDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug")
 	FColor DebugColor = FColor::Green;
 
-	/** Debug sphere radius for visualization */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Debug", meta = (ClampMin = "1.0", ClampMax = "100.0"))
-	float DebugSphereRadius = 10.0f;
-
 	// ==================== Placement Rules ====================
 
 	/** Enable this scatter type */
@@ -386,14 +342,6 @@ struct VOXELCORE_API FScatterDefinition
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Placement", meta = (Bitmask, BitmaskEnum = "/Script/VoxelCore.EScatterSurfaceLocationFlags"))
 	int32 SurfaceLocationMask = static_cast<int32>(EScatterSurfaceLocationFlags::Surface);
-
-	/**
-	 * DEPRECATED — legacy single-choice surface location. Retained (hidden) only so assets
-	 * saved before the bitmask change deserialize their old value; migrated into
-	 * SurfaceLocationMask by UVoxelScatterConfiguration::PostLoad, then reset.
-	 */
-	UPROPERTY()
-	EScatterSurfaceLocation SurfaceLocation = EScatterSurfaceLocation::SurfaceOnly;
 
 	/** Avoid placement in shadowed areas (high AO) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Placement")
@@ -608,17 +556,6 @@ struct VOXELCORE_API FScatterDefinition
 	}
 
 	/**
-	 * Get spawn probability (now just returns Density directly).
-	 * Density is interpreted as direct probability (0-1).
-	 *
-	 * @return Probability (0-1) of spawning at a valid point
-	 */
-	float GetSpawnProbability() const
-	{
-		return FMath::Clamp(Density, 0.0f, 1.0f);
-	}
-
-	/**
 	 * Compute instance scale from seed.
 	 */
 	float ComputeScale(float Random01) const
@@ -696,43 +633,10 @@ struct VOXELCORE_API FChunkScatterData
 	{
 	}
 
-	/** Get spawn points for a specific scatter type */
-	void GetSpawnPointsForType(int32 ScatterTypeID, TArray<FScatterSpawnPoint>& OutPoints) const
-	{
-		for (const FScatterSpawnPoint& Point : SpawnPoints)
-		{
-			if (Point.ScatterTypeID == ScatterTypeID)
-			{
-				OutPoints.Add(Point);
-			}
-		}
-	}
-
-	/** Get count for a specific scatter type */
-	int32 GetCountForType(int32 ScatterTypeID) const
-	{
-		int32 Count = 0;
-		for (const FScatterSpawnPoint& Point : SpawnPoints)
-		{
-			if (Point.ScatterTypeID == ScatterTypeID)
-			{
-				++Count;
-			}
-		}
-		return Count;
-	}
-
 	/** Get approximate memory usage */
 	SIZE_T GetAllocatedSize() const
 	{
 		return SpawnPoints.GetAllocatedSize();
-	}
-
-	/** Clear all data */
-	void Reset()
-	{
-		SpawnPoints.Empty();
-		bIsValid = false;
 	}
 };
 
@@ -808,13 +712,6 @@ struct VOXELCORE_API FScatterExclusionVolume
 	/** Oriented-box half-extents in world units. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Exclusion")
 	FVector HalfExtent = FVector(500.0f, 500.0f, 500.0f);
-
-	/**
-	 * Reserved: width of a soft-edge falloff band at the box rim (probabilistic thinning instead of a
-	 * hard cut). Unused for now — 0 means a hard edge; keep 0 until the falloff pass is implemented.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Exclusion")
-	float EdgeFalloff = 0.0f;
 
 	/** Usable = has a valid Id and a positive extent on every axis. */
 	bool IsUsable() const

@@ -757,7 +757,6 @@ FString FVoxelStreamingBenchmark::BuildRunMetadataJson() const
 		Bool(TEXT("gpuGenerationConfigured"), Cfg->bUseGPUGeneration);
 		Bool(TEXT("gpuGenerationActive"), ChunkManager->IsUsingGPUGeneration());
 		Bool(TEXT("gpuMeshingConfigured"), Cfg->bUseGPUMeshing);
-		Bool(TEXT("gpuScatterExtractionConfigured"), Cfg->bUseGPUScatterExtraction); // ignored since G27: scatter extracts on the CPU
 		Bool(TEXT("forceCPU"), FParse::Param(FCommandLine::Get(), TEXT("VoxelForceCPU")));
 		Int(TEXT("worldSeed"), Cfg->WorldSeed);
 		Num(TEXT("voxelSize"), Cfg->VoxelSize);

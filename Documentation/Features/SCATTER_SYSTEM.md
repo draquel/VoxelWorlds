@@ -48,7 +48,6 @@ public:
 
     // Scatter definitions
     void AddScatterDefinition(const FScatterDefinition& Definition);
-    bool RemoveScatterDefinition(int32 ScatterID);
     const FScatterDefinition* GetScatterDefinition(int32 ScatterID) const;
 
     // Chunk hand-off (called by ChunkManager when a chunk's mesh is ready; reads the voxels, not the mesh)
@@ -292,8 +291,9 @@ anywhere else.
   the sea's minimum depth (`FScatterExtractionContext::CaveConfiguration`). Before, a cave within a voxel past a
   chunk's max face read as rock: the cave floor in that cell got no point, and where the cave met the face the rock
   made a floor in the air (on `Review_Planet` 1.3-1.6% of the points missed and up to 7% added).
-  `voxel.Scatter.PlanetFaceCaves 0` restores that for A/B; `voxel.Scatter.PlanetFaceAudit` compares every cached chunk
-  with an extraction that takes those voxels from its neighbours (`OutsideVoxelSource`). They are the CPU formula's, which the GPU generator matches to a density step or two at a few
+  `voxel.Scatter.PlanetFaceCaves 0` restores that for A/B; `voxel.Scatter.PlanetFaceAudit` and
+  `UVoxelScatterManager::ComparePlanetFaceVoxels` were deleted in CR1 (SCAT-29; `Scatter.Planet.FaceCaves` builds the same
+  reference through `OutsideVoxelSource`). The voxels past the faces are the CPU formula's, which the GPU generator matches to a density step or two at a few
   voxels (`Generation.GPUvsCPUSphericalParity`), so on the GPU path a crossing at a face is very rarely doubled (one
   point in about two million on `Review_Planet`). A point on a face is interpolated from the same four voxels on both
   sides (fractions within 1e-7 of a cell face snap to it), so a voxel exactly at the threshold there cannot leave the
@@ -319,8 +319,7 @@ drifting sideways by the rounded slope. Neighbouring chunks' lines did not conti
 diagonals they stepped along different axes, and elsewhere their drift rounded differently), so strips along chunk faces
 got too few points; the staircase rounding also thinned the points inside a chunk on some slopes, and a line top that
 left the chunk needed G29's rules to decide whether the neighbour made its point. The rays need none of that.
-`voxel.Scatter.LineTopAudit` still measures it on a live planet: pairs of open points from two chunks on one up-line,
-and the local density around the pawn.
+`voxel.Scatter.LineTopAudit` was deleted in CR1 (SCAT-29; `Scatter.Planet.LineTop.*` and `Planet.DensityPerArea` cover it).
 
 Heightmap worlds keep `ExtractSurfacePointsFromVoxelData` and the old expressions (`LocalUp` +Z, weight 1, the jitter
 call unchanged). `voxel.Scatter.Digest` logs the cached spawn points' counts and a CRC per type, to compare builds
@@ -338,8 +337,8 @@ ownership a chunk's mesh is its interior mesh, which has no vertex in the cells 
 (they belong to the chunk's seams), so every chunk the GPU path extracted had no point there: bare strips in the grass
 along chunk borders and along the contour where the terrain crosses a chunk layer's top. Its output buffer also held
 4,096 points, sized for 32³ chunks, and dropped whichever points came last on the GPU (not deterministic either way).
-`bUseGPUScatterExtraction` is kept so assets load, and ignored (logged once at initialisation).
-`voxel.Scatter.BoundaryAudit` measures how a chunk's points cover the cell layers along its six faces.
+`bUseGPUScatterExtraction` was deleted in CR1 (SCAT-06; a removed property drops silently on load), and so was
+`voxel.Scatter.BoundaryAudit` (SCAT-29; `Scatter.Boundary.EveryCellLayerCovered` covers it).
 
 ### 2. Scatter Placement
 

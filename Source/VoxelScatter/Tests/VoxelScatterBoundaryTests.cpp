@@ -24,9 +24,6 @@
 // - EveryCellLayerCovered: a plane tilted along X and Y through a 3 x 3 x 2 block of chunks, crossing the two layers'
 //   shared plane. Every voxel column has exactly one open-surface point, on the plane, and each of the six boundary cell
 //   layers (local 0 and ChunkSize - 1 on each axis) holds the points of every column whose surface lies in it.
-// - ManagerIgnoresGPUFlag: through the scatter manager's own pipeline, a configuration with bUseGPUScatterExtraction set
-//   caches the same surface points as one without it, the +X and +Y boundary columns included, and a second manager
-//   with the flag set gives the same points (deterministic).
 // ---------------------------------------------------------------------------
 
 namespace VoxelScatterBoundaryTestUtils
@@ -78,79 +75,6 @@ namespace VoxelScatterBoundaryTestUtils
 		}
 		return Voxels;
 	}
-
-	/** Two surface point lists equal point for point (position, normal, material, classification). */
-	bool SamePoints(const TArray<FVoxelSurfacePoint>& A, const TArray<FVoxelSurfacePoint>& B)
-	{
-		if (A.Num() != B.Num())
-		{
-			return false;
-		}
-		for (int32 i = 0; i < A.Num(); ++i)
-		{
-			if (!A[i].Position.Equals(B[i].Position, 0.0) || !A[i].Normal.Equals(B[i].Normal, 0.0) || A[i].MaterialID != B[i].MaterialID
-				|| A[i].bIsUnderground != B[i].bIsUnderground || A[i].bIsUnderwater != B[i].bIsUnderwater)
-			{
-				return false;
-			}
-		}
-		return true;
-	}
-
-	/** Private game world + initialized scatter manager for a smooth world, torn down on destruction. */
-	struct FHarness
-	{
-		UWorld* World = nullptr;
-		UVoxelWorldConfiguration* Config = nullptr;
-		UVoxelScatterManager* Manager = nullptr;
-
-		explicit FHarness(bool bGPUFlag)
-		{
-			World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelScatterBoundaryTestWorld"));
-			FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
-			Context.SetCurrentWorld(World);
-			Config = NewObject<UVoxelWorldConfiguration>();
-			Config->ChunkSize = ChunkSize;
-			Config->VoxelSize = VoxelSize;
-			Config->ScatterRadius = 100000.0f;
-			Config->MeshingMode = EMeshingMode::DualContouring;
-			Config->bUseGPUScatterExtraction = bGPUFlag;
-			Manager = NewObject<UVoxelScatterManager>();
-			Manager->AddToRoot();
-			Manager->Initialize(Config, World);
-			Manager->SetSurfacePointSpacing(VoxelSize);
-		}
-
-		~FHarness()
-		{
-			if (Manager)
-			{
-				Manager->Shutdown();
-				Manager->RemoveFromRoot();
-			}
-			if (World)
-			{
-				GEngine->DestroyWorldContext(World);
-				World->DestroyWorld(false);
-			}
-		}
-
-		/** Submit a chunk as if its mesh just arrived and pump until its extraction is done; null when it found no point. */
-		const FChunkSurfaceData* Run(const FIntVector& Coord, const TArray<FVoxelData>& Voxels)
-		{
-			Manager->OnChunkMeshDataReady(Coord, Voxels, ChunkSize, VoxelSize);
-			const double Deadline = FPlatformTime::Seconds() + 15.0;
-			while (FPlatformTime::Seconds() < Deadline)
-			{
-				Manager->Update(FVector::ZeroVector, 0.05f);
-				if (Manager->GetPendingGenerationCount() == 0)
-				{
-					break;
-				}
-			}
-			return Manager->GetChunkSurfaceData(Coord);
-		}
-	};
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterBoundaryEveryLayerTest,
@@ -253,52 +177,6 @@ bool FVoxelScatterBoundaryEveryLayerTest::RunTest(const FString& Parameters)
 		TestEqual(FString::Printf(TEXT("Face %s: every column whose surface lies in the boundary layer has its point there"), FaceNames[Face]),
 			BoundaryPoints[Face], Expected[Face]);
 	}
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterBoundaryManagerTest,
-	"VoxelWorlds.Scatter.Boundary.ManagerIgnoresGPUFlag",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FVoxelScatterBoundaryManagerTest::RunTest(const FString& Parameters)
-{
-	using namespace VoxelScatterBoundaryTestUtils;
-
-	// H = 300.37 + 0.13 X + 0.11 Y over one chunk: 300 to 684, inside the chunk, crossing its +X and +Y boundary columns.
-	const FTiltedPlaneWorldMode Mode(300.37f, 0.13f, 0.11f);
-	const FIntVector Coord(0, 0, 0);
-	const TArray<FVoxelData> Voxels = MakeChunk(Coord, Mode);
-
-	// Each run in a fresh manager. (A chunk unloaded and resubmitted to the same manager: VoxelScatterReloadTests, world
-	// modes review G30.)
-	auto RunOnce = [&](bool bGPUFlag) -> TArray<FVoxelSurfacePoint>
-	{
-		FHarness Harness(bGPUFlag);
-		const FChunkSurfaceData* Surface = Harness.Run(Coord, Voxels);
-		return Surface ? Surface->SurfacePoints : TArray<FVoxelSurfacePoint>();
-	};
-	const TArray<FVoxelSurfacePoint> Flagged = RunOnce(true);
-	const TArray<FVoxelSurfacePoint> Again = RunOnce(true);
-	const TArray<FVoxelSurfacePoint> Flagless = RunOnce(false);
-	TestTrue(TEXT("With bUseGPUScatterExtraction set, the chunk gets surface data"), Flagged.Num() > 0);
-
-	int32 PlusX = 0, PlusY = 0;
-	for (const FVoxelSurfacePoint& Point : Flagged)
-	{
-		if (Point.bIsUnderground)
-		{
-			continue;
-		}
-		PlusX += FMath::RoundToInt32(Point.Position.X / VoxelSize) == ChunkSize - 1 ? 1 : 0;
-		PlusY += FMath::RoundToInt32(Point.Position.Y / VoxelSize) == ChunkSize - 1 ? 1 : 0;
-	}
-	AddInfo(FString::Printf(TEXT("%d points with the flag set, %d without, %d in a second manager; +X boundary column %d, +Y %d"), Flagged.Num(),
-		Flagless.Num(), Again.Num(), PlusX, PlusY));
-	TestEqual(TEXT("One point per column"), Flagged.Num(), ChunkSize * ChunkSize);
-	TestTrue(TEXT("The flag changes nothing: the same points as without it"), SamePoints(Flagged, Flagless));
-	TestTrue(TEXT("Deterministic: a second manager gives the same points"), SamePoints(Flagged, Again));
-	TestEqual(TEXT("The +X boundary column has a point in every row"), PlusX, ChunkSize);
-	TestEqual(TEXT("The +Y boundary column has a point in every row"), PlusY, ChunkSize);
 	return true;
 }
 

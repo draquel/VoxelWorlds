@@ -219,11 +219,6 @@ public:
 	void GetTypeHISMs(int32 ScatterTypeID, TArray<TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>>& OutHISMs) const;
 
 	/**
-	 * Refresh all HISM components after definition changes.
-	 */
-	void RefreshAllComponents();
-
-	/**
 	 * Get number of active HISM components.
 	 */
 	int32 GetHISMCount() const { return HISMComponents.Num(); }
@@ -311,20 +306,6 @@ protected:
 	 * Configure HISM component from scatter definition.
 	 */
 	void ConfigureHISMComponent(UHierarchicalInstancedStaticMeshComponent* HISM, const FScatterDefinition& Definition);
-
-	/**
-	 * Add instances to HISM from spawn points.
-	 *
-	 * @param HISM Target HISM component
-	 * @param SpawnPoints Spawn points to add
-	 * @param Definition Scatter definition for transform settings
-	 * @param OutInstanceIndices Output array of added instance indices
-	 */
-	void AddInstancesToHISM(
-		UHierarchicalInstancedStaticMeshComponent* HISM,
-		const TArray<FScatterSpawnPoint>& SpawnPoints,
-		const FScatterDefinition& Definition,
-		TArray<int32>& OutInstanceIndices);
 
 protected:
 	// ==================== Components ====================
