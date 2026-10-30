@@ -30,6 +30,7 @@
 #include "VoxelResidencyStats.h"
 #include "Async/ParallelFor.h"
 #include "VoxelNeighborSliceExtraction.h"
+#include "VoxelCPUNoiseGenerator.h"
 #include "VoxelGPUNoiseGenerator.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
@@ -1991,57 +1992,6 @@ void UVoxelChunkManager::ForceStreamingUpdate()
 }
 
 // ==================== Chunk Requests ====================
-
-void UVoxelChunkManager::RequestChunkLoad(const FIntVector& ChunkCoord, float Priority)
-{
-	if (!bIsInitialized)
-	{
-		return;
-	}
-
-	FVoxelChunkState& State = GetOrCreateChunkState(ChunkCoord);
-
-	if (State.State == EChunkState::Unloaded)
-	{
-		// Add to generation queue with sorted insertion
-		FChunkLODRequest Request;
-		Request.ChunkCoord = ChunkCoord;
-		Request.LODLevel = 0; // Will be determined by LOD strategy
-		Request.Priority = Priority;
-
-		if (AddToGenerationQueue(Request))
-		{
-			SetChunkState(ChunkCoord, EChunkState::PendingGeneration);
-
-			UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) requested for loading"),
-				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
-		}
-	}
-}
-
-void UVoxelChunkManager::RequestChunkUnload(const FIntVector& ChunkCoord)
-{
-	if (!bIsInitialized)
-	{
-		return;
-	}
-
-	if (ChunkStates.Contains(ChunkCoord))
-	{
-		const EChunkState CurrentState = ChunkStates[ChunkCoord].State;
-
-		if (CurrentState != EChunkState::Unloaded && CurrentState != EChunkState::PendingUnload)
-		{
-			if (AddToUnloadQueue(ChunkCoord))
-			{
-				SetChunkState(ChunkCoord, EChunkState::PendingUnload);
-
-				UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) requested for unloading"),
-					ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
-			}
-		}
-	}
-}
 
 void UVoxelChunkManager::MarkChunkDirty(const FIntVector& ChunkCoord)
 {
@@ -5074,17 +5024,6 @@ void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("AddConditioningZone: a %s zone in a %s world has no effect (planet zones need a Direction, FVoxelConditioningZone::MakeRadial)."),
 			Zone.IsRadial() ? TEXT("planet") : TEXT("heightmap"), bPlanet ? TEXT("planet") : TEXT("heightmap"));
 	}
-	OnTerrainConditioningChanged.Broadcast();
-}
-
-void UVoxelChunkManager::ClearConditioningZones()
-{
-	if (FarField && ConditioningZones.Num() > 0)
-	{
-		FarField->InvalidateCap(FVector::UpVector, UE_DOUBLE_PI);
-		FarField->InvalidateBox(FBox2D(FVector2D(-1.0e15), FVector2D(1.0e15)));
-	}
-	ConditioningZones.Reset();
 	OnTerrainConditioningChanged.Broadcast();
 }
 

@@ -12,11 +12,8 @@
 #include "ChunkRenderData.h"
 #include "LODTypes.h"
 #include "IVoxelNoiseGenerator.h"
-#include "VoxelCPUNoiseGenerator.h"
 #include "VoxelTerrainConditioning.h"
-#include "InfinitePlaneWorldMode.h"
 #include "IVoxelMesher.h"
-#include "VoxelCPUDualContourMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelSeamRegistry.h"
@@ -399,23 +396,6 @@ public:
 	// ==================== Chunk Requests ====================
 
 	/**
-	 * Request a specific chunk to be loaded.
-	 *
-	 * @param ChunkCoord Chunk coordinate to load
-	 * @param Priority Loading priority (higher = sooner)
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
-	void RequestChunkLoad(const FIntVector& ChunkCoord, float Priority = 1.0f);
-
-	/**
-	 * Request a specific chunk to be unloaded.
-	 *
-	 * @param ChunkCoord Chunk coordinate to unload
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
-	void RequestChunkUnload(const FIntVector& ChunkCoord);
-
-	/**
 	 * Mark a chunk as dirty (needs remeshing).
 	 *
 	 * @param ChunkCoord Chunk coordinate to mark dirty
@@ -668,15 +648,6 @@ public:
 	 * @return Altitude above the datum (0 when the world is not a planet)
 	 */
 	float GetGeneratedPlanetAltitude(const FVector& Direction) const;
-
-	/**
-	 * Local up at a chunk's centre: +Z in heightmap modes, the radial direction on a planet. The meshing and seam requests
-	 * carry it (FVoxelMeshingRequest::LocalUp; spherical SP-D1, SP-D2).
-	 *
-	 * @param ChunkCoord Chunk coordinate
-	 * @return Unit up vector
-	 */
-	FVector GetChunkLocalUp(const FIntVector& ChunkCoord) const;
 
 	// ==================== World Bounds and Local Frame (WM-A2) ====================
 	// The configured world mode's bounds and frame (IVoxelWorldMode), for Blueprint and for game plugins, which reach
@@ -969,9 +940,6 @@ public:
 	/** The planet ocean: section 0 the top (faces outward), section 1 the underside (null without an ocean). */
 	UProceduralMeshComponent* GetPlanetOceanComponent() const { return PlanetOcean; }
 
-	/** The settings the planet ocean was built with. */
-	const FVoxelPlanetOceanSettings& GetPlanetOceanSettings() const { return PlanetOceanSettings; }
-
 	/** Whether the planet ocean's underside is shown now (the viewer is inside the sea radius). */
 	bool IsPlanetOceanUndersideShown() const { return bPlanetOceanUndersideShown; }
 
@@ -989,9 +957,6 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
 	bool HasFarField() const { return FarField.IsValid(); }
-
-	/** The far field (null without one). */
-	const FVoxelPlanetFarField* GetFarField() const { return FarField.Get(); }
 
 	/** The far field, mutable (tests: synchronous builds). */
 	FVoxelPlanetFarField* GetFarFieldMutable() { return FarField.Get(); }
@@ -1123,11 +1088,6 @@ public:
 	 * Get the current LOD strategy.
 	 */
 	IVoxelLODStrategy* GetLODStrategy() const { return LODStrategy; }
-
-	/**
-	 * Get the current mesh renderer.
-	 */
-	IVoxelMeshRenderer* GetMeshRenderer() const { return MeshRenderer; }
 
 	/**
 	 * Get the edit manager.
@@ -1291,14 +1251,6 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Conditioning")
 	void AddConditioningZone(const FVoxelConditioningZone& Zone);
-
-	/** Remove all static conditioning zones. */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Conditioning")
-	void ClearConditioningZones();
-
-	/** Number of registered static conditioning zones. */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Conditioning")
-	int32 GetConditioningZoneCount() const { return ConditioningZones.Num(); }
 
 	/**
 	 * Register a dynamic terrain conditioner (game-side, boundary-safe — e.g. supplying zones from POI
@@ -1554,7 +1506,6 @@ public:
 
 	/** Drive streaming from a fixed position instead of the camera (deterministic benchmark). */
 	void SetBenchmarkView(bool bActive, const FVector& Position) { bBenchmarkViewActive = bActive; BenchmarkViewPosition = Position; }
-	bool IsBenchmarkViewActive() const { return bBenchmarkViewActive; }
 
 	/** Queue depths for benchmark sampling. */
 	int32 GetPendingUnloadCount() const { return UnloadQueue.Num(); }
@@ -1661,21 +1612,6 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Debug")
 	int32 AuditResidency(FString& OutReport) const;
-
-	/**
-	 * Layer-boundary audit (voxel.Gen.LayerAudit, world modes review G34): over every loaded chunk with voxel data, counts the
-	 * columns with a ceiling (air under solid) and a floor (solid under air) at each Z plane of the chunk, the plane against
-	 * the chunk below (its top voxel against this chunk's bottom voxel) separately, from the generated voxels and with the
-	 * edit layer applied. A cave's ceilings fall on every plane alike; a spike at the chunk boundary is an artefact. For the
-	 * chunks with the most boundary ceilings it regenerates the chunk and the one below with the CPU generator and compares
-	 * them voxel by voxel with what streamed, and samples the cave carve at the two voxels of each such column.
-	 *
-	 * @param MaxLines Chunks to list (most boundary ceilings first)
-	 * @param RegenCount How many of them to regenerate on the CPU and compare
-	 * @param OutReport Multi-line report
-	 * @return Boundary ceiling columns over all chunk pairs (generated voxels)
-	 */
-	int64 AuditLayerBoundaries(int32 MaxLines, int32 RegenCount, FString& OutReport);
 
 	/**
 	 * Draw debug visualization.
@@ -2267,6 +2203,15 @@ public:
 	const FVoxelSeamRegistry* GetSeamRegistry() const { return SeamRegistry.Get(); }
 
 private:
+
+	/**
+	 * Local up at a chunk's centre: +Z in heightmap modes, the radial direction on a planet. The meshing and seam requests
+	 * carry it (FVoxelMeshingRequest::LocalUp; spherical SP-D1, SP-D2).
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @return Unit up vector
+	 */
+	FVector GetChunkLocalUp(const FIntVector& ChunkCoord) const;
 
 	/**
 	 * Per-owner seam slot meshes, kept CPU-side so the renderer receives ONE merged bucket per
