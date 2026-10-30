@@ -394,8 +394,8 @@ public:
 	float GetCollisionRadius() const { return CollisionRadius; }
 
 	/**
-	 * Get the radius actually used this frame (CollisionRadius plus the speed-aware lead when
-	 * voxel.Collision.LeadFix is on). Diagnostics/validation for the Tier-0 fall-through fix.
+	 * Get the radius actually used this frame (CollisionRadius plus the speed-aware lead).
+	 * Diagnostics/validation for the Tier-0 fall-through fix.
 	 * Plain (non-UFUNCTION) getter so adding it is Live-Coding-friendly.
 	 */
 	float GetCurrentEffectiveRadius() const { return CurrentEffectiveRadius; }
@@ -489,14 +489,14 @@ protected:
 	void UpdateCollisionDecisions(const FVector& ViewerPosition);
 
 	/**
-	 * Resolve the position collision should center on. With voxel.Collision.LeadFix on, this is the
-	 * player pawn (the camera trails it in 3rd person, which shrinks the forward collision lead);
-	 * otherwise the passed viewer position.
+	 * Resolve the position collision should center on: the player pawn (the camera trails it in
+	 * 3rd person, which shrinks the forward collision lead), or the passed viewer position when no
+	 * pawn is resolvable.
 	 */
 	FVector ResolveFocusPosition(const FVector& FallbackViewerPosition) const;
 
 	/**
-	 * Tier 1 (LeadFix-gated): force-cook, at top priority, the chunk under the focus plus a short fan
+	 * Tier 1: force-cook, at top priority, the chunk under the focus plus a short fan
 	 * along its velocity across local up — including the chunk it is descending into — so ground under
 	 * imminent (and downhill) footfalls is cooked before the pawn enters it. Overrides the normal
 	 * center-distance priority (which deprioritizes a descending chunk whose center is far below).
@@ -651,9 +651,6 @@ protected:
 	/** Last viewer position for change detection */
 	FVector LastViewerPosition = FVector(FLT_MAX);
 
-	/** Threshold for viewer movement to trigger collision update */
-	static constexpr float UpdateThreshold = 1000.0f;
-
 	/** True until we've successfully queued initial collision (chunks may not be loaded on first frame) */
 	bool bPendingInitialUpdate = true;
 
@@ -664,7 +661,7 @@ protected:
 	 */
 	float SecondsSinceDecisions = 0.0f;
 
-	// ==================== Tier 0: pawn-centered, speed-aware collision (voxel.Collision.LeadFix) ====================
+	// ==================== Tier 0: pawn-centered, speed-aware collision ====================
 
 	/** Last focus (pawn) position, for velocity estimation. FLT_MAX until the first Update(). */
 	FVector LastFocusPosition = FVector(FLT_MAX);

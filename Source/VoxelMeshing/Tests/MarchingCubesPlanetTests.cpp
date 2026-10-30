@@ -14,7 +14,6 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
-#include "HAL/IConsoleManager.h"
 #include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
@@ -188,61 +187,47 @@ bool FMarchingCubesPlanetGeomorphTest::RunTest(const FString& Parameters)
 {
 	using namespace MarchingCubesPlanetTestUtils;
 
-	IConsoleVariable* Morph = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.MCBoundaryMorph"));
-	if (!TestNotNull(TEXT("voxel.MCBoundaryMorph exists"), Morph))
+	// A LOD-0 chunk whose +Y neighbour is at LOD 1 (face 3), the transvoxel ribbon on, the curved density so the coarse
+	// surface differs from the fine one. The same request is meshed with LocalUp +Z, where the steepness gate rejects
+	// this terrain (the equator before Phase 4) and nothing moves, and with LocalUp +X, where the morph runs along X.
+	// The morph only moves vertices, so the +Z mesh is the unmorphed reference and the two pair vertex by vertex; a
+	// vertex the +Z mesh had morphed along Z would show up here as a move off the X axis.
+	FVoxelMeshingRequest RequestZ = MakeRequest(0, FVector::UpVector, true);
+	RequestZ.TransitionFaces = 1 << 3;
+	RequestZ.NeighborLODLevels[3] = 1;
+	FVoxelMeshingRequest RequestUp = RequestZ;
+	RequestUp.LocalUp = FVector(1, 0, 0);
+
+	FChunkMeshData Reference, AlongUp;
+	const bool bReference = Mesh(RequestZ, true, Reference);
+	const bool bUp = Mesh(RequestUp, true, AlongUp);
+	const bool bSameTopology = bReference && bUp && Reference.Positions.Num() == AlongUp.Positions.Num() && Reference.Positions.Num() > 0;
+	if (!TestTrue(TEXT("Both runs mesh the same topology (local up +Z and +X)"), bSameTopology))
 	{
 		return false;
 	}
-	const int32 Saved = Morph->GetInt();
 
-	// A LOD-0 chunk whose +Y neighbour is at LOD 1 (face 3), the transvoxel ribbon on, the curved density so the coarse
-	// surface differs from the fine one. Each run meshes with the morph off and on; the morph only moves vertices.
-	auto Run = [&](const FVector& LocalUp, int32& OutMoved, int32& OutOffAxis, float& OutMaxShift) -> bool
+	int32 Moved = 0;
+	int32 OffAxis = 0;
+	float MaxShift = 0.0f;
+	for (int32 i = 0; i < Reference.Positions.Num(); ++i)
 	{
-		FVoxelMeshingRequest Request = MakeRequest(0, LocalUp, true);
-		Request.TransitionFaces = 1 << 3;
-		Request.NeighborLODLevels[3] = 1;
-		FChunkMeshData Off, On;
-		Morph->Set(0, ECVF_SetByCode);
-		const bool bOff = Mesh(Request, true, Off);
-		Morph->Set(1, ECVF_SetByCode);
-		const bool bOn = Mesh(Request, true, On);
-		if (!bOff || !bOn || Off.Positions.Num() != On.Positions.Num() || Off.Positions.Num() == 0)
+		const FVector3f Delta = AlongUp.Positions[i] - Reference.Positions[i];
+		if (Delta.IsNearlyZero(1.0e-4f))
 		{
-			return false;
+			continue;
 		}
-		OutMoved = 0;
-		OutOffAxis = 0;
-		OutMaxShift = 0.0f;
-		for (int32 i = 0; i < Off.Positions.Num(); ++i)
-		{
-			const FVector3f Delta = On.Positions[i] - Off.Positions[i];
-			if (Delta.IsNearlyZero(1.0e-4f))
-			{
-				continue;
-			}
-			++OutMoved;
-			OutMaxShift = FMath::Max(OutMaxShift, Delta.GetAbsMax());
-			const int32 Axis = FMath::Abs(LocalUp.X) > 0.5 ? 0 : 2;
-			FVector3f OffAxis = Delta;
-			OffAxis[Axis] = 0.0f;
-			OutOffAxis += OffAxis.IsNearlyZero(1.0e-4f) ? 0 : 1;
-		}
-		return true;
-	};
+		++Moved;
+		MaxShift = FMath::Max(MaxShift, Delta.GetAbsMax());
+		FVector3f OffX = Delta;
+		OffX.X = 0.0f;
+		OffAxis += OffX.IsNearlyZero(1.0e-4f) ? 0 : 1;
+	}
 
-	int32 MovedUp = 0, OffAxisUp = 0, MovedZ = 0, OffAxisZ = 0;
-	float ShiftUp = 0.0f, ShiftZ = 0.0f;
-	const bool bUp = Run(FVector(1, 0, 0), MovedUp, OffAxisUp, ShiftUp);
-	const bool bZ = Run(FVector::UpVector, MovedZ, OffAxisZ, ShiftZ);
-	Morph->Set(Saved, ECVF_SetByCode);
-
-	AddInfo(FString::Printf(TEXT("Terrain across +X, +Y neighbour coarser: local up +X moves %d vertices (largest shift %.1f uu, %d off the X axis); "
-		"local up +Z moves %d"), MovedUp, ShiftUp, OffAxisUp, MovedZ));
-	TestTrue(TEXT("Both runs mesh the same topology with the morph off and on"), bUp && bZ);
-	TestTrue(TEXT("Along local up the seam ramp is morphed"), MovedUp > 0);
-	TestEqual(TEXT("... along X only"), OffAxisUp, 0);
-	TestEqual(TEXT("Along world Z the steepness gate rejects this terrain (the equator before Phase 4)"), MovedZ, 0);
+	AddInfo(FString::Printf(TEXT("Terrain across +X, +Y neighbour coarser: local up +X moves %d vertices against the +Z mesh (largest shift %.1f uu, %d off the X axis)"),
+		Moved, MaxShift, OffAxis));
+	TestTrue(TEXT("Along local up the seam ramp is morphed"), Moved > 0);
+	TestEqual(TEXT("... along X only (and along world Z the steepness gate rejects this terrain)"), OffAxis, 0);
 	return true;
 }
 

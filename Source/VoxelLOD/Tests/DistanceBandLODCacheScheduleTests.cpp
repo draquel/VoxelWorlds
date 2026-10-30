@@ -2,7 +2,6 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
-#include "HAL/IConsoleManager.h"
 #include "DistanceBandLODStrategy.h"
 #include "VoxelWorldConfiguration.h"
 
@@ -118,19 +117,6 @@ bool FLODCacheScheduleTriggersTest::RunTest(const FString& Parameters)
 	Shifted.WorldOrigin = FVector(12345.0f, 54321.0f, 0.0f);
 	Strategy.Update(Shifted, Dt);
 	TestEqual(TEXT("A new world origin rebuilds"), Strategy.GetBalancedLODCacheRebuildCount(), BeforeCrossing + 5);
-
-	if (IConsoleVariable* Balance = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.LODBalance")))
-	{
-		const int32 Previous = Balance->GetInt();
-		Balance->Set(Previous != 0 ? 0 : 1, ECVF_SetByCode);
-		Strategy.Update(Shifted, Dt);
-		TestEqual(TEXT("Toggling voxel.LODBalance rebuilds"), Strategy.GetBalancedLODCacheRebuildCount(), BeforeCrossing + 6);
-		Balance->Set(Previous, ECVF_SetByCode);
-	}
-	else
-	{
-		AddError(TEXT("voxel.LODBalance is not registered"));
-	}
 
 	return true;
 }

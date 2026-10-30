@@ -160,8 +160,8 @@ namespace
 }
 
 // ---------------------------------------------------------------------------
-// HT1: analytic GetTerrainHeightAt applies continentalness (matches the generation formula), and
-// quantifies the pre-fix raw-height gap across distances.
+// HT1: analytic GetTerrainHeightAt applies continentalness (matches the generation formula) across
+// distances.
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelHeightContinentalnessParityTest,
 	"VoxelWorlds.Generation.HeightParity.Continentalness",
@@ -176,10 +176,7 @@ bool FVoxelHeightContinentalnessParityTest::RunTest(const FString& Parameters)
 	FInfinitePlaneWorldMode Analytic(Base);
 	Analytic.SetBiomeContext(Config);
 
-	FInfinitePlaneWorldMode Raw(Base); // no biome context => legacy raw base-noise height
-
 	const float Distances[] = { 0.0f, 10000.0f, 50000.0f, 100000.0f, 150000.0f, 200000.0f };
-	float MaxRawGap = 0.0f;
 
 	for (float D : Distances)
 	{
@@ -189,27 +186,15 @@ bool FVoxelHeightContinentalnessParityTest::RunTest(const FString& Parameters)
 		{
 			const float A = Analytic.GetTerrainHeightAt(Pt.X, Pt.Y, Noise);
 			const float Ref = ReferenceGenerationHeight(Pt.X, Pt.Y, Noise, Base, Config);
-			const float RawH = Raw.GetTerrainHeightAt(Pt.X, Pt.Y, Noise);
 
-			// The fixed analytic height must match the generation formula essentially exactly.
+			// The analytic height must match the generation formula essentially exactly.
 			TestTrue(
 				FString::Printf(TEXT("Analytic==GenerationFormula at (%.0f,%.0f): |%.3f-%.3f|"), Pt.X, Pt.Y, A, Ref),
 				FMath::Abs(A - Ref) < 0.1f);
-
-			MaxRawGap = FMath::Max(MaxRawGap, FMath::Abs(RawH - Ref));
 		}
 
-		const float A0 = Analytic.GetTerrainHeightAt(D, D, Noise);
-		const float R0 = Raw.GetTerrainHeightAt(D, D, Noise);
-		AddInfo(FString::Printf(TEXT("dist=%.0f  analytic=%.1f  raw(legacy)=%.1f  gap=%.1f"),
-			D, A0, R0, FMath::Abs(A0 - R0)));
+		AddInfo(FString::Printf(TEXT("dist=%.0f  analytic=%.1f"), D, Analytic.GetTerrainHeightAt(D, D, Noise)));
 	}
-
-	// The pre-fix (raw) height was off by far more than a voxel somewhere — this WAS the bug.
-	AddInfo(FString::Printf(TEXT("Max raw(legacy)-vs-generation gap across samples: %.1f uu (%.2f voxels)"),
-		MaxRawGap, MaxRawGap / kVoxelSize));
-	TestTrue(TEXT("Legacy raw height diverges > 1 voxel from generation (bug reproduced)"),
-		MaxRawGap > kVoxelSize);
 
 	Config->RemoveFromRoot();
 	return true;
@@ -231,7 +216,6 @@ bool FVoxelHeightGeneratedSurfaceParityTest::RunTest(const FString& Parameters)
 
 	FInfinitePlaneWorldMode Analytic(Base);
 	Analytic.SetBiomeContext(Config);
-	FInfinitePlaneWorldMode Raw(Base);
 
 	FVoxelCPUNoiseGenerator Generator;
 	Generator.Initialize();
@@ -245,8 +229,6 @@ bool FVoxelHeightGeneratedSurfaceParityTest::RunTest(const FString& Parameters)
 		FVector2D(-200000.0f, 80000.0f),
 	};
 
-	bool bAnySignificantRawGap = false;
-
 	for (const FVector2D& Pt : Points)
 	{
 		const float AnalyticH = Analytic.GetTerrainHeightAt(Pt.X, Pt.Y, Noise);
@@ -258,25 +240,15 @@ bool FVoxelHeightGeneratedSurfaceParityTest::RunTest(const FString& Parameters)
 			continue;
 		}
 
-		const float RawH = Raw.GetTerrainHeightAt(Pt.X, Pt.Y, Noise);
-		AddInfo(FString::Printf(TEXT("(%.0f,%.0f): analytic=%.1f  realSurface=%.1f  |diff|=%.2f voxels ; legacyRaw=%.1f (off by %.1f)"),
-			Pt.X, Pt.Y, AnalyticH, RealZ, FMath::Abs(AnalyticH - RealZ) / kVoxelSize, RawH, FMath::Abs(RawH - RealZ)));
+		AddInfo(FString::Printf(TEXT("(%.0f,%.0f): analytic=%.1f  realSurface=%.1f  |diff|=%.2f voxels"),
+			Pt.X, Pt.Y, AnalyticH, RealZ, FMath::Abs(AnalyticH - RealZ) / kVoxelSize));
 
-		// The FIXED analytic height must sit on the real surface within a voxel.
+		// The analytic height must sit on the real surface within a voxel.
 		TestTrue(
 			FString::Printf(TEXT("Analytic height matches real surface at (%.0f,%.0f): |%.1f-%.1f| < 1 voxel"),
 				Pt.X, Pt.Y, AnalyticH, RealZ),
 			FMath::Abs(AnalyticH - RealZ) < kVoxelSize);
-
-		if (FMath::Abs(RawH - RealZ) > kVoxelSize)
-		{
-			bAnySignificantRawGap = true;
-		}
 	}
-
-	// Confirms the fix is load-bearing: the legacy raw height missed the real surface by > 1 voxel.
-	TestTrue(TEXT("Legacy raw height missed the real surface by > 1 voxel at some distance"),
-		bAnySignificantRawGap);
 
 	Config->RemoveFromRoot();
 	return true;

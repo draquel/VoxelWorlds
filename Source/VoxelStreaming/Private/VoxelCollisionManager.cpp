@@ -29,26 +29,18 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelCollision, Log, All);
 
-// ==================== Tier 0 fall-through fix cvars (see UVoxelCollisionManager::Update) ====================
-// All gated behind LeadFix so the legacy behavior is one toggle away for A/B validation.
-
-static TAutoConsoleVariable<int32> CVarCollisionLeadFix(
-	TEXT("voxel.Collision.LeadFix"),
-	1,
-	TEXT("Tier-0 collision fall-through fix. 1 = center collision on the PAWN (not the trailing 3rd-person camera), ")
-	TEXT("expand the collision radius with speed, and re-decide eagerly while moving. 0 = legacy behavior."),
-	ECVF_Default);
+// ==================== Tier 0 pawn-centred, speed-aware collision cvars (see UVoxelCollisionManager::Update) ====================
 
 static TAutoConsoleVariable<float> CVarCollisionBaseRadius(
 	TEXT("voxel.Collision.BaseRadius"),
 	0.0f,
-	TEXT("Base collision radius (uu) when LeadFix is on. <= 0 uses the configured radius (ViewDistance * 0.5)."),
+	TEXT("Base collision radius (uu). <= 0 uses the configured radius (ViewDistance * 0.5)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarCollisionLeadSeconds(
 	TEXT("voxel.Collision.LeadSeconds"),
 	0.75f,
-	TEXT("Seconds of focus velocity added to the collision radius as forward lead when LeadFix is on ")
+	TEXT("Seconds of focus velocity added to the collision radius as forward lead ")
 	TEXT("(effective radius = base + speed * LeadSeconds)."),
 	ECVF_Default);
 
@@ -62,10 +54,10 @@ static TAutoConsoleVariable<float> CVarCollisionResweepSeconds(
 static TAutoConsoleVariable<float> CVarCollisionMoveUpdateThreshold(
 	TEXT("voxel.Collision.MoveUpdateThreshold"),
 	200.0f,
-	TEXT("Min focus movement (uu) between collision decision sweeps when LeadFix is on (legacy = 1000)."),
+	TEXT("Min focus movement (uu) between collision decision sweeps."),
 	ECVF_Default);
 
-// ---- Tier 1: cook throughput + path/descent coverage (all under LeadFix) ----
+// ---- Tier 1: cook throughput + path/descent coverage ----
 
 static TAutoConsoleVariable<int32> CVarCollisionMaxApplies(
 	TEXT("voxel.Collision.MaxAppliesPerFrame"),
@@ -83,7 +75,7 @@ static TAutoConsoleVariable<int32> CVarCollisionMaxAsyncTasks(
 static TAutoConsoleVariable<int32> CVarCollisionLookAheadChunks(
 	TEXT("voxel.Collision.LookAheadChunks"),
 	2,
-	TEXT("When LeadFix is on, force-cook this many chunks ahead along the pawn's horizontal velocity — plus the "
+	TEXT("Force-cook this many chunks ahead along the pawn's horizontal velocity — plus the "
 	     "chunk it is descending into — at top priority, so ground under imminent (incl. downhill) footfalls is "
 	     "cooked before entry. 0 disables path coverage."),
 	ECVF_Default);
@@ -294,11 +286,10 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 	// 1. Always drain completed async results first (lightweight game-thread work)
 	ProcessCompletedCollisionCooks();
 
-	// Tier 0 fall-through fix (voxel.Collision.LeadFix): center collision on the PAWN, not the
-	// passed viewer position. In 3rd person the camera trails the pawn, which shifts the collision
-	// shell behind it and shrinks the forward lead — the fall-through signature. Falls back to the
-	// passed viewer position when the fix is off or no pawn is resolvable.
-	const bool bLeadFix = CVarCollisionLeadFix.GetValueOnGameThread() != 0;
+	// Tier 0 fall-through fix: center collision on the PAWN, not the passed viewer position. In 3rd
+	// person the camera trails the pawn, which shifts the collision shell behind it and shrinks the
+	// forward lead — the fall-through signature. Falls back to the passed viewer position when no
+	// pawn is resolvable.
 	const FVector FocusPosition = ResolveFocusPosition(ViewerPosition);
 
 	// Focus velocity for the speed-aware radius + path coverage. Use HORIZONTAL speed for the lead:
@@ -316,24 +307,17 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 		FocusSpeed = SmoothedFocusSpeed;
 	}
 
-	// Effective radius = base (+ forward lead proportional to speed) when the fix is on, never
-	// smaller than the configured CollisionRadius.
-	float EffectiveRadius = CollisionRadius;
-	if (bLeadFix)
-	{
-		const float ConfiguredBase = CVarCollisionBaseRadius.GetValueOnGameThread();
-		const float Base = ConfiguredBase > 0.0f ? ConfiguredBase : CollisionRadius;
-		EffectiveRadius = Base + FocusSpeed * CVarCollisionLeadSeconds.GetValueOnGameThread();
-	}
+	// Effective radius = base + forward lead proportional to speed, never smaller than the
+	// configured CollisionRadius.
+	const float ConfiguredBase = CVarCollisionBaseRadius.GetValueOnGameThread();
+	const float Base = ConfiguredBase > 0.0f ? ConfiguredBase : CollisionRadius;
+	const float EffectiveRadius = Base + FocusSpeed * CVarCollisionLeadSeconds.GetValueOnGameThread();
 	CurrentEffectiveRadius = FMath::Max(EffectiveRadius, CollisionRadius);
 
-	// 2. Re-run collision decisions when the focus moved enough. With the fix on, use a much smaller
-	// deadband and force an immediate re-decision on a stop->start transition, so the first steps
-	// after standing still don't outrun the (legacy 10 m) deadband.
-	const float MoveThreshold = bLeadFix
-		? FMath::Max(CVarCollisionMoveUpdateThreshold.GetValueOnGameThread(), 1.0f)
-		: UpdateThreshold;
-	const bool bStartedMoving = bLeadFix && bWasStationary && FocusSpeed > StationarySpeedThreshold;
+	// 2. Re-run collision decisions when the focus moved enough: a small deadband, and an immediate
+	// re-decision on a stop->start transition, so the first steps after standing still don't outrun it.
+	const float MoveThreshold = FMath::Max(CVarCollisionMoveUpdateThreshold.GetValueOnGameThread(), 1.0f);
+	const bool bStartedMoving = bWasStationary && FocusSpeed > StationarySpeedThreshold;
 	const float DistanceMoved = FVector::Dist(FocusPosition, LastViewerPosition);
 	SecondsSinceDecisions += DeltaTime;
 	const float ResweepSeconds = CVarCollisionResweepSeconds.GetValueOnGameThread();
@@ -360,10 +344,7 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 	// one it is descending into — are cooked FIRST, overriding their center-distance priority (a
 	// descending chunk's center is far below, so distance-priority deprioritizes it until the pawn is
 	// already dropping in). This closes the residual sustained-traversal / downhill fall-through.
-	if (bLeadFix)
-	{
-		ForcePathCoverage(FocusPosition, FocusVelocity);
-	}
+	ForcePathCoverage(FocusPosition, FocusVelocity);
 
 	// 3. Process dirty chunks (from edits, and neighbours that arrived after a cook: G32) — just queues requests, lightweight
 	ProcessNeighborRecooks();
@@ -375,7 +356,7 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 
 FVector UVoxelCollisionManager::ResolveFocusPosition(const FVector& FallbackViewerPosition) const
 {
-	if (CVarCollisionLeadFix.GetValueOnGameThread() != 0 && CachedWorld)
+	if (CachedWorld)
 	{
 		if (const APlayerController* PC = CachedWorld->GetFirstPlayerController())
 		{
@@ -952,8 +933,8 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 	}
 
 	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
-	// Tier 0: use the speed-expanded effective radius when voxel.Collision.LeadFix is on
-	// (CurrentEffectiveRadius is refreshed each frame in Update()); never below CollisionRadius.
+	// Tier 0: use the speed-expanded effective radius (CurrentEffectiveRadius is refreshed each
+	// frame in Update()); never below CollisionRadius.
 	const float EffectiveRadius = FMath::Max(CurrentEffectiveRadius, CollisionRadius);
 	const float CollisionRadiusSq = EffectiveRadius * EffectiveRadius;
 

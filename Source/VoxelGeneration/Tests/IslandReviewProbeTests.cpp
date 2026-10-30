@@ -117,8 +117,7 @@ bool FIslandReviewHeightProbeTest::RunTest(const FString& Parameters)
 		const FWorldModeTerrainParams Terrain(Config->SeaLevel, Config->HeightScale, Config->BaseHeight);
 		FIslandBowlWorldMode IslandMode(Terrain, Island);
 		IslandMode.SetBiomeContext(Config->BiomeConfiguration);
-		const FVoxelBiomeSnapshot Biome = FInfinitePlaneWorldMode::IsAnalyticContinentalnessEnabled()
-			? FVoxelBiomeSnapshot::FromConfig(Config->BiomeConfiguration) : FVoxelBiomeSnapshot();
+		const FVoxelBiomeSnapshot Biome = FVoxelBiomeSnapshot::FromConfig(Config->BiomeConfiguration);
 		const float WaterLine = Config->bEnableWaterLevel ? Config->WaterLevel : Config->SeaLevel;
 
 		FVoxelCPUNoiseGenerator Generator;

@@ -249,8 +249,8 @@ private:
 	 *
 	 * For each emitted vertex within the morph width of an active transition face, ramps its
 	 * height toward the coarse iso-surface so the fine boundary contour meets the coarser
-	 * neighbour with no vertical step (Transvoxel "secondary positions", baked). Gated by
-	 * voxel.MCBoundaryMorph; no-op when TransitionMask == 0.
+	 * neighbour with no vertical step (Transvoxel "secondary positions", baked). No-op when
+	 * TransitionMask == 0.
 	 *
 	 * @param Request The meshing request (provides density + neighbour data)
 	 * @param Stride This chunk's LOD stride (2^LODLevel)

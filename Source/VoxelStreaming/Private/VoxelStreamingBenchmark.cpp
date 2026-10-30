@@ -772,7 +772,6 @@ FString FVoxelStreamingBenchmark::BuildRunMetadataJson() const
 			return Var ? Var->GetInt() : -1;
 		};
 		Int(TEXT("farCompression"), CVarInt(TEXT("voxel.FarCompression")));
-		Int(TEXT("farCompressionAsync"), CVarInt(TEXT("voxel.FarCompression.Async")));
 		Vec(TEXT("worldOrigin"), Cfg->WorldOrigin);
 		if (Cfg->WorldMode == EWorldMode::IslandBowl)
 		{
