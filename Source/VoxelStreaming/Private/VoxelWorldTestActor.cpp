@@ -5,6 +5,7 @@
 #include "VoxelChunkManager.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelMaterialAtlas.h"
+#include "Materials/MaterialParameterCollection.h" // Config->LODParameterCollection; VoxelWorldConfiguration.h only forward-declares it
 #include "DistanceBandLODStrategy.h"
 #include "VoxelPMCRenderer.h"
 #include "VoxelCustomVFRenderer.h"

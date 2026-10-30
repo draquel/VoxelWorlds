@@ -21,19 +21,17 @@ public class VoxelStreaming : ModuleRules
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
+			"ChaosCore", // linked, not included: Chaos:: symbols reached through Chaos/TriangleMeshImplicitObject.h
 				"Core",
 				"CoreUObject",
 				"Engine",
-				"InputCore",
+				"InputCore", // linked, not included: EKeys in the test actor (AVoxelWorldTestActor; leaves with it, D-CR11)
 				"VoxelCore",
 				"VoxelLOD",
 				"VoxelRendering",
 				"VoxelGeneration",
 				"VoxelMeshing",
-				"VoxelScatter",
-				"PhysicsCore",
-				"Chaos",
-				"ChaosCore",
+				"Chaos", // VoxelCollisionManager.h: Chaos/TriangleMeshImplicitObject.h (FAsyncCollisionResult::TriMesh)
 			}
 		);
 
@@ -43,6 +41,8 @@ public class VoxelStreaming : ModuleRules
 				"ProceduralMeshComponent", // the far ocean's meshes (WM-E1)
 				"RenderCore", // the bench's game and render thread times (stat unit's)
 				"RHI", // the bench's GPU frame time
+				"PhysicsCore", // VoxelCollisionManager.cpp: UPhysicalMaterial; the public headers reach FCollisionShape through Engine
+				"VoxelScatter", // the chunk manager, bench and test actor; VoxelChunkManager.h only forward-declares UVoxelScatterManager
 			}
 		);
 

@@ -2,6 +2,7 @@
 
 #include "VoxelMaterialAtlas.h"
 #include "VoxelMaterialRegistry.h"
+#include "Engine/Texture2D.h"
 #include "Engine/Texture2DArray.h"
 #include "ImageCore.h"
 #include "TextureResource.h"

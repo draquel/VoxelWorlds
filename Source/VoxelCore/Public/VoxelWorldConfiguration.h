@@ -4,13 +4,13 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
-#include "Materials/MaterialParameterCollection.h"
 #include "VoxelCoreTypes.h"
 #include "VoxelTreeTypes.h"
 #include "LODTypes.h"
 #include "VoxelWorldConfiguration.generated.h"
 
 class UMaterialInterface;
+class UMaterialParameterCollection;
 class UVoxelBiomeConfiguration;
 class UVoxelCaveConfiguration;
 class UVoxelScatterConfiguration;

@@ -23,7 +23,6 @@ public class VoxelLOD : ModuleRules
 			{
 				"Core",
 				"CoreUObject",
-				"Engine",
 				"VoxelCore",
 			}
 		);
@@ -31,6 +30,8 @@ public class VoxelLOD : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				// The public headers only forward-declare UWorld; Engine headers are included from Private/ alone
+				"Engine",
 				// Vertical terrain-culling bounds come from the generation height math
 				// (FInfinitePlaneWorldMode::GetTerrainHeightBounds) — the single source of truth.
 				"VoxelGeneration",

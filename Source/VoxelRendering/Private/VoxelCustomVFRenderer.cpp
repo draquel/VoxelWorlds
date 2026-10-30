@@ -9,6 +9,7 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialParameterCollection.h" // CurrentLODCollection.Get(); VoxelWorldConfiguration.h only forward-declares it
 #include "VT/RuntimeVirtualTexture.h"
 #include "RHICommandList.h"
 #include "RenderingThread.h"
