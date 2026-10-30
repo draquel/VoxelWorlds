@@ -664,13 +664,6 @@ void FDistanceBandLODStrategy::GetChunksToUnload(
 	}
 }
 
-float FDistanceBandLODStrategy::GetChunkPriority(
-	const FIntVector& ChunkCoord,
-	const FLODQueryContext& Context) const
-{
-	return CalculatePriority(ChunkCoord, Context);
-}
-
 FString FDistanceBandLODStrategy::GetDebugInfo() const
 {
 	FString Info = FString::Printf(TEXT("DistanceBandLODStrategy\n"));

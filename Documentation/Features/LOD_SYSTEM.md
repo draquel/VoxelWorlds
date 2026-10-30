@@ -158,28 +158,7 @@ public:
     
     // ==================== Optional Optimization ====================
     
-    /**
-     * Should this chunk be updated this frame? (Throttling)
-     * Default: Always update
-     */
-    virtual bool ShouldUpdateChunk(
-        FIntVector ChunkCoord, 
-        const FLODQueryContext& Context
-    ) const {
-        return true;
-    }
-    
-    /**
-     * Get priority for chunk generation (higher = more important).
-     * Used for sorting generation queue.
-     * Default: Inverse distance
-     */
-    virtual float GetChunkPriority(
-        FIntVector ChunkCoord, 
-        const FLODQueryContext& Context
-    ) const {
-        return 1.0f;
-    }
+    // ShouldUpdateChunk and GetChunkPriority: deleted in CR1 (STREAM-10)
     
     // ==================== Debugging ====================
     

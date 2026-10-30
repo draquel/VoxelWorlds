@@ -75,11 +75,6 @@ public:
 
 	virtual void Update(const FLODQueryContext& Context, float DeltaTime) override;
 
-	virtual float GetChunkPriority(
-		const FIntVector& ChunkCoord,
-		const FLODQueryContext& Context
-	) const override;
-
 	virtual FString GetDebugInfo() const override;
 
 	virtual void DrawDebugVisualization(

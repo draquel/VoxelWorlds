@@ -199,46 +199,6 @@ public:
 	// ==================== Optional Optimization ====================
 
 	/**
-	 * Should this chunk be updated this frame?
-	 *
-	 * Optional throttling mechanism. Return false to skip expensive
-	 * updates for chunks that haven't changed significantly.
-	 *
-	 * Default: Always returns true
-	 *
-	 * @param ChunkCoord Chunk position
-	 * @param Context Query context
-	 * @return True if chunk should be updated
-	 */
-	virtual bool ShouldUpdateChunk(
-		const FIntVector& ChunkCoord,
-		const FLODQueryContext& Context
-	) const
-	{
-		return true;
-	}
-
-	/**
-	 * Get priority for chunk generation/loading.
-	 *
-	 * Higher priority chunks are processed first. Used for sorting
-	 * the generation queue.
-	 *
-	 * Default: Returns inverse distance (closer = higher priority)
-	 *
-	 * @param ChunkCoord Chunk position
-	 * @param Context Query context
-	 * @return Priority value (higher = more important)
-	 */
-	virtual float GetChunkPriority(
-		const FIntVector& ChunkCoord,
-		const FLODQueryContext& Context
-	) const
-	{
-		return 1.0f;
-	}
-
-	/**
 	 * Get the distance (world units) beyond which a loaded chunk is out of range and
 	 * should be unloaded. Also used to cull chunks from the generation/mesh queue before
 	 * they ever load, when the viewer has moved far past them while they sat in the backlog.
