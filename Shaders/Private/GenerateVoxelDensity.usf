@@ -11,7 +11,7 @@
  */
 
 #include "/Engine/Public/Platform.ush"
-#include "/Plugin/VoxelWorlds/Private/FBMNoise.ush"
+#include "/Plugin/VoxelWorlds/Private/VoxelNoiseCommon.ush"
 #include "/Plugin/VoxelWorlds/Private/WorldModeSDF.ush"
 #include "/Plugin/VoxelWorlds/Private/CaveGeneration.ush"
 

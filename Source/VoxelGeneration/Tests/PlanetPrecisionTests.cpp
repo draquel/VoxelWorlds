@@ -10,6 +10,7 @@
 #include "VoxelWorldModeFactory.h"
 #include "VoxelData.h"
 #include "VoxelPlanetNoise.h"
+#include "VoxelClassicNoiseControl.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/ScopeExit.h"
 
@@ -368,7 +369,7 @@ bool FVoxelNoisePlanetHashNoPeriodTest::RunTest(const FString& Parameters)
 		for (int32 i = 0; i < 256; ++i)
 		{
 			const FVector P(Random.FRandRange(0.0, 1000.0), Random.FRandRange(0.0, 1000.0), Random.FRandRange(0.0, 1000.0));
-			MeanDelta += FMath::Abs(FVoxelCPUNoiseGenerator::Perlin3D(P + FVector(256, 0, 0), 7) - FVoxelCPUNoiseGenerator::Perlin3D(P, 7)) / 256.0;
+			MeanDelta += FMath::Abs(VoxelClassicNoiseControl::Perlin3D(P + FVector(256, 0, 0), 7) - VoxelClassicNoiseControl::Perlin3D(P, 7)) / 256.0;
 		}
 		AddInfo(FString::Printf(TEXT("Control: the heightmap Perlin 256 units apart along X differs by %.2e on average"), MeanDelta));
 		TestTrue(TEXT("Control: the heightmap noise repeats every 256 units"), MeanDelta < 1.0e-3);

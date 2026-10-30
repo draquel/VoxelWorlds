@@ -22,9 +22,9 @@ static TAutoConsoleVariable<float> CVarVoxelEditUndoHistoryMB(
 	ECVF_Default);
 
 // File format version for binary serialization
-// Version 1: Original format with NewData/OriginalData only
-// Version 2: Added EditMode, DensityDelta, BrushMaterialID for relative edits
-static constexpr uint32 VOXEL_EDIT_FILE_VERSION = 2;
+// Version 2: EditMode, DensityDelta, BrushMaterialID, NewData, then the pre-G60 OriginalData (4 bytes, skipped on read)
+// Version 3: without OriginalData (CR1, CORE-12). Version 1 (NewData/OriginalData only) is no longer read.
+static constexpr uint32 VOXEL_EDIT_FILE_VERSION = 3;
 static constexpr uint32 VOXEL_EDIT_FILE_MAGIC = 0x56455449; // "VETI" - Voxel Edit
 
 UVoxelEditManager::UVoxelEditManager()
@@ -256,11 +256,8 @@ bool UVoxelEditManager::ApplyEdit(const FVector& WorldPos, const FVoxelData& New
 		return false;
 	}
 
-	// Get original data
-	const FVoxelData OriginalData = GetOriginalVoxelData(ChunkCoord, LocalPos);
-
 	// Apply the edit
-	ApplyEditInternal(ChunkCoord, LocalPos, NewData, OriginalData, Mode);
+	ApplyEditInternal(ChunkCoord, LocalPos, FVoxelEdit(LocalPos, NewData, Mode));
 
 	// Auto-end operation if we auto-started
 	if (bAutoOperation)
@@ -310,7 +307,6 @@ int32 UVoxelEditManager::ApplyBrushEdit(const FVector& WorldPos, const FVoxelBru
 		case EEditMode::Add: ModeStr = TEXT("Add"); break;
 		case EEditMode::Subtract: ModeStr = TEXT("Subtract"); break;
 		case EEditMode::Paint: ModeStr = TEXT("Paint"); break;
-		case EEditMode::Smooth: ModeStr = TEXT("Smooth"); break;
 		}
 		BeginEditOperation(FString::Printf(TEXT("Brush %s (R=%.0f)"), *ModeStr, Brush.Radius));
 	}
@@ -696,15 +692,11 @@ bool UVoxelEditManager::SaveEditsToFile(const FString& FilePath)
 			Writer << const_cast<int32&>(Edit.DensityDelta);
 			Writer << const_cast<uint8&>(Edit.BrushMaterialID);
 
-			// Legacy NewData/OriginalData (kept for potential backwards compatibility)
+			// NewData
 			Writer << const_cast<uint8&>(Edit.NewData.MaterialID);
 			Writer << const_cast<uint8&>(Edit.NewData.Density);
 			Writer << const_cast<uint8&>(Edit.NewData.BiomeID);
 			Writer << const_cast<uint8&>(Edit.NewData.Metadata);
-			Writer << const_cast<uint8&>(Edit.OriginalData.MaterialID);
-			Writer << const_cast<uint8&>(Edit.OriginalData.Density);
-			Writer << const_cast<uint8&>(Edit.OriginalData.BiomeID);
-			Writer << const_cast<uint8&>(Edit.OriginalData.Metadata);
 		}
 	}
 
@@ -751,14 +743,12 @@ bool UVoxelEditManager::LoadEditsFromFile(const FString& FilePath)
 		return false;
 	}
 
-	if (Version != VOXEL_EDIT_FILE_VERSION && Version != 1)
+	if (Version != VOXEL_EDIT_FILE_VERSION && Version != 2)
 	{
-		UE_LOG(LogVoxelEdit, Error, TEXT("LoadEditsFromFile: Unsupported version %d (expected %d or 1)"),
+		UE_LOG(LogVoxelEdit, Error, TEXT("LoadEditsFromFile: Unsupported version %d (expected %d or 2)"),
 			Version, VOXEL_EDIT_FILE_VERSION);
 		return false;
 	}
-
-	const bool bIsVersion2 = (Version >= 2);
 
 	// Clear existing edits
 	ClearAllEdits();
@@ -790,35 +780,25 @@ bool UVoxelEditManager::LoadEditsFromFile(const FString& FilePath)
 			// Core position
 			Reader << Edit.LocalPosition;
 
-			// Version 2+: Read edit mode and relative edit data
-			if (bIsVersion2)
-			{
-				uint8 EditModeValue = 0;
-				Reader << EditModeValue;
-				Edit.EditMode = static_cast<EEditMode>(EditModeValue);
-				Reader << Edit.DensityDelta;
-				Reader << Edit.BrushMaterialID;
-			}
+			// Edit mode and relative edit data
+			uint8 EditModeValue = 0;
+			Reader << EditModeValue;
+			Edit.EditMode = static_cast<EEditMode>(EditModeValue);
+			Reader << Edit.DensityDelta;
+			Reader << Edit.BrushMaterialID;
 
-			// Read NewData/OriginalData (all versions)
+			// NewData
 			Reader << Edit.NewData.MaterialID;
 			Reader << Edit.NewData.Density;
 			Reader << Edit.NewData.BiomeID;
 			Reader << Edit.NewData.Metadata;
-			Reader << Edit.OriginalData.MaterialID;
-			Reader << Edit.OriginalData.Density;
-			Reader << Edit.OriginalData.BiomeID;
-			Reader << Edit.OriginalData.Metadata;
 
-			// Version 1 fallback: Use Set mode with absolute data
-			if (!bIsVersion2)
+			// Version 2 carried the pre-G60 OriginalData after it (4 bytes, unused)
+			if (Version == 2)
 			{
-				Edit.EditMode = EEditMode::Set;
-				Edit.DensityDelta = 0;
-				Edit.BrushMaterialID = Edit.NewData.MaterialID;
+				uint8 Legacy[4];
+				Reader.Serialize(Legacy, sizeof(Legacy));
 			}
-
-			Edit.Timestamp = FPlatformTime::Seconds();
 
 			Layer->ApplyEdit(Edit);
 			Loaded.Add(Edit.LocalPosition);
@@ -956,52 +936,6 @@ FVector UVoxelEditManager::LocalToWorldPos(const FIntVector& ChunkCoord, const F
 void UVoxelEditManager::ApplyEditInternal(
 	const FIntVector& ChunkCoord,
 	const FIntVector& LocalPos,
-	const FVoxelData& NewData,
-	const FVoxelData& OriginalData,
-	EEditMode Mode)
-{
-	// Create or get edit layer
-	FChunkEditLayer* Layer = GetOrCreateEditLayer(ChunkCoord);
-	if (!Layer)
-	{
-		return;
-	}
-
-	// The edit the voxel held before, for undo
-	TOptional<FVoxelEdit> Before;
-	if (const FVoxelEdit* Existing = Layer->GetEdit(LocalPos))
-	{
-		Before = *Existing;
-	}
-
-	// Create edit record
-	FVoxelEdit Edit(LocalPos, NewData, OriginalData, Mode);
-
-	// Apply to layer
-	Layer->ApplyEdit(Edit);
-
-	// Track in current operation if active
-	if (CurrentOperation.IsValid())
-	{
-		CurrentOperation->RecordChange(ChunkCoord, LocalPos, Before.GetPtrOrNull(), &Edit);
-		OperationBounds.FindOrAdd(ChunkCoord).Add(LocalPos);
-	}
-
-	// Notify listeners — but only for standalone edits. During a Begin/End batch operation (brush),
-	// defer to EndEditOperation, which broadcasts ONCE per affected chunk. Broadcasting per voxel made
-	// the chunk-manager handler run its full-radius scatter clear + chunk/neighbour dirty cascade once
-	// per edited voxel — a large brush (hundreds of thousands of voxels) froze the game thread.
-	if (!CurrentOperation.IsValid())
-	{
-		FVoxelEditedVoxelBounds One;
-		One.Add(LocalPos);
-		BroadcastChunkEdited(ChunkCoord, CurrentEditSource, CurrentEditCenter, CurrentEditRadius, One);
-	}
-}
-
-void UVoxelEditManager::ApplyEditInternal(
-	const FIntVector& ChunkCoord,
-	const FIntVector& LocalPos,
 	const FVoxelEdit& Edit)
 {
 	// Create or get edit layer
@@ -1025,7 +959,7 @@ void UVoxelEditManager::ApplyEditInternal(
 	// Check for existing edit at this location and accumulate if compatible
 	if (const FVoxelEdit* ExistingEdit = Before.GetPtrOrNull())
 	{
-		const bool bExistingAbsolute = ExistingEdit->EditMode == EEditMode::Set || ExistingEdit->EditMode == EEditMode::Smooth;
+		const bool bExistingAbsolute = ExistingEdit->EditMode == EEditMode::Set;
 		const bool bNewRelative = EditCopy.EditMode == EEditMode::Add || EditCopy.EditMode == EEditMode::Subtract
 			|| EditCopy.EditMode == EEditMode::Paint;
 
@@ -1036,7 +970,6 @@ void UVoxelEditManager::ApplyEditInternal(
 		if (bExistingAbsolute && bNewRelative)
 		{
 			const FVoxelData Composed = EditCopy.ApplyToProceduralData(ExistingEdit->NewData);
-			EditCopy.OriginalData = ExistingEdit->NewData; // undo restores the absolute voxel
 			EditCopy.NewData = Composed;
 			EditCopy.EditMode = EEditMode::Set;
 			EditCopy.DensityDelta = 0;
@@ -1124,7 +1057,7 @@ void UVoxelEditManager::ApplyEditInternal(
 				}
 			}
 		}
-		// An absolute edit (Set, Smooth) replaces whatever was there; so does Paint over Add/Subtract (as before).
+		// An absolute edit (Set) replaces whatever was there; so does Paint over Add/Subtract (as before).
 	}
 
 	// Apply to layer
@@ -1168,23 +1101,6 @@ bool UVoxelEditManager::GetBroadcastEditBounds(FIntVector& OutMin, FIntVector& O
 	OutMin = ActiveBroadcastBounds->Min;
 	OutMax = ActiveBroadcastBounds->Max;
 	return true;
-}
-
-FVoxelData UVoxelEditManager::GetOriginalVoxelData(const FIntVector& ChunkCoord, const FIntVector& LocalPos) const
-{
-	// First check if there's an existing edit
-	if (const FChunkEditLayer* Layer = GetEditLayer(ChunkCoord))
-	{
-		if (const FVoxelEdit* Edit = Layer->GetEdit(LocalPos))
-		{
-			// Return the current edited data (which becomes "original" for the new edit)
-			return Edit->NewData;
-		}
-	}
-
-	// No existing edit - return air as placeholder (procedural data is not known here). Undo does not read it: it restores
-	// the change's previous edit, or none (G60).
-	return FVoxelData::Air();
 }
 
 void UVoxelEditManager::TrimUndoStack()

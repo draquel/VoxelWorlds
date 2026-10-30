@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include "FBMNoise.ush"
+#include "VoxelNoiseCommon.ush"
 
 // World mode enum (must match EWorldMode in C++)
 #define WORLD_MODE_INFINITE_PLANE 0

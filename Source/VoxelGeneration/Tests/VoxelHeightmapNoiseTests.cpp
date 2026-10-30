@@ -8,6 +8,7 @@
 #include "VoxelNoiseTypes.h"
 #include "IVoxelWorldMode.h"
 #include "InfinitePlaneWorldMode.h"
+#include "VoxelClassicNoiseControl.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -15,7 +16,7 @@
 // The heightmap noise since the world modes review's MP4 (WM-MP6, WM-MP7, decision D39; GenerationVersion 3): the
 // heightmap entry point FVoxelCPUNoiseGenerator::FBM3D samples the planet's noise (FVoxelPlanetNoise): a hashed integer
 // lattice with no 256-unit period, split-origin sampling exact to float precision at any distance from the origin, and the
-// continuous Simplex kernel (G43). The classic table noise (ClassicFBM3D) is kept as the control.
+// continuous Simplex kernel (G43). The classic table noise (VoxelClassicNoiseControl::ClassicFBM3D) is kept as the control.
 //
 // - Noise.HeightmapNoise: FBM3D is the planet noise bit for bit; at 2D points up to 1e9 uu from the origin it is within
 //   1e-5 of the double reference (the classic noise's float positions were 64 uu coarse there); it repeats nowhere over
@@ -136,7 +137,7 @@ bool FVoxelHeightmapNoiseTest::RunTest(const FString& Parameters)
 		{
 			const FVector P(Random.FRandRange(0.0, PeriodUU), Random.FRandRange(0.0, PeriodUU), 0.0);
 			const FVector Q = P + FVector(PeriodUU, 0.0, 0.0);
-			ClassicMean += FMath::Abs(FVoxelCPUNoiseGenerator::ClassicFBM3D(Q, Params) - FVoxelCPUNoiseGenerator::ClassicFBM3D(P, Params)) / Count;
+			ClassicMean += FMath::Abs(VoxelClassicNoiseControl::ClassicFBM3D(Q, Params) - VoxelClassicNoiseControl::ClassicFBM3D(P, Params)) / Count;
 			NewMean += FMath::Abs(FVoxelCPUNoiseGenerator::FBM3D(Q, Params) - FVoxelCPUNoiseGenerator::FBM3D(P, Params)) / Count;
 		}
 		AddInfo(FString::Printf(TEXT("%s: a shift of %.0f / f = %.0f uu along X: the classic noise differs by %.2e on average, the heightmap noise by %.3f"), Name, PeriodUnits, PeriodUU, ClassicMean, NewMean));
@@ -178,7 +179,7 @@ bool FVoxelHeightmapNoiseTest::RunTest(const FString& Parameters)
 		for (int32 i = 0; i < Count; ++i)
 		{
 			const FVector P(Random.FRandRange(-1.0e6, 1.0e6), Random.FRandRange(-1.0e6, 1.0e6), 0.0);
-			const double C = FVoxelCPUNoiseGenerator::ClassicFBM3D(P, Params);
+			const double C = VoxelClassicNoiseControl::ClassicFBM3D(P, Params);
 			const double N = FVoxelCPUNoiseGenerator::FBM3D(P, Params);
 			SumC += C; SumCC += C * C; SumN += N; SumNN += N * N;
 			MaxAbsN = FMath::Max(MaxAbsN, FMath::Abs(N));

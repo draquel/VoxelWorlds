@@ -1537,7 +1537,6 @@ public:
 	int32 GetEffectiveMaxAsyncMeshTasks() const { return EffectiveMaxAsyncMeshTasks; }
 	int32 GetEffectiveMaxLODRemeshPerFrame() const { return EffectiveMaxLODRemeshPerFrame; }
 	int32 GetEffectiveMaxPendingMeshes() const { return EffectiveMaxPendingMeshes; }
-	bool AreSubsystemsDeferred() const { return bSubsystemsDeferred; }
 
 	/** Get count of async generation tasks in flight */
 	int32 GetAsyncGenerationInProgressCount() const { return AsyncGenerationInProgress.Num(); }
@@ -3011,9 +3010,6 @@ private:
 	 * that would otherwise make the throttle a one-way latch for the whole session.
 	 */
 	float ObservedFrameFloorMs = 16.67f;
-
-	/** Whether collision/scatter updates are deferred due to heavy gen queue */
-	bool bSubsystemsDeferred = false;
 
 	// ==================== Per-Frame Timing ====================
 

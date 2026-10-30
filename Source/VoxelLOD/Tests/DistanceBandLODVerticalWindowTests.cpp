@@ -71,7 +71,6 @@ namespace VerticalWindowTestHelpers
 	{
 		FLODQueryContext Context;
 		Context.ViewerPosition = FVector(XY.X, XY.Y, Layer * ChunkWorldSize + 2400.0f);
-		Context.ViewDistance = 40000.0f;
 		Context.WorldMode = WorldMode;
 		return Context;
 	}

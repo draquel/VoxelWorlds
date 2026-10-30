@@ -141,7 +141,7 @@ never hold a value of size R in float on a planet path: altitudes and signed dis
 is `FVoxelPlanetNoise` / `PlanetNoise.ush` (hashed lattice, split-origin, the continuous Simplex kernel; heightmap worlds
 reach it through `FVoxelCPUNoiseGenerator::FBM3D` since the world modes review's MP4, D39, `GenerationVersion` 3, and the
 GPU's heightmap branch samples it at the chunk's origin corner; the classic table noise stays only as the tests' control,
-`ClassicFBM3D`); primitives sit at their render region's origin (`FVoxelRenderRegions`) and store float offsets from it
+`VoxelClassicNoiseControl::ClassicFBM3D` in `VoxelGeneration/Tests`); primitives sit at their render region's origin (`FVoxelRenderRegions`) and store float offsets from it
 (scene proxy vertices, seams, water, scatter HISMs per region).
 
 A planet streams by chunk (spherical Phase 6, WM-BP8; `Features/LOD_SYSTEM.md`): `FDistanceBandLODStrategy::IsInPlanetWindow`

@@ -36,7 +36,6 @@ namespace LODOffTestHelpers
 	{
 		FLODQueryContext Context;
 		Context.ViewerPosition = FVector(2400.0f, 2400.0f, 2400.0f);
-		Context.ViewDistance = 40000.0f;
 		Context.WorldMode = EWorldMode::InfinitePlane;
 		return Context;
 	}

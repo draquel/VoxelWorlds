@@ -49,8 +49,6 @@ public:
 		const FVector& WorldPosition,
 		const FVoxelNoiseParams& Params) override;
 
-	virtual FRHIBuffer* GetGeneratedBuffer(const FVoxelGenerationHandle& Handle) override;
-
 	virtual bool ReadbackToCPU(
 		const FVoxelGenerationHandle& Handle,
 		TArray<FVoxelData>& OutVoxelData) override;
@@ -72,60 +70,6 @@ public:
 	 * @return Noise value in range approximately [-1, 1]
 	 */
 	static float FBM3D(const FVector& Position, const FVoxelNoiseParams& Params);
-
-	// The classic table noise (Ken Perlin's 256-entry permutation, the 0.6 Simplex kernel): what heightmap worlds sampled
-	// before MP4. No generation path reads it; the tests keep it as the control that repeats every 256 lattice units and
-	// steps across the simplex boundaries (Noise.PlanetHashNoPeriod, Noise.HeightmapNoise).
-
-	/**
-	 * Classic 3D Perlin noise (the permutation table; a 256-unit period).
-	 *
-	 * @param Position World position to sample
-	 * @param Seed Random seed for permutation table
-	 * @return Noise value in range [-1, 1]
-	 */
-	static float Perlin3D(const FVector& Position, int32 Seed = 0);
-
-	/**
-	 * Classic 3D Simplex noise (the permutation table, the 0.6 corner kernel).
-	 *
-	 * @param Position World position to sample
-	 * @param Seed Random seed for permutation table
-	 * @return Noise value in range [-1, 1]
-	 */
-	static float Simplex3D(const FVector& Position, int32 Seed = 0);
-
-	/**
-	 * Classic fBm over Perlin3D / Simplex3D / Cellular3D / Voronoi3D: what FBM3D was before MP4, for the tests' controls.
-	 *
-	 * @param Position World position to sample
-	 * @param Params Noise parameters (octaves, frequency, etc.)
-	 * @return Noise value in range approximately [-1, 1]
-	 */
-	static float ClassicFBM3D(const FVector& Position, const FVoxelNoiseParams& Params);
-
-	/**
-	 * Classic 3D Cellular (Worley) noise at a position.
-	 * Uses 3x3x3 cell search to find distances to nearest two feature points.
-	 *
-	 * @param Position World position to sample (pre-scaled by frequency)
-	 * @param Seed Random seed
-	 * @param OutF1 Distance to nearest feature point
-	 * @param OutF2 Distance to second nearest feature point
-	 */
-	static void Cellular3D(const FVector& Position, int32 Seed, float& OutF1, float& OutF2);
-
-	/**
-	 * Classic 3D Voronoi noise at a position.
-	 * Same as Cellular but also returns a stable cell ID.
-	 *
-	 * @param Position World position to sample (pre-scaled by frequency)
-	 * @param Seed Random seed
-	 * @param OutF1 Distance to nearest feature point
-	 * @param OutF2 Distance to second nearest feature point
-	 * @param OutCellID Stable hash-based cell identifier [0, 1]
-	 */
-	static void Voronoi3D(const FVector& Position, int32 Seed, float& OutF1, float& OutF2, float& OutCellID);
 
 	/**
 	 * Run the post-generation passes (water fill + underground classification) on already-generated
@@ -157,13 +101,6 @@ private:
 		TArray<FVoxelData>& OutVoxelData);
 
 	/**
-	 * Generate chunk using full 3D noise (for volumetric modes).
-	 */
-	void GenerateChunk3DNoise(
-		const FVoxelNoiseGenerationRequest& Request,
-		TArray<FVoxelData>& OutVoxelData);
-
-	/**
 	 * Generate chunk using Island Bowl world mode (bounded terrain with falloff).
 	 */
 	void GenerateChunkIslandBowl(
@@ -178,29 +115,6 @@ private:
 		const FVoxelNoiseGenerationRequest& Request,
 		const FSphericalPlanetWorldMode& WorldMode,
 		TArray<FVoxelData>& OutVoxelData);
-
-	// ==================== Noise Helper Functions ====================
-
-	/** Fade function for smooth interpolation */
-	static float Fade(float T);
-
-	/** Linear interpolation */
-	static float Lerp(float A, float B, float T);
-
-	/** Gradient function for Perlin noise */
-	static float Grad(int32 Hash, float X, float Y, float Z);
-
-	/** Get permutation value with seed offset */
-	static int32 Perm(int32 Index, int32 Seed = 0);
-
-	/** Hash function for simplex noise */
-	static int32 Hash(int32 I, int32 Seed = 0);
-
-	/** Floor function that returns int32 */
-	static int32 FastFloor(float X);
-
-	/** Dot product for simplex gradient */
-	static float SimplexDot(const int32* G, float X, float Y, float Z);
 
 	// ==================== Cave Generation Helpers ====================
 

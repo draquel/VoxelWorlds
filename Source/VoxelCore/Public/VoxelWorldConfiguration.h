@@ -594,10 +594,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance")
 	bool bAdaptiveThrottling = true;
 
-	/** Defer collision/scatter when generation queue exceeds this count (0 = disabled) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "0", ClampMax = "200"))
-	int32 DeferSubsystemsThreshold = 20;
-
 	/** Maximum concurrent async scatter generation tasks (1-4). Scatter extraction and placement run on thread pool. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Performance", meta = (ClampMin = "1", ClampMax = "4"))
 	int32 MaxAsyncScatterTasks = 2;
@@ -642,15 +638,6 @@ public:
 	{
 		return bUseGPUGeneration;
 	}
-
-	/** Get the world size of a single chunk at a specific LOD */
-	float GetChunkWorldSizeAtLOD(int32 LODLevel) const;
-
-	/** Get LOD band for a given distance, returns nullptr if beyond all bands */
-	const FLODBand* GetLODBandForDistance(float Distance) const;
-
-	/** Get the LOD level for a given distance */
-	int32 GetLODLevelForDistance(float Distance) const;
 
 	/** Validate configuration and log any issues (including GetSettingsWarnings) */
 	bool ValidateConfiguration() const;

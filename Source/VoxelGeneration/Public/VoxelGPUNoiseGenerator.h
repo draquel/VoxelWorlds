@@ -57,8 +57,6 @@ public:
 		const FVector& WorldPosition,
 		const FVoxelNoiseParams& Params) override;
 
-	virtual FRHIBuffer* GetGeneratedBuffer(const FVoxelGenerationHandle& Handle) override;
-
 	virtual bool ReadbackToCPU(
 		const FVoxelGenerationHandle& Handle,
 		TArray<FVoxelData>& OutVoxelData) override;
@@ -146,10 +144,4 @@ private:
 		uint64 RequestId,
 		TSharedPtr<FGenerationResult> Result,
 		FOnVoxelGenerationComplete OnComplete);
-
-	/** Create the structured buffer for output */
-	FBufferRHIRef CreateOutputBuffer(int32 ChunkSize);
-
-	/** Create a staging buffer for CPU readback */
-	FBufferRHIRef CreateStagingBuffer(int32 ChunkSize);
 };

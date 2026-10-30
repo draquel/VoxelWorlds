@@ -31,18 +31,6 @@ struct VOXELCORE_API FLODQueryContext
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
 	FVector ViewerForward = FVector::ForwardVector;
 
-	/** Viewer right direction (normalized) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
-	FVector ViewerRight = FVector::RightVector;
-
-	/** Viewer up direction (normalized) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
-	FVector ViewerUp = FVector::UpVector;
-
-	/** Maximum view distance for chunk loading */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
-	float ViewDistance = 10000.0f;
-
 	/**
 	 * Planets: how far ViewerPosition (the streaming viewer) lies under the camera along local down, by the descent prefetch
 	 * (spherical Phase 6, WM-BP10); 0 = the viewer is the camera. The voxel cut-over reads the camera's altitude from it
@@ -63,10 +51,6 @@ struct VOXELCORE_API FLODQueryContext
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
 	float FieldOfView = 90.0f;
 
-	/** Aspect ratio for frustum calculations */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
-	float AspectRatio = 1.777f;
-
 	/** Frustum planes for culling (optional, 6 planes) */
 	UPROPERTY()
 	TArray<FPlane> FrustumPlanes;
@@ -81,37 +65,11 @@ struct VOXELCORE_API FLODQueryContext
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
 	EWorldMode WorldMode = EWorldMode::InfinitePlane;
 
-	/** World radius (for spherical worlds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
-	float WorldRadius = 100000.0f;
-
 	// ==================== Performance Budgets ====================
-
-	/** Maximum chunks to load per frame */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
-	int32 MaxChunksToLoadPerFrame = 4;
 
 	/** Maximum chunks to unload per frame */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
 	int32 MaxChunksToUnloadPerFrame = 8;
-
-	/** Time budget for chunk operations (milliseconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
-	float TimeSliceMS = 2.0f;
-
-	// ==================== Frame Information ====================
-
-	/** Current frame number for temporal coherence (stored as int64 for Blueprint compatibility) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
-	int64 FrameNumber = 0;
-
-	/** Current game time (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
-	float GameTime = 0.0f;
-
-	/** Time since last frame (seconds) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
-	float DeltaTime = 0.0f;
 
 	/** Default constructor */
 	FLODQueryContext() = default;

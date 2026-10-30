@@ -56,7 +56,6 @@ bool FUnloadCandidatesVetoDoesNotStarveTest::RunTest(const FString& Parameters)
 
 	FLODQueryContext Context;
 	Context.ViewerPosition = FVector(2400.0f, 2400.0f, 2400.0f); // centre of chunk (0,0,0)
-	Context.ViewDistance = 40000.0f;
 	Context.MaxChunksToUnloadPerFrame = 16;
 
 	// 20 refused chunks (think: stranded in Meshing) farther out than the one acceptable far chunk,

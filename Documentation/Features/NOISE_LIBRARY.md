@@ -68,7 +68,7 @@ Result = Total / MaxAmplitude
 
 ### Ridged fBm
 
-Available on GPU as `RidgedFBM3D()`. Applies `1 - |noise|` per octave for sharp ridge features (mountain peaks, ridgelines).
+`RidgedFBM3D()` deleted in CR1 (CORE-03).
 
 ## GPU Implementation
 
@@ -76,11 +76,8 @@ Available on GPU as `RidgedFBM3D()`. Applies `1 - |noise|` per octave for sharp 
 
 | File | Contents |
 |------|----------|
-| `VoxelNoiseCommon.ush` | Hash functions, permutation table, utilities |
-| `PerlinNoise.ush` | `Perlin3D(float3, int)` |
-| `SimplexNoise.ush` | `Simplex3D(float3, int)` |
-| `CellularNoise.ush` | `Cellular3D(float3, int)`, `Voronoi3D(float3, int)` |
-| `FBMNoise.ush` | `FBM3D()`, `FBMSimplex()`, `FBMPerlin()`, `FBMCellular()`, `FBMVoronoi()`, `RidgedFBM3D()` |
+| `VoxelNoiseCommon.ush` | `NOISE_TYPE_*`, `NoiseToDensity`, `PackVoxelData` |
+| `PerlinNoise.ush`, `SimplexNoise.ush`, `CellularNoise.ush`, `FBMNoise.ush` | deleted in CR1 (CORE-03) |
 
 ### Noise Type Defines
 
@@ -95,21 +92,7 @@ Must match `EVoxelNoiseType` enum values.
 
 ### GPU Functions
 
-```hlsl
-// Core fBm with noise type selection
-float FBM3D(float3 Position, int NoiseType, int Seed, int Octaves,
-            float Frequency, float Amplitude, float Lacunarity, float Persistence)
-
-// Convenience wrappers
-float FBMSimplex(float3 Position, int Seed, int Octaves, float Frequency, float Persistence)
-float FBMPerlin(float3 Position, int Seed, int Octaves, float Frequency, float Persistence)
-float FBMCellular(float3 Position, int Seed, int Octaves, float Frequency, float Persistence)
-float FBMVoronoi(float3 Position, int Seed, int Octaves, float Frequency, float Persistence)
-
-// Raw Cellular/Voronoi
-float2 Cellular3D(float3 Position, int Seed)  // Returns (F1, F2)
-float3 Voronoi3D(float3 Position, int Seed)   // Returns (F1, F2, CellID)
-```
+The classic GPU functions (`FBM3D`, its wrappers, `Cellular3D`, `Voronoi3D`) were deleted in CR1 (CORE-03); generation samples `PlanetFBM3D` (below).
 
 ## CPU Implementation
 
@@ -127,13 +110,7 @@ float3 Voronoi3D(float3 Position, int Seed)   // Returns (F1, F2, CellID)
 // (decision D39) it is FVoxelPlanetNoise::FBM3D in every world mode (the section below).
 static float FBM3D(const FVector& Position, const FVoxelNoiseParams& Params);
 
-// The classic table noise (Ken Perlin's 256-entry permutation, the 0.6 Simplex kernel): what heightmap worlds sampled
-// before MP4. No generation path reads it; the tests keep it as the control that repeats every 256 lattice units.
-static float Perlin3D(const FVector& Position, int32 Seed = 0);
-static float Simplex3D(const FVector& Position, int32 Seed = 0);
-static void Cellular3D(const FVector& Position, int32 Seed, float& OutF1, float& OutF2);
-static void Voronoi3D(const FVector& Position, int32 Seed, float& OutF1, float& OutF2, float& OutCellID);
-static float ClassicFBM3D(const FVector& Position, const FVoxelNoiseParams& Params);
+// The classic table noise (Perlin3D, Simplex3D, Cellular3D, Voronoi3D, ClassicFBM3D) moved to the tests' VoxelClassicNoiseControl in CR1 (CORE-02).
 ```
 
 ## GPU/CPU Consistency
@@ -144,8 +121,7 @@ voxel's offset, so the two differ by float rounding only: the `VoxelWorlds.Gener
 world mode's densities within 2 steps on 99% of the voxels and their materials, biomes and flags equal (the planet lines
 were within a few voxels since spherical Phase 6; the heightmap lines, bit-identical before MP4, are now of the same kind).
 
-The classic shader functions (`PerlinNoise.ush`, `SimplexNoise.ush`, `CellularNoise.ush`, `FBMNoise.ush`) are no longer
-called by generation; `FBMNoise.ush` is still included for its `NOISE_TYPE_*` defines.
+The classic shader files were deleted in CR1 (CORE-03); `VoxelNoiseCommon.ush` keeps the `NOISE_TYPE_*` defines.
 
 ## The Terrain Noise (spherical Phase 6; every world mode since MP4)
 
