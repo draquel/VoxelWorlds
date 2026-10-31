@@ -1208,16 +1208,13 @@ bool FMCLODBoundaryT10OrientationTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// ==================== T11: GPU-port watertightness contract ====================
+// ==================== T11: the transition ribbon's watertightness contract ====================
 //
-// The GPU Marching Cubes mesher (VoxelGPUMarchingCubesMesher + the TransitionCS
-// compute pass) is a line-for-line port of the CPU transvoxel path exercised by
-// T6-T10. Headless automation runs under -nullrhi, which has no compute-shader
-// support, so the GPU mesher itself cannot run here. This test pins, via the CPU
-// mesher the shader mirrors, the exact watertightness contract the GPU port must
-// reproduce for the LOD pairs it handles: the finer chunk's transition ribbon must
-// (a) introduce no mesh holes vs the pure mesh, and (b) match the coarser
-// neighbour's boundary exactly (unmatchedB == 0). Across the three field shapes.
+// For the LOD pairs the live path handles (LOD0|LOD1 and LOD1|LOD2) the finer chunk's
+// transition ribbon must (a) introduce no mesh holes vs the pure mesh, and (b) match the
+// coarser neighbour's boundary exactly (unmatchedB == 0), across the three field shapes.
+// The test is named for the GPU Marching Cubes port it once pinned (a line-for-line port of
+// this CPU path, deleted in code review CR1); the contract it states is the CPU mesher's own.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCLODBoundaryT11GPUPortContractTest, "VoxelWorlds.Meshing.MarchingCubes.LODBoundary.T11_GPUPortContract",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -1285,13 +1282,13 @@ bool FMCLODBoundaryT11GPUPortContractTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// ==================== T12: transvoxel table / constant integrity (GPU buffer pin) ====================
+// ==================== T12: transvoxel table / constant integrity ====================
 //
-// The GPU shader (TransitionCS / MainCS) is driven by the SAME TransvoxelTables
-// arrays the dispatcher flattens into structured buffers, plus a few hardcoded
-// algorithm constants (BitToSample, the invariant-corner mapping, the endpoint
-// nibble decode). This test pins the assumptions the shader makes about those
-// tables so they cannot drift silently and read out of bounds on the GPU:
+// The CPU mesher indexes the TransvoxelTables arrays by case and class, plus a few
+// hardcoded algorithm constants (BitToSample, the invariant-corner mapping, the endpoint
+// nibble decode). This test pins the assumptions the mesher makes about those tables so
+// they cannot drift silently and read out of bounds (it was written as the pin for the GPU
+// port's structured buffers, deleted in code review CR1):
 //   - every transition CASE maps to a class in [0,56)  (indexes TransitionCellData[56])
 //   - every transition CLASS's vertex count <= 12 and its triangle indices are
 //     < vertex count (until the 0xFF terminator)

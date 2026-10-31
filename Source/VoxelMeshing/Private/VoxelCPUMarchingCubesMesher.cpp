@@ -140,7 +140,6 @@ void FVoxelCPUMarchingCubesMesher::Shutdown()
 		return;
 	}
 
-	ReleaseAllHandles();
 	bIsInitialized = false;
 	UE_LOG(LogVoxelMeshing, Log, TEXT("CPU MarchingCubes Mesher shutdown"));
 }
@@ -1649,117 +1648,8 @@ double FVoxelCPUMarchingCubesMesher::ScanSurfaceAlongLocalUp(
 }
 
 // ============================================================================
-// Async Pattern (wraps sync for CPU mesher)
+// Configuration
 // ============================================================================
-
-FVoxelMeshingHandle FVoxelCPUMarchingCubesMesher::GenerateMeshAsync(
-	const FVoxelMeshingRequest& Request,
-	FOnVoxelMeshingComplete OnComplete)
-{
-	const uint64 RequestId = NextRequestId.fetch_add(1);
-	FVoxelMeshingHandle Handle(RequestId, Request.ChunkCoord);
-
-	// CPU mesher runs synchronously
-	FCachedResult Result;
-	Result.bSuccess = GenerateMeshCPU(Request, Result.MeshData, Result.Stats);
-
-	// Cache the result
-	{
-		FScopeLock Lock(&CacheLock);
-		CachedResults.Add(RequestId, MoveTemp(Result));
-	}
-
-	Handle.bIsComplete = true;
-	Handle.bWasSuccessful = Result.bSuccess;
-
-	// Call completion delegate
-	if (OnComplete.IsBound())
-	{
-		OnComplete.Execute(Handle, Handle.bWasSuccessful);
-	}
-
-	return Handle;
-}
-
-bool FVoxelCPUMarchingCubesMesher::IsComplete(const FVoxelMeshingHandle& Handle) const
-{
-	return Handle.bIsComplete;
-}
-
-bool FVoxelCPUMarchingCubesMesher::WasSuccessful(const FVoxelMeshingHandle& Handle) const
-{
-	return Handle.bWasSuccessful;
-}
-
-FRHIBuffer* FVoxelCPUMarchingCubesMesher::GetVertexBuffer(const FVoxelMeshingHandle& Handle)
-{
-	// CPU mesher doesn't create GPU buffers
-	return nullptr;
-}
-
-FRHIBuffer* FVoxelCPUMarchingCubesMesher::GetIndexBuffer(const FVoxelMeshingHandle& Handle)
-{
-	// CPU mesher doesn't create GPU buffers
-	return nullptr;
-}
-
-bool FVoxelCPUMarchingCubesMesher::GetBufferCounts(
-	const FVoxelMeshingHandle& Handle,
-	uint32& OutVertexCount,
-	uint32& OutIndexCount) const
-{
-	FScopeLock Lock(&CacheLock);
-	const FCachedResult* Result = CachedResults.Find(Handle.RequestId);
-	if (Result && Result->bSuccess)
-	{
-		OutVertexCount = Result->MeshData.GetVertexCount();
-		OutIndexCount = Result->MeshData.Indices.Num();
-		return true;
-	}
-	return false;
-}
-
-bool FVoxelCPUMarchingCubesMesher::GetRenderData(
-	const FVoxelMeshingHandle& Handle,
-	FChunkRenderData& OutRenderData)
-{
-	FScopeLock Lock(&CacheLock);
-	const FCachedResult* Result = CachedResults.Find(Handle.RequestId);
-	if (Result && Result->bSuccess)
-	{
-		OutRenderData.ChunkCoord = Handle.ChunkCoord;
-		OutRenderData.VertexCount = Result->MeshData.GetVertexCount();
-		OutRenderData.IndexCount = Result->MeshData.Indices.Num();
-		return true;
-	}
-	return false;
-}
-
-bool FVoxelCPUMarchingCubesMesher::ReadbackToCPU(
-	const FVoxelMeshingHandle& Handle,
-	FChunkMeshData& OutMeshData)
-{
-	FScopeLock Lock(&CacheLock);
-	const FCachedResult* Result = CachedResults.Find(Handle.RequestId);
-	if (Result && Result->bSuccess)
-	{
-		OutMeshData = Result->MeshData;
-		return true;
-	}
-	return false;
-}
-
-void FVoxelCPUMarchingCubesMesher::ReleaseHandle(const FVoxelMeshingHandle& Handle)
-{
-	FScopeLock Lock(&CacheLock);
-	CachedResults.Remove(Handle.RequestId);
-}
-
-void FVoxelCPUMarchingCubesMesher::ReleaseAllHandles()
-{
-	FScopeLock Lock(&CacheLock);
-	CachedResults.Empty();
-}
 
 void FVoxelCPUMarchingCubesMesher::SetConfig(const FVoxelMeshingConfig& InConfig)
 {
@@ -1769,20 +1659,6 @@ void FVoxelCPUMarchingCubesMesher::SetConfig(const FVoxelMeshingConfig& InConfig
 const FVoxelMeshingConfig& FVoxelCPUMarchingCubesMesher::GetConfig() const
 {
 	return Config;
-}
-
-bool FVoxelCPUMarchingCubesMesher::GetStats(
-	const FVoxelMeshingHandle& Handle,
-	FVoxelMeshingStats& OutStats) const
-{
-	FScopeLock Lock(&CacheLock);
-	const FCachedResult* Result = CachedResults.Find(Handle.RequestId);
-	if (Result)
-	{
-		OutStats = Result->Stats;
-		return true;
-	}
-	return false;
 }
 
 // ============================================================================

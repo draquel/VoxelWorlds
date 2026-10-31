@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "IVoxelMeshRenderer.h"
-#include "VoxelChunkGPUData.h"
+#include "VoxelVertex.h"
 #include "VoxelRenderRegions.h"
 
 class UVoxelWorldComponent;
@@ -51,7 +51,6 @@ public:
 	virtual bool IsInitialized() const override;
 
 	// Mesh Updates
-	virtual void UpdateChunkMesh(const FChunkRenderData& RenderData) override;
 	virtual void UpdateChunkMeshFromCPU(
 		const FIntVector& ChunkCoord,
 		int32 LODLevel,

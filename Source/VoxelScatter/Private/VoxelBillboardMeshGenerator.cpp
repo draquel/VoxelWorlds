@@ -3,6 +3,7 @@
 #include "VoxelBillboardMeshGenerator.h"
 #include "VoxelScatter.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/Texture2D.h" // CreateBillboardMaterial passes a UTexture2D* as a UTexture* (VoxelMaterialAtlas.h only forward-declares it)
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "StaticMeshDescription.h"

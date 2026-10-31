@@ -33,7 +33,7 @@ VoxelWorlds is a **GPU-driven voxel terrain system** designed for high-performan
 - Three meshing algorithms (cubic, Marching Cubes, Dual Contouring)
 - Pluggable LOD system (distance bands, quadtree, octree)
 - Hybrid rendering (Custom VF + PMC fallback)
-- GPU compute pipeline for generation and meshing
+- GPU compute pipeline for generation; meshing on CPU workers
 - Biome system with material assignment
 - Edit layer for terrain modification
 - Vegetation scatter system
@@ -143,25 +143,6 @@ struct FChunkDescriptor {
     float MorphFactor;         // LOD transition blend (0-1)
     
     int32 GenerationSeed;      // For deterministic regeneration (int32 for BP)
-};
-```
-
-### FChunkRenderData
-```cpp
-struct FChunkRenderData {
-    FIntVector ChunkCoord;
-    int32 LODLevel;
-    
-    // GPU buffer handles (RDG)
-    FRDGBufferRef ComputeVertexBuffer;
-    FRDGBufferRef ComputeIndexBuffer;
-    
-    uint32 VertexCount;
-    uint32 IndexCount;
-    bool bNeedsCollisionUpdate;
-    
-    // For PMC fallback
-    TArray<FVoxelData> VoxelData;
 };
 ```
 
@@ -354,7 +335,7 @@ See: [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) for complete details.
 ```cpp
 class IVoxelMeshRenderer {
     virtual void Initialize(UWorld* World, const FVoxelWorldConfiguration& Config) = 0;
-    virtual void UpdateChunkMesh(const FChunkRenderData& RenderData) = 0;
+    virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) = 0;
     virtual void RemoveChunk(FIntVector ChunkCoord) = 0;
     virtual void SetMaterial(UMaterialInterface* Material) = 0;
     virtual void UpdateLODTransition(FIntVector ChunkCoord, float MorphFactor) = 0;
@@ -387,11 +368,10 @@ Output: RWStructuredBuffer<FVoxelData>
 
 **Phase 2: Meshing**
 ```
-Input: VoxelData buffer, MeshingMode
-Compute Shader: MarchingCubesMeshGeneration.usf
-             or DualContourMeshGeneration.usf (4-pass: edges → QEF → quads)
-             (cubic meshes on the CPU only: FVoxelCPUCubicMesher)
-Output: RWStructuredBuffer<FVoxelVertex>, RWStructuredBuffer<uint32>
+Input: the chunk's voxels (read back from the GPU), MeshingMode
+CPU worker: FVoxelCPUMarchingCubesMesher, FVoxelCPUDualContourMesher or FVoxelCPUCubicMesher
+            (interior chunk meshes, plus the seam jobs between chunks)
+Output: FChunkMeshData, uploaded by the renderer
 ```
 
 **Phase 3: Rendering**
@@ -496,43 +476,10 @@ void UVoxelChunkManager::TickComponent(float DeltaTime) {
 
 ### ChunkManager ↔ Renderer
 
-```cpp
-// ChunkManager dispatches render updates
-void UVoxelChunkManager::OnChunkMeshingComplete(
-    FIntVector ChunkCoord, 
-    const FChunkRenderData& RenderData)
-{
-    // Send to renderer (GPU buffers stay on GPU)
-    MeshRenderer->UpdateChunkMesh(RenderData);
-    
-    // Collision handled separately by CollisionManager::Update()
-    // (async pipeline: data prep → thread pool mesh gen + trimesh → game thread physics)
-    
-    // Update scatter/foliage
-    ScatterSystem->GenerateScatterForChunk(ChunkCoord);
-}
-```
-
-### GPU Compute ↔ Renderer
-
-```cpp
-// Direct GPU buffer handoff (Custom VF)
-void FVoxelCustomVFRenderer::UpdateChunkMesh(const FChunkRenderData& RenderData) {
-    FRDGBuilder GraphBuilder(RHICmdList);
-    
-    // Extract buffers (stay on GPU!)
-    FBufferRHIRef VertexBuffer = 
-        GraphBuilder.ConvertToExternalBuffer(RenderData.ComputeVertexBuffer);
-    FBufferRHIRef IndexBuffer = 
-        GraphBuilder.ConvertToExternalBuffer(RenderData.ComputeIndexBuffer);
-    
-    // Update vertex factory
-    VertexFactory->UpdateBuffers(VertexBuffer, IndexBuffer);
-    
-    // Mark scene proxy dirty
-    SceneProxy->UpdateChunkBuffers(RenderData.ChunkCoord);
-}
-```
+A chunk mesh lands on the game thread as `FChunkMeshData` (`ProcessCompletedAsyncMeshes`); the chunk manager hands it
+to the renderer with `UpdateChunkMeshFromCPU`, which uploads it on the render thread
+(`FVoxelSceneProxy::UpdateChunkFromCPUData_RenderThread`). Collision is cooked from the same data by the collision
+manager (async: data prep → thread-pool mesh gen + trimesh → game-thread physics); scatter extracts from the voxels.
 
 ---
 
@@ -640,7 +587,7 @@ At player speed 1000 cm/s:
 
 ### Optimization Strategies
 
-1. **GPU-First**: Keep data on GPU, avoid CPU readback
+1. **GPU generation**: one compute dispatch per chunk, one readback
 2. **Batch Operations**: Process multiple chunks per compute dispatch
 3. **Async Compute**: Overlap generation with rendering
 4. **LOD Morphing**: Smooth transitions without regeneration
@@ -705,22 +652,20 @@ The streaming system has been optimized to eliminate per-frame overhead:
 
 **Conclusion**: Performance gains justify maintenance cost.
 
-### Why GPU-First Pipeline?
+### Why GPU Generation and CPU Meshing?
 
-**Decision**: All generation and meshing on GPU via compute shaders.
+**Decision**: Generation on the GPU via compute shaders; meshing on CPU workers.
 
 **Rationale**:
-- Voxel terrain is embarrassingly parallel
-- GPU has 1000x more parallel compute than CPU
-- Keeping data GPU-side eliminates transfer bottleneck
-- Enables massive chunk throughput
+- Generation is one thread per voxel: embarrassingly parallel, a fraction of a millisecond per chunk
+- Meshing must be bit-exact between a chunk's interior and the seams it meets (seam ownership); the GPU
+  meshers never were, and no world dispatched them, so they were deleted (code review CR1)
 
 **Trade-offs**:
-- HLSL compute shader expertise required
-- GPU debugging is harder
-- Limited by GPU memory
+- HLSL compute shader expertise required for generation
+- A readback per chunk
 
-**Conclusion**: Absolutely necessary for performance targets.
+**Conclusion**: the generation side pays for itself; the meshing side is where the correctness contract lives.
 
 ### Why Distance Bands Default?
 

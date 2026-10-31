@@ -24,8 +24,6 @@ public class VoxelCore : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
-				"RenderCore",
-				"RHI",
 			}
 		);
 

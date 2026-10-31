@@ -23,8 +23,8 @@ public class VoxelNavigation : ModuleRules
 			{
 				"VoxelStreaming", // chunk manager: edit-merged / analytic surface queries, load + edit events
 				"VoxelGeneration", // FVoxelSurfaceSample (the planet surface along local up)
-				"VoxelLOD",       // tests: a chunk manager with the distance-band strategy
-				"VoxelRendering", // tests: a renderer stub (IVoxelMeshRenderer)
+				"VoxelLOD",       // linked, not included: FDistanceBandLODStrategy via Testing/VoxelTestChunkWorld.h (tests)
+				"VoxelRendering", // linked, not included: IVoxelMeshRenderer via Testing/VoxelTestChunkWorld.h (tests)
 			}
 		);
 	}

@@ -21,7 +21,6 @@
  * Performance: ~30-80ms for 32^3 chunk on typical CPU
  *
  * @see IVoxelMesher
- * @see FVoxelGPUMarchingCubesMesher
  * @see MarchingCubesTables
  */
 class VOXELMESHING_API FVoxelCPUMarchingCubesMesher : public IVoxelMesher
@@ -47,36 +46,8 @@ public:
 		FChunkMeshData& OutMeshData,
 		FVoxelMeshingStats& OutStats) override;
 
-	// Async GPU methods - CPU mesher runs synchronously, wraps sync call
-	virtual FVoxelMeshingHandle GenerateMeshAsync(
-		const FVoxelMeshingRequest& Request,
-		FOnVoxelMeshingComplete OnComplete) override;
-
-	virtual bool IsComplete(const FVoxelMeshingHandle& Handle) const override;
-	virtual bool WasSuccessful(const FVoxelMeshingHandle& Handle) const override;
-
-	virtual FRHIBuffer* GetVertexBuffer(const FVoxelMeshingHandle& Handle) override;
-	virtual FRHIBuffer* GetIndexBuffer(const FVoxelMeshingHandle& Handle) override;
-	virtual bool GetBufferCounts(
-		const FVoxelMeshingHandle& Handle,
-		uint32& OutVertexCount,
-		uint32& OutIndexCount) const override;
-	virtual bool GetRenderData(
-		const FVoxelMeshingHandle& Handle,
-		FChunkRenderData& OutRenderData) override;
-	virtual bool ReadbackToCPU(
-		const FVoxelMeshingHandle& Handle,
-		FChunkMeshData& OutMeshData) override;
-
-	virtual void ReleaseHandle(const FVoxelMeshingHandle& Handle) override;
-	virtual void ReleaseAllHandles() override;
-
 	virtual void SetConfig(const FVoxelMeshingConfig& Config) override;
 	virtual const FVoxelMeshingConfig& GetConfig() const override;
-
-	virtual bool GetStats(
-		const FVoxelMeshingHandle& Handle,
-		FVoxelMeshingStats& OutStats) const override;
 
 	virtual FString GetMesherTypeName() const override { return TEXT("CPU MarchingCubes"); }
 
@@ -632,17 +603,4 @@ private:
 
 	/** Current configuration */
 	FVoxelMeshingConfig Config;
-
-	/** Counter for generating request IDs */
-	std::atomic<uint64> NextRequestId{1};
-
-	/** Cached mesh results for async pattern */
-	struct FCachedResult
-	{
-		FChunkMeshData MeshData;
-		FVoxelMeshingStats Stats;
-		bool bSuccess = false;
-	};
-	TMap<uint64, FCachedResult> CachedResults;
-	mutable FCriticalSection CacheLock;
 };

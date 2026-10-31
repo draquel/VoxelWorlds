@@ -67,20 +67,6 @@ struct FVoxelVertex {
 };
 ```
 
-### FChunkRenderData
-```cpp
-struct FChunkRenderData {
-    FIntVector ChunkCoord;
-    int32 LODLevel;
-    FRDGBufferRef ComputeVertexBuffer;
-    FRDGBufferRef ComputeIndexBuffer;
-    uint32 VertexCount;
-    uint32 IndexCount;
-    bool bNeedsCollisionUpdate;
-    FBox Bounds;
-};
-```
-
 ## LOD System Data
 
 ### FLODQueryContext

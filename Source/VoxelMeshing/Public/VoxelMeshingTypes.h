@@ -8,14 +8,13 @@
 /**
  * Cell-domain restriction for seam-ownership meshing (SEAM_OWNERSHIP_ARCHITECTURE.md §2, P1+).
  *
- * Full = legacy whole-chunk meshing: the chunk meshes its own cells plus the -1 boundary layer
- * against neighbor slices, and the strided-boundary weld reconciles LOD boundaries. Interior =
- * the seam-ownership interior pass: only cells with zero neighbor dependence are meshed
- * ([0, GridSize-1) per axis — no quad references a -1 or GridSize-1 boundary-layer cell), the
- * weld and skirts are skipped, and the request deliberately carries NO neighbor data (gradient
- * taps that would exit the chunk use the absent-neighbor Air fallback -> one-sided rim normals,
- * the same trade the default geometry-only deep depth already accepts). Boundary geometry is
- * produced separately by single-owner seam jobs. Currently honored by the CPU DC mesher only.
+ * Full = whole-chunk meshing: the chunk meshes its own cells plus the -1 boundary layer against
+ * neighbor slices (the collision cook's request). Interior = the seam-ownership interior pass: only
+ * cells with zero neighbor dependence are meshed ([0, GridSize-1) per axis — no quad references a
+ * -1 or GridSize-1 boundary-layer cell) and the request deliberately carries NO neighbor data
+ * (gradient taps that would exit the chunk use the absent-neighbor Air fallback -> one-sided rim
+ * normals, the same trade the default geometry-only deep depth already accepts). Boundary geometry
+ * is produced separately by single-owner seam jobs. Honored by all three meshers.
  */
 enum class EVoxelMeshCellDomain : uint8
 {
@@ -216,9 +215,9 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	int32 NeighborLODLevels[6] = {-1, -1, -1, -1, -1, -1};
 
 	/**
-	 * Cell-domain restriction (seam-ownership P1). Full = legacy whole-chunk meshing (default,
+	 * Cell-domain restriction (seam-ownership P1). Full = whole-chunk meshing (default,
 	 * bit-identical to pre-P1 behavior). Interior = interior-only pass with zero neighbor deps;
-	 * see EVoxelMeshCellDomain. Honored by the CPU/GPU DC and CPU MC meshers.
+	 * see EVoxelMeshCellDomain. Honored by all three meshers.
 	 */
 	EVoxelMeshCellDomain MeshCellDomain = EVoxelMeshCellDomain::Full;
 
@@ -660,63 +659,6 @@ struct VOXELMESHING_API FVoxelCornerSeamRequest
 };
 
 /**
- * Handle for tracking async meshing operations.
- *
- * Returned by async meshing calls, used to query status
- * and retrieve results.
- */
-struct VOXELMESHING_API FVoxelMeshingHandle
-{
-
-	/** Unique identifier for this request */
-	uint64 RequestId = 0;
-
-	/** Whether the meshing operation has completed */
-	bool bIsComplete = false;
-
-	/** Whether the operation completed successfully */
-	bool bWasSuccessful = false;
-
-	/** Chunk coordinate this handle refers to */
-	FIntVector ChunkCoord = FIntVector::ZeroValue;
-
-	/** Default constructor */
-	FVoxelMeshingHandle() = default;
-
-	/** Construct with request ID */
-	explicit FVoxelMeshingHandle(uint64 InRequestId, const FIntVector& InChunkCoord)
-		: RequestId(InRequestId)
-		, bIsComplete(false)
-		, bWasSuccessful(false)
-		, ChunkCoord(InChunkCoord)
-	{
-	}
-
-	/** Check if handle is valid */
-	FORCEINLINE bool IsValid() const
-	{
-		return RequestId != 0;
-	}
-
-	/** Reset handle to invalid state */
-	void Reset()
-	{
-		RequestId = 0;
-		bIsComplete = false;
-		bWasSuccessful = false;
-		ChunkCoord = FIntVector::ZeroValue;
-	}
-};
-
-/**
- * Delegate called when an async meshing operation completes.
- *
- * @param Handle The handle for the completed operation
- * @param bSuccess Whether the operation completed successfully
- */
-DECLARE_DELEGATE_TwoParams(FOnVoxelMeshingComplete, FVoxelMeshingHandle /*Handle*/, bool /*bSuccess*/);
-
-/**
  * Statistics for a meshing operation.
  */
 struct VOXELMESHING_API FVoxelMeshingStats
@@ -752,12 +694,6 @@ struct VOXELMESHING_API FVoxelMeshingStats
  */
 struct VOXELMESHING_API FVoxelMeshingConfig
 {
-
-	/** Maximum vertices per mesh (for buffer pre-allocation) */
-	uint32 MaxVerticesPerChunk = 65536;
-
-	/** Maximum indices per mesh (for buffer pre-allocation) */
-	uint32 MaxIndicesPerChunk = 196608;
 
 	/** Whether to generate UVs */
 	bool bGenerateUVs = true;

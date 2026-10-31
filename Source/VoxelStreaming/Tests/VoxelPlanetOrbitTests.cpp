@@ -46,7 +46,6 @@ namespace VoxelPlanetOrbitTestUtils
 		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
 		virtual void Shutdown() override { bInitialized = false; }
 		virtual bool IsInitialized() const override { return bInitialized; }
-		virtual void UpdateChunkMesh(const FChunkRenderData& RenderData) override {}
 		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override { Chunks.Add(ChunkCoord); }
 		virtual void RemoveChunk(const FIntVector& ChunkCoord) override { Chunks.Remove(ChunkCoord); }
 		virtual void ClearAllChunks() override { Chunks.Reset(); }
@@ -111,7 +110,6 @@ namespace VoxelPlanetOrbitTestUtils
 				FLODBand(2000.0f, 4000.0f, 1, 2),
 				FLODBand(4000.0f, ViewDistance, 2, 4) };
 			Config->bUseGPUGeneration = false;
-			Config->bUseGPUMeshing = false;
 			Config->bGenerateCollision = false;
 			Config->bEnableScatter = false;
 			Config->bEnableCaves = false;

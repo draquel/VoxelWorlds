@@ -275,7 +275,6 @@ void FVoxelCPUCubicMesher::Shutdown()
 		return;
 	}
 
-	ReleaseAllHandles();
 	bIsInitialized = false;
 	UE_LOG(LogVoxelMeshing, Log, TEXT("CPU Cubic Mesher shutdown"));
 }
@@ -1264,120 +1263,8 @@ void FVoxelCPUCubicMesher::EmitQuad(
 }
 
 // ============================================================================
-// Async Pattern (wraps sync for CPU mesher)
+// Configuration
 // ============================================================================
-
-FVoxelMeshingHandle FVoxelCPUCubicMesher::GenerateMeshAsync(
-	const FVoxelMeshingRequest& Request,
-	FOnVoxelMeshingComplete OnComplete)
-{
-	const uint64 RequestId = NextRequestId.fetch_add(1);
-	FVoxelMeshingHandle Handle(RequestId, Request.ChunkCoord);
-
-	// CPU mesher runs synchronously
-	FCachedResult Result;
-	Result.bSuccess = GenerateMeshCPU(Request, Result.MeshData, Result.Stats);
-
-	// Cache the result
-	{
-		FScopeLock Lock(&CacheLock);
-		CachedResults.Add(RequestId, MoveTemp(Result));
-	}
-
-	Handle.bIsComplete = true;
-	Handle.bWasSuccessful = Result.bSuccess;
-
-	// Call completion delegate
-	if (OnComplete.IsBound())
-	{
-		OnComplete.Execute(Handle, Handle.bWasSuccessful);
-	}
-
-	return Handle;
-}
-
-bool FVoxelCPUCubicMesher::IsComplete(const FVoxelMeshingHandle& Handle) const
-{
-	// CPU mesher always completes synchronously
-	return Handle.bIsComplete;
-}
-
-bool FVoxelCPUCubicMesher::WasSuccessful(const FVoxelMeshingHandle& Handle) const
-{
-	return Handle.bWasSuccessful;
-}
-
-FRHIBuffer* FVoxelCPUCubicMesher::GetVertexBuffer(const FVoxelMeshingHandle& Handle)
-{
-	// CPU mesher doesn't create GPU buffers
-	return nullptr;
-}
-
-FRHIBuffer* FVoxelCPUCubicMesher::GetIndexBuffer(const FVoxelMeshingHandle& Handle)
-{
-	// CPU mesher doesn't create GPU buffers
-	return nullptr;
-}
-
-bool FVoxelCPUCubicMesher::GetBufferCounts(
-	const FVoxelMeshingHandle& Handle,
-	uint32& OutVertexCount,
-	uint32& OutIndexCount) const
-{
-	FScopeLock Lock(&CacheLock);
-	const FCachedResult* Result = CachedResults.Find(Handle.RequestId);
-	if (Result && Result->bSuccess)
-	{
-		OutVertexCount = Result->MeshData.GetVertexCount();
-		OutIndexCount = Result->MeshData.Indices.Num();
-		return true;
-	}
-	return false;
-}
-
-bool FVoxelCPUCubicMesher::GetRenderData(
-	const FVoxelMeshingHandle& Handle,
-	FChunkRenderData& OutRenderData)
-{
-	// CPU mesher doesn't create GPU render data
-	// Caller should use ReadbackToCPU and upload manually
-	FScopeLock Lock(&CacheLock);
-	const FCachedResult* Result = CachedResults.Find(Handle.RequestId);
-	if (Result && Result->bSuccess)
-	{
-		OutRenderData.ChunkCoord = Handle.ChunkCoord;
-		OutRenderData.VertexCount = Result->MeshData.GetVertexCount();
-		OutRenderData.IndexCount = Result->MeshData.Indices.Num();
-		return true;
-	}
-	return false;
-}
-
-bool FVoxelCPUCubicMesher::ReadbackToCPU(
-	const FVoxelMeshingHandle& Handle,
-	FChunkMeshData& OutMeshData)
-{
-	FScopeLock Lock(&CacheLock);
-	const FCachedResult* Result = CachedResults.Find(Handle.RequestId);
-	if (Result && Result->bSuccess)
-	{
-		OutMeshData = Result->MeshData;
-		return true;
-	}
-	return false;
-}
-
-void FVoxelCPUCubicMesher::ReleaseHandle(const FVoxelMeshingHandle& Handle)
-{
-	FScopeLock Lock(&CacheLock);
-	CachedResults.Remove(Handle.RequestId);
-}
-
-void FVoxelCPUCubicMesher::ReleaseAllHandles()
-{
-	FScopeLock Lock(&CacheLock);
-	CachedResults.Empty();
-}
 
 void FVoxelCPUCubicMesher::SetConfig(const FVoxelMeshingConfig& InConfig)
 {
@@ -1387,18 +1274,4 @@ void FVoxelCPUCubicMesher::SetConfig(const FVoxelMeshingConfig& InConfig)
 const FVoxelMeshingConfig& FVoxelCPUCubicMesher::GetConfig() const
 {
 	return Config;
-}
-
-bool FVoxelCPUCubicMesher::GetStats(
-	const FVoxelMeshingHandle& Handle,
-	FVoxelMeshingStats& OutStats) const
-{
-	FScopeLock Lock(&CacheLock);
-	const FCachedResult* Result = CachedResults.Find(Handle.RequestId);
-	if (Result)
-	{
-		OutStats = Result->Stats;
-		return true;
-	}
-	return false;
 }

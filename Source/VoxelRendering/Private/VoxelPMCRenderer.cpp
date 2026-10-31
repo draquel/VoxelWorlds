@@ -138,15 +138,6 @@ bool FVoxelPMCRenderer::IsInitialized() const
 
 // ==================== Mesh Updates ====================
 
-void FVoxelPMCRenderer::UpdateChunkMesh(const FChunkRenderData& RenderData)
-{
-	check(IsInGameThread());
-
-	// GPU path is not ideal for PMC - log warning
-	UE_LOG(LogVoxelRendering, Warning,
-		TEXT("FVoxelPMCRenderer::UpdateChunkMesh called with GPU render data. Use UpdateChunkMeshFromCPU for PMC renderer."));
-}
-
 void FVoxelPMCRenderer::UpdateChunkMeshFromCPU(
 	const FIntVector& ChunkCoord,
 	int32 LODLevel,

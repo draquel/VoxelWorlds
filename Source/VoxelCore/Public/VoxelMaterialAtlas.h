@@ -4,9 +4,10 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
-#include "Engine/Texture2D.h"
-#include "Engine/Texture2DArray.h"
 #include "VoxelMaterialAtlas.generated.h"
+
+class UTexture2D;
+class UTexture2DArray;
 
 /**
  * Face type for directional texture mapping.

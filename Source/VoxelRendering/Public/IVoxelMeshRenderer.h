@@ -68,23 +68,10 @@ public:
 	// ==================== Mesh Updates ====================
 
 	/**
-	 * Update or create mesh for a chunk.
+	 * Update or create a chunk's mesh from CPU-side mesh data (the chunk manager's path).
 	 *
 	 * If the chunk already exists, its mesh is replaced.
 	 * If new, the chunk is added to the render set.
-	 *
-	 * For Custom VF: RenderData contains GPU buffer references
-	 * For PMC: RenderData may require CPU-side vertex data
-	 *
-	 * @param RenderData Chunk render data with geometry information
-	 */
-	virtual void UpdateChunkMesh(const FChunkRenderData& RenderData) = 0;
-
-	/**
-	 * Update chunk mesh using CPU-side mesh data.
-	 *
-	 * Alternative to UpdateChunkMesh for when CPU mesh data is available
-	 * (e.g., for PMC renderer or collision generation).
 	 *
 	 * @param ChunkCoord Chunk coordinate
 	 * @param LODLevel Current LOD level

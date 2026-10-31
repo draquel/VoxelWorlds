@@ -24,8 +24,6 @@ public class VoxelMeshing : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
-				"RenderCore",
-				"RHI",
 				"VoxelCore",
 			}
 		);
@@ -33,8 +31,6 @@ public class VoxelMeshing : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"Projects",
-				"Renderer",
 			}
 		);
 

@@ -7,7 +7,6 @@
 #include "Materials/MaterialInterface.h"
 #include "LocalVertexFactory.h"
 #include "VoxelLocalVertexFactory.h"
-#include "VoxelChunkGPUData.h"  // FVoxelChunkGPUData (GPU chunk buffer container)
 #include "VoxelBatchCounters.h"
 
 class UVoxelWorldComponent;
@@ -176,20 +175,7 @@ public:
 	// ==================== Chunk Management (Render Thread) ====================
 
 	/**
-	 * Update or add chunk GPU data.
-	 * Converts from FVoxelChunkGPUData (FVoxelVertex format) to FLocalVertexFactory-compatible format.
-	 * Must be called on render thread.
-	 *
-	 * @param RHICmdList RHI command list for resource initialization
-	 * @param ChunkCoord Chunk coordinate
-	 * @param GPUData GPU data for the chunk (in FVoxelVertex format)
-	 * @param bCrossfade If true and the chunk already has a mesh, retain it as the crossfade Previous set instead of releasing it
-	 */
-	void UpdateChunkBuffers_RenderThread(FRHICommandListBase& RHICmdList, const FIntVector& ChunkCoord, const FVoxelChunkGPUData& GPUData, bool bCrossfade = false);
-
-	/**
-	 * Update chunk directly from CPU vertex data - FAST PATH.
-	 * Avoids GPU buffer roundtrip by taking CPU arrays directly.
+	 * Update or add a chunk's mesh from CPU vertex data.
 	 * Must be called on render thread.
 	 *
 	 * @param RHICmdList RHI command list for resource initialization

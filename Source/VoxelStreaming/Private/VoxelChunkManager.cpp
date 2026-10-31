@@ -25,12 +25,11 @@
 #include "VoxelCPUCubicMesher.h"
 #include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelCPUDualContourMesher.h"
-#include "VoxelGPUDualContourMesher.h"
-#include "VoxelGPUMarchingCubesMesher.h"
 #include "VoxelResidencyStats.h"
 #include "Async/ParallelFor.h"
 #include "VoxelNeighborSliceExtraction.h"
 #include "VoxelCPUNoiseGenerator.h"
+#include "RenderGraphResources.h" // FRDGPooledBuffer: the GPU generator and meshers hold TRefCountPtrs to it
 #include "VoxelGPUNoiseGenerator.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
@@ -480,21 +479,6 @@ static TAutoConsoleVariable<int32> CVarSeamMaxJobsPerTick(
 // onto it): every configuration runs interior-only chunk meshes + single-owner seam jobs.
 // Qualified vs legacy: thrash -96/-98%, catch-up 31.9->11.8s, GT MeshMs 8.5->0.6ms on GPU RHI
 // (SEAM_OWNERSHIP_ARCHITECTURE.md §7.1); cubic in WORLD_MODES_REVIEW_PLAN.md §14.9.
-
-// With a GPU DC main mesher, seam junctions are only bit-exact if interiors are CPU-meshed too
-// (GPU QEF solves diverge from the CPU seam rings — visible cracks). 1 = route interior chunk
-// meshes to the CPU SeamMesher while seam meshing is active (watertight). 0 = keep GPU interior
-// meshes (junction cracks; A/B lever for measuring the GPU interior-meshing advantage).
-static TAutoConsoleVariable<int32> CVarSeamCPUInteriorRouting(
-	TEXT("voxel.Seam.CPUInteriorRouting"),
-	1,
-	TEXT("When seam meshing is active with a GPU DC mesher: 1 = interior chunk meshes run on the "
-	     "CPU DC mesher (bit-exact seam junctions, default and the only supported setting).\n"
-	     "0 is RETIRED and NON-FUNCTIONAL: the GPU DC interior path produces zero geometry "
-	     "(Pass 3 readback race), so setting 0 leaves only the CPU seam ribbons and the terrain "
-	     "disappears. Kept solely so the setting is discoverable rather than silently missing. "
-	     "See SEAM_OWNERSHIP_ARCHITECTURE.md 7.2 option C."),
-	ECVF_Default);
 
 // Job-stage caps. Seam jobs are strip-sized and finish within a frame (worker p50 ~0.2-0.7 ms), so
 // the in-flight cap behaves as a PER-TICK DRAIN BUDGET rather than a concurrency limit: a near
@@ -1061,13 +1045,6 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// Sub-timed per function so the benchmark CSV can attribute meshing-phase cost.
 	SectionStart = FPlatformTime::Seconds();
 	SubStart = SectionStart;
-	if (Mesher)
-	{
-		Mesher->Tick(DeltaTime);
-	}
-	SubEnd = FPlatformTime::Seconds();
-	Timing.MeshTickMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
-	SubStart = SubEnd;
 	ProcessMeshingQueue(TimeSlice * 0.4f, Timing);
 	SubEnd = FPlatformTime::Seconds();
 	Timing.MeshLaunchMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
@@ -1427,10 +1404,9 @@ void UVoxelChunkManager::Initialize(
 			Configuration->bUseGPUGeneration ? TEXT("true") : TEXT("false"),
 			bForceCPU ? TEXT("true") : TEXT("false"));
 	}
-	const bool bUseGPU = Configuration->bUseGPUMeshing && !bForceCPU;
 	if (bForceCPU)
 	{
-		UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelForceCPU: forcing CPU generation + CPU mesher (GPU disabled)"));
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelForceCPU: forcing CPU generation"));
 	}
 
 	// Create mesher based on configuration
@@ -1441,42 +1417,19 @@ void UVoxelChunkManager::Initialize(
 		MeshConfig.bCalculateAO = Configuration->bCalculateAO;
 		MeshConfig.UVScale = Configuration->UVScale;
 
-		// Marching Cubes is triangle-soup (3 verts/tri, no vertex sharing) — a chunk needs far more
-		// vertices than Dual Contouring (~1 vert/cell). Scale the GPU output-buffer budget with chunk
-		// volume so cave-dense chunks (lots of interior surface) fit at large chunk sizes (e.g. 64^3)
-		// instead of overflowing the default 65536 cap and vanishing (the reported invisible-cave-chunk
-		// bug). 32^3 stays at 65536; 64^3 -> 524288. The shader's overflow guard still truncates any
-		// pathological chunk safely (visible, no corruption). Soup => index count == vertex count.
-		const int64 ChunkCells = (int64)Configuration->ChunkSize * Configuration->ChunkSize * Configuration->ChunkSize;
-		MeshConfig.MaxVerticesPerChunk = (uint32)FMath::Clamp<int64>(ChunkCells * 2, 65536, 1048576);
-		MeshConfig.MaxIndicesPerChunk = MeshConfig.MaxVerticesPerChunk;
-
 		// Disable LOD seam handling if configured
 		if (!Configuration->bEnableLODSeams)
 		{
 			MeshConfig.bUseTransvoxel = false;
 		}
 
-		if (bUseGPU)
-		{
-			auto GPUMCMesher = MakeUnique<FVoxelGPUMarchingCubesMesher>();
-			GPUMCMesher->Initialize();
-			GPUMCMesher->SetConfig(MeshConfig);
-			Mesher = MoveTemp(GPUMCMesher);
-			UE_LOG(LogVoxelStreaming, Log, TEXT("Using GPU MarchingCubes mesher (AO=%s, UVScale=%.2f)"),
-				Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
-				Configuration->UVScale);
-		}
-		else
-		{
-			auto CPUMCMesher = MakeUnique<FVoxelCPUMarchingCubesMesher>();
-			CPUMCMesher->Initialize();
-			CPUMCMesher->SetConfig(MeshConfig);
-			Mesher = MoveTemp(CPUMCMesher);
-			UE_LOG(LogVoxelStreaming, Log, TEXT("Using CPU MarchingCubes mesher (AO=%s, UVScale=%.2f)"),
-				Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
-				Configuration->UVScale);
-		}
+		auto CPUMCMesher = MakeUnique<FVoxelCPUMarchingCubesMesher>();
+		CPUMCMesher->Initialize();
+		CPUMCMesher->SetConfig(MeshConfig);
+		Mesher = MoveTemp(CPUMCMesher);
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Using CPU MarchingCubes mesher (AO=%s, UVScale=%.2f)"),
+			Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
+			Configuration->UVScale);
 	}
 	else if (Configuration->MeshingMode == EMeshingMode::DualContouring)
 	{
@@ -1488,26 +1441,13 @@ void UVoxelChunkManager::Initialize(
 		// DC uses its own LOD boundary merging, not Transvoxel transition cells
 		MeshConfig.bUseTransvoxel = false;
 
-		if (bUseGPU)
-		{
-			auto GPUDCMesher = MakeUnique<FVoxelGPUDualContourMesher>();
-			GPUDCMesher->Initialize();
-			GPUDCMesher->SetConfig(MeshConfig);
-			Mesher = MoveTemp(GPUDCMesher);
-			UE_LOG(LogVoxelStreaming, Log, TEXT("Using GPU Dual Contouring mesher (AO=%s, UVScale=%.2f)"),
-				Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
-				Configuration->UVScale);
-		}
-		else
-		{
-			auto DCMesher = MakeUnique<FVoxelCPUDualContourMesher>();
-			DCMesher->Initialize();
-			DCMesher->SetConfig(MeshConfig);
-			Mesher = MoveTemp(DCMesher);
-			UE_LOG(LogVoxelStreaming, Log, TEXT("Using CPU Dual Contouring mesher (AO=%s, UVScale=%.2f)"),
-				Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
-				Configuration->UVScale);
-		}
+		auto DCMesher = MakeUnique<FVoxelCPUDualContourMesher>();
+		DCMesher->Initialize();
+		DCMesher->SetConfig(MeshConfig);
+		Mesher = MoveTemp(DCMesher);
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Using CPU Dual Contouring mesher (AO=%s, UVScale=%.2f)"),
+			Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
+			Configuration->UVScale);
 	}
 	else
 	{
@@ -1534,12 +1474,6 @@ void UVoxelChunkManager::Initialize(
 	{
 		SeamRegistry->SetFaceSeamsOnly(Configuration->MeshingMode == EMeshingMode::Cubic);
 	}
-	if (Mesher->GetMesherTypeName().Contains(TEXT("GPU")) && CVarSeamCPUInteriorRouting.GetValueOnGameThread() != 0)
-	{
-		UE_LOG(LogVoxelStreaming, Log,
-			TEXT("Seam meshing: chunk meshes route to the CPU seam mesher (GPU results are not bit-exact with the CPU seam geometry — junction cracks); the GPU mesher idles."));
-	}
-
 	// Clear pending mesh queue
 	PendingMeshQueue.Empty();
 
@@ -5744,104 +5678,39 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 
 	// Capture mesher pointer (it's a TUniquePtr, so we need raw pointer for lambda)
 	IVoxelMesher* MesherPtr = Mesher.Get();
-
-	// Seam-ownership junction exactness: interior chunk meshes run on the same CPU instance that
-	// meshes the seams. Seam rings recompute rim vertices bit-exactly only against the CPU op
-	// sequence — the GPU QEF solve diverges (cell-relative coordinate formulation, and SVD threshold
-	// flips that can move a vertex by up to a cell), which rendered as boundary cracks growing with
-	// LOD. One mesher computes both sides; a GPU main mesher idles for chunk meshes.
-	if (MesherPtr->GetMesherTypeName().Contains(TEXT("GPU"))
-		&& CVarSeamCPUInteriorRouting.GetValueOnGameThread() != 0)
-	{
-		MesherPtr = EnsureSeamMesher();
-	}
 	const FIntVector ChunkCoord = Request.ChunkCoord;
 	const int32 LODLevel = Request.LODLevel;
 
 	// Use a weak pointer to safely check if ChunkManager is still valid
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 
-	// Detect GPU meshers by type name — use GenerateMeshAsync() for GPU dispatch
-	const bool bUseGPUPath = MesherPtr->GetMesherTypeName().Contains(TEXT("GPU"));
-
-	if (bUseGPUPath)
+	// Dispatch to a thread-pool worker
+	Async(EAsyncExecution::ThreadPool, [MesherGuard = FMesherWorkerGuard(MesherWorkerJobs), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel, DispatchSerial,
+		DeferredVoxels = MoveTemp(DeferredVoxels), DeferredDecode = MoveTemp(DeferredDecode)]() mutable
 	{
-		// GPU path: async callback (fired from the mesher's game-thread Tick) enqueues the result
-		FOnVoxelMeshingComplete OnComplete;
-		OnComplete.BindLambda([WeakThis, MesherPtr, ChunkCoord, LODLevel, DispatchSerial](
-			FVoxelMeshingHandle Handle, bool bSuccess)
+		// Generate mesh on background thread
+		FChunkMeshData MeshData;
+		const double WorkerStart = FPlatformTime::Seconds();
+		TakeDeferredMeshVoxels(DeferredVoxels, DeferredDecode, MeshRequest.VoxelData);
+		const bool bSuccess = MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);
+		const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
+
+		// Queue result for game thread (thread-safe MPSC queue)
+		if (UVoxelChunkManager* This = WeakThis.Get())
 		{
-			UVoxelChunkManager* This = WeakThis.Get();
-			if (!This)
-			{
-				return;
-			}
-
-			FAsyncMeshResult AsyncResult;
-			AsyncResult.ChunkCoord = ChunkCoord;
-			AsyncResult.LODLevel = LODLevel;
-			AsyncResult.DispatchSerial = DispatchSerial;
-
+			FAsyncMeshResult Result;
+			Result.ChunkCoord = ChunkCoord;
+			Result.LODLevel = LODLevel;
+			Result.bSuccess = bSuccess;
+			Result.DispatchSerial = DispatchSerial;
+			Result.WorkerMs = WorkerMs;
 			if (bSuccess)
 			{
-				// Readback GPU data to CPU for the rendering pipeline
-				FChunkMeshData MeshData;
-				if (MesherPtr->ReadbackToCPU(Handle, MeshData))
-				{
-					AsyncResult.bSuccess = true;
-					AsyncResult.MeshData = MoveTemp(MeshData);
-				}
-				MesherPtr->ReleaseHandle(Handle);
+				Result.MeshData = MoveTemp(MeshData);
 			}
-			else
-			{
-				AsyncResult.bSuccess = false;
-			}
-
-			This->CompletedMeshQueue.Enqueue(MoveTemp(AsyncResult));
-		});
-
-		// Dispatch from a thread-pool worker: GenerateMeshAsync's CPU side (packing the chunk
-		// volume into upload buffers, copies + allocations per chunk) was a per-launch game-thread
-		// cost. The DC/MC meshers are worker-safe here (atomic request ids, lock-guarded result
-		// maps, and their render command is self-contained).
-		Async(EAsyncExecution::ThreadPool, [MesherGuard = FMesherWorkerGuard(MesherWorkerJobs), MesherPtr, MeshRequest = MoveTemp(MeshRequest), OnComplete,
-			DeferredVoxels = MoveTemp(DeferredVoxels), DeferredDecode = MoveTemp(DeferredDecode)]() mutable
-		{
-			TakeDeferredMeshVoxels(DeferredVoxels, DeferredDecode, MeshRequest.VoxelData);
-			MesherPtr->GenerateMeshAsync(MeshRequest, OnComplete);
-		});
-	}
-	else
-	{
-		// CPU path: existing thread pool dispatch (unchanged)
-		Async(EAsyncExecution::ThreadPool, [MesherGuard = FMesherWorkerGuard(MesherWorkerJobs), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel, DispatchSerial,
-			DeferredVoxels = MoveTemp(DeferredVoxels), DeferredDecode = MoveTemp(DeferredDecode)]() mutable
-		{
-			// Generate mesh on background thread
-			FChunkMeshData MeshData;
-			const double WorkerStart = FPlatformTime::Seconds();
-			TakeDeferredMeshVoxels(DeferredVoxels, DeferredDecode, MeshRequest.VoxelData);
-			const bool bSuccess = MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);
-			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
-
-			// Queue result for game thread (thread-safe MPSC queue)
-			if (UVoxelChunkManager* This = WeakThis.Get())
-			{
-				FAsyncMeshResult Result;
-				Result.ChunkCoord = ChunkCoord;
-				Result.LODLevel = LODLevel;
-				Result.bSuccess = bSuccess;
-				Result.DispatchSerial = DispatchSerial;
-				Result.WorkerMs = WorkerMs;
-				if (bSuccess)
-				{
-					Result.MeshData = MoveTemp(MeshData);
-				}
-				This->CompletedMeshQueue.Enqueue(MoveTemp(Result));
-			}
-		});
-	}
+			This->CompletedMeshQueue.Enqueue(MoveTemp(Result));
+		}
+	});
 }
 
 void UVoxelChunkManager::ProcessCompletedAsyncMeshes()
