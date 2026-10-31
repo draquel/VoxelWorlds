@@ -474,7 +474,7 @@ public:
 	 * Scatter configuration data asset.
 	 * Defines scatter types (grass, rocks, trees) with meshes and placement rules.
 	 * Create a UVoxelScatterConfiguration asset and assign it here.
-	 * If null, default scatter definitions will be used.
+	 * Null = no scatter (the manager's built-in defaults went in code review CR1, D-CR18).
 	 *
 	 * To create: Right-click in Content Browser -> Miscellaneous -> Data Asset -> VoxelScatterConfiguration
 	 */

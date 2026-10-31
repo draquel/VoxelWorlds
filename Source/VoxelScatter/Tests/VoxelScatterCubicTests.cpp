@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "Testing/VoxelScatterTestDefinitions.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "VoxelScatterManager.h"
@@ -100,6 +101,7 @@ bool FVoxelScatterCubicCPUExtractionTest::RunTest(const FString& Parameters)
 	UVoxelScatterManager* Manager = NewObject<UVoxelScatterManager>();
 	Manager->AddToRoot();
 	Manager->Initialize(Cubic, World);
+	VoxelScatterTesting::AddCubicDefinitions(*Manager);
 
 	const FIntVector Coord(0, 0, 0);
 	Manager->OnChunkMeshDataReady(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);

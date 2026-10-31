@@ -46,13 +46,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter|Sampling", meta = (ClampMin = "10.0", ClampMax = "500.0"))
 	float SurfacePointSpacing = 100.0f;
 
-	/**
-	 * Use default scatter definitions if array is empty.
-	 * When true and ScatterDefinitions is empty, creates Grass/Rocks/Trees defaults.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter")
-	bool bUseDefaultsIfEmpty = true;
-
 public:
 	/**
 	 * Get scatter definition by ID.

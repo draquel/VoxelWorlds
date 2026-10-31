@@ -81,9 +81,9 @@ it ends the source, brush centre and radius it broadcast. The history (undo and 
   broadcast like any other. Water propagation's flood is one (it follows from the edit that let the water in): undoing
   that edit puts its voxels back as they were before it, the flood there with them, and its redo floods again. Water the
   flood put beyond the edit's voxels stays.
-  The world's own generation is outside it too (G68): dungeon stamps (`UDungeonVoxelStamper`), their entrances
-  (`UDungeonEntranceStitcher`) and campsites (`UVoxelWorldPOIPlacement::PlaceCampsite`), so an undo takes back the
-  player's own last edit, never a POI. Until 2026-10-22 they were undo steps: on `Review_Planet_L` four POI operations
+  The world's own generation is outside it too (G68): dungeon stamps (`UDungeonVoxelStamper`) and their entrances
+  (`UDungeonEntranceStitcher`; the runtime campsite levelling that was the third went in code review CR1, D-CR17), so
+  an undo takes back the player's own last edit, never a POI.Until 2026-10-22 they were undo steps: on `Review_Planet_L` four POI operations
   around a site held 94 MB of history, and an undo took back the last of them. As with the flood, undoing a player's
   edit made before a stamp puts back that edit's voxels as they were before it, the stamp's there with them.
 - A clear (`ClearChunkEdits`, `ClearAllEdits`) is outside the history; a load (`LoadEditsFromFile`) clears it.

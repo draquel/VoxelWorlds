@@ -128,7 +128,6 @@ seam-closure and streaming tests, and GPU/CPU parity tests that exercise the rea
 
 - `voxel.RemeshAll` — re-mesh all loaded chunks
 - `voxel.Bench.Run` — streaming performance benchmark
-- `voxel.VertexColorDebugMode 0|1|2` — debug vertex AO / material / biome encoding
 
 ---
 

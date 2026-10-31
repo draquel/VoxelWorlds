@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "Testing/VoxelScatterTestDefinitions.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "VoxelScatterManager.h"
@@ -56,6 +57,7 @@ namespace VoxelScatterCleanupTestUtils
 			Manager = NewObject<UVoxelScatterManager>();
 			Manager->AddToRoot();
 			Manager->Initialize(Config, World);
+			VoxelScatterTesting::AddCubicDefinitions(*Manager); // the configuration's default meshing mode is cubic
 		}
 
 		~FScatterTestHarness()

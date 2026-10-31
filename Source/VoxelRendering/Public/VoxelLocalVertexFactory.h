@@ -6,28 +6,7 @@
 #include "RenderResource.h"
 #include "LocalVertexFactory.h"
 #include "VoxelVertex.h"
-#include "VoxelMaterialRegistry.h"
 #include "RenderUtils.h"  // For FPackedNormal
-
-/**
- * Debug mode for vertex color output.
- * When enabled, material colors are baked directly into vertex RGB for visual debugging.
- * When disabled, encoded data (AO, MaterialID, BiomeID) is stored for material graph use.
- */
-namespace EVoxelVertexColorDebugMode
-{
-	/** Normal mode: R=AO, G=MaterialID/255, B=BiomeID/255, A=1 */
-	constexpr int32 Disabled = 0;
-
-	/** Debug mode: RGB=MaterialColor * AO, A=1 (visual debugging) */
-	constexpr int32 MaterialColors = 1;
-
-	/** Debug mode: RGB=BiomeID as hue, A=1 */
-	constexpr int32 BiomeColors = 2;
-}
-
-/** Current debug mode - change this to switch modes (defined in VoxelSceneProxy.cpp) */
-extern VOXELRENDERING_API int32 GVoxelVertexColorDebugMode;
 
 /**
  * Vertex format compatible with FLocalVertexFactory.
@@ -167,53 +146,12 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 		// Store MaterialID and FaceType in UV1 as exact floats (no interpolation issues)
 		Result.TexCoord1 = FVector2f(static_cast<float>(MaterialID), static_cast<float>(FaceType));
 
-		// Apply debug mode
-		if (GVoxelVertexColorDebugMode == EVoxelVertexColorDebugMode::MaterialColors)
-		{
-			// Debug: Bake material color * AO directly into vertex color
-			float AOFactor = 1.0f - (AOValue * 0.25f); // 0->1.0, 1->0.75, 2->0.5, 3->0.25
-			FColor MatColor = FVoxelMaterialRegistry::GetMaterialColor(MaterialID);
-			Result.Color = FColor(
-				static_cast<uint8>(MatColor.R * AOFactor),
-				static_cast<uint8>(MatColor.G * AOFactor),
-				static_cast<uint8>(MatColor.B * AOFactor),
-				255
-			);
-		}
-		else if (GVoxelVertexColorDebugMode == EVoxelVertexColorDebugMode::BiomeColors)
-		{
-			// Debug: Show BiomeID as distinct color using lookup table
-			// Each BiomeID gets a unique, easily distinguishable color
-			static const FColor BiomeDebugColors[] = {
-				FColor(255, 0, 0, 255),     // 0 = Red
-				FColor(0, 255, 0, 255),     // 1 = Green
-				FColor(0, 0, 255, 255),     // 2 = Blue
-				FColor(255, 255, 0, 255),   // 3 = Yellow
-				FColor(255, 0, 255, 255),   // 4 = Magenta
-				FColor(0, 255, 255, 255),   // 5 = Cyan
-				FColor(255, 128, 0, 255),   // 6 = Orange
-				FColor(128, 0, 255, 255),   // 7 = Purple
-			};
-			constexpr int32 NumBiomeColors = sizeof(BiomeDebugColors) / sizeof(BiomeDebugColors[0]);
-
-			float AOFactor = 1.0f - (AOValue * 0.25f);
-			FColor BaseColor = BiomeDebugColors[BiomeID % NumBiomeColors];
-			Result.Color = FColor(
-				static_cast<uint8>(BaseColor.R * AOFactor),
-				static_cast<uint8>(BaseColor.G * AOFactor),
-				static_cast<uint8>(BaseColor.B * AOFactor),
-				255
-			);
-		}
-		else
-		{
-			// Normal mode: Encode data for material graph
-			// R = Reserved (legacy MaterialID for compatibility)
-			// G = BiomeID (0-255)
-			// B = AO << 6 (top 2 bits: 0, 64, 128, 192 for AO 0-3)
-			// A = 255
-			Result.Color = FColor(MaterialID, BiomeID, AOValue << 6, 255);
-		}
+		// Encode data for the material graph:
+		// R = MaterialID (0-255)
+		// G = BiomeID (0-255)
+		// B = AO << 6 (top 2 bits: 0, 64, 128, 192 for AO 0-3)
+		// A = 255
+		Result.Color = FColor(MaterialID, BiomeID, AOValue << 6, 255);
 
 		return Result;
 	}

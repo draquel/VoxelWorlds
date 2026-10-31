@@ -241,15 +241,6 @@ public:
 
 	// ==================== Visibility ====================
 
-	/**
-	 * Show or hide surface-only scatter (trees, grass, etc.) based on viewer position.
-	 * When the viewer is underground, surface scatter should be hidden to prevent
-	 * foliage from being visible through cave ceilings.
-	 *
-	 * @param bVisible True to show surface scatter, false to hide
-	 */
-	void SetSurfaceScatterVisible(bool bVisible);
-
 	// ==================== Scatter Data Access ====================
 
 	/**
@@ -714,11 +705,6 @@ protected:
 	 * Get chunk world origin for coordinate conversion.
 	 */
 	FVector GetChunkWorldOrigin(const FIntVector& ChunkCoord) const;
-
-	/**
-	 * Create default scatter definitions.
-	 */
-	void CreateDefaultDefinitions();
 
 protected:
 	// ==================== Sub-Managers ====================

@@ -720,21 +720,12 @@ public:
 
     UPROPERTY(EditAnywhere, Category = "Scatter")
     float SurfacePointSpacing = 100.0f;
-
-    UPROPERTY(EditAnywhere, Category = "Scatter")
-    bool bUseDefaultsIfEmpty = true;
 };
 ```
 
-### Default Scatter Types
-
-Created automatically if no configuration is provided:
-
-| Type | Density | Slope | Materials | Notes |
-|------|---------|-------|-----------|-------|
-| Grass | 50% | 0-30° | Grass | Top faces only, dense |
-| Rocks | 5% | 0-60° | Stone, Dirt | Can appear on slopes |
-| Trees | 2% | 0-20° | Grass | Very sparse, flat terrain |
+A world without a configuration, or one whose array is empty, places no scatter (the manager's built-in grass, rock
+and tree definitions, and the cubic trio, went in code review CR1, D-CR18; `VoxelScatterTesting::SmoothDefinitions`
+keeps the smooth three for the tests that ran on them).
 
 ## Performance Considerations
 
@@ -930,16 +921,6 @@ int32 BillboardAtlasRows = 4;    // Atlas grid rows
    - `TextureSampleParameter2D("BaseTexture")` connected to BaseColor + OpacityMask
    - Material expressions created via `#if WITH_EDITORONLY_DATA`
    - Cached in static `CachedRuntimeBillboardBaseMaterial`
-
-### Default Cubic Scatter Definitions
-
-Created when `MeshingMode == Cubic`:
-
-| ID | Name | Type | Size | Density | Materials | Cull Dist |
-|----|------|------|------|---------|-----------|-----------|
-| 100 | CubicGrass | CrossBillboard | 80x80cm | 0.4 | Grass | 5000 |
-| 101 | CubicFlowers | CrossBillboard | 60x60cm | 0.08 | Grass | 4000 |
-| 102 | CubicRocks | StaticMesh | — | 0.05 | Stone, Dirt | 20000 |
 
 ### Scatter Edit Integration for Block Edits
 
