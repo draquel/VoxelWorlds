@@ -9,10 +9,10 @@ DECLARE_LOG_CATEGORY_EXTERN(LogVoxelRendering, Log, All);
 /**
  * VoxelRendering module - Rendering system for VoxelWorlds.
  *
- * Provides pluggable mesh rendering through the IVoxelMeshRenderer interface.
- * Supports two rendering backends:
- * - Custom Vertex Factory (GPU-driven, runtime)
- * - ProceduralMeshComponent (Editor/tools fallback)
+ * Provides mesh rendering through the IVoxelMeshRenderer interface: FVoxelCustomVFRenderer, one
+ * UVoxelWorldComponent per render region, its FVoxelSceneProxy drawing the chunk, seam and water
+ * meshes through UE's FLocalVertexFactory. (The ProceduralMeshComponent fallback renderer was
+ * deleted in code review CR1, D-CR7.)
  *
  * Dependencies: VoxelCore
  *

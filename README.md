@@ -17,13 +17,13 @@ water, ore, scatter).
 - **Watertight LOD seams** — MC seams handled by **geomorph** (bending the fine surface toward the
   coarse contour at the boundary); DC LOD seams and 4-chunk corner seams sealed.
 - **Pluggable LOD** — swappable strategies via `IVoxelLODStrategy` (distance-band default) with
-  asymmetric refine/coarsen hysteresis and material-parameter-collection LOD morphing. Cubic meshing
+  asymmetric refine/coarsen hysteresis; LOD flips crossfade (a dithered mesh swap). Cubic meshing
   runs without LOD: greedy meshing is its answer to distance.
 - **Streaming** — distance-based chunk load/unload with async mesh generation, stale-cull, thrash
   instrumentation, async Chaos collision cooking, and far-chunk voxel-data compression (keyed on
   distance, so it also covers LOD-off and cubic worlds).
-- **Hybrid rendering** — a GPU-driven renderer built on UE's `FLocalVertexFactory`
-  (`FVoxelCustomVFRenderer`) plus a `ProceduralMeshComponent` fallback (`FVoxelPMCRenderer`).
+- **Rendering** — one renderer built on UE's `FLocalVertexFactory` (`FVoxelCustomVFRenderer`: a world
+  component per render region, its scene proxy drawing chunk, seam and water meshes).
 - **Procedural generation** — CPU/GPU noise library, multiple world modes (infinite plane, spherical
   planet, island/bowl), biomes, caves, ore veins, water, and a foliage/scatter system with voxel
   tree injection.
@@ -55,9 +55,9 @@ VoxelWorlds/
 ├── Source/
 │   ├── VoxelCore/         # Data structures, configs, material/biome registries, edit manager
 │   ├── VoxelGeneration/   # CPU/GPU noise, world modes, tree injection
-│   ├── VoxelMeshing/      # Cubic (CPU) / Marching Cubes / Dual Contouring (CPU+GPU) meshers; water mesher
+│   ├── VoxelMeshing/      # Cubic / Marching Cubes / Dual Contouring meshers (CPU); water mesher
 │   ├── VoxelLOD/          # Pluggable LOD strategy (distance band)
-│   ├── VoxelRendering/    # Scene proxy, FLocalVertexFactory renderer + PMC fallback, world component
+│   ├── VoxelRendering/    # Scene proxy, FLocalVertexFactory renderer, world component
 │   ├── VoxelStreaming/    # Chunk manager, collision manager, water propagation, benchmark, test actor
 │   ├── VoxelScatter/      # Foliage/scatter placement + HISM rendering
 │   └── VoxelMap/          # Map/minimap subsystem
@@ -102,8 +102,7 @@ seam-closure and streaming tests, and GPU/CPU parity tests that exercise the rea
 - `FVoxelCPUMarchingCubesMesher` — Marching Cubes meshing
 - `FVoxelCPUDualContourMesher` — Dual Contouring meshing
 - `FVoxelWaterMesher` — water surface meshing
-- `FVoxelCustomVFRenderer` — GPU-driven renderer (UE `FLocalVertexFactory`)
-- `FVoxelPMCRenderer` — `ProceduralMeshComponent` fallback renderer
+- `FVoxelCustomVFRenderer` — the renderer (UE `FLocalVertexFactory`)
 - `FVoxelSceneProxy` / `UVoxelWorldComponent` — scene proxy + primitive component bridge
 - `FVoxelMaterialRegistry` / `UVoxelMaterialAtlas` — material definitions and texture atlas
 - `FVoxelBiomeRegistry` — biome definitions registry

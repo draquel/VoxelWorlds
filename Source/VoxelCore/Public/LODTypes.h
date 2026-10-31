@@ -113,19 +113,14 @@ struct VOXELCORE_API FChunkLODRequest
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
 	float Priority = 0.0f;
 
-	/** LOD transition morph factor (0 = this LOD, 1 = next LOD) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
-	float MorphFactor = 0.0f;
-
 	/** Default constructor */
 	FChunkLODRequest() = default;
 
 	/** Construct with values */
-	FChunkLODRequest(const FIntVector& InChunkCoord, int32 InLODLevel, float InPriority = 0.0f, float InMorphFactor = 0.0f)
+	FChunkLODRequest(const FIntVector& InChunkCoord, int32 InLODLevel, float InPriority = 0.0f)
 		: ChunkCoord(InChunkCoord)
 		, LODLevel(InLODLevel)
 		, Priority(InPriority)
-		, MorphFactor(InMorphFactor)
 	{
 	}
 
@@ -169,10 +164,6 @@ struct VOXELCORE_API FLODBand
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "8"))
 	int32 ChunkSize = VOXEL_DEFAULT_CHUNK_SIZE;
 
-	/** Distance range for LOD morphing (0 = no morphing) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "0"))
-	float MorphRange = 0.0f;
-
 	/** Default constructor */
 	FLODBand() = default;
 
@@ -183,7 +174,6 @@ struct VOXELCORE_API FLODBand
 		, LODLevel(InLOD)
 		, VoxelStride(InStride)
 		, ChunkSize(InChunkSize)
-		, MorphRange(0.0f)
 	{
 	}
 
@@ -191,23 +181,6 @@ struct VOXELCORE_API FLODBand
 	FORCEINLINE bool ContainsDistance(float Distance) const
 	{
 		return Distance >= MinDistance && Distance < MaxDistance;
-	}
-
-	/** Calculate morph factor for smooth LOD transition */
-	FORCEINLINE float GetMorphFactor(float Distance) const
-	{
-		if (MorphRange <= 0.0f)
-		{
-			return 0.0f;
-		}
-
-		const float MorphStart = MaxDistance - MorphRange;
-		if (Distance <= MorphStart)
-		{
-			return 0.0f;
-		}
-
-		return FMath::Clamp((Distance - MorphStart) / MorphRange, 0.0f, 1.0f);
 	}
 
 	/** Get the world size covered by one chunk at this LOD */

@@ -169,7 +169,7 @@ private:
 		float FarOceanMs;
 		int32 FarOceanRebuildN;
 		// Memory (MB) and far-compression residency, refreshed every MemorySampleIntervalSec
-		float VoxelMB, EditMB, RendCPUMB, RendGPUMB, CollMB, ScatMB, ProcessMB;
+		float VoxelMB, EditMB, RendGPUMB, CollMB, ScatMB, ProcessMB;
 		int32 ResidentN, UniformN, CompressedN, EmptyN;
 		// LOD evaluation this tick (KI12): candidates found (-1 = no evaluation) and re-meshes queued; and
 		// the LOD backlog when the sample was taken (Loaded chunks whose LOD change is not queued, and the

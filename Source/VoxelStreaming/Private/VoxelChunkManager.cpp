@@ -1159,14 +1159,6 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 			Timing.LODEvalQueued = Queued;
 			LODEvalSchedule.OnEvaluated(Context.ViewerPosition, Queued, bCapReached);
 		}
-
-		// Morph factor updates: gated by movement threshold
-		const float PositionDeltaSq = FVector::DistSquared(Context.ViewerPosition, LastLODUpdatePosition);
-		if (bViewerChunkChanged || PositionDeltaSq > LODUpdateThresholdSq)
-		{
-			UpdateLODMorphFactors(Context);
-			LastLODUpdatePosition = Context.ViewerPosition;
-		}
 	}
 	Timing.LODMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
 
@@ -1312,13 +1304,6 @@ void UVoxelChunkManager::Initialize(
 		MeshRenderer->SetWaterMaterial(Configuration->WaterMeshMaterial);
 	}
 
-	// Disable LOD morphing for cubic mode - vertices cannot interpolate with hard edges
-	if (Configuration->MeshingMode == EMeshingMode::Cubic && Configuration->bEnableLODMorphing)
-	{
-		Configuration->bEnableLODMorphing = false;
-		UE_LOG(LogVoxelStreaming, Log, TEXT("LOD morphing disabled for cubic mode (hard-edged vertices cannot interpolate)"));
-	}
-
 	// Cubic runs without the LOD system (decision D7): greedy meshing is its answer to distance and
 	// the cubic mesher never reads the LOD level, so LOD changes would only re-mesh and crossfade
 	// identical geometry. IsLODEnabled() applies the rule for every reader, including the LOD
@@ -1357,7 +1342,6 @@ void UVoxelChunkManager::Initialize(
 	// Reset streaming decision caching (sentinel values force update on first tick)
 	CachedViewerChunk = FIntVector(INT32_MAX, INT32_MAX, INT32_MAX);
 	LastStreamingUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
-	LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	bForceStreamingUpdate = false;
 	LODEvalSchedule.Reset();
 
@@ -1788,7 +1772,6 @@ void UVoxelChunkManager::Shutdown()
 	// Reset streaming decision caching
 	CachedViewerChunk = FIntVector(INT32_MAX, INT32_MAX, INT32_MAX);
 	LastStreamingUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
-	LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	bForceStreamingUpdate = false;
 	LODEvalSchedule.Reset();
 
@@ -2818,7 +2801,6 @@ UVoxelChunkManager::FVoxelMemoryStats UVoxelChunkManager::GetVoxelMemoryStats() 
 	// Renderer
 	if (MeshRenderer)
 	{
-		Stats.RendererCPUBytes = MeshRenderer->GetCPUMemoryUsage();
 		Stats.RendererGPUBytes = MeshRenderer->GetGPUMemoryUsage();
 	}
 
@@ -2834,7 +2816,7 @@ UVoxelChunkManager::FVoxelMemoryStats UVoxelChunkManager::GetVoxelMemoryStats() 
 		Stats.ScatterBytes = ScatterManager->GetTotalMemoryUsage();
 	}
 
-	Stats.TotalBytes = Stats.VoxelDataBytes + Stats.EditDataBytes + Stats.RendererCPUBytes
+	Stats.TotalBytes = Stats.VoxelDataBytes + Stats.EditDataBytes
 		+ Stats.RendererGPUBytes + Stats.CollisionBytes + Stats.ScatterBytes;
 
 	return Stats;
@@ -6263,40 +6245,6 @@ void UVoxelChunkManager::GetBenchLODBacklog(int32& OutStale, int32& OutStaleNear
 				++OutStaleNear;
 			}
 		}
-	}
-}
-
-void UVoxelChunkManager::UpdateLODMorphFactors(const FLODQueryContext& Context)
-{
-	if (!LODStrategy || !MeshRenderer)
-	{
-		return;
-	}
-
-	if (Configuration && !Configuration->IsLODEnabled())
-	{
-		return;
-	}
-
-	TArray<TPair<FIntVector, float>> Transitions;
-
-	for (const FIntVector& ChunkCoord : LoadedChunkCoords)
-	{
-		const float NewMorphFactor = LODStrategy->GetLODMorphFactor(ChunkCoord, Context);
-
-		if (FVoxelChunkState* State = ChunkStates.Find(ChunkCoord))
-		{
-			if (FMath::Abs(State->MorphFactor - NewMorphFactor) > 0.01f)
-			{
-				State->MorphFactor = NewMorphFactor;
-				Transitions.Add(TPair<FIntVector, float>(ChunkCoord, NewMorphFactor));
-			}
-		}
-	}
-
-	if (Transitions.Num() > 0)
-	{
-		MeshRenderer->UpdateLODTransitionsBatch(Transitions);
 	}
 }
 

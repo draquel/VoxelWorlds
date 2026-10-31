@@ -414,7 +414,6 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromCPUData(
 		FChunkInfo& Info = ChunkInfoMap.FindOrAdd(ChunkCoord);
 		Info.Bounds = LocalBounds;
 		Info.LODLevel = LODLevel;
-		Info.bIsVisible = true;
 		SetChunkStats(Info, VertexCount, IndexCount / 3,
 			static_cast<int64>(VertexCount) * sizeof(FVoxelVertex) + static_cast<int64>(IndexCount) * sizeof(uint32));
 
@@ -791,51 +790,6 @@ void UVoxelWorldComponent::ClearAllSeamMeshes()
 			[Proxy](FRHICommandListImmediate& RHICmdList)
 			{
 				Proxy->ClearAllSeamMeshes_RenderThread();
-			}
-		);
-	}
-}
-
-void UVoxelWorldComponent::SetChunkVisible(const FIntVector& ChunkCoord, bool bNewVisibility)
-{
-	check(IsInGameThread());
-
-	// Update game thread tracking
-	{
-		FScopeLock Lock(&ChunkInfoLock);
-
-		FChunkInfo* Info = ChunkInfoMap.Find(ChunkCoord);
-		if (Info)
-		{
-			Info->bIsVisible = bNewVisibility;
-			bTotalBoundsDirty = true;
-		}
-	}
-
-	// Enqueue render thread update
-	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
-	if (Proxy)
-	{
-		ENQUEUE_RENDER_COMMAND(SetVoxelChunkVisible)(
-			[Proxy, ChunkCoord, bNewVisibility](FRHICommandListImmediate& RHICmdList)
-			{
-				Proxy->SetChunkVisible_RenderThread(ChunkCoord, bNewVisibility);
-			}
-		);
-	}
-}
-
-void UVoxelWorldComponent::UpdateChunkMorphFactor(const FIntVector& ChunkCoord, float MorphFactor)
-{
-	check(IsInGameThread());
-
-	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
-	if (Proxy)
-	{
-		ENQUEUE_RENDER_COMMAND(UpdateVoxelMorphFactor)(
-			[Proxy, ChunkCoord, MorphFactor](FRHICommandListImmediate& RHICmdList)
-			{
-				Proxy->UpdateChunkMorphFactor_RenderThread(ChunkCoord, MorphFactor);
 			}
 		);
 	}
@@ -1866,61 +1820,6 @@ void UVoxelWorldComponent::SetUseSmoothMeshing(bool bUseSmooth)
 			UpdateMaterialAtlasParameters();
 		}
 	}
-}
-
-// ==================== LOD Configuration ====================
-
-void UVoxelWorldComponent::SetLODTransitionDistances(float InLODStartDistance, float InLODEndDistance)
-{
-	LODStartDistance = FMath::Max(0.0f, InLODStartDistance);
-	LODEndDistance = FMath::Max(LODStartDistance + 1.0f, InLODEndDistance);
-
-	// Update Material Parameter Collection with new values
-	UpdateLODParameterCollection();
-
-	UE_LOG(LogVoxelRendering, Log, TEXT("LOD Transition: Start=%.0f, End=%.0f"), LODStartDistance, LODEndDistance);
-}
-
-void UVoxelWorldComponent::SetLODParameterCollection(UMaterialParameterCollection* InCollection)
-{
-	LODParameterCollection = InCollection;
-
-	// Update with current values
-	UpdateLODParameterCollection();
-}
-
-void UVoxelWorldComponent::UpdateLODParameterCollection()
-{
-	if (!LODParameterCollection)
-	{
-		return;
-	}
-
-	UWorld* World = GetWorld();
-	if (!World)
-	{
-		return;
-	}
-
-	// Get the parameter collection instance for this world
-	UMaterialParameterCollectionInstance* MPCInstance = World->GetParameterCollectionInstance(LODParameterCollection);
-	if (!MPCInstance)
-	{
-		UE_LOG(LogVoxelRendering, Warning, TEXT("Failed to get MPC instance for LOD parameters"));
-		return;
-	}
-
-	// Calculate inverse range for efficient shader calculation
-	const float InvRange = 1.0f / FMath::Max(LODEndDistance - LODStartDistance, 1.0f);
-
-	// Update the parameters
-	// These correspond to CollectionParameter nodes in the material
-	MPCInstance->SetScalarParameterValue(FName("LODStartDistance"), LODStartDistance);
-	MPCInstance->SetScalarParameterValue(FName("LODEndDistance"), LODEndDistance);
-	MPCInstance->SetScalarParameterValue(FName("LODInvRange"), InvRange);
-
-	UE_LOG(LogVoxelRendering, Verbose, TEXT("Updated MPC: Start=%.0f, End=%.0f, InvRange=%.6f"),
-		LODStartDistance, LODEndDistance, InvRange);
 }
 
 // ==================== Queries ====================

@@ -6,7 +6,6 @@
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelBiomeSnapshot.h"
 #include "VoxelTreeTypes.h"
-#include "Materials/MaterialParameterCollection.h" // the header forward-declares it (LODParameterCollection)
 #include "HAL/IConsoleManager.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
@@ -27,7 +26,6 @@ UVoxelWorldConfiguration::UVoxelWorldConfiguration()
 	//
 	// Design principles:
 	// - Bands should cover up to ViewDistance (not far beyond)
-	// - MorphRange ~25% of band width for smooth transitions
 	// - Wider bands at distance for stability (less popping)
 	// - Last band extends to ViewDistance
 	//
@@ -36,12 +34,6 @@ UVoxelWorldConfiguration::UVoxelWorldConfiguration()
 	LODBands.Add(FLODBand(0.0f, 4000.0f, 0, 1, 32));      // LOD 0: 0-4000, full detail
 	LODBands.Add(FLODBand(4000.0f, 7000.0f, 1, 2, 32));   // LOD 1: 4000-7000, half detail
 	LODBands.Add(FLODBand(7000.0f, 10000.0f, 2, 4, 32));  // LOD 2: 7000-10000, quarter detail
-
-	// Set morph ranges to 25% of band width for smooth transitions
-	for (FLODBand& Band : LODBands)
-	{
-		Band.MorphRange = (Band.MaxDistance - Band.MinDistance) * 0.25f;
-	}
 
 	// Biome configuration (BiomeConfiguration data asset) contains:
 	// - Biome definitions (Plains, Desert, Tundra, etc.)
@@ -269,29 +261,6 @@ void UVoxelWorldConfiguration::PostLoad()
 			UE_LOG(LogVoxelCore, Warning, TEXT("VoxelWorldConfiguration %s: %s"), *GetPathName(), *Warning);
 		}
 	}
-}
-
-float UVoxelWorldConfiguration::GetMaterialLODStartDistance() const
-{
-	if (LODBands.Num() == 0)
-	{
-		return 0.0f;
-	}
-
-	// Start morphing at first band's morph start point
-	const FLODBand& FirstBand = LODBands[0];
-	return FMath::Max(0.0f, FirstBand.MaxDistance - FirstBand.MorphRange);
-}
-
-float UVoxelWorldConfiguration::GetMaterialLODEndDistance() const
-{
-	if (LODBands.Num() == 0)
-	{
-		return ViewDistance;
-	}
-
-	// End at the last band's max distance, clamped to ViewDistance
-	return FMath::Min(LODBands.Last().MaxDistance, ViewDistance);
 }
 
 FVector UVoxelWorldConfiguration::GetPlanetSpawnPosition() const

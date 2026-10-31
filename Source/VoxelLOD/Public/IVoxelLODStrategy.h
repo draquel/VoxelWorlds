@@ -72,21 +72,6 @@ public:
 		return GetLODForChunk(ChunkCoord, Context);
 	}
 
-	/**
-	 * Get morph factor for LOD transition blending.
-	 *
-	 * Used to smoothly blend between LOD levels in the vertex shader.
-	 * Returns 0 when fully at current LOD, 1 when ready to transition to next.
-	 *
-	 * @param ChunkCoord Chunk position in chunk coordinate space
-	 * @param Context Query context with viewer and world state
-	 * @return Morph factor 0-1 (0 = current LOD, 1 = next LOD)
-	 */
-	virtual float GetLODMorphFactor(
-		const FIntVector& ChunkCoord,
-		const FLODQueryContext& Context
-	) const = 0;
-
 	// ==================== Visibility & Streaming ====================
 
 	/**

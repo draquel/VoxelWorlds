@@ -384,7 +384,7 @@ Create in: `Content/VoxelWorlds/Materials/M_VoxelMaster`
 - **Use Material Attributes**: false
 - **Tangent Space Normal**: OFF (we output world-space normals)
 
-> **Why Masked?** The master material uses `BLEND_Masked` so that the PMC renderer can create a masked material instance (MID) that inherits alpha cutout support for materials like leaves. The opaque MID overrides the blend mode back to `BLEND_Opaque`, which causes UE to ignore the OpacityMask pin entirely — no performance cost for opaque chunks.
+> **Why Masked?** The master material uses `BLEND_Masked` so that materials like leaves keep alpha cutout support; the opaque material instance overrides the blend mode back to `BLEND_Opaque`, so opaque terrain pays nothing for the mask.
 
 ### Parameters to Create
 

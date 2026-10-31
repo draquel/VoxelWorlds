@@ -79,21 +79,6 @@ TEST(VoxelLOD, DistanceBandBasic) {
     int32 LOD1 = Strategy.GetLODForChunk(FIntVector(20,0,0), Context);
     EXPECT_EQ(LOD1, 1);
 }
-
-TEST(VoxelLOD, LODMorphFactor) {
-    FDistanceBandLODStrategy Strategy;
-    // ... configure
-    
-    FLODQueryContext Context;
-    Context.ViewerPosition = FVector::ZeroVector;
-    
-    // Chunk at transition zone
-    FIntVector ChunkInTransition(15, 0, 0);
-    float MorphFactor = Strategy.GetLODMorphFactor(ChunkInTransition, Context);
-    
-    EXPECT_GE(MorphFactor, 0.0f);
-    EXPECT_LE(MorphFactor, 1.0f);
-}
 ```
 
 ### VoxelRendering Module
@@ -157,7 +142,6 @@ TEST(Integration, LODTransitions) {
     Manager->Update(0.016f);
     
     // Verify chunks transitioned
-    // Check morph factors updated
 }
 ```
 

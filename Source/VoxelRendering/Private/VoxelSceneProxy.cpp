@@ -4,7 +4,6 @@
 #include "VoxelWorldComponent.h"
 #include "VoxelRendering.h"
 #include "VoxelLocalVertexFactory.h"
-#include "LocalVFTestComponent.h"  // For InitLocalVertexFactoryStreams
 #include "MaterialDomain.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialRenderProxy.h"  // For FColoredMaterialRenderProxy
@@ -220,7 +219,7 @@ FVoxelSceneProxy::FVoxelSceneProxy(UVoxelWorldComponent* InComponent, UMaterialI
 	// Cache material relevance
 	MaterialRelevance = Material->GetRelevance(GetFeatureLevelShaderPlatform(FeatureLevel));
 
-	// Note: Per-chunk vertex factories are created in UpdateChunkFromCPUData_RenderThread
+	// Note: Per-chunk vertex factories are created in ProcessBatchUpdate_RenderThread
 
 	// Set proxy properties
 	bVerifyUsedMaterials = false;
@@ -357,7 +356,7 @@ SIZE_T FVoxelSceneProxy::GetTypeHash() const
 
 void FVoxelSceneProxy::CreateRenderThreadResources(FRHICommandListBase& RHICmdList)
 {
-	// Per-chunk vertex factories are created in UpdateChunkFromCPUData_RenderThread
+	// Per-chunk vertex factories are created in ProcessBatchUpdate_RenderThread
 }
 
 void FVoxelSceneProxy::GetDynamicMeshElements(
@@ -459,8 +458,8 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			const FIntVector& ChunkCoord = Pair.Key;
 			const FVoxelChunkRenderData& RenderData = Pair.Value;
 
-			// Skip invisible or empty chunks (IndexCount < 3 means zero triangles)
-			if (!RenderData.bIsVisible || !RenderData.HasValidBuffers() || RenderData.IndexCount < 3)
+			// Skip empty chunks (IndexCount < 3 means zero triangles)
+			if (!RenderData.HasValidBuffers() || RenderData.IndexCount < 3)
 			{
 				SkippedInvisible++;
 				continue;
@@ -735,7 +734,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 				const FVoxelSeamMeshKey& SeamKey = Pair.Key;
 				const FVoxelChunkRenderData& RenderData = Pair.Value;
 
-				if (!RenderData.bIsVisible || !RenderData.HasValidBuffers() || RenderData.IndexCount < 3)
+				if (!RenderData.HasValidBuffers() || RenderData.IndexCount < 3)
 				{
 					SkippedInvisible++;
 					continue;
@@ -857,7 +856,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 					const FIntVector2& TileCoord = Pair.Key;
 					const FVoxelChunkRenderData& RenderData = Pair.Value;
 
-					if (!RenderData.bIsVisible || !RenderData.HasValidBuffers() || RenderData.IndexCount < 3)
+					if (!RenderData.HasValidBuffers() || RenderData.IndexCount < 3)
 					{
 						SkippedInvisible++;
 						continue;
@@ -1114,183 +1113,6 @@ void FVoxelSceneProxy::RetireOrReleaseChunk_AssumesLocked(const FIntVector& Chun
 	}
 }
 
-void FVoxelSceneProxy::UpdateChunkFromCPUData_RenderThread(
-	FRHICommandListBase& RHICmdList,
-	const FIntVector& ChunkCoord,
-	TArray<FVoxelVertex>&& Vertices,
-	TArray<uint32>&& Indices,
-	int32 LODLevel,
-	const FBox& ChunkLocalBounds,
-	const FVector& ChunkWorldPosition,
-	bool bCrossfade)
-{
-	check(IsInRenderingThread());
-
-	// Sync debug mode from console variable
-	SyncVertexColorDebugMode();
-
-	const uint32 VertexCount = Vertices.Num();
-	const uint32 IndexCount = Indices.Num();
-
-	if (VertexCount == 0 || IndexCount == 0)
-	{
-		UE_LOG(LogVoxelRendering, Warning, TEXT("UpdateChunkFromCPUData_RenderThread: Empty data for chunk %s"), *ChunkCoord.ToString());
-		return;
-	}
-
-	FScopeLock Lock(&ChunkDataLock);
-
-	// Retire (crossfade) or release any existing mesh for this chunk
-	RetireOrReleaseChunk_AssumesLocked(ChunkCoord, bCrossfade);
-
-	// Convert FVoxelVertex to FVoxelLocalVertex format directly from CPU data (NO GPU READBACK!), the chunk origin
-	// relative to the primitive's (RenderOrigin, WM-BP7)
-	const FVector3f ChunkOffset = ToRenderOffset(ChunkWorldPosition);
-
-	TArray<FVoxelLocalVertex> ConvertedVertices;
-	ConvertedVertices.SetNumUninitialized(VertexCount);
-
-	TArray<FColor> ColorData;
-	ColorData.SetNumUninitialized(VertexCount);
-
-	// Tangent data for SRV: interleaved TangentX + TangentZ (2 x FPackedNormal = 8 bytes per vertex)
-	struct FPackedTangentPair
-	{
-		FPackedNormal TangentX;
-		FPackedNormal TangentZ;
-	};
-	TArray<FPackedTangentPair> TangentData;
-	TangentData.SetNumUninitialized(VertexCount);
-
-	// TexCoord data for SRV (GPUScene manual vertex fetch)
-	// With 2 UV channels, store as float4 per vertex: (UV0.x, UV0.y, UV1.x, UV1.y)
-	TArray<FVector4f> TexCoordData;
-	TexCoordData.SetNumUninitialized(VertexCount);
-
-	for (uint32 i = 0; i < VertexCount; i++)
-	{
-		ConvertedVertices[i] = ConvertVertex(Vertices[i], ChunkOffset);
-		// Offset vertex position from chunk-local to world space
-		ConvertedVertices[i].Position += ChunkOffset;
-		ColorData[i] = ConvertedVertices[i].Color;
-
-		// Extract tangent data for SRV
-		TangentData[i].TangentX = ConvertedVertices[i].TangentX;
-		TangentData[i].TangentZ = ConvertedVertices[i].TangentZ;
-
-		// Extract TexCoord data for SRV (both UV channels as float4)
-		TexCoordData[i] = FVector4f(
-			ConvertedVertices[i].TexCoord.X,
-			ConvertedVertices[i].TexCoord.Y,
-			ConvertedVertices[i].TexCoord1.X,
-			ConvertedVertices[i].TexCoord1.Y
-		);
-	}
-
-	// Create new render data
-	FVoxelChunkRenderData NewRenderData;
-	NewRenderData.ChunkCoord = ChunkCoord;
-	NewRenderData.LODLevel = LODLevel;
-	NewRenderData.VertexCount = VertexCount;
-	NewRenderData.IndexCount = IndexCount;
-	// Offset local bounds to world space
-	NewRenderData.WorldBounds = ChunkLocalBounds.ShiftBy(ChunkWorldPosition);
-	NewRenderData.ChunkWorldPosition = ChunkWorldPosition;
-	NewRenderData.MorphFactor = 0.0f;
-	NewRenderData.bIsVisible = true;
-
-	// Create vertex buffer
-	const uint32 ConvertedVertexSize = VertexCount * sizeof(FVoxelLocalVertex);
-	NewRenderData.VertexBufferRHI = RHICmdList.CreateBuffer(
-		FRHIBufferCreateDesc::Create(TEXT("VoxelLocalVertexBuffer_CPU"), ConvertedVertexSize, sizeof(FVoxelLocalVertex), BUF_Static | BUF_VertexBuffer)
-			.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
-
-	void* VertexData = RHICmdList.LockBuffer(NewRenderData.VertexBufferRHI, 0, ConvertedVertexSize, RLM_WriteOnly);
-	FMemory::Memcpy(VertexData, ConvertedVertices.GetData(), ConvertedVertexSize);
-	RHICmdList.UnlockBuffer(NewRenderData.VertexBufferRHI);
-
-	// Create separate color buffer for SRV
-	const uint32 ColorBufferSize = VertexCount * sizeof(FColor);
-	NewRenderData.ColorBufferRHI = RHICmdList.CreateBuffer(
-		FRHIBufferCreateDesc::Create(TEXT("VoxelColorBuffer_CPU"), ColorBufferSize, sizeof(FColor), BUF_Static | BUF_ShaderResource)
-			.SetInitialState(ERHIAccess::SRVMask));
-
-	void* ColorBufferData = RHICmdList.LockBuffer(NewRenderData.ColorBufferRHI, 0, ColorBufferSize, RLM_WriteOnly);
-	FMemory::Memcpy(ColorBufferData, ColorData.GetData(), ColorBufferSize);
-	RHICmdList.UnlockBuffer(NewRenderData.ColorBufferRHI);
-
-	// Create color SRV
-	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_B8G8R8A8));
-
-	// Create tangent buffer for SRV (interleaved TangentX + TangentZ, 8 bytes per vertex)
-	const uint32 TangentBufferSize = VertexCount * sizeof(FPackedTangentPair);
-	NewRenderData.TangentBufferRHI = RHICmdList.CreateBuffer(
-		FRHIBufferCreateDesc::Create(TEXT("VoxelTangentBuffer_CPU"), TangentBufferSize, sizeof(FPackedTangentPair), BUF_Static | BUF_ShaderResource)
-			.SetInitialState(ERHIAccess::SRVMask));
-
-	void* TangentBufferData = RHICmdList.LockBuffer(NewRenderData.TangentBufferRHI, 0, TangentBufferSize, RLM_WriteOnly);
-	FMemory::Memcpy(TangentBufferData, TangentData.GetData(), TangentBufferSize);
-	RHICmdList.UnlockBuffer(NewRenderData.TangentBufferRHI);
-
-	// Create tangent SRV
-	NewRenderData.TangentsSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TangentBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R8G8B8A8_SNORM));
-
-	// Create TexCoord buffer for SRV (GPUScene manual vertex fetch)
-	// With 2 UV channels, each vertex has 4 floats (UV0.xy, UV1.xy)
-	const uint32 TexCoordBufferSize = VertexCount * sizeof(FVector4f);
-	NewRenderData.TexCoordBufferRHI = RHICmdList.CreateBuffer(
-		FRHIBufferCreateDesc::Create(TEXT("VoxelTexCoordBuffer_CPU"), TexCoordBufferSize, sizeof(FVector4f), BUF_Static | BUF_ShaderResource)
-			.SetInitialState(ERHIAccess::SRVMask));
-
-	void* TexCoordBufferData = RHICmdList.LockBuffer(NewRenderData.TexCoordBufferRHI, 0, TexCoordBufferSize, RLM_WriteOnly);
-	FMemory::Memcpy(TexCoordBufferData, TexCoordData.GetData(), TexCoordBufferSize);
-	RHICmdList.UnlockBuffer(NewRenderData.TexCoordBufferRHI);
-
-	// Create TexCoord SRV - FVector4f is 16 bytes (4x float for 2 UV channels)
-	NewRenderData.TexCoordSRV = RHICmdList.CreateShaderResourceView(NewRenderData.TexCoordBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_G32R32F));
-
-	// Create index buffer directly from CPU data
-	const uint32 IndexBufferSize = IndexCount * sizeof(uint32);
-	NewRenderData.IndexBufferRHI = RHICmdList.CreateBuffer(
-		FRHIBufferCreateDesc::Create(TEXT("VoxelIndexBuffer_CPU"), IndexBufferSize, sizeof(uint32), BUF_Static | BUF_IndexBuffer)
-			.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
-
-	void* IndexData = RHICmdList.LockBuffer(NewRenderData.IndexBufferRHI, 0, IndexBufferSize, RLM_WriteOnly);
-	FMemory::Memcpy(IndexData, Indices.GetData(), IndexBufferSize);
-	RHICmdList.UnlockBuffer(NewRenderData.IndexBufferRHI);
-
-	// Store render data
-	ChunkRenderData.Add(ChunkCoord, NewRenderData);
-
-	// Create and initialize vertex buffer wrapper
-	TSharedPtr<FVoxelLocalVertexBuffer> VertexBufferWrapper = MakeShared<FVoxelLocalVertexBuffer>();
-	VertexBufferWrapper->InitWithRHIBuffer(NewRenderData.VertexBufferRHI);
-	VertexBufferWrapper->InitResource(RHICmdList);
-	ChunkVertexBuffers.Add(ChunkCoord, VertexBufferWrapper);
-
-	// Create and initialize index buffer wrapper
-	TSharedPtr<FVoxelLocalIndexBuffer> IndexBufferWrapper = MakeShared<FVoxelLocalIndexBuffer>();
-	IndexBufferWrapper->InitWithRHIBuffer(NewRenderData.IndexBufferRHI, IndexCount);
-	IndexBufferWrapper->InitResource(RHICmdList);
-	ChunkIndexBuffers.Add(ChunkCoord, IndexBufferWrapper);
-
-	// Create and initialize per-chunk vertex factory
-	TSharedPtr<FLocalVertexFactory> ChunkVertexFactory = MakeShared<FLocalVertexFactory>(FeatureLevel, "FVoxelChunkVertexFactory_CPU");
-	InitVoxelLocalVertexFactory(
-		RHICmdList,
-		ChunkVertexFactory.Get(),
-		VertexBufferWrapper.Get(),
-		NewRenderData.ColorSRV,
-		NewRenderData.TangentsSRV,
-		NewRenderData.TexCoordSRV
-	);
-	ChunkVertexFactory->InitResource(RHICmdList);
-	ChunkVertexFactories.Add(ChunkCoord, ChunkVertexFactory);
-
-	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelSceneProxy: Updated chunk %s from CPU data - %d vertices, %d indices (DIRECT PATH)"),
-		*ChunkCoord.ToString(), VertexCount, IndexCount);
-}
-
 void FVoxelSceneProxy::RemoveChunk_RenderThread(const FIntVector& ChunkCoord)
 {
 	check(IsInRenderingThread());
@@ -1380,38 +1202,6 @@ void FVoxelSceneProxy::ClearAllChunks_RenderThread()
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Cleared all chunks"));
 }
 
-void FVoxelSceneProxy::SetChunkVisible_RenderThread(const FIntVector& ChunkCoord, bool bVisible)
-{
-	check(IsInRenderingThread());
-
-	FScopeLock Lock(&ChunkDataLock);
-
-	if (FVoxelChunkRenderData* RenderData = ChunkRenderData.Find(ChunkCoord))
-	{
-		RenderData->bIsVisible = bVisible;
-	}
-}
-
-void FVoxelSceneProxy::UpdateChunkMorphFactor_RenderThread(const FIntVector& ChunkCoord, float MorphFactor)
-{
-	check(IsInRenderingThread());
-
-	FScopeLock Lock(&ChunkDataLock);
-
-	const float Clamped = FMath::Clamp(MorphFactor, 0.0f, 1.0f);
-
-	if (FVoxelChunkRenderData* RenderData = ChunkRenderData.Find(ChunkCoord))
-	{
-		RenderData->MorphFactor = Clamped;
-	}
-
-	// Repurposed as the crossfade alpha carrier (SEAM_OWNERSHIP_ARCHITECTURE.md §5)
-	if (FVoxelChunkFadeState* FadeState = ChunkFadeStates.Find(ChunkCoord))
-	{
-		FadeState->FadeAlpha = Clamped;
-	}
-}
-
 void FVoxelSceneProxy::SetMaterial_RenderThread(UMaterialInterface* InMaterial, const FMaterialRelevance& InMaterialRelevance)
 {
 	check(IsInRenderingThread());
@@ -1474,10 +1264,6 @@ void FVoxelSceneProxy::UpdateChunkFadeAlphasBatch_RenderThread(const TArray<TPai
 		if (FVoxelChunkFadeState* FadeState = ChunkFadeStates.Find(Pair.Key))
 		{
 			FadeState->FadeAlpha = Clamped;
-		}
-		if (FVoxelChunkRenderData* RenderData = ChunkRenderData.Find(Pair.Key))
-		{
-			RenderData->MorphFactor = Clamped;
 		}
 	}
 }
@@ -1605,8 +1391,6 @@ void FVoxelSceneProxy::UpdateWaterTileFromCPUData_RenderThread(
 	NewRenderData.IndexCount = IndexCount;
 	NewRenderData.WorldBounds = TileBounds.ShiftBy(TileWorldPosition);
 	NewRenderData.ChunkWorldPosition = TileWorldPosition;
-	NewRenderData.MorphFactor = 0.0f;
-	NewRenderData.bIsVisible = true;
 
 	// Create vertex buffer
 	const uint32 ConvertedVertexSize = VertexCount * sizeof(FVoxelLocalVertex);
@@ -1860,8 +1644,6 @@ void FVoxelSceneProxy::UpdateSeamMeshFromCPUData_RenderThread(
 	NewRenderData.IndexCount = IndexCount;
 	NewRenderData.WorldBounds = SeamBounds.ShiftBy(OwnerWorldPosition);
 	NewRenderData.ChunkWorldPosition = OwnerWorldPosition;
-	NewRenderData.MorphFactor = 0.0f;
-	NewRenderData.bIsVisible = true;
 
 	// Create vertex buffer
 	const uint32 ConvertedVertexSize = VertexCount * sizeof(FVoxelLocalVertex);
@@ -2296,8 +2078,6 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 		// Offset local bounds to world space
 		NewRenderData.WorldBounds = Add.LocalBounds.ShiftBy(Add.ChunkWorldPosition);
 		NewRenderData.ChunkWorldPosition = Add.ChunkWorldPosition;
-		NewRenderData.MorphFactor = 0.0f;
-		NewRenderData.bIsVisible = true;
 
 		// Create vertex buffer
 		const uint32 ConvertedVertexSize = VertexCount * sizeof(FVoxelLocalVertex);
@@ -2455,7 +2235,7 @@ bool FVoxelSceneProxy::GetChunkDrawInfo_RenderThread(const FIntVector& ChunkCoor
 	{
 		OutInfo.CurrentTriangles = Current->IndexCount / 3;
 		OutInfo.LODLevel = Current->LODLevel;
-		OutInfo.bVisible = Current->bIsVisible;
+		OutInfo.bVisible = true;
 		OutInfo.VertexFactory = VertexFactoryPtr->Get();
 	}
 	OutInfo.PreviousTriangles = PreviousMesh ? PreviousMesh->RenderData.IndexCount / 3 : 0;
@@ -2492,9 +2272,9 @@ bool FVoxelSceneProxy::GetWaterTileDrawInfo_RenderThread(const FIntVector2& Tile
 			Drawn ? *FString::Printf(TEXT(", last drawn %u frames ago"), GFrameNumberRenderThread - *Drawn) : TEXT(""));
 		return false;
 	}
-	Out = FString::Printf(TEXT("%s: %u vertices, %u indices, buffers %s, vertex factory %s, visible %s, world bounds %s; drawn %s"),
+	Out = FString::Printf(TEXT("%s: %u vertices, %u indices, buffers %s, vertex factory %s, world bounds %s; drawn %s"),
 		*ProxyState, Data->VertexCount, Data->IndexCount, Data->HasValidBuffers() ? TEXT("valid") : TEXT("INVALID"),
-		(VertexFactoryPtr && VertexFactoryPtr->IsValid()) ? TEXT("valid") : TEXT("MISSING"), Data->bIsVisible ? TEXT("yes") : TEXT("no"),
+		(VertexFactoryPtr && VertexFactoryPtr->IsValid()) ? TEXT("valid") : TEXT("MISSING"),
 		*Data->WorldBounds.ToString(),
 		Drawn ? *FString::Printf(TEXT("%u frames ago"), GFrameNumberRenderThread - *Drawn) : TEXT("NEVER by a main view"));
 	return Data->HasValidBuffers();
