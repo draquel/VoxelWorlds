@@ -30,6 +30,7 @@
 #include "VoxelResidencyStats.h"
 #include "Async/ParallelFor.h"
 #include "VoxelNeighborSliceExtraction.h"
+#include "VoxelCPUNoiseGenerator.h"
 #include "VoxelGPUNoiseGenerator.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
@@ -543,7 +544,7 @@ static TAutoConsoleVariable<int32> CVarSeamHoldMs(
 static TAutoConsoleVariable<int32> CVarAppearHold(
 	TEXT("voxel.MeshFade.AppearHold"),
 	1,
-	TEXT("Hold a new chunk that fades in (voxel.MeshFade.Appear) until its ready seams land, then fade them in together "
+	TEXT("Hold a new chunk that fades in (beyond voxel.MeshFade.AppearMinDistance) until its ready seams land, then fade them in together "
 	     "(capped by voxel.MeshFade.SeamHoldMs). 1 = on (default), 0 = the interior fades in at once and its seams follow."),
 	ECVF_Default);
 
@@ -601,16 +602,8 @@ static TAutoConsoleVariable<int32> CVarFarCompressionMaxScansPerTick(
 	TEXT("voxel.FarCompression.MaxScansPerTick"),
 	4,
 	TEXT("Budget: max fresh compress attempts per tick (uniform scan + general encode, ~3.5ms per 1MB chunk "
-	     "in PIE). Async: encodes handed to workers; sync: encodes run on the game thread. "
+	     "in PIE), the encodes handed to workers. "
 	     "Free re-collapses/re-compresses and skips of already-evaluated chunks are not counted against this."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarFarCompressionAsync(
-	TEXT("voxel.FarCompression.Async"),
-	1,
-	TEXT("1 = encode on a background worker from a copy of the chunk's array; the game thread installs the "
-	     "result only if the array is unchanged (FChunkDescriptor::AsyncCompactTicket). 0 = encode on the game "
-	     "thread inside the sweep, as before (for A/B)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarFarCompressionMaxInFlight(
@@ -1991,57 +1984,6 @@ void UVoxelChunkManager::ForceStreamingUpdate()
 }
 
 // ==================== Chunk Requests ====================
-
-void UVoxelChunkManager::RequestChunkLoad(const FIntVector& ChunkCoord, float Priority)
-{
-	if (!bIsInitialized)
-	{
-		return;
-	}
-
-	FVoxelChunkState& State = GetOrCreateChunkState(ChunkCoord);
-
-	if (State.State == EChunkState::Unloaded)
-	{
-		// Add to generation queue with sorted insertion
-		FChunkLODRequest Request;
-		Request.ChunkCoord = ChunkCoord;
-		Request.LODLevel = 0; // Will be determined by LOD strategy
-		Request.Priority = Priority;
-
-		if (AddToGenerationQueue(Request))
-		{
-			SetChunkState(ChunkCoord, EChunkState::PendingGeneration);
-
-			UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) requested for loading"),
-				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
-		}
-	}
-}
-
-void UVoxelChunkManager::RequestChunkUnload(const FIntVector& ChunkCoord)
-{
-	if (!bIsInitialized)
-	{
-		return;
-	}
-
-	if (ChunkStates.Contains(ChunkCoord))
-	{
-		const EChunkState CurrentState = ChunkStates[ChunkCoord].State;
-
-		if (CurrentState != EChunkState::Unloaded && CurrentState != EChunkState::PendingUnload)
-		{
-			if (AddToUnloadQueue(ChunkCoord))
-			{
-				SetChunkState(ChunkCoord, EChunkState::PendingUnload);
-
-				UE_LOG(LogVoxelStreaming, Verbose, TEXT("Chunk (%d, %d, %d) requested for unloading"),
-					ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
-			}
-		}
-	}
-}
 
 void UVoxelChunkManager::MarkChunkDirty(const FIntVector& ChunkCoord)
 {
@@ -4825,7 +4767,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	View.BandRadius = bNoWindow ? 0.0 : UnloadDistance + HalfDiagonal;
 	View.PrebuildRadius = bNoWindow ? 0.0 : 0.75 * LoadDistance;
 	View.Time = FPlatformTime::Seconds();
-	// A new chunk fades in over the patch under it (voxel.MeshFade.Appear): hide the patch once it has.
+	// A new chunk fades in over the patch under it (the appearance fade, R24 P3): hide the patch once it has.
 	static IConsoleVariable* FadeDuration = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.MeshFade.Duration"));
 	View.HideDelay = (FadeDuration ? FMath::Max(0.0f, FadeDuration->GetFloat()) : 0.35f) + 0.1;
 	View.ChunkStateVersion = ChunkStateVersion;
@@ -5074,17 +5016,6 @@ void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("AddConditioningZone: a %s zone in a %s world has no effect (planet zones need a Direction, FVoxelConditioningZone::MakeRadial)."),
 			Zone.IsRadial() ? TEXT("planet") : TEXT("heightmap"), bPlanet ? TEXT("planet") : TEXT("heightmap"));
 	}
-	OnTerrainConditioningChanged.Broadcast();
-}
-
-void UVoxelChunkManager::ClearConditioningZones()
-{
-	if (FarField && ConditioningZones.Num() > 0)
-	{
-		FarField->InvalidateCap(FVector::UpVector, UE_DOUBLE_PI);
-		FarField->InvalidateBox(FBox2D(FVector2D(-1.0e15), FVector2D(1.0e15)));
-	}
-	ConditioningZones.Reset();
 	OnTerrainConditioningChanged.Broadcast();
 }
 
@@ -7834,7 +7765,6 @@ FString UVoxelChunkManager::DescribeSnapshotCache() const
 void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Context, FVoxelTimingStats& Timing)
 {
 	const bool bEnabled = CVarFarCompression.GetValueOnGameThread() != 0;
-	const bool bAsync = CVarFarCompressionAsync.GetValueOnGameThread() != 0;
 	const int32 MinStride = FMath::Max(1, CVarFarCompressionMinStride.GetValueOnGameThread());
 	const int64 IdleFrames = FMath::Max(0, CVarFarCompressionIdleFrames.GetValueOnGameThread());
 	const int32 MaxScans = FMath::Max(1, CVarFarCompressionMaxScansPerTick.GetValueOnGameThread());
@@ -7926,21 +7856,14 @@ void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Cont
 			// An encode of exactly this array is in flight.
 			continue;
 		}
-		if (Budget >= MaxScans || (bAsync && FarCompressJobsInFlight >= MaxInFlight))
+		if (Budget >= MaxScans || FarCompressJobsInFlight >= MaxInFlight)
 		{
 			// Out of budget this tick; retry next tick (bCompressionEvaluated stays false).
 			continue;
 		}
 		++Budget;
 		++FarCompressEncodes;
-		if (bAsync)
-		{
-			DispatchFarCompression(Pair.Key, D, Codec);
-		}
-		else
-		{
-			D.TryCompress(Codec);
-		}
+		DispatchFarCompression(Pair.Key, D, Codec);
 	}
 	Timing.FarCompressDispatchCount = Budget;
 
@@ -9567,7 +9490,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 
 // Console: voxel.RemeshAll
 // Re-mesh every currently-loaded chunk IN PLACE (marks them dirty without changing LOD), so a live
-// mesher CVar change (e.g. voxel.MCBoundaryMorph) takes effect immediately while the LOD rings /
+// mesher CVar change (e.g. voxel.MCBoundaryMorphWidth) takes effect immediately while the LOD rings /
 // seams stay exactly where they are. Handy for A/B-ing meshing changes while detached and flying.
 static FAutoConsoleCommandWithWorldAndArgs GVoxelRemeshAllCmd(
 	TEXT("voxel.RemeshAll"),

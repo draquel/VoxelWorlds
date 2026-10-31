@@ -3,18 +3,6 @@
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelBiomeConfiguration.h"
-#include "HAL/IConsoleManager.h"
-
-// When 1 (default), the analytic terrain-height query (GetTerrainHeightAt) applies the same
-// continentalness height modulation as generation, so spawn / nav / POI placement matches the real
-// generated surface. Set to 0 to restore the legacy raw base-noise height (A/B or emergency revert).
-static int32 GVoxelAnalyticContinentalness = 1;
-static FAutoConsoleVariableRef CVarVoxelAnalyticContinentalness(
-	TEXT("voxel.Height.AnalyticContinentalness"),
-	GVoxelAnalyticContinentalness,
-	TEXT("1 (default): analytic GetTerrainHeightAt applies continentalness modulation to match the ")
-	TEXT("generated surface (spawn/nav/POI). 0: legacy raw base-noise height."),
-	ECVF_Default);
 
 FInfinitePlaneWorldMode::FInfinitePlaneWorldMode()
 	: TerrainParams()
@@ -46,10 +34,9 @@ float FInfinitePlaneWorldMode::GetTerrainHeightAt(
 	const FVoxelNoiseParams& NoiseParams) const
 {
 	// Match generation: modulate the terrain params by continentalness so the analytic height equals
-	// the real generated surface (spawn / nav / POI placement). Gated so it can be reverted at runtime.
-	// Generation applies continentalness whenever a biome config has it enabled; mirror that here.
-	const FVoxelBiomeSnapshot* Ctx = IsAnalyticContinentalnessEnabled() ? &BiomeSnapshot : nullptr;
-	return SampleTerrainHeight(X, Y, TerrainParams, NoiseParams, Ctx);
+	// the real generated surface (spawn / nav / POI placement). Generation applies continentalness
+	// whenever a biome config has it enabled; mirror that here.
+	return SampleTerrainHeight(X, Y, TerrainParams, NoiseParams, &BiomeSnapshot);
 }
 
 float FInfinitePlaneWorldMode::SampleTerrainHeight(
@@ -64,11 +51,6 @@ float FInfinitePlaneWorldMode::SampleTerrainHeight(
 	const FWorldModeTerrainParams EffectiveParams =
 		ComputeEffectiveTerrainParams(X, Y, BaseParams, NoiseParams, BiomeSnapshot, Continentalness);
 	return NoiseToTerrainHeight(NoiseValue, EffectiveParams);
-}
-
-bool FInfinitePlaneWorldMode::IsAnalyticContinentalnessEnabled()
-{
-	return GVoxelAnalyticContinentalness != 0;
 }
 
 FIntVector FInfinitePlaneWorldMode::WorldToChunkCoord(

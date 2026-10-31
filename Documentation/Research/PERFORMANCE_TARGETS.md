@@ -298,7 +298,7 @@ At player speed 1000 cm/s (10 m/s):
 - Asymmetric deadband around LOD band edges, in chunk-widths, exposed on the World config:
   `LODRefineHysteresis` (default 0.25, eager — detail appears as you approach) and
   `LODCoarsenHysteresis` (default 0.5, damped — terrain you left doesn't flicker)
-- Plus a 2:1 adjacency balance (`MaxNeighborLODDelta`); both toggled by cvar `voxel.LODBalance`
+- Plus a 2:1 adjacency balance (`MaxNeighborLODDelta`); both always on (the raw-bands rule retired under CR1 D-CR2)
 - Damps band-edge churn; measured to remove ~25% of raw LOD transitions
 
 **Phase 4: Per-job cost + stale-cull** (Implemented)

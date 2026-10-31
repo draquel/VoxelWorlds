@@ -262,7 +262,7 @@ public:
 	 */
 	void SetSeamFadeHold(const FIntVector& OwnerChunkCoord, bool bHold);
 
-	/** True if seam bucket swaps crossfade right now (voxel.MeshFade.Seams and the chunk crossfade prerequisites). */
+	/** True if seam bucket swaps crossfade right now (the chunk crossfade prerequisites). */
 	bool CanCrossfadeSeams() const;
 
 	// ==================== First-Appearance Fades (R24 P3) ====================
@@ -276,8 +276,8 @@ public:
 	void SetFadeViewerPosition(const FVector& ViewerPosition);
 
 	/**
-	 * True if a first mesh submitted for this chunk now would fade in from nothing: appearance fades
-	 * on (voxel.MeshFade.Appear), the chunk has no mesh yet, a viewer is known, the fade cap has room,
+	 * True if a first mesh submitted for this chunk now would fade in from nothing: the crossfade is
+	 * on (voxel.MeshFade), the chunk has no mesh yet, a viewer is known, the fade cap has room,
 	 * and the chunk's cell is at least voxel.MeshFade.AppearMinDistance from the viewer. The chunk
 	 * manager holds such a chunk for its seams (SetChunkFadeHold) before submitting it.
 	 *
@@ -749,7 +749,7 @@ private:
 	 * Start a first-appearance fade (R24 P3) for geometry that has no mesh yet: only a fade-in MID,
 	 * held if a hold is requested for it. Enqueues the fade-state attach before the mesh lands.
 	 * @param Key         Interior or seam bucket key
-	 * @param bBypassGate Fade regardless of distance and voxel.MeshFade.Appear (a bucket joining a held transition)
+	 * @param bBypassGate Fade regardless of distance and the known viewer (a bucket joining a held transition)
 	 * @return False if refused (near the viewer, fades off, cap, MID failure) — show the mesh at once.
 	 */
 	bool StartAppearFade(const FIntVector4& Key, bool bBypassGate);

@@ -11,27 +11,6 @@
 #include "DrawDebugHelpers.h"
 #include "HAL/IConsoleManager.h"
 
-// P2-B: toggle the LOD adjacency balance + hysteresis at runtime, so the
-// >=2-level-gap count (see voxel.LogBoundaryResidency) can be compared on/off in
-// a single live session. 1 = balanced (default), 0 = raw distance bands (legacy).
-static TAutoConsoleVariable<int32> CVarLODBalance(
-	TEXT("voxel.LODBalance"),
-	1,
-	TEXT("Enforce the 2:1 LOD adjacency balance + hysteresis in FDistanceBandLODStrategy. 1=on (default), 0=raw distance bands."),
-	ECVF_Default);
-
-// When the 2:1 balance runs, balance across all 26 neighbours (6 faces + 12 edges + 8 corners)
-// instead of just the 6 faces. Face-only balancing leaves diagonal (edge/corner) neighbours able
-// to differ by 2 LOD levels, so three LODs can meet at a chunk corner (LOD0/1/2 junction) and the
-// per-face transvoxel/morph can't stitch it. Full 26-neighbour balancing guarantees every pair of
-// vertex-sharing chunks differs by <=1, so at most two LOD levels ever meet at any corner — no
-// 3-LOD junction, independent of band widths. 1=on (default), 0=face-only (legacy).
-static TAutoConsoleVariable<int32> CVarLODBalanceDiagonal(
-	TEXT("voxel.LODBalanceDiagonal"),
-	1,
-	TEXT("2:1 LOD balance across all 26 neighbours (edges+corners), not just 6 faces. Prevents 3-LOD corner junctions. 1=on (default), 0=face-only."),
-	ECVF_Default);
-
 // Spherical Phase 6, WM-BP10 (D18): the voxel cut-over altitude over the surface under the viewer, above which a planet's
 // voxel window unloads and the far field alone draws the planet.
 static TAutoConsoleVariable<float> CVarPlanetVoxelCutover(
@@ -384,9 +363,7 @@ bool FDistanceBandLODStrategy::ShouldRebuildBalancedLODCache(const FLODQueryCont
 	return bBalancedLODCacheDirty
 		|| CachedViewerChunk != LastRebuildViewerChunk
 		|| FVector::DistSquared(Context.ViewerPosition, LastRebuildViewerPosition) >= FMath::Square(BalancedLODCacheMoveThreshold)
-		|| !Context.WorldOrigin.Equals(LastRebuildWorldOrigin)
-		|| CVarLODBalance.GetValueOnGameThread() != LastRebuildBalanceCVar
-		|| CVarLODBalanceDiagonal.GetValueOnGameThread() != LastRebuildDiagonalCVar;
+		|| !Context.WorldOrigin.Equals(LastRebuildWorldOrigin);
 }
 
 int32 FDistanceBandLODStrategy::GetRawLODForDistance(float Distance) const
@@ -662,13 +639,6 @@ void FDistanceBandLODStrategy::GetChunksToUnload(
 	{
 		OutUnload.Add(Candidate.Value);
 	}
-}
-
-float FDistanceBandLODStrategy::GetChunkPriority(
-	const FIntVector& ChunkCoord,
-	const FLODQueryContext& Context) const
-{
-	return CalculatePriority(ChunkCoord, Context);
 }
 
 FString FDistanceBandLODStrategy::GetDebugInfo() const
@@ -1001,8 +971,6 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 	LastRebuildViewerPosition = Context.ViewerPosition;
 	LastRebuildViewerChunk = WorldPosToChunkCoord(Context.ViewerPosition);
 	LastRebuildWorldOrigin = Context.WorldOrigin;
-	LastRebuildBalanceCVar = CVarLODBalance.GetValueOnGameThread();
-	LastRebuildDiagonalCVar = CVarLODBalanceDiagonal.GetValueOnGameThread();
 
 	// LOD disabled or no bands: nothing to balance; consumers fall back to raw (0).
 	if (!bEnableLOD || LODBands.Num() == 0)
@@ -1010,8 +978,6 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 		CommittedLODCache.Reset();
 		return;
 	}
-
-	const bool bBalance = LastRebuildBalanceCVar != 0;
 
 	// Enumerate every chunk the strategy keeps within the load horizon: each column's keep window (GetColumnWindow),
 	// which contains its load window, without the other world-mode culls. The resulting map is a superset of the chunks
@@ -1029,12 +995,9 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 		const int32 RawLOD = GetRawLODForDistance(Distance);
 
 		int32 Committed = RawLOD;
-		if (bBalance)
+		if (const int32* Prev = CommittedLODCache.Find(ChunkCoord))
 		{
-			if (const int32* Prev = CommittedLODCache.Find(ChunkCoord))
-			{
-				Committed = ApplyLODHysteresis(*Prev, RawLOD, Distance);
-			}
+			Committed = ApplyLODHysteresis(*Prev, RawLOD, Distance);
 		}
 
 		BalancedLODCache.Add(ChunkCoord, Committed);
@@ -1080,14 +1043,8 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 	// 2 LOD levels, so three LODs can meet at a chunk corner (LOD0/1/2 junction) that the
 	// per-face transvoxel/morph can't stitch. The full 26-neighbour set (6 faces + 12 edges +
 	// 8 corners) makes every vertex-sharing pair differ by <=1, so at most two LOD levels meet
-	// at any corner — no 3-LOD junction, regardless of band widths. Toggle: voxel.LODBalanceDiagonal.
-	if (bBalance)
+	// at any corner — no 3-LOD junction, regardless of band widths.
 	{
-		static const FIntVector FaceOffsets[6] = {
-			FIntVector(-1, 0, 0), FIntVector(1, 0, 0),
-			FIntVector(0, -1, 0), FIntVector(0, 1, 0),
-			FIntVector(0, 0, -1), FIntVector(0, 0, 1),
-		};
 		// All 26 neighbours (every dx,dy,dz in {-1,0,1} except the origin), built once.
 		static const TArray<FIntVector> AllOffsets = []()
 		{
@@ -1109,9 +1066,8 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 			return Offs;
 		}();
 
-		const bool bDiagonal = LastRebuildDiagonalCVar != 0;
-		const FIntVector* Offsets = bDiagonal ? AllOffsets.GetData() : FaceOffsets;
-		const int32 NumOffsets = bDiagonal ? AllOffsets.Num() : 6;
+		const FIntVector* Offsets = AllOffsets.GetData();
+		const int32 NumOffsets = AllOffsets.Num();
 
 		bool bChanged = true;
 		int32 Guard = 0;

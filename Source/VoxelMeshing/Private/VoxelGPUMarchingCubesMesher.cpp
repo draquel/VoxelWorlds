@@ -17,9 +17,8 @@
 #include "DataDrivenShaderPlatformInfo.h"
 #include "HAL/IConsoleManager.h"
 
-// LOD-seam geomorph CVars (defined in VoxelCPUMarchingCubesMesher.cpp); the GPU path mirrors the
-// CPU bake, so both meshers share the same on/off toggle and morph width.
-extern TAutoConsoleVariable<int32> CVarMCBoundaryMorph;
+// LOD-seam geomorph width (defined in VoxelCPUMarchingCubesMesher.cpp); the GPU path mirrors the
+// CPU bake, so both meshers share the same morph width.
 extern TAutoConsoleVariable<float> CVarMCBoundaryMorphWidth;
 extern TAutoConsoleVariable<int32> CVarVoxelShadingNormals;
 extern TAutoConsoleVariable<int32> CVarVoxelCrossingGradientNormals;
@@ -754,7 +753,7 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 				MeshParams->ChunkWorldPosition = ChunkWorldPos;
 				MeshParams->IsoLevel = CapturedConfig.IsoLevel;
 				MeshParams->LODStride = LODStride;
-				MeshParams->MCBoundaryMorph = (bMorphAlongZ && CVarMCBoundaryMorph.GetValueOnAnyThread() != 0) ? 1u : 0u;
+				MeshParams->MCBoundaryMorph = bMorphAlongZ ? 1u : 0u;
 				MeshParams->MCBoundaryMorphWidth = FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
 				MeshParams->VoxelShadingNormals = CVarVoxelShadingNormals.GetValueOnAnyThread() != 0 ? 1u : 0u;
 				MeshParams->CrossingGradientNormals = CVarVoxelCrossingGradientNormals.GetValueOnAnyThread() != 0 ? 1u : 0u;
@@ -829,7 +828,7 @@ void FVoxelGPUMarchingCubesMesher::DispatchComputeShader(
 				TParams->ChunkWorldPosition = ChunkWorldPos;
 				TParams->IsoLevel = CapturedConfig.IsoLevel;
 				TParams->LODStride = LODStride;
-				TParams->MCBoundaryMorph = (bMorphAlongZ && CVarMCBoundaryMorph.GetValueOnAnyThread() != 0) ? 1u : 0u;
+				TParams->MCBoundaryMorph = bMorphAlongZ ? 1u : 0u;
 				TParams->MCBoundaryMorphWidth = FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
 				TParams->VoxelShadingNormals = CVarVoxelShadingNormals.GetValueOnAnyThread() != 0 ? 1u : 0u;
 				TParams->CrossingGradientNormals = CVarVoxelCrossingGradientNormals.GetValueOnAnyThread() != 0 ? 1u : 0u;

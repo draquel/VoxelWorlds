@@ -191,8 +191,7 @@ Cheese threshold. Its roof is then the window's fade-in, not the noise:
 
 `VoxelDemo`'s `DemoCaveConfig` was such a layer until 2026-10-20: Spaghetti at threshold 0.5, depths 20 to 45, fade 4,
 with roofs 1,350 uu under the ground and 1,725 under the seabed (world modes review G34, §19.12). `voxel.Gen.LayerAudit`
-counts cave ceilings and floors per Z plane over the loaded chunks and compares the chunks with the most on a chunk-layer
-boundary with a CPU regeneration, to tell a configured roof from a generation artefact.
+deleted in CR1 (STREAM-08).
 
 ### The Demo Configuration
 `DemoCaveConfig` (VoxelDemo, and every review, planet, cubic and seam test configuration that references it) has been

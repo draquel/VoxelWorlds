@@ -16,13 +16,6 @@
 // contour meets the coarse neighbour with no vertical step. Baked at mesh time (the chunk is
 // re-meshed when its own or a neighbour's LOD changes), so it needs no vertex-format or shader
 // change on the CPU path. See Documentation/GEOMORPH_IMPLEMENTATION_PLAN.md.
-TAutoConsoleVariable<int32> CVarMCBoundaryMorph(
-	TEXT("voxel.MCBoundaryMorph"),
-	1,
-	TEXT("MC LOD-seam geomorph: ramp the fine surface to the coarse height near transition faces ")
-	TEXT("(1=on, 0=off). Off reproduces the vertical-wall step."),
-	ECVF_Default);
-
 TAutoConsoleVariable<float> CVarMCBoundaryMorphWidth(
 	TEXT("voxel.MCBoundaryMorphWidth"),
 	2.0f,
@@ -548,7 +541,7 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 	// LOD-seam geomorph: for cubes in the boundary slab of an active transition face, ramp the
 	// fine vertices toward the coarse-LOD surface so the boundary contour meets the coarser
 	// neighbour with no vertical step (the ribbon then has ~zero height to span). No-op unless
-	// this cube borders a coarser neighbour; gated by voxel.MCBoundaryMorph.
+	// this cube borders a coarser neighbour.
 	if (TransitionMask != 0)
 	{
 		ApplyBoundaryMorph(Request, Stride, TransitionMask, CellVertices, VertexCount);
@@ -1257,7 +1250,7 @@ void FVoxelCPUMarchingCubesMesher::ApplyBoundaryMorph(
 	FVector3f* CellVertices,
 	int32 VertexCount) const
 {
-	if (TransitionMask == 0 || CVarMCBoundaryMorph.GetValueOnAnyThread() == 0)
+	if (TransitionMask == 0)
 	{
 		return;
 	}
@@ -2363,8 +2356,7 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	// Geomorph the ribbon's FINE-side vertices toward the coarse surface, matching the (also
 	// morphed) fine-MC boundary contour so they stay coincident -> the vertical wall collapses
 	// while the seam stays watertight. The OUTER (coarse-corner) vertices are left on the coarse
-	// contour so the exact neighbour match (T6/T8) is preserved. Gated by voxel.MCBoundaryMorph.
-	if (CVarMCBoundaryMorph.GetValueOnAnyThread() != 0)
+	// contour so the exact neighbour match (T6/T8) is preserved.
 	{
 		const int32 SelfStride = 1 << Request.LODLevel;
 		const uint8 FaceMask = static_cast<uint8>(1 << FaceIndex);

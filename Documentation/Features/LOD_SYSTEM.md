@@ -158,28 +158,7 @@ public:
     
     // ==================== Optional Optimization ====================
     
-    /**
-     * Should this chunk be updated this frame? (Throttling)
-     * Default: Always update
-     */
-    virtual bool ShouldUpdateChunk(
-        FIntVector ChunkCoord, 
-        const FLODQueryContext& Context
-    ) const {
-        return true;
-    }
-    
-    /**
-     * Get priority for chunk generation (higher = more important).
-     * Used for sorting generation queue.
-     * Default: Inverse distance
-     */
-    virtual float GetChunkPriority(
-        FIntVector ChunkCoord, 
-        const FLODQueryContext& Context
-    ) const {
-        return 1.0f;
-    }
+    // ShouldUpdateChunk and GetChunkPriority: deleted in CR1 (STREAM-10)
     
     // ==================== Debugging ====================
     
@@ -793,7 +772,7 @@ the planet; now it keeps the window, and `vox.Planet` reports "cut-over off: no 
   60,000, within D3 and the same frame time) and a descent has about 20 s to stream it back.
 - **The far field** cuts its hole while chunks are held; once the window holds none, it refines by its screen error alone
   (`BandRadius` 0: no band patches forced for an empty window). When the window resumes the band returns, its patches
-  build while their parents draw, and the chunks fade in over them (`voxel.MeshFade.Appear`, measured from the camera).
+  build while their parents draw, and the chunks fade in over them (the appearance fade, measured from the camera).
 - **The descent prefetch** (`UVoxelChunkManager::ApplyDescentPrefetch`): under a camera descending faster than
   `voxel.Stream.DescentMinSpeed` (1,500 uu/s) the streaming viewer goes ahead of it along local down by what it covers
   in `voxel.Stream.DescentLead` seconds (3), at most half its altitude and never within two chunks of the surface

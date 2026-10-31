@@ -13,7 +13,7 @@
 #   powershell -File ...\voxel_bench_sweep.ps1 -Prefix islandM -Config /Game/PluginTesting/Review/Review_Island_M `
 #     -Distance 500000 -BenchArgs "start=-250000:0 dir=1:0 follow=300"
 #   # cvar A/B (run in-process with & so -Velocities binds as int[]):
-#   & ...\voxel_bench_sweep.ps1 -Prefix sync -PreCmds "voxel.FarCompression.Async 0"
+#   & ...\voxel_bench_sweep.ps1 -Prefix nofarfield -PreCmds "voxel.World.FarField 0"
 #
 # Paths self-locate from the script location; override -EditorCmd if your engine lives elsewhere.
 param(
@@ -32,7 +32,7 @@ param(
   #   -ExtraArgs "-VoxelMaxAsyncMesh=16 -VoxelMaxAsyncGen=8 -VoxelPinScheduler"
   [string]$ExtraArgs = "",
   # Console commands run before the bench starts, e.g. a cvar A/B:
-  #   -PreCmds "voxel.FarCompression.Async 0"
+  #   -PreCmds "voxel.World.FarField 0"
   [string[]]$PreCmds = @()
 )
 

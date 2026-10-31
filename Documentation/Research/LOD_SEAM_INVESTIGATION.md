@@ -240,7 +240,7 @@ legitimate, not a race.
 Implemented in `FDistanceBandLODStrategy`: `Update()` builds a `BalancedLODCache`
 (raw band LOD → hysteresis vs last frame → 2:1 refine-to-fixpoint), and
 `GetLODForChunk`/`GetVisibleChunks` read it so all manager call sites agree.
-Toggle with `voxel.LODBalance` (default 1).
+Always on (its A/B toggle retired under CR1 D-CR2; the A/B below predates that).
 
 **A/B over a settled session (`voxel.LogBoundaryResidency 2`, wide forced remesh):**
 
