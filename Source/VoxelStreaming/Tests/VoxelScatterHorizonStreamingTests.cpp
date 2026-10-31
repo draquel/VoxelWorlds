@@ -6,6 +6,7 @@
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
 #include "Testing/VoxelTestChunkWorld.h"
+#include "Testing/VoxelScatterTestDefinitions.h"
 #include "VoxelChunkManager.h"
 #include "VoxelScatterManager.h"
 #include "VoxelWorldConfiguration.h"
@@ -108,6 +109,7 @@ namespace VoxelScatterHorizonStreamingTestUtils
 			W.Stop();
 			return R;
 		}
+		VoxelScatterTesting::AddSmoothDefinitions(*Scatter);
 		Scatter->SetSurfacePointSpacing(W.Config->VoxelSize * 2.0f);
 		if (const FScatterDefinition* Trees = Scatter->GetScatterDefinition(TreeID))
 		{

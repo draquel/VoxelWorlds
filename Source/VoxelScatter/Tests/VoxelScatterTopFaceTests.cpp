@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "Testing/VoxelScatterTestDefinitions.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "VoxelScatterManager.h"
@@ -306,6 +307,7 @@ namespace VoxelScatterTopFaceTestUtils
 			Manager = NewObject<UVoxelScatterManager>();
 			Manager->AddToRoot();
 			Manager->Initialize(Config, World);
+			VoxelScatterTesting::AddSmoothDefinitions(*Manager);
 		}
 
 		~FHarness()

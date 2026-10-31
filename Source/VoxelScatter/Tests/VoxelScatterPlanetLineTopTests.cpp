@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "Testing/VoxelScatterTestDefinitions.h"
 #include "Algo/AllOf.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -601,6 +602,7 @@ namespace VoxelScatterLineTopTestUtils
 			Manager = NewObject<UVoxelScatterManager>();
 			Manager->AddToRoot();
 			Manager->Initialize(Config, World);
+			VoxelScatterTesting::AddSmoothDefinitions(*Manager);
 		}
 
 		~FPlanetHarness()

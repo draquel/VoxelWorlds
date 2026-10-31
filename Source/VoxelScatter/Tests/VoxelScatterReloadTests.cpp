@@ -4,6 +4,7 @@
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "Testing/VoxelScatterTestDefinitions.h"
 #include "Engine/StaticMesh.h"
 #include "VoxelScatterManager.h"
 #include "VoxelScatterRenderer.h"
@@ -25,7 +26,7 @@
 // (a cleared radius, an exclusion volume, a harvest) put two instances on every point.
 //
 // Through the scatter manager's own pipeline (OnChunkMeshDataReady -> async extraction -> Update), on a tilted heightmap
-// plane of grass and dirt and the default definitions (grass, rocks, trees with a SpawnDistance) given an engine mesh so
+// plane of grass and dirt and the test definitions (grass, rocks, trees with a SpawnDistance) given an engine mesh so
 // the renderer holds real instances:
 // - SameAsFresh: four chunks; one unloads and reloads three times. After each unload neither cache nor the renderer holds
 //   it; after each reload its surface data is cached and equals the first extraction's, its spawn points equal the first
@@ -46,7 +47,7 @@ namespace VoxelScatterReloadTestUtils
 	constexpr int32 ChunkSize = 16;
 	constexpr float VoxelSize = 100.0f;
 	constexpr float ChunkWorldSize = ChunkSize * VoxelSize;
-	constexpr int32 TreeID = 2; // CreateDefaultDefinitions' smooth trees (SpawnDistance 20,000)
+	constexpr int32 TreeID = 2; // VoxelScatterTesting::SmoothDefinitions' trees (SpawnDistance 20,000)
 
 	/** A heightmap world mode whose natural terrain is the plane H = Offset + SlopeX * X + SlopeY * Y. */
 	struct FTiltedPlaneWorldMode : public IVoxelWorldMode
@@ -159,10 +160,11 @@ namespace VoxelScatterReloadTestUtils
 			Manager = NewObject<UVoxelScatterManager>();
 			Manager->AddToRoot();
 			Manager->Initialize(Config, World);
+			VoxelScatterTesting::AddSmoothDefinitions(*Manager);
 			Manager->SetSurfacePointSpacing(VoxelSize);
 			Manager->SetWorldMode(&Plane());
 
-			// The default definitions have no mesh, so the renderer would make no instance. Give each the engine cube; trees
+			// The test definitions have no mesh, so the renderer would make no instance.Give each the engine cube; trees
 			// dense enough that every chunk has some.
 			for (const int32 ID : { 0, 1, TreeID })
 			{

@@ -18,26 +18,6 @@
 
 // ==================== Console Variables ====================
 
-// Global debug mode variable (declared extern in VoxelLocalVertexFactory.h)
-int32 GVoxelVertexColorDebugMode = EVoxelVertexColorDebugMode::Disabled;
-
-static TAutoConsoleVariable<int32> CVarVoxelVertexColorDebugMode(
-	TEXT("voxel.VertexColorDebugMode"),
-	0,
-	TEXT("Debug mode for voxel vertex colors:\n")
-	TEXT("  0 = Disabled (R=AO, G=MaterialID, B=BiomeID) - for material graph use\n")
-	TEXT("  1 = MaterialColors (RGB=MaterialColor*AO) - visual debugging\n")
-	TEXT("  2 = BiomeColors (RGB=BiomeHue*AO) - visual debugging\n")
-	TEXT("Note: Chunks must be re-meshed to see changes (reload level or move far away and back)."),
-	ECVF_Default
-);
-
-// Sync the console variable to the global debug mode on access
-static void SyncVertexColorDebugMode()
-{
-	GVoxelVertexColorDebugMode = CVarVoxelVertexColorDebugMode.GetValueOnAnyThread();
-}
-
 static TAutoConsoleVariable<int32> CVarVoxelShadowCullFrustum(
 	TEXT("voxel.Render.ShadowCullFrustum"),
 	1,
@@ -1931,9 +1911,6 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 	TArray<FIntVector>&& Removals)
 {
 	check(IsInRenderingThread());
-
-	// Sync debug mode from console variable
-	SyncVertexColorDebugMode();
 
 	// Process removals first to free up resources
 	for (const FIntVector& ChunkCoord : Removals)
