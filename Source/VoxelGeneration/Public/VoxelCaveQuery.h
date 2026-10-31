@@ -27,7 +27,7 @@ public:
 	 * Cave carve density [0,1] at an explicit world position. 0 = solid (no carving),
 	 * 1 = fully carved (open cave).
 	 *
-	 * Mirrors generation-time carving exactly (FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane):
+	 * Mirrors generation-time carving exactly (FVoxelCPUNoiseGenerator::GenerateChunkHeightmap):
 	 * depth below the surface is measured in voxels, and only positions strictly BELOW the terrain
 	 * surface carve — at or above the surface this returns 0 (there is no solid terrain to carve).
 	 *

@@ -93,19 +93,13 @@ private:
 	// ==================== World Mode Generation ====================
 
 	/**
-	 * Generate chunk using Infinite Plane world mode (2D heightmap).
+	 * Generate a chunk of a heightmap world mode (InfinitePlane, IslandBowl): 2D noise to a height, the island's edge
+	 * falloff composed on it, biomes, caves and ores by the column's depth. One body for both modes (code review CR2,
+	 * CORE-23); the GPU has one heightmap branch too.
 	 */
-	void GenerateChunkInfinitePlane(
+	void GenerateChunkHeightmap(
 		const FVoxelNoiseGenerationRequest& Request,
-		const FInfinitePlaneWorldMode& WorldMode,
-		TArray<FVoxelData>& OutVoxelData);
-
-	/**
-	 * Generate chunk using Island Bowl world mode (bounded terrain with falloff).
-	 */
-	void GenerateChunkIslandBowl(
-		const FVoxelNoiseGenerationRequest& Request,
-		const FIslandBowlWorldMode& WorldMode,
+		const IVoxelWorldMode& WorldMode,
 		TArray<FVoxelData>& OutVoxelData);
 
 	/**
