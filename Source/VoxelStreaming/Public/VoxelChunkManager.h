@@ -32,7 +32,7 @@ class UVoxelWorldConfiguration;
 class FVoxelGPUNoiseGenerator;
 class IVoxelLODStrategy;
 class IVoxelMeshRenderer;
-class FVoxelCPUMarchingCubesMesher;
+class UVoxelMaterialAtlas;
 class UVoxelEditManager;
 class UVoxelCollisionManager;
 class UVoxelScatterManager;
@@ -1581,10 +1581,10 @@ public:
 	void DrawDebugVisualization() const;
 
 	/**
-	 * Get the Marching Cubes mesher for debug access.
-	 * Returns nullptr if mesher is not a MarchingCubes mesher or not initialized.
+	 * The material atlas the renderer draws with (the world actor's MaterialAtlas), or null before Initialize or without
+	 * one. The map subsystem builds its palette from it (code review CR1, REND-20).
 	 */
-	FVoxelCPUMarchingCubesMesher* GetMarchingCubesMesher() const;
+	UVoxelMaterialAtlas* GetMaterialAtlas() const;
 
 	// ==================== Events ====================
 

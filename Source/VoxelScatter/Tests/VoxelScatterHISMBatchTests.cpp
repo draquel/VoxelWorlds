@@ -4,6 +4,7 @@
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "Testing/VoxelScatterTestDefinitions.h"
 #include "Engine/StaticMesh.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "HAL/IConsoleManager.h"
@@ -25,7 +26,7 @@
 // per voxel.Scatter.HISMBatchSeconds, releases zero-scaled where each instance stands; and voxel.Scatter.RegionChunks
 // sizes the regions HISMs are kept per.
 //
-// Through the scatter manager's own pipeline on a tilted heightmap plane of grass and dirt (the default definitions given
+// Through the scatter manager's own pipeline on a tilted heightmap plane of grass and dirt (the test definitions given
 // an engine mesh, as the reload tests):
 // - SameInstances: the same scenario with every write made at once (HISMBatchSeconds 0, the behaviour before G42) and
 //   batched: four chunks near the viewer, the viewer far (the trees released), a chunk unloaded, reloaded near, and a
@@ -42,7 +43,7 @@ namespace VoxelScatterHISMBatchTestUtils
 	constexpr int32 ChunkSize = 16;
 	constexpr float VoxelSize = 100.0f;
 	constexpr float ChunkWorldSize = ChunkSize * VoxelSize;
-	constexpr int32 TreeID = 2; // CreateDefaultDefinitions' smooth trees (SpawnDistance 20,000)
+	constexpr int32 TreeID = 2; // VoxelScatterTesting::SmoothDefinitions' trees (SpawnDistance 20,000)
 	const int32 TypeIDs[] = { 0, 1, TreeID };
 
 	/** A heightmap world mode whose natural terrain is the plane H = Offset + SlopeX * X + SlopeY * Y. */
@@ -151,6 +152,7 @@ namespace VoxelScatterHISMBatchTestUtils
 			Manager = NewObject<UVoxelScatterManager>();
 			Manager->AddToRoot();
 			Manager->Initialize(Config, World);
+			VoxelScatterTesting::AddSmoothDefinitions(*Manager);
 			Manager->SetSurfacePointSpacing(VoxelSize);
 			Manager->SetWorldMode(&Plane());
 			for (const int32 ID : TypeIDs)

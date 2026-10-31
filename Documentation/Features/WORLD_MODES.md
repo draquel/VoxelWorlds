@@ -51,7 +51,7 @@ placement all use it. `MakeFingerprint` and `GenerationVersion` describe the wor
 **Reaching it from game code and Blueprint.** The chunk manager (a component of the world actor) exposes the configured
 mode's bounds and frame as `BlueprintPure` functions in the `Voxel|World` category: `IsInsideWorld`, `GetWorldBounds`,
 `GetUpVectorAt`, `GetAltitudeAt`, `WorldToSurface`, `SurfaceToWorld` and `GetWorldFingerprint`. VoxelWorlds does not
-depend on the game plugins; they call these through `AVoxelWorldTestActor::GetChunkManager()`, as they already do for
+depend on the game plugins; they call these through `AVoxelWorldActor::GetChunkManager()`, as they alreadydo for
 the surface queries.
 
 ---
@@ -476,7 +476,7 @@ Review plan §19 (decisions D14-D16):
 | Conditioning zones | A planet zone is a cap on the datum sphere: `FVoxelConditioningZone::Direction` (zero = a heightmap zone), `InnerRadius` and `FalloffWidth` as great-circle distances, `TargetHeight` an altitude, weighted with the heightmap's smoothstep (`GetWeightAtDirection`) and blended into the terrain's altitude along each direction (`FVoxelTerrainConditioning::ApplyToAltitude`) on the CPU and the GPU (`PlanetApplyConditioning`). The chunk manager gathers a chunk's zones by the cap its box subtends (`GatherConditioningZonesOnSphere`); conditioners answer `IVoxelTerrainConditioner::GatherConditioningOnSphere`. A zone of the other kind does nothing (with a warning). `PlanetGenerationVersion` 4 | `VoxelGeneration/VoxelTerrainConditioning.h`, `SphericalPlanet.ush` |
 | The generated surface | The natural surface plus the zones: `UVoxelChunkManager::GetGeneratedSurfacePoint` / `GetGeneratedPlanetAltitude`, the start of `QueryEditMergedSurfacePoint`'s walk, the spawn, the map's planet tiles, scatter's line top, PCG's far points; `GetSurfacePointAt` stays the natural surface | `VoxelChunkManager` |
 | POIs | Placed on the cube-sphere grid's cells (`FPOIPlacement::GeneratePlanetPOIs`, the site survey on the tangent plane in altitudes, the sea's altitude as the water line); each POI has a pad space, the tangent frame at its centre (x east, y north, z local up), in which its claims, structures and dungeon are composed with the plane's arithmetic; structures are draped onto the pad's cap; streaming, `poi.Find` and the map markers by 3D distance | parent project, `VoxelWorldPOI` (its `POI_POPULATION_PLAN.md`, `POI_DUNGEON_PLAN.md`) |
-| Campsites | Generated campsites stand on the draped pad and respawn the player along their own up; `PlaceCampsite` levels its pad and apron along local up | `VoxelWorldPOI` |
+| Campsites | Generated campsites stand on the draped pad and respawn the player along their own up | `VoxelWorldPOI` |
 | Dungeons | Stamped and stitched in a frame (`UDungeonVoxelStamper::StampDungeonInFrame`, `UDungeonEntranceStitcher::StitchEntranceInFrame`), tiles laid out in the tile actor's own frame (`ADungeonActor::bMapInActorFrame`); the POI's dungeon record and gameplay stay in pad space and convert at the boundary | `ProceduralDungeonPlugin`, `VoxelWorldPOI` |
 
 ### The radius ceiling (SP-H1, SP-H2)
@@ -582,7 +582,7 @@ use the block tops in a cubic heightmap world (`FVoxelBlockSurface::UsesBlockSur
 | System | In a block world | Where |
 |--------|------------------|-------|
 | Surface queries | `GetGeneratedSurfaceHeight` samples the column at its corner and returns the top of the topmost block the generator makes (`FVoxelBlockSurface::BlockTopForHeight`, exact by the generator's own density rule); `QueryEditMergedSurface` returns the top face of the topmost ground voxel with no ground above it in the edit-merged column (the configured voxel trees' leaves are not ground: a canopy is walked under); the point forms follow; normal and slope stay the density gradient's (the terrain's slope). Spawn, surface NPC spawns, navigation, the dungeon entrance stitcher, PCG near points, `vox.TPPOI` and the bench's follow take block tops with no change of their own | `VoxelChunkManager`, `VoxelBlockSurface` |
-| Pads | Generation unchanged (a pad zone's target is still the pad height); the pad's walking surface is `SnapToBlockTop(PadHeight)` (`FPOIPlacement::GetPadSurfaceHeight`): the claim, the structures and a dungeon's mouth stand there. The runtime campsite levelling (`PlaceCampsite`) sets whole blocks: the pad at a block top and a staircase apron, one block per block of distance | VoxelWorldPOI |
+| Pads | Generation unchanged (a pad zone's target is still the pad height); the pad's walking surface is `SnapToBlockTop(PadHeight)` (`FPOIPlacement::GetPadSurfaceHeight`): the claim, the structures and a dungeon's mouth stand there | VoxelWorldPOI |
 | Steps | Players and NPCs step one block (`UVCMovementComponent::MaxStepHeight` = V + 5, `vc.Move.StepUpBlocks`); two blocks are a wall; the camera eases a block step | VoxelCharacterPlugin |
 | Navigation | One cell per block column on the voxel grid, a step of at most one block (no √2 on diagonals, no corner cut past a pillar), the node budget scaled by the cell area (`voxel.Nav.BlockSteps`) | `VoxelSurfaceNavigationSubsystem`, see `SURFACE_NAVIGATION.md` |
 | Voxel trees | Recomputed from the injector's seeded positions (`FVoxelTreeInjector::FindTreesWithTrunkAt`, `CollectTreeVoxels`; `UVoxelChunkManager::FindVoxelTreeAt`, `GetVoxelTreeBlocks`, `FellVoxelTree`); chopped like a scatter tree, felled to a stump at the harvest entry's third hit | VoxelWorlds, VoxelCharacterPlugin |
@@ -650,7 +650,7 @@ it by the `VoxelWorlds.Generation.GPUvsCPU*` parity tests:
 World mode can only be set at initialization time. Changing modes requires reinitializing the voxel world:
 
 ```cpp
-void AVoxelWorldTestActor::InitializeVoxelWorld()
+void AVoxelWorldActor::InitializeVoxelWorld()
 {
     // Get configuration (mode is set in Configuration asset or defaults)
     UVoxelWorldConfiguration* Config = Configuration;

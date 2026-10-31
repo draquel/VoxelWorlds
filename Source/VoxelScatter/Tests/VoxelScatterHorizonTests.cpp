@@ -4,6 +4,7 @@
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "Testing/VoxelScatterTestDefinitions.h"
 #include "Engine/StaticMesh.h"
 #include "HAL/IConsoleManager.h"
 #include "VoxelScatterManager.h"
@@ -26,7 +27,7 @@
 // arrives at the window's front beyond every spawn distance, so its scatter waited for its next mesh (the LOD refine near
 // the viewer), where every type landed at once, the trees inside their fade band: the pop-in in front of the player.
 //
-// Through the manager's own pipeline on a tilted heightmap plane with the default definitions (grass and rocks at
+// Through the manager's own pipeline on a tilted heightmap plane with the test definitions (grass and rocks at
 // ScatterRadius 10,000, trees with a SpawnDistance of 20,000), a hand-off requester standing in for the chunk manager's:
 // - Horizon: a chunk submitted with the viewer 40,000 away extracts nothing and waits; with the viewer at 15,000 (within
 //   the trees' distance) the distance pass hands it off again and it holds the trees and no grass; with the viewer near
@@ -44,7 +45,7 @@ namespace VoxelScatterHorizonTestUtils
 	constexpr float ScatterRadius = 10000.0f;
 	constexpr int32 GrassID = 0;
 	constexpr int32 RockID = 1;
-	constexpr int32 TreeID = 2; // CreateDefaultDefinitions' smooth trees (SpawnDistance 20,000)
+	constexpr int32 TreeID = 2; // VoxelScatterTesting::SmoothDefinitions' trees (SpawnDistance 20,000)
 
 	struct FScopedCVar
 	{
@@ -162,6 +163,7 @@ namespace VoxelScatterHorizonTestUtils
 			Manager = NewObject<UVoxelScatterManager>();
 			Manager->AddToRoot();
 			Manager->Initialize(Config, World);
+			VoxelScatterTesting::AddSmoothDefinitions(*Manager);
 			Manager->SetSurfacePointSpacing(VoxelSize);
 			Manager->SetWorldMode(&Plane());
 			for (const int32 ID : { GrassID, RockID, TreeID })

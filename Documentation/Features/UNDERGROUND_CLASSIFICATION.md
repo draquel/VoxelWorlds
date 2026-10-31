@@ -100,7 +100,6 @@ The **surface exposure guard** (`!bAdjacentToSurfaceAir`) prevents flagging soli
 | `ExtractSurfacePointsFromVoxelData` | Air voxels in column scan | Sets `bIsUnderground` on CPU-extracted surface points |
 | `ExtractSurfacePointsCubic` | Air voxels in cubic block scan | Sets `bIsUnderground` on cubic surface points |
 | `VoxelTreeInjector` | Air voxel above tree base | Prevents tree placement in caves |
-| `VoxelWorldTestActor` | Voxel at viewer position | Viewer underground detection |
 
 ## Surface Point Classification
 

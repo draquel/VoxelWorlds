@@ -2838,21 +2838,9 @@ void UVoxelChunkManager::DrawDebugVisualization() const
 #endif
 }
 
-FVoxelCPUMarchingCubesMesher* UVoxelChunkManager::GetMarchingCubesMesher() const
+UVoxelMaterialAtlas* UVoxelChunkManager::GetMaterialAtlas() const
 {
-	if (!Mesher.IsValid())
-	{
-		return nullptr;
-	}
-
-	// Check mesher type using the virtual GetMesherTypeName method
-	// This avoids dynamic_cast which requires RTTI (disabled in UE)
-	if (Mesher->GetMesherTypeName() == TEXT("CPU MarchingCubes"))
-	{
-		return static_cast<FVoxelCPUMarchingCubesMesher*>(Mesher.Get());
-	}
-
-	return nullptr;
+	return MeshRenderer ? MeshRenderer->GetMaterialAtlas() : nullptr;
 }
 
 // ==================== Internal Update Methods ====================

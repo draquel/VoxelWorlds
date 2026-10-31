@@ -4,6 +4,7 @@
 #include "Misc/AutomationTest.h"
 #include "HAL/IConsoleManager.h"
 #include "Testing/VoxelTestChunkWorld.h"
+#include "Testing/VoxelScatterTestDefinitions.h"
 #include "VoxelChunkManager.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
@@ -498,6 +499,7 @@ bool FVoxelScatterEditReadersPlanetTest::RunTest(const FString& Parameters)
 		W.Config->bEnableScatter = true;
 		W.Config->ScatterRadius = 100000.0f;
 		W.StartManager();
+		VoxelScatterTesting::AddSmoothDefinitions(*W.Manager->GetScatterManager());
 		// Rays one voxel apart, so the edge reader's last cell column has a ray across it.
 		W.Manager->GetScatterManager()->SetSurfacePointSpacing(W.Config->VoxelSize);
 		// The equator on the +X face: local up +X, so the rays run along X, beside the chunk's walls.
@@ -607,8 +609,9 @@ bool FVoxelScatterEditReadersPlaneTest::RunTest(const FString& Parameters)
 		W.Config->bEnableScatter = true;
 		W.Config->ScatterRadius = 100000.0f;
 		W.StartManager();
-		// The default definitions have no mesh, so the renderer would make no instance: give each the engine cube.
+		// The test definitions have no mesh, so the renderer would make no instance: give each the engine cube.
 		UVoxelScatterManager* Scatter = W.Manager->GetScatterManager();
+		VoxelScatterTesting::AddSmoothDefinitions(*Scatter);
 		for (FScatterDefinition Def : TArray<FScatterDefinition>(Scatter->GetScatterDefinitions()))
 		{
 			Def.Mesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Engine/BasicShapes/Cube.Cube")));

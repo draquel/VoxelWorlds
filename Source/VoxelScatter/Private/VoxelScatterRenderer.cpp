@@ -879,40 +879,6 @@ bool UVoxelScatterRenderer::FindNearestInstance(int32 ScatterTypeID, const FVect
 	return OutIndex != INDEX_NONE;
 }
 
-void UVoxelScatterRenderer::SetSurfaceScatterVisible(bool bVisible)
-{
-	if (!ScatterManager)
-	{
-		return;
-	}
-
-	for (auto& Pair : HISMComponents)
-	{
-		const int32 ScatterTypeID = Pair.Key.ScatterTypeID;
-		UHierarchicalInstancedStaticMeshComponent* HISM = Pair.Value;
-		if (!HISM)
-		{
-			continue;
-		}
-
-		const FScatterDefinition* Def = ScatterManager->GetScatterDefinition(ScatterTypeID);
-		if (!Def)
-		{
-			continue;
-		}
-
-		// Hide scatter types that can't legitimately appear underground (no Underground
-		// flag in the mask) — e.g. dry-land or underwater foliage seen through cave ceilings.
-		// Underground-capable types stay visible so cave scatter doesn't blink when descending.
-		const bool bCanAppearUnderground =
-			(Def->SurfaceLocationMask & static_cast<int32>(EScatterSurfaceLocationFlags::Underground)) != 0;
-		if (!bCanAppearUnderground)
-		{
-			HISM->SetVisibility(bVisible);
-		}
-	}
-}
-
 FString UVoxelScatterRenderer::GetDebugStats() const
 {
 	const int32 TotalInstances = GetTotalInstanceCount();

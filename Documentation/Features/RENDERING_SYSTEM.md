@@ -95,7 +95,7 @@ After extensive debugging, the project switched to using Epic's **FLocalVertexFa
 ### Architecture Overview
 
 ```
-AVoxelWorldTestActor
+AVoxelWorldActor
     │
     ├── UVoxelChunkManager (component)
     │   └── Coordinates chunk streaming
@@ -208,15 +208,6 @@ AO = floor(VertexColor.B * 4);  // 0-3
 AOFactor = 1.0 - (AO * 0.25);   // 1.0, 0.75, 0.5, 0.25
 FinalColor = BaseColor * AOFactor;
 ```
-
-### Debug Visualization Modes
-
-Console variable `voxel.VertexColorDebugMode`:
-- **0** (Default): Normal encoding (R=MaterialID, G=BiomeID, B=AO)
-- **1** (MaterialColors): RGB = MaterialColor * AO
-- **2** (BiomeColors): RGB = BiomeHue * AO (Red=0, Green=1, Blue=2, etc.)
-
-Note: Chunks must be re-meshed after changing debug mode.
 
 ---
 

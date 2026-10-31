@@ -468,7 +468,6 @@ FMaterialRelevance WaterMaterialRelevance;
 | `bEnableWaterLevel` | bool | false | Master toggle for the water system |
 | `WaterLevel` | float | 0.0 | Water surface Z height (InfinitePlane/IslandBowl modes) |
 | `WaterRadius` | float | 100000.0 | Water sphere radius (SphericalPlanet mode): the sea for generation and gameplay, and the ocean shell's radius |
-| `bShowWaterPlane` | bool | true | Show fallback static water plane when `WaterMeshMaterial` is null |
 | `WaterMeshMaterial` | UMaterialInterface* | nullptr | Material for water tile rendering (should be translucent or Single Layer Water) |
 
 ### Material Requirements
@@ -478,7 +477,7 @@ The `WaterMeshMaterial` should be:
 - **Translucent** blend mode — for simple transparent water
 - Should NOT be opaque — water tiles render as a second pass and need correct translucency sorting
 
-When `WaterMeshMaterial` is null, the system falls back to a static water plane at `WaterLevel` (controlled by `bShowWaterPlane`).
+When `WaterMeshMaterial` is null no water is drawn; the game module's demo actor (`AVoxelDemoActor::bShowWaterPlane`) draws a static plane at `WaterLevel` for such a world.
 
 ### Lumen: Translucency Reflections
 

@@ -25,7 +25,6 @@ public class VoxelStreaming : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
-				"InputCore", // linked, not included: EKeys in the test actor (AVoxelWorldTestActor; leaves with it, D-CR11)
 				"VoxelCore",
 				"VoxelLOD",
 				"VoxelRendering",
@@ -42,7 +41,7 @@ public class VoxelStreaming : ModuleRules
 				"RenderCore", // the bench's game and render thread times (stat unit's)
 				"RHI", // the bench's GPU frame time
 				"PhysicsCore", // VoxelCollisionManager.cpp: UPhysicalMaterial; the public headers reach FCollisionShape through Engine
-				"VoxelScatter", // the chunk manager, bench and test actor; VoxelChunkManager.h only forward-declares UVoxelScatterManager
+				"VoxelScatter", // the chunk manager and the bench; VoxelChunkManager.h only forward-declares UVoxelScatterManager
 			}
 		);
 
