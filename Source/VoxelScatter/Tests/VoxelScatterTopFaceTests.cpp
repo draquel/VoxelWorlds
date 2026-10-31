@@ -133,22 +133,25 @@ namespace VoxelScatterTopFaceTestUtils
 		return Voxels;
 	}
 
-	/** The context the scatter manager builds: the world mode (null = no analytic height) and the bottom-layer edits above. */
+	/**
+	 * The context the scatter manager builds: the world mode (null = no analytic height) and the bottom-layer edits above,
+	 * keyed in this chunk's frame (the layer over the top at Z = ChunkSize) as GatherAboveLayerEdits keys them.
+	 */
 	FScatterExtractionContext MakeContext(const IVoxelWorldMode* Mode, const FChunkEditLayer* AboveLayer = nullptr)
 	{
 		FScatterExtractionContext Context;
 		Context.WorldMode = Mode;
 		if (AboveLayer)
 		{
-			TMap<int32, FVoxelEdit> Bottom;
+			TMap<FIntVector, FVoxelEdit> Bottom;
 			for (const TPair<int32, FVoxelEdit>& Pair : AboveLayer->Edits)
 			{
 				if (Pair.Value.LocalPosition.Z == 0)
 				{
-					Bottom.Add(Pair.Value.LocalPosition.X + Pair.Value.LocalPosition.Y * ChunkSize, Pair.Value);
+					Bottom.Add(FIntVector(Pair.Value.LocalPosition.X, Pair.Value.LocalPosition.Y, ChunkSize), Pair.Value);
 				}
 			}
-			Context.AboveLayerEdits = MakeShared<const TMap<int32, FVoxelEdit>>(MoveTemp(Bottom));
+			Context.OutsideEdits = MakeShared<const TMap<FIntVector, FVoxelEdit>>(MoveTemp(Bottom));
 		}
 		return Context;
 	}
@@ -163,8 +166,7 @@ namespace VoxelScatterTopFaceTestUtils
 	TArray<FVoxelSurfacePoint> Extract(EPath Path, const TArray<FVoxelData>& Voxels, const FIntVector& Coord, const FScatterExtractionContext& Context)
 	{
 		FChunkSurfaceData Surface;
-		UVoxelScatterManager::ExtractHeightmapSurfacePoints(Voxels, Coord, ChunkOrigin(Coord), ChunkSize, VoxelSize, VoxelSize,
-			Path == EPath::Cubic, Context, Surface);
+		UVoxelScatterManager::ExtractChunkSurfacePoints(Path == EPath::Cubic, Voxels, Coord, ChunkOrigin(Coord), ChunkSize, VoxelSize, VoxelSize, {}, Context, Surface);
 		return Surface.SurfacePoints;
 	}
 
@@ -526,8 +528,7 @@ bool FVoxelScatterTopFaceEditsAboveTest::RunTest(const FString& Parameters)
 //   CPU with their boundary 12 voxels or more under the ground. Over every column of the lower chunk's top layer, both
 //   heightmap paths: a point there exactly where the upper chunk's bottom voxel is air (a cave floor at the boundary), and
 //   underground; none where it is solid. Again with biome overrides (caves in only the most common biome, from a shallower
-//   minimum depth) and with the upper chunk's bottom layer edited (dug over rock, filled over a cave). With
-//   voxel.Scatter.BuriedTopFace 0 (the voxel taken for air, as before) the top layer holds a copy under the rock.
+//   minimum depth) and with the upper chunk's bottom layer edited (dug over rock, filled over a cave).
 // ---------------------------------------------------------------------------
 
 namespace VoxelScatterBuriedTopFaceTestUtils
@@ -601,15 +602,14 @@ namespace VoxelScatterBuriedTopFaceTestUtils
 		}
 
 		/** The context MakeExtractionContext builds for a chunk (no conditioning zones here). */
-		FScatterExtractionContext MakeContext(bool bAnyDepth, const TSharedPtr<const TMap<int32, FVoxelEdit>>& AboveEdits = nullptr) const
+		FScatterExtractionContext MakeContext(const TSharedPtr<const TMap<FIntVector, FVoxelEdit>>& AboveEdits = nullptr) const
 		{
 			FScatterExtractionContext Context;
 			Context.WorldMode = Mode.Get();
 			Context.NoiseParams = Config->NoiseParams;
 			Context.Sea = FVoxelSeaSurface::FromConfig(*Config);
 			Context.CaveConfiguration = Caves;
-			Context.bDecideVoxelAboveAtAnyDepth = bAnyDepth;
-			Context.AboveLayerEdits = AboveEdits;
+			Context.OutsideEdits = AboveEdits;
 			return Context;
 		}
 
@@ -734,16 +734,15 @@ bool FVoxelScatterTopFaceBuriedCavesTest::RunTest(const FString& Parameters)
 		return Pairs;
 	};
 
-	auto RunPairs = [this, &World](const TArray<FPair>& Pairs, const TCHAR* Label, bool bAnyDepth, EPath Path)
+	auto RunPairs = [this, &World](const TArray<FPair>& Pairs, const TCHAR* Label, EPath Path)
 	{
 		FRowResult Total;
 		for (const FPair& Pair : Pairs)
 		{
-			Total.Add(CheckRow(Path, Pair.LowerVoxels, BottomMerged(Pair.UpperVoxels, nullptr), Pair.Lower, World.MakeContext(bAnyDepth)));
+			Total.Add(CheckRow(Path, Pair.LowerVoxels, BottomMerged(Pair.UpperVoxels, nullptr), Pair.Lower, World.MakeContext()));
 		}
-		AddInfo(FString::Printf(TEXT("%s, %s%s: %d columns with a solid top voxel, %d of them under air (a crossing at the boundary); %d top-layer points: %d copies under rock, %d crossings missed, %d not underground"),
-			Label, PathName(Path), bAnyDepth ? TEXT("") : TEXT(" (taken for air, as before)"), Total.SolidTops, Total.Real, Total.Points, Total.Copies, Total.Missed,
-			Total.NotUnderground));
+		AddInfo(FString::Printf(TEXT("%s, %s: %d columns with a solid top voxel, %d of them under air (a crossing at the boundary); %d top-layer points: %d copies under rock, %d crossings missed, %d not underground"),
+			Label, PathName(Path), Total.SolidTops, Total.Real, Total.Points, Total.Copies, Total.Missed, Total.NotUnderground));
 		return Total;
 	};
 
@@ -751,14 +750,11 @@ bool FVoxelScatterTopFaceBuriedCavesTest::RunTest(const FString& Parameters)
 	FRowResult AllReal;
 	for (const EPath Path : { EPath::Column, EPath::Cubic })
 	{
-		const FRowResult New = RunPairs(Pairs, TEXT("Default caves"), true, Path);
+		const FRowResult New = RunPairs(Pairs, TEXT("Default caves"), Path);
 		AllReal.Add(New);
 		TestEqual(*FString::Printf(TEXT("Default caves, %s: no copy of the rock on the top layer"), PathName(Path)), New.Copies, 0);
 		TestEqual(*FString::Printf(TEXT("Default caves, %s: every cave floor at the boundary has its point"), PathName(Path)), New.Missed, 0);
 		TestEqual(*FString::Printf(TEXT("Default caves, %s: a buried chunk's top-layer points are underground"), PathName(Path)), New.NotUnderground, 0);
-		const FRowResult Old = RunPairs(Pairs, TEXT("Default caves"), false, Path);
-		TestTrue(*FString::Printf(TEXT("Default caves, %s: taken for air, the top layer holds copies under the rock (%d)"), PathName(Path), Old.Copies),
-			Old.Copies > 0 && Old.Copies == Old.SolidTops - Old.Real);
 	}
 	TestTrue(*FString::Printf(TEXT("Caves cross the boundaries (%d crossings): not vacuous"), AllReal.Real), AllReal.Real >= 20);
 
@@ -769,17 +765,20 @@ bool FVoxelScatterTopFaceBuriedCavesTest::RunTest(const FString& Parameters)
 		for (const FPair& Pair : Pairs)
 		{
 			TMap<int32, FVoxelEdit> Edits;
+			TMap<FIntVector, FVoxelEdit> Outside;
 			for (int32 I = 0; I < ChunkSize * ChunkSize; I += 7)
 			{
 				const FIntVector Local(I % ChunkSize, I / ChunkSize, 0);
 				const bool bSolid = Pair.UpperVoxels[I].IsSolid();
-				Edits.Add(I, FVoxelEdit(Local, bSolid ? FVoxelData::Air() : FVoxelData::Solid(EVoxelMaterial::Stone), EEditMode::Set));
+				const FVoxelEdit Edit(Local, bSolid ? FVoxelData::Air() : FVoxelData::Solid(EVoxelMaterial::Stone), EEditMode::Set);
+				Edits.Add(I, Edit);
+				Outside.Add(FIntVector(Local.X, Local.Y, ChunkSize), Edit);
 				(bSolid ? Dug : Filled) += 1;
 			}
-			const TSharedPtr<const TMap<int32, FVoxelEdit>> Shared = MakeShared<const TMap<int32, FVoxelEdit>>(Edits);
+			const TSharedPtr<const TMap<FIntVector, FVoxelEdit>> Shared = MakeShared<const TMap<FIntVector, FVoxelEdit>>(MoveTemp(Outside));
 			for (const EPath Path : { EPath::Column, EPath::Cubic })
 			{
-				Total.Add(CheckRow(Path, Pair.LowerVoxels, BottomMerged(Pair.UpperVoxels, &Edits), Pair.Lower, World.MakeContext(true, Shared)));
+				Total.Add(CheckRow(Path, Pair.LowerVoxels, BottomMerged(Pair.UpperVoxels, &Edits), Pair.Lower, World.MakeContext(Shared)));
 			}
 		}
 		AddInfo(FString::Printf(TEXT("Edited above (%d dug, %d filled), both paths: %d solid tops, %d under air; %d points: %d copies, %d missed, %d not underground"),
@@ -822,7 +821,7 @@ bool FVoxelScatterTopFaceBuriedCavesTest::RunTest(const FString& Parameters)
 		FRowResult Total;
 		for (const EPath Path : { EPath::Column, EPath::Cubic })
 		{
-			Total.Add(RunPairs(OverridePairs, *FString::Printf(TEXT("Biome overrides (%d biomes, caves in %d)"), BiomeCounts.Num(), Common), true, Path));
+			Total.Add(RunPairs(OverridePairs, *FString::Printf(TEXT("Biome overrides (%d biomes, caves in %d)"), BiomeCounts.Num(), Common), Path));
 		}
 		TestEqual(TEXT("Biome overrides: no copy"), Total.Copies, 0);
 		TestEqual(TEXT("Biome overrides: no crossing missed"), Total.Missed, 0);

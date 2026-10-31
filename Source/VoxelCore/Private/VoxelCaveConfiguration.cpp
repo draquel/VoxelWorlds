@@ -93,3 +93,33 @@ bool UVoxelCaveConfiguration::HasEnabledLayers() const
 	}
 	return false;
 }
+
+bool UVoxelCaveConfiguration::AnyLayerReachesDepth(float DepthBelowSurface) const
+{
+	float ShallowestOverride = UnderwaterMinDepth > 0.0f ? UnderwaterMinDepth : TNumericLimits<float>::Max();
+	for (const FBiomeCaveOverride& Override : BiomeOverrides)
+	{
+		if (Override.MinDepthOverride >= 0.0f)
+		{
+			ShallowestOverride = FMath::Min(ShallowestOverride, Override.MinDepthOverride);
+		}
+	}
+	for (const FCaveLayerConfig& Layer : CaveLayers)
+	{
+		if (!Layer.bEnabled)
+		{
+			continue;
+		}
+		const float MinDepth = FMath::Min(Layer.MinDepth, ShallowestOverride);
+		if (DepthBelowSurface < MinDepth - Layer.DepthFadeWidth)
+		{
+			continue;
+		}
+		if (Layer.MaxDepth > 0.0f && DepthBelowSurface > Layer.MaxDepth + Layer.DepthFadeWidth)
+		{
+			continue;
+		}
+		return true;
+	}
+	return false;
+}

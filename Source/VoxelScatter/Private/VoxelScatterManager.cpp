@@ -37,23 +37,6 @@ static TAutoConsoleVariable<int32> CVarVoxelScatterRegionChunks(
 	TEXT("(voxel.Render.RegionChunks; the behaviour before G42); N > 0 = regions of N chunks. Read when the scatter manager initializes."),
 	ECVF_Default);
 
-static TAutoConsoleVariable<int32> CVarVoxelScatterBuriedTopFace(
-	TEXT("voxel.Scatter.BuriedTopFace"),
-	1,
-	TEXT("Heightmap worlds (world modes review G28): 1 = the column and cubic scans decide the voxel over a chunk's top layer at any\n")
-	TEXT("depth, as generation makes it (the generated height, the cave carve, the chunk above's edits), so a buried chunk's top face\n")
-	TEXT("carries no copy of the rock over it; 0 = only within 1.5 voxels of the generated ground (G26), taken for air deeper (before).\n")
-	TEXT("Read when a chunk's extraction context is built."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarVoxelScatterPlanetFaceCaves(
-	TEXT("voxel.Scatter.PlanetFaceCaves"),
-	1,
-	TEXT("Planets (world modes review G72): 1 = the voxels past a chunk's +X, +Y and +Z faces, which its rays read in its last\n")
-	TEXT("cells, are carved by the caves as generation carves them; 0 = the generated altitude alone (before): a cave opening\n")
-	TEXT("such a voxel was read as rock. Read when a chunk's extraction context is built."),
-	ECVF_Default);
-
 static TAutoConsoleVariable<int32> CVarVoxelScatterFirstExtractionAtHorizon(
 	TEXT("voxel.Scatter.FirstExtractionAtHorizon"),
 	1,
@@ -126,7 +109,7 @@ namespace
 	/**
 	 * A planet chunk's density for ExtractSurfacePointsAlongUp's radial rays (world modes review G31), on the voxel lattice
 	 * 0..ChunkSize on each axis: its own voxels, and past its +X, +Y and +Z faces (index ChunkSize) the voxel the planet
-	 * generator makes there with the neighbour's edit (FScatterExtractionContext::GetPlanetVoxelOutsideChunk), computed the
+	 * generator makes there with the neighbour's edit (FScatterExtractionContext::GetVoxelOutsideChunk), computed the
 	 * first time a ray needs it. Cell (I, J, K) spans voxels I..I+1 on each axis; the chunk owns cells 0..ChunkSize-1, so
 	 * its last cell on each axis reaches one voxel into the neighbour.
 	 */
@@ -163,7 +146,7 @@ namespace
 				FVoxelData Given;
 				Cached = (Context.OutsideVoxelSource && Context.OutsideVoxelSource(Local, Given))
 					? Given.Density
-					: Context.GetPlanetVoxelOutsideChunk(Local, Origin + FVector(Local) * VoxelSize, VoxelSize).Density;
+					: Context.GetVoxelOutsideChunk(Local, Origin + FVector(Local) * VoxelSize, VoxelSize).Density;
 			}
 			return static_cast<uint8>(Cached);
 		}
@@ -430,7 +413,7 @@ void UVoxelScatterManager::ValidateScatterDistances() const
 		}
 
 		// A definition with no explicit spawn distance falls back to the manager-wide radius.
-		const float EffectiveSpawnDistance = Def.SpawnDistance > 0.0f ? Def.SpawnDistance : ScatterRadius;
+		const float EffectiveSpawnDistance = GetEffectiveSpawnDistance(Def);
 
 		// 1. HISM fades instances between LODStartDistance and CullDistance. Collapsing that
 		//    range to zero leaves no fade at all, so instances vanish/appear in a hard step.
@@ -674,29 +657,20 @@ void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, co
 	TArray<FScatterDefinition> DefsToGenerate;
 	for (const FScatterDefinition& Def : ScatterDefinitions)
 	{
-		if (!Def.bEnabled)
+		// The one eligibility rule (code review CR2, SCAT-17): enabled, the tree-mode rule, within its spawn distance.
+		if (!IsDefinitionEligible(Def, ChunkDistance))
 		{
-			UE_LOG(LogVoxelScatter, Verbose, TEXT("  Scatter %d (%s): SKIPPED — disabled"),
-				Def.ScatterID, *Def.Name);
-			continue;
-		}
-
-		// Tree mode filtering for VoxelInjection types
-		if (Def.MeshType == EScatterMeshType::VoxelInjection)
-		{
-			// VoxelInjection definitions are rendered as HISM scatter ONLY in HISM or Both (far) mode
-			if (TreeMode == EVoxelTreeMode::VoxelData)
+			if (Def.bEnabled && Def.MeshType == EScatterMeshType::VoxelInjection && Configuration->TreeMode == EVoxelTreeMode::VoxelData)
 			{
 				UE_LOG(LogVoxelScatter, Warning, TEXT("  Scatter %d (%s): SKIPPED — VoxelInjection type with TreeMode=VoxelData (trees only in terrain, no HISM). Set TreeMode to HISM or Both to see trees as HISM instances."),
 					Def.ScatterID, *Def.Name);
-				continue; // Trees are in VoxelData already, skip HISM
 			}
-			if (TreeMode == EVoxelTreeMode::Both && ChunkDistance <= VoxelTreeMaxDist)
+			else
 			{
-				UE_LOG(LogVoxelScatter, Verbose, TEXT("  Scatter %d (%s): SKIPPED — VoxelInjection type within VoxelTree range (%.0f <= %.0f)"),
-					Def.ScatterID, *Def.Name, ChunkDistance, VoxelTreeMaxDist);
-				continue; // Within VoxelData range, skip HISM
+				UE_LOG(LogVoxelScatter, Verbose, TEXT("  Scatter %d (%s): SKIPPED — disabled, a VoxelInjection type within the voxel trees' reach, or beyond its spawn distance %.0f at %.0f"),
+					Def.ScatterID, *Def.Name, GetEffectiveSpawnDistance(Def), ChunkDistance);
 			}
+			continue;
 		}
 
 		// Skip types already generated for this chunk
@@ -704,15 +678,6 @@ void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, co
 		{
 			UE_LOG(LogVoxelScatter, Verbose, TEXT("  Scatter %d (%s): SKIPPED — already completed for this chunk"),
 				Def.ScatterID, *Def.Name);
-			continue;
-		}
-
-		// Distance check
-		const float EffectiveSpawnDistance = Def.SpawnDistance > 0.0f ? Def.SpawnDistance : ScatterRadius;
-		if (ChunkDistance > EffectiveSpawnDistance)
-		{
-			UE_LOG(LogVoxelScatter, Verbose, TEXT("  Scatter %d (%s): SKIPPED — distance %.0f > spawn distance %.0f"),
-				Def.ScatterID, *Def.Name, ChunkDistance, EffectiveSpawnDistance);
 			continue;
 		}
 
@@ -882,107 +847,63 @@ void UVoxelScatterManager::ClearScatterInRadius(const FVector& WorldPosition, fl
 	}
 
 	// Find which chunks are affected by this edit
-	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
-	const FVector WorldOrigin = Configuration->WorldOrigin;
-
-	// Calculate affected chunk range
-	const FVector MinWorld = WorldPosition - FVector(Radius);
-	const FVector MaxWorld = WorldPosition + FVector(Radius);
-
-	const FIntVector MinChunk(
-		FMath::FloorToInt((MinWorld.X - WorldOrigin.X) / ChunkWorldSize),
-		FMath::FloorToInt((MinWorld.Y - WorldOrigin.Y) / ChunkWorldSize),
-		FMath::FloorToInt((MinWorld.Z - WorldOrigin.Z) / ChunkWorldSize)
-	);
-	const FIntVector MaxChunk(
-		FMath::FloorToInt((MaxWorld.X - WorldOrigin.X) / ChunkWorldSize),
-		FMath::FloorToInt((MaxWorld.Y - WorldOrigin.Y) / ChunkWorldSize),
-		FMath::FloorToInt((MaxWorld.Z - WorldOrigin.Z) / ChunkWorldSize)
-	);
-
 	const float RadiusSq = Radius * Radius;
 	int32 TotalRemoved = 0;
 
-	// Process each potentially affected chunk
-	for (int32 CX = MinChunk.X; CX <= MaxChunk.X; ++CX)
+	ForEachChunkInBounds(FBox(WorldPosition - FVector(Radius), WorldPosition + FVector(Radius)), [&](const FIntVector& ChunkCoord)
 	{
-		for (int32 CY = MinChunk.Y; CY <= MaxChunk.Y; ++CY)
+		// Add cleared volume to this chunk
+		TArray<FClearedScatterVolume>& ClearedVolumes = ClearedVolumesPerChunk.FindOrAdd(ChunkCoord);
+		ClearedVolumes.Add(FClearedScatterVolume(WorldPosition, Radius));
+
+		// Scrub cached surface points inside the radius so distance streaming
+		// can't resurrect scatter here from pre-edit surface data (placement
+		// never consults cleared volumes; the cache must not contain them)
+		if (FChunkSurfaceData* SurfaceData = SurfaceDataCache.Find(ChunkCoord))
 		{
-			for (int32 CZ = MinChunk.Z; CZ <= MaxChunk.Z; ++CZ)
+			SurfaceData->SurfacePoints.RemoveAll([&WorldPosition, RadiusSq](const FVoxelSurfacePoint& Point)
 			{
-				const FIntVector ChunkCoord(CX, CY, CZ);
+				return FVector::DistSquared(Point.Position, WorldPosition) <= RadiusSq;
+			});
+		}
 
-				// Add cleared volume to this chunk
-				TArray<FClearedScatterVolume>& ClearedVolumes = ClearedVolumesPerChunk.FindOrAdd(ChunkCoord);
-				ClearedVolumes.Add(FClearedScatterVolume(WorldPosition, Radius));
-
-				// Scrub cached surface points inside the radius so distance streaming
-				// can't resurrect scatter here from pre-edit surface data (placement
-				// never consults cleared volumes; the cache must not contain them)
-				if (FChunkSurfaceData* SurfaceData = SurfaceDataCache.Find(ChunkCoord))
+		// Remove spawn points that fall within the radius
+		TSet<int32> AffectedTypes;
+		FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
+		if (ScatterData && ScatterData->bIsValid)
+		{
+			for (int32 i = ScatterData->SpawnPoints.Num() - 1; i >= 0; --i)
+			{
+				const FScatterSpawnPoint& Point = ScatterData->SpawnPoints[i];
+				if (FVector::DistSquared(Point.Position, WorldPosition) <= RadiusSq)
 				{
-					SurfaceData->SurfacePoints.RemoveAll([&WorldPosition, RadiusSq](const FVoxelSurfacePoint& Point)
-					{
-						return FVector::DistSquared(Point.Position, WorldPosition) <= RadiusSq;
-					});
-				}
-
-				// Remove spawn points that fall within the radius
-				TSet<int32> AffectedTypes;
-				FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
-				if (ScatterData && ScatterData->bIsValid)
-				{
-					for (int32 i = ScatterData->SpawnPoints.Num() - 1; i >= 0; --i)
-					{
-						const FScatterSpawnPoint& Point = ScatterData->SpawnPoints[i];
-						if (FVector::DistSquared(Point.Position, WorldPosition) <= RadiusSq)
-						{
-							AffectedTypes.Add(Point.ScatterTypeID);
-							ScatterData->SpawnPoints.RemoveAt(i);
-							++TotalRemoved;
-						}
-					}
-				}
-
-				// Replace this chunk's instances for the affected types with the surviving
-				// points — immediate release + re-add via the per-frame add budget, which
-				// runs every Tick. A full-type rebuild would wait for a stationary viewer
-				// AND an idle generation pipeline, leaving cleared scatter visible
-				// (floating/clipped) for as long as the player keeps moving.
-				if (AffectedTypes.Num() > 0 && ScatterRenderer && ScatterRenderer->IsInitialized())
-				{
-					for (int32 TypeID : AffectedTypes)
-					{
-						const FScatterDefinition* Def = GetScatterDefinition(TypeID);
-						if (!Def)
-						{
-							continue;
-						}
-
-						TArray<FTransform> RemainingTransforms;
-						for (const FScatterSpawnPoint& Point : ScatterData->SpawnPoints)
-						{
-							if (Point.ScatterTypeID == TypeID)
-							{
-								RemainingTransforms.Add(Point.GetTransform(Def->bAlignToSurfaceNormal, Def->SurfaceOffset));
-							}
-						}
-						ScatterRenderer->UpdateChunkTypeInstances(ChunkCoord, TypeID, MoveTemp(RemainingTransforms));
-					}
-				}
-
-				// Also remove from pending queue to prevent stale data
-				if (PendingQueueSet.Contains(ChunkCoord))
-				{
-					PendingQueueSet.Remove(ChunkCoord);
-					PendingGenerationQueue.RemoveAll([&ChunkCoord](const FPendingScatterGeneration& Request)
-					{
-						return Request.ChunkCoord == ChunkCoord;
-					});
+					AffectedTypes.Add(Point.ScatterTypeID);
+					ScatterData->SpawnPoints.RemoveAt(i);
+					++TotalRemoved;
 				}
 			}
 		}
-	}
+
+		// Replace this chunk's instances for the affected types with the surviving
+		// points — immediate release + re-add via the per-frame add budget, which
+		// runs every Tick. A full-type rebuild would wait for a stationary viewer
+		// AND an idle generation pipeline, leaving cleared scatter visible
+		// (floating/clipped) for as long as the player keeps moving.
+		if (ScatterData)
+		{
+			ReplaceChunkTypeInstances(ChunkCoord, *ScatterData, AffectedTypes);
+		}
+
+		// Also remove from pending queue to prevent stale data
+		if (PendingQueueSet.Contains(ChunkCoord))
+		{
+			PendingQueueSet.Remove(ChunkCoord);
+			PendingGenerationQueue.RemoveAll([&ChunkCoord](const FPendingScatterGeneration& Request)
+			{
+				return Request.ChunkCoord == ChunkCoord;
+			});
+		}
+	});
 
 	if (TotalRemoved > 0)
 	{
@@ -1158,72 +1079,33 @@ void UVoxelScatterManager::ClearSpawnPointsInExclusionVolume(const FScatterExclu
 		return;
 	}
 
-	const FBox Bounds = Volume.GetWorldBounds();
-	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
-	const FVector WorldOrigin = Configuration->WorldOrigin;
-
-	const FIntVector MinChunk(
-		FMath::FloorToInt((Bounds.Min.X - WorldOrigin.X) / ChunkWorldSize),
-		FMath::FloorToInt((Bounds.Min.Y - WorldOrigin.Y) / ChunkWorldSize),
-		FMath::FloorToInt((Bounds.Min.Z - WorldOrigin.Z) / ChunkWorldSize));
-	const FIntVector MaxChunk(
-		FMath::FloorToInt((Bounds.Max.X - WorldOrigin.X) / ChunkWorldSize),
-		FMath::FloorToInt((Bounds.Max.Y - WorldOrigin.Y) / ChunkWorldSize),
-		FMath::FloorToInt((Bounds.Max.Z - WorldOrigin.Z) / ChunkWorldSize));
-
 	int32 TotalRemoved = 0;
-	for (int32 CX = MinChunk.X; CX <= MaxChunk.X; ++CX)
+
+	ForEachChunkInBounds(Volume.GetWorldBounds(), [&](const FIntVector& ChunkCoord)
 	{
-		for (int32 CY = MinChunk.Y; CY <= MaxChunk.Y; ++CY)
+		FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
+		if (!ScatterData || !ScatterData->bIsValid)
 		{
-			for (int32 CZ = MinChunk.Z; CZ <= MaxChunk.Z; ++CZ)
+			return;
+		}
+
+		// Remove spawn points inside the oriented box; note which types lost instances.
+		// The surface cache is deliberately left whole — unregister regrows from it.
+		TSet<int32> AffectedTypes;
+		for (int32 i = ScatterData->SpawnPoints.Num() - 1; i >= 0; --i)
+		{
+			if (Volume.ContainsPoint(ScatterData->SpawnPoints[i].Position))
 			{
-				const FIntVector ChunkCoord(CX, CY, CZ);
-				FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
-				if (!ScatterData || !ScatterData->bIsValid)
-				{
-					continue;
-				}
-
-				// Remove spawn points inside the oriented box; note which types lost instances.
-				// The surface cache is deliberately left whole — unregister regrows from it.
-				TSet<int32> AffectedTypes;
-				for (int32 i = ScatterData->SpawnPoints.Num() - 1; i >= 0; --i)
-				{
-					if (Volume.ContainsPoint(ScatterData->SpawnPoints[i].Position))
-					{
-						AffectedTypes.Add(ScatterData->SpawnPoints[i].ScatterTypeID);
-						ScatterData->SpawnPoints.RemoveAt(i);
-						++TotalRemoved;
-					}
-				}
-
-				// Replace each affected type's instances with the survivors — immediate release +
-				// budgeted re-add per (chunk,type), the same flash-free path player edits use.
-				if (AffectedTypes.Num() > 0 && ScatterRenderer && ScatterRenderer->IsInitialized())
-				{
-					for (int32 TypeID : AffectedTypes)
-					{
-						const FScatterDefinition* Def = GetScatterDefinition(TypeID);
-						if (!Def)
-						{
-							continue;
-						}
-
-						TArray<FTransform> RemainingTransforms;
-						for (const FScatterSpawnPoint& Point : ScatterData->SpawnPoints)
-						{
-							if (Point.ScatterTypeID == TypeID)
-							{
-								RemainingTransforms.Add(Point.GetTransform(Def->bAlignToSurfaceNormal, Def->SurfaceOffset));
-							}
-						}
-						ScatterRenderer->UpdateChunkTypeInstances(ChunkCoord, TypeID, MoveTemp(RemainingTransforms));
-					}
-				}
+				AffectedTypes.Add(ScatterData->SpawnPoints[i].ScatterTypeID);
+				ScatterData->SpawnPoints.RemoveAt(i);
+				++TotalRemoved;
 			}
 		}
-	}
+
+		// Replace each affected type's instances with the survivors — immediate release +
+		// budgeted re-add per (chunk,type), the same flash-free path player edits use.
+		ReplaceChunkTypeInstances(ChunkCoord, *ScatterData, AffectedTypes);
+	});
 
 	if (TotalRemoved > 0)
 	{
@@ -1239,9 +1121,23 @@ void UVoxelScatterManager::QueueExclusionRegrowForBounds(const FBox& Bounds)
 		return;
 	}
 
+	ForEachChunkInBounds(Bounds, [&](const FIntVector& ChunkCoord)
+	{
+		// Only chunks with cached surface data can regrow in place. Anything else
+		// (unloaded, awaiting re-mesh) regenerates naturally on its next fresh pass,
+		// which consults the current volume set anyway.
+		if (SurfaceDataCache.Contains(ChunkCoord))
+		{
+			PendingExclusionRegrow.Add(ChunkCoord);
+		}
+	});
+}
+
+void UVoxelScatterManager::ForEachChunkInBounds(const FBox& Bounds, TFunctionRef<void(const FIntVector&)> Visit) const
+{
+	// The chunks a world box touches, floored on the chunk grid (code review CR2, SCAT-18: the one loop).
 	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
 	const FVector WorldOrigin = Configuration->WorldOrigin;
-
 	const FIntVector MinChunk(
 		FMath::FloorToInt((Bounds.Min.X - WorldOrigin.X) / ChunkWorldSize),
 		FMath::FloorToInt((Bounds.Min.Y - WorldOrigin.Y) / ChunkWorldSize),
@@ -1250,23 +1146,42 @@ void UVoxelScatterManager::QueueExclusionRegrowForBounds(const FBox& Bounds)
 		FMath::FloorToInt((Bounds.Max.X - WorldOrigin.X) / ChunkWorldSize),
 		FMath::FloorToInt((Bounds.Max.Y - WorldOrigin.Y) / ChunkWorldSize),
 		FMath::FloorToInt((Bounds.Max.Z - WorldOrigin.Z) / ChunkWorldSize));
-
 	for (int32 CX = MinChunk.X; CX <= MaxChunk.X; ++CX)
 	{
 		for (int32 CY = MinChunk.Y; CY <= MaxChunk.Y; ++CY)
 		{
 			for (int32 CZ = MinChunk.Z; CZ <= MaxChunk.Z; ++CZ)
 			{
-				const FIntVector ChunkCoord(CX, CY, CZ);
-				// Only chunks with cached surface data can regrow in place. Anything else
-				// (unloaded, awaiting re-mesh) regenerates naturally on its next fresh pass,
-				// which consults the current volume set anyway.
-				if (SurfaceDataCache.Contains(ChunkCoord))
-				{
-					PendingExclusionRegrow.Add(ChunkCoord);
-				}
+				Visit(FIntVector(CX, CY, CZ));
 			}
 		}
+	}
+}
+
+void UVoxelScatterManager::ReplaceChunkTypeInstances(const FIntVector& ChunkCoord, const FChunkScatterData& ScatterData, const TSet<int32>& AffectedTypes)
+{
+	// Each affected type's instances replaced with the survivors: immediate release + budgeted re-add per (chunk, type),
+	// the flash-free path player edits use (code review CR2, SCAT-18: the one rebuild).
+	if (AffectedTypes.Num() == 0 || !ScatterRenderer || !ScatterRenderer->IsInitialized())
+	{
+		return;
+	}
+	for (int32 TypeID : AffectedTypes)
+	{
+		const FScatterDefinition* Def = GetScatterDefinition(TypeID);
+		if (!Def)
+		{
+			continue;
+		}
+		TArray<FTransform> RemainingTransforms;
+		for (const FScatterSpawnPoint& Point : ScatterData.SpawnPoints)
+		{
+			if (Point.ScatterTypeID == TypeID)
+			{
+				RemainingTransforms.Add(Point.GetTransform(Def->bAlignToSurfaceNormal, Def->SurfaceOffset));
+			}
+		}
+		ScatterRenderer->UpdateChunkTypeInstances(ChunkCoord, TypeID, MoveTemp(RemainingTransforms));
 	}
 }
 
@@ -1364,36 +1279,20 @@ TArray<FScatterDefinition> UVoxelScatterManager::BuildEligibleDefinitionsForDist
 		return Result;
 	}
 
-	// Same eligibility rules as the OnChunkMeshDataReady hand-off (minus the per-chunk
-	// completed-types check — regrow clears that set before launching).
-	const EVoxelTreeMode TreeMode = Configuration->TreeMode;
-	const float VoxelTreeMaxDist = Configuration->VoxelTreeMaxDistance;
-
+	// The hand-off's eligibility rule (minus the per-chunk completed-types check: regrow clears that set before launching).
 	for (const FScatterDefinition& Def : ScatterDefinitions)
 	{
-		if (!Def.bEnabled)
+		if (IsDefinitionEligible(Def, ChunkDistance))
 		{
-			continue;
+			Result.Add(Def);
 		}
-		if (Def.MeshType == EScatterMeshType::VoxelInjection)
-		{
-			if (TreeMode == EVoxelTreeMode::VoxelData)
-			{
-				continue;
-			}
-			if (TreeMode == EVoxelTreeMode::Both && ChunkDistance <= VoxelTreeMaxDist)
-			{
-				continue;
-			}
-		}
-		const float EffectiveSpawnDistance = Def.SpawnDistance > 0.0f ? Def.SpawnDistance : ScatterRadius;
-		if (ChunkDistance > EffectiveSpawnDistance)
-		{
-			continue;
-		}
-		Result.Add(Def);
 	}
 	return Result;
+}
+
+bool UVoxelScatterManager::IsDefinitionEligible(const FScatterDefinition& Def, float ChunkDistance) const
+{
+	return Def.bEnabled && PassesTreeModeRule(Def, ChunkDistance) && ChunkDistance <= GetEffectiveSpawnDistance(Def);
 }
 
 // ==================== Configuration ====================
@@ -2435,10 +2334,8 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 			// edits applied. Solid, the ground continues into the chunk above, which extracts the real surface: taking it for
 			// air made a copy of that surface on this chunk's top face, up to 1.5 voxels under the ground (G26), and under
 			// deeper ground a copy of the rock over the whole top face of a buried chunk, which underground scatter took for
-			// cave floors (G28). Air, it is the surface or a cave floor at the boundary. With voxel.Scatter.BuriedTopFace 0
-			// only within CoverThreshold over the generated ground, taken for air deeper, as before G28.
-			const bool bKnowVoxelAbove = bHaveColumnHeight
-				&& (Context.bDecideVoxelAboveAtAnyDepth || ColumnTerrainHeight <= ChunkTopWorldZ + CoverThreshold);
+			// cave floors (G28). Air, it is the surface or a cave floor at the boundary. Decided at any depth.
+			const bool bKnowVoxelAbove = bHaveColumnHeight;
 
 			for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
 			{
@@ -2468,8 +2365,8 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 				}
 				else if (bKnowVoxelAbove)
 				{
-					const FVoxelData AboveVoxel = Context.GetVoxelAboveChunk(X, Y, ChunkSize,
-						ChunkWorldOrigin + FVector(X * VoxelSize, Y * VoxelSize, ChunkSize * VoxelSize), ColumnTerrainHeight, VoxelSize, Voxel.BiomeID);
+					const FVoxelData AboveVoxel = Context.GetVoxelOutsideChunk(FIntVector(X, Y, ChunkSize),
+						ChunkWorldOrigin + FVector(X * VoxelSize, Y * VoxelSize, ChunkSize * VoxelSize), VoxelSize, Voxel.BiomeID, &ColumnTerrainHeight);
 					if (AboveVoxel.IsSolid())
 					{
 						bFoundColumnTop = true; // the ground above covers the rest of the column
@@ -2605,153 +2502,29 @@ float FScatterExtractionContext::GetGeneratedTerrainHeight(double WorldX, double
 		ConditioningZones.IsValid() ? ConditioningZones.Get() : nullptr).Position.Z);
 }
 
-FVoxelData FScatterExtractionContext::GetVoxelAboveChunk(int32 LocalX, int32 LocalY, int32 ChunkSize, const FVector& SamplePos, float GeneratedHeight,
-	float VoxelSize, uint8 BiomeID) const
+FVoxelData FScatterExtractionContext::GetVoxelOutsideChunk(const FIntVector& LocalCoord, const FVector& WorldPos, float VoxelSize, int32 BiomeHint,
+	const float* GeneratedHeight) const
 {
-	// The heightmap generators' density (InfinitePlane and IslandBowl alike): the signed distance to the generated height,
-	// less the cave carve where the voxel is solid and under the ground, as GenerateChunkHeightmap apply it
-	// (G28). A column's biome is the same at every depth, so the chunk's own voxel there carries the one generation used.
-	uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(
-		FInfinitePlaneWorldMode::CalculateSignedDistance(static_cast<float>(SamplePos.Z), GeneratedHeight), VoxelSize);
-	const float DepthBelowSurface = (GeneratedHeight - static_cast<float>(SamplePos.Z)) / VoxelSize;
-	if (CaveConfiguration && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
+	check(WorldMode != nullptr);
+	// The voxel as generation makes it (the one single-voxel entry), on the surface the caller sampled for its column
+	// where it has one (a heightmap scan judges a column by that height).
+	FVoxelTerrainSurfacePoint ColumnSurface;
+	const FVoxelTerrainSurfacePoint* Surface = nullptr;
+	if (GeneratedHeight)
 	{
-		const bool bUnderwater = Sea.bEnabled && GeneratedHeight < Sea.PlaneZ;
-		const float Carve = FVoxelCPUNoiseGenerator::CalculateCaveDensity(SamplePos, DepthBelowSurface, BiomeID, CaveConfiguration, NoiseParams.Seed, bUnderwater);
-		if (Carve > 0.0f)
-		{
-			Density = static_cast<uint8>(FMath::Clamp(FMath::Max(0.0f, static_cast<float>(Density) - Carve * 255.0f), 0.0f, 255.0f));
-		}
+		ColumnSurface.Position = FVector(WorldPos.X, WorldPos.Y, *GeneratedHeight);
+		Surface = &ColumnSurface;
 	}
-	const FVoxelData Generated(0, Density);
-	if (AboveLayerEdits.IsValid())
+	const FVoxelData Generated = FVoxelSurfaceQuery::GenerateVoxelAt(*WorldMode, WorldPos, VoxelSize, NoiseParams,
+		ConditioningZones.IsValid() ? ConditioningZones.Get() : nullptr, CaveConfiguration, Sea, bEnableBiomes, BiomeHint, Surface);
+	if (OutsideEdits.IsValid())
 	{
-		if (const FVoxelEdit* Edit = AboveLayerEdits->Find(LocalX + LocalY * ChunkSize))
+		if (const FVoxelEdit* Edit = OutsideEdits->Find(LocalCoord))
 		{
 			return Edit->ApplyToProceduralData(Generated);
 		}
 	}
 	return Generated;
-}
-
-/**
- * Whether any of a cave configuration's layers can carve at a depth under the ground (voxels) for some biome, under the sea
- * or not: its depth window (MinDepth less the fade, MaxDepth plus it), the minimum depth the shallowest of the layer's own,
- * a biome override's and the underwater one (CalculateCaveDensity replaces the layer's with those). Outside every layer's
- * window the carve is 0 for any biome, so the biome need not be found (G72: a planet voxel's biome costs two climate fields).
- */
-static bool CaveLayerReachesDepth(const UVoxelCaveConfiguration& Caves, float DepthBelowSurface)
-{
-	float ShallowestOverride = Caves.UnderwaterMinDepth > 0.0f ? Caves.UnderwaterMinDepth : TNumericLimits<float>::Max();
-	for (const FBiomeCaveOverride& Override : Caves.BiomeOverrides)
-	{
-		if (Override.MinDepthOverride >= 0.0f)
-		{
-			ShallowestOverride = FMath::Min(ShallowestOverride, Override.MinDepthOverride);
-		}
-	}
-	for (const FCaveLayerConfig& Layer : Caves.CaveLayers)
-	{
-		if (!Layer.bEnabled)
-		{
-			continue;
-		}
-		const float MinDepth = FMath::Min(Layer.MinDepth, ShallowestOverride);
-		if (DepthBelowSurface < MinDepth - Layer.DepthFadeWidth)
-		{
-			continue;
-		}
-		if (Layer.MaxDepth > 0.0f && DepthBelowSurface > Layer.MaxDepth + Layer.DepthFadeWidth)
-		{
-			continue;
-		}
-		return true;
-	}
-	return false;
-}
-
-FVoxelData FScatterExtractionContext::GetPlanetVoxelOutsideChunk(const FIntVector& LocalCoord, const FVector& WorldPos, float VoxelSize) const
-{
-	check(WorldMode != nullptr && WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet);
-	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WorldMode);
-	const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
-
-	// GenerateChunkSphericalPlanet's density: the generated altitude along the voxel's direction (the planet zones
-	// applied), the shell's signed distance to it. The continentalness the altitude samples picks the biome below.
-	const FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, Params.PlanetCenter);
-	float Continentalness = 0.0f;
-	float Altitude = FSphericalPlanetWorldMode::SampleRadialDisplacement(Direction, Params.PlanetRadius, Planet.GetTerrainParams(), NoiseParams,
-		&Planet.GetBiomeSnapshot(), &Continentalness);
-	if (ConditioningZones.IsValid() && ConditioningZones->Num() > 0)
-	{
-		Altitude = FVoxelTerrainConditioning::ApplyToAltitude(Direction, Params.PlanetRadius, Altitude, *ConditioningZones);
-	}
-	const double Distance = FSphericalPlanetWorldMode::CalculateRadialDistance(WorldPos, Params.PlanetCenter);
-	const float SignedDistance = FSphericalPlanetWorldMode::ShellSignedDistance(Distance, Params.PlanetRadius + Altitude, Params);
-	uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
-
-	// The cave carve where the voxel is solid and under the ground, as GenerateChunkSphericalPlanet applies it (G72): its
-	// depth along local up, the biome generation gives its direction (only the cave configuration's biome overrides read
-	// it), the sea's minimum depth when the ground is under the sea.
-	const float DepthBelowSurface = static_cast<float>((static_cast<double>(Altitude) - (Distance - Params.PlanetRadius)) / VoxelSize);
-	if (bCarvePlanetFaceVoxels && CaveConfiguration && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f
-		&& CaveLayerReachesDepth(*CaveConfiguration, DepthBelowSurface))
-	{
-		uint8 BiomeID = 0;
-		if (CaveConfiguration->BiomeOverrides.Num() > 0 && bEnableBiomes)
-		{
-			const FVoxelBiomeSnapshot& Snapshot = Planet.GetBiomeSnapshot();
-			const FVoxelNoiseParams TemperatureParams = FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + Snapshot.TemperatureSeedOffset,
-				Snapshot.TemperatureNoiseFrequency);
-			const FVoxelNoiseParams MoistureParams = FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + Snapshot.MoistureSeedOffset,
-				Snapshot.MoistureNoiseFrequency);
-			float Temperature = 0.0f;
-			float Moisture = 0.0f;
-			FSphericalPlanetWorldMode::SampleClimate(Direction, Params.PlanetRadius, TemperatureParams, MoistureParams, Temperature, Moisture);
-			BiomeID = Snapshot.bIsValid
-				? Snapshot.GetBiomeBlend(Temperature, Moisture, Continentalness).GetDominantBiome()
-				: FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f).GetDominantBiome();
-		}
-		const bool bUnderwater = Sea.bEnabled && static_cast<double>(Altitude) < Sea.Radius - Params.PlanetRadius;
-		const float Carve = FVoxelCPUNoiseGenerator::CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, CaveConfiguration, NoiseParams.Seed,
-			bUnderwater, &Params);
-		if (Carve > 0.0f)
-		{
-			Density = static_cast<uint8>(FMath::Clamp(FMath::Max(0.0f, static_cast<float>(Density) - Carve * 255.0f), 0.0f, 255.0f));
-		}
-	}
-	const FVoxelData Generated(0, Density);
-	if (TouchingEdits.IsValid())
-	{
-		if (const FVoxelEdit* Edit = TouchingEdits->Find(LocalCoord))
-		{
-			return Edit->ApplyToProceduralData(Generated);
-		}
-	}
-	return Generated;
-}
-
-void UVoxelScatterManager::ExtractHeightmapSurfacePoints(
-	const TArray<FVoxelData>& VoxelData,
-	const FIntVector& ChunkCoord,
-	const FVector& ChunkWorldOrigin,
-	int32 ChunkSize,
-	float VoxelSize,
-	float PointSpacing,
-	bool bCubic,
-	const FScatterExtractionContext& Context,
-	FChunkSurfaceData& OutSurfaceData)
-{
-	const TArray<FClearedScatterVolume> NoClearedVolumes;
-	if (bCubic)
-	{
-		ExtractSurfacePointsCubic(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, NoClearedVolumes, Context, OutSurfaceData);
-	}
-	else
-	{
-		ExtractSurfacePointsFromVoxelData(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, NoClearedVolumes,
-			Context, OutSurfaceData);
-	}
 }
 
 void UVoxelScatterManager::ExtractChunkSurfacePoints(
@@ -2781,19 +2554,6 @@ void UVoxelScatterManager::ExtractChunkSurfacePoints(
 		ExtractSurfacePointsFromVoxelData(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, ClearedVolumes,
 			Context, OutSurfaceData);
 	}
-}
-
-void UVoxelScatterManager::ExtractPlanetSurfacePoints(
-	const TArray<FVoxelData>& VoxelData,
-	const FIntVector& ChunkCoord,
-	const FVector& ChunkWorldOrigin,
-	int32 ChunkSize,
-	float VoxelSize,
-	float PointSpacing,
-	const FScatterExtractionContext& Context,
-	FChunkSurfaceData& OutSurfaceData)
-{
-	ExtractSurfacePointsAlongUp(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, {}, Context, OutSurfaceData);
 }
 
 void UVoxelScatterManager::ExtractSurfacePointsAlongUp(
@@ -3153,13 +2913,11 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 				else if (bHaveColumnHeight)
 				{
 					// The block over the top layer is the chunk above's, sampled at this column's corner (G26, G28, see
-					// ExtractSurfacePointsFromVoxelData): solid where the ground continues above, caves included. With
-					// voxel.Scatter.BuriedTopFace 0 only near the generated ground, judged at the corner or at the block's
-					// centre (the buried test's height), so a column that test lets through always has its block above decided.
+					// ExtractSurfacePointsFromVoxelData): solid where the ground continues above, caves included, decided at
+					// any depth.
 					const float SampleHeight = Context.GetGeneratedTerrainHeight(ChunkWorldOrigin.X + X * VoxelSize, ChunkWorldOrigin.Y + Y * VoxelSize);
-					if ((Context.bDecideVoxelAboveAtAnyDepth || FMath::Min(SampleHeight, ColumnTerrainHeight) <= ChunkTopWorldZ + CoverThreshold)
-						&& Context.GetVoxelAboveChunk(X, Y, ChunkSize, ChunkWorldOrigin + FVector(X * VoxelSize, Y * VoxelSize, ChunkSize * VoxelSize),
-							SampleHeight, VoxelSize, Voxel.BiomeID).IsSolid())
+					if (Context.GetVoxelOutsideChunk(FIntVector(X, Y, ChunkSize), ChunkWorldOrigin + FVector(X * VoxelSize, Y * VoxelSize, ChunkSize * VoxelSize),
+							VoxelSize, Voxel.BiomeID, &SampleHeight).IsSolid())
 					{
 						bFoundColumnTop = true; // the ground above covers the rest of the column
 						continue;
@@ -3341,12 +3099,9 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 	{
 		Context.NoiseParams = Configuration->NoiseParams;
 		Context.Sea = FVoxelSeaSurface::FromConfig(*Configuration); // bEnabled follows bEnableWaterLevel
-		// The voxel over a heightmap chunk's top layer is carved as generation carves it (G28).
+		// The voxels a chunk's extraction reads past its own data are carved as generation carves them (G28, G72).
 		Context.CaveConfiguration = Configuration->bEnableCaves ? Configuration->CaveConfiguration.Get() : nullptr;
-		Context.bDecideVoxelAboveAtAnyDepth = CVarVoxelScatterBuriedTopFace.GetValueOnAnyThread() != 0;
-		// A planet's voxels past a chunk's +X, +Y and +Z faces are carved likewise (G72).
 		Context.bEnableBiomes = Configuration->bEnableBiomes;
-		Context.bCarvePlanetFaceVoxels = CVarVoxelScatterPlanetFaceCaves.GetValueOnAnyThread() != 0;
 		// The conditioning zones over the chunk, so the analytic surface is the generated one: the buried-chunk test's
 		// height on a heightmap (G23), the voxels past a planet chunk's faces (spherical SP-B10).
 		if (ConditioningGatherer)
@@ -3359,32 +3114,14 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 				Context.ConditioningZones = MakeShared<const TArray<FVoxelConditioningZone>>(MoveTemp(Zones));
 			}
 		}
-		// The chunk above's edits on its bottom layer: the voxel over this chunk's top layer is that layer's (heightmap G26).
-		if (EditLayerSource && WorldMode != nullptr && WorldMode->IsHeightmapBased())
+		// The edits in the voxels the extraction reads past the chunk: the chunk above's bottom layer on a heightmap world
+		// (the voxels over this chunk's top layer, G26); on a planet the layers of the neighbours past the chunk's +X, +Y
+		// and +Z faces, which its last cell on each axis reaches (G29, G31).
+		if (EditLayerSource && WorldMode != nullptr)
 		{
-			if (const FChunkEditLayer* AboveLayer = EditLayerSource(ChunkCoord + FIntVector(0, 0, 1)))
-			{
-				const int32 CS = Configuration->ChunkSize;
-				TMap<int32, FVoxelEdit> BottomEdits;
-				for (const TPair<int32, FVoxelEdit>& Pair : AboveLayer->Edits)
-				{
-					const FIntVector& Local = Pair.Value.LocalPosition;
-					if (Local.Z == 0 && Local.X >= 0 && Local.X < CS && Local.Y >= 0 && Local.Y < CS)
-					{
-						BottomEdits.Add(Local.X + Local.Y * CS, Pair.Value);
-					}
-				}
-				if (BottomEdits.Num() > 0)
-				{
-					Context.AboveLayerEdits = MakeShared<const TMap<int32, FVoxelEdit>>(MoveTemp(BottomEdits));
-				}
-			}
-		}
-		// Planets: a chunk's last cell on each axis reaches the voxels past its +X, +Y and +Z faces, in the layers of the
-		// neighbours there (G29, G31).
-		if (EditLayerSource && WorldMode != nullptr && WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet)
-		{
-			Context.TouchingEdits = GatherPlanetTouchingEdits(ChunkCoord, Configuration->ChunkSize, EditLayerSource);
+			Context.OutsideEdits = WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet
+				? GatherPlanetTouchingEdits(ChunkCoord, Configuration->ChunkSize, EditLayerSource)
+				: GatherAboveLayerEdits(ChunkCoord, Configuration->ChunkSize, EditLayerSource);
 		}
 	}
 	return Context;
@@ -3396,6 +3133,30 @@ void UVoxelScatterManager::GetPlanetShellNeighbours(TArray<FIntVector>& OutOffse
 	{
 		OutOffsets.AddUnique(FIntVector(I & 1, (I >> 1) & 1, (I >> 2) & 1));
 	}
+}
+
+TSharedPtr<const TMap<FIntVector, FVoxelEdit>> UVoxelScatterManager::GatherAboveLayerEdits(const FIntVector& ChunkCoord, int32 ChunkSize,
+	TFunctionRef<const FChunkEditLayer*(const FIntVector&)> EditLayerSource)
+{
+	const FChunkEditLayer* AboveLayer = EditLayerSource(ChunkCoord + FIntVector(0, 0, 1));
+	if (!AboveLayer)
+	{
+		return nullptr;
+	}
+	TMap<FIntVector, FVoxelEdit> BottomEdits;
+	for (const TPair<int32, FVoxelEdit>& Pair : AboveLayer->Edits)
+	{
+		const FIntVector& Local = Pair.Value.LocalPosition;
+		if (Local.Z == 0 && Local.X >= 0 && Local.X < ChunkSize && Local.Y >= 0 && Local.Y < ChunkSize)
+		{
+			BottomEdits.Add(FIntVector(Local.X, Local.Y, ChunkSize), Pair.Value);
+		}
+	}
+	if (BottomEdits.Num() == 0)
+	{
+		return nullptr;
+	}
+	return MakeShared<const TMap<FIntVector, FVoxelEdit>>(MoveTemp(BottomEdits));
 }
 
 TSharedPtr<const TMap<FIntVector, FVoxelEdit>> UVoxelScatterManager::GatherPlanetTouchingEdits(const FIntVector& ChunkCoord, int32 ChunkSize,
@@ -3428,18 +3189,20 @@ TSharedPtr<const TMap<FIntVector, FVoxelEdit>> UVoxelScatterManager::GatherPlane
 	return MakeShared<const TMap<FIntVector, FVoxelEdit>>(MoveTemp(Touching));
 }
 
-void UVoxelScatterManager::GetEditReaderOffsets(bool bHeightmapReads, bool bPlanetReads, const FIntVector* EditMin,
-	TArray<FIntVector>& OutOffsets)
+void UVoxelScatterManager::GetEditReaderOffsets(bool bPlanet, const FIntVector* EditMin, TArray<FIntVector>& OutOffsets)
 {
 	// A heightmap chunk reads the voxels over its top layer: the bottom layer (local Z 0) of the chunk above (G26).
-	if (bHeightmapReads && (!EditMin || EditMin->Z == 0))
+	if (!bPlanet)
 	{
-		OutOffsets.AddUnique(FIntVector(0, 0, -1));
+		if (!EditMin || EditMin->Z == 0)
+		{
+			OutOffsets.AddUnique(FIntVector(0, 0, -1));
+		}
+		return;
 	}
 	// A planet chunk reads one layer past its +X, +Y and +Z faces, in the neighbours at the offsets D of
 	// GetPlanetShellNeighbours: the neighbour's local 0 on every axis where D is 1 (G29, G31). So the chunk at -D reads this
 	// one's voxels there.
-	if (bPlanetReads)
 	{
 		TArray<FIntVector> Shell;
 		GetPlanetShellNeighbours(Shell);
@@ -3458,11 +3221,12 @@ void UVoxelScatterManager::GetEditReaderOffsets(bool bHeightmapReads, bool bPlan
 void UVoxelScatterManager::GetEditReaders(const FIntVector& EditedChunk, const FIntVector* EditMin, TArray<FIntVector>& OutChunks) const
 {
 	// The same conditions under which MakeExtractionContext reads a neighbour's edits.
-	const bool bEdits = static_cast<bool>(EditLayerSource) && WorldMode != nullptr;
-	const bool bHeightmapReads = bEdits && WorldMode->IsHeightmapBased();
-	const bool bPlanetReads = bEdits && WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet;
+	if (!EditLayerSource || WorldMode == nullptr)
+	{
+		return;
+	}
 	TArray<FIntVector> Offsets;
-	GetEditReaderOffsets(bHeightmapReads, bPlanetReads, EditMin, Offsets);
+	GetEditReaderOffsets(WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet, EditMin, Offsets);
 	for (const FIntVector& Offset : Offsets)
 	{
 		OutChunks.Add(EditedChunk + Offset);

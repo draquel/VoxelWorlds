@@ -321,25 +321,24 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterEditReadersRuleTest, "VoxelWorlds.
 bool FVoxelScatterEditReadersRuleTest::RunTest(const FString& Parameters)
 {
 	// --- The reader rule by the layers an edit reached ---
-	auto Offsets = [](bool bHeightmap, bool bPlanet, const FIntVector* Min)
+	auto Offsets = [](bool bPlanet, const FIntVector* Min)
 	{
 		TArray<FIntVector> Out;
-		UVoxelScatterManager::GetEditReaderOffsets(bHeightmap, bPlanet, Min, Out);
+		UVoxelScatterManager::GetEditReaderOffsets(bPlanet, Min, Out);
 		Out.Sort([](const FIntVector& A, const FIntVector& B) { return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z); });
 		return Out;
 	};
 	const FIntVector Mid(5, 5, 5), BottomZ(5, 5, 0), FaceX(0, 5, 5), EdgeXY(0, 0, 5), Corner(0, 0, 0);
-	TestEqual(TEXT("Heightmap: an edit inside the chunk is read by no other chunk"), Offsets(true, false, &Mid).Num(), 0);
-	TestEqual(TEXT("Heightmap: an edit on the bottom layer is read by the chunk below"), Offsets(true, false, &BottomZ), TArray<FIntVector>{ FIntVector(0, 0, -1) });
-	TestEqual(TEXT("Heightmap: an edit on the -X layer only is read by no other chunk"), Offsets(true, false, &FaceX).Num(), 0);
-	TestEqual(TEXT("Heightmap: unknown bounds give the chunk below"), Offsets(true, false, nullptr), TArray<FIntVector>{ FIntVector(0, 0, -1) });
-	TestEqual(TEXT("Planet: an edit inside the chunk is read by no other chunk"), Offsets(false, true, &Mid).Num(), 0);
-	TestEqual(TEXT("Planet: an edit on the -X layer is read by the -X neighbour"), Offsets(false, true, &FaceX), TArray<FIntVector>{ FIntVector(-1, 0, 0) });
-	TestEqual(TEXT("Planet: an edit on the -X -Y edge is read by the -X, -Y and -X -Y neighbours"), Offsets(false, true, &EdgeXY),
+	TestEqual(TEXT("Heightmap: an edit inside the chunk is read by no other chunk"), Offsets(false, &Mid).Num(), 0);
+	TestEqual(TEXT("Heightmap: an edit on the bottom layer is read by the chunk below"), Offsets(false, &BottomZ), TArray<FIntVector>{ FIntVector(0, 0, -1) });
+	TestEqual(TEXT("Heightmap: an edit on the -X layer only is read by no other chunk"), Offsets(false, &FaceX).Num(), 0);
+	TestEqual(TEXT("Heightmap: unknown bounds give the chunk below"), Offsets(false, nullptr), TArray<FIntVector>{ FIntVector(0, 0, -1) });
+	TestEqual(TEXT("Planet: an edit inside the chunk is read by no other chunk"), Offsets(true, &Mid).Num(), 0);
+	TestEqual(TEXT("Planet: an edit on the -X layer is read by the -X neighbour"), Offsets(true, &FaceX), TArray<FIntVector>{ FIntVector(-1, 0, 0) });
+	TestEqual(TEXT("Planet: an edit on the -X -Y edge is read by the -X, -Y and -X -Y neighbours"), Offsets(true, &EdgeXY),
 		TArray<FIntVector>{ FIntVector(-1, -1, 0), FIntVector(-1, 0, 0), FIntVector(0, -1, 0) });
-	TestEqual(TEXT("Planet: an edit on the min corner is read by the seven neighbours at -X / -Y / -Z"), Offsets(false, true, &Corner).Num(), 7);
-	TestEqual(TEXT("Planet: unknown bounds give the seven"), Offsets(false, true, nullptr).Num(), 7);
-	TestEqual(TEXT("No neighbour reads: no reader"), Offsets(false, false, nullptr).Num(), 0);
+	TestEqual(TEXT("Planet: an edit on the min corner is read by the seven neighbours at -X / -Y / -Z"), Offsets(true, &Corner).Num(), 7);
+	TestEqual(TEXT("Planet: unknown bounds give the seven"), Offsets(true, nullptr).Num(), 7);
 
 	// --- What the edit manager reports while it broadcasts ---
 	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();

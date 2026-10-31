@@ -11,6 +11,7 @@ struct FVoxelNoiseParams;
 struct FVoxelSeaSurface;
 class IVoxelWorldMode;
 class FSphericalPlanetWorldMode;
+class UVoxelCaveConfiguration;
 
 /**
  * The surface ladder's rungs (GLOSSARY.md), the layers a "where is the ground here" query answers from:
@@ -153,6 +154,42 @@ public:
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
 		const FVoxelSeaSurface& Sea);
+
+	/**
+	 * The voxel generation makes at a world position, by density alone (material 0, no flags): the signed distance to the
+	 * generated surface on the position's up-line (GetGeneratedSurface: a heightmap's height, a planet's shell), less the
+	 * cave carve where it is solid under the ground (FVoxelCPUNoiseGenerator::CalculateCaveDensity at its depth, for the
+	 * biome generation gives it, under the sea or not). The one single-voxel entry for a reader that needs a voxel its own
+	 * chunk data cannot show (scatter's voxels past a chunk's faces; code review CR2, SCAT-16).
+	 *
+	 * @param WorldMode World mode
+	 * @param WorldPos The voxel's sample position, as generation samples it
+	 * @param VoxelSize Voxel size (depths are in voxels)
+	 * @param NoiseParams Terrain noise
+	 * @param Zones The conditioning zones there, or null (used only when Surface is null)
+	 * @param Caves The world's cave configuration when its caves are on, else null
+	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig)
+	 * @param bEnableBiomes Whether the world's biomes are on (the planet's biome for the cave overrides)
+	 * @param BiomeHint The biome generation gives the position (a heightmap column's, which its chunk's voxels carry), or
+	 *        -1: on a planet derived from its climate when a cave override needs it, behind
+	 *        UVoxelCaveConfiguration::AnyLayerReachesDepth; 0 on a heightmap
+	 * @param Surface The generated surface on the position's up-line when the caller has it (its height sampled where
+	 *        the caller sampled it), else sampled here with Zones
+	 * @param Continentalness What GetGeneratedSurface returned with Surface (a planet's biome reuses it)
+	 * @return The voxel's density (the material 0)
+	 */
+	static FVoxelData GenerateVoxelAt(
+		const IVoxelWorldMode& WorldMode,
+		const FVector& WorldPos,
+		float VoxelSize,
+		const FVoxelNoiseParams& NoiseParams,
+		const TArray<struct FVoxelConditioningZone>* Zones,
+		const UVoxelCaveConfiguration* Caves,
+		const FVoxelSeaSurface& Sea,
+		bool bEnableBiomes,
+		int32 BiomeHint = -1,
+		const FVoxelTerrainSurfacePoint* Surface = nullptr,
+		float Continentalness = 0.0f);
 
 	// ==================== Heightmap (Z-up) forms ====================
 

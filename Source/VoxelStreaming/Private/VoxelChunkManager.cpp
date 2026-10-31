@@ -9389,8 +9389,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterEditAuditCmd(
 
 			// The chunks a chunk reads past its faces: the inverse of the reader offsets.
 			TArray<FIntVector> ReaderOffsets;
-			UVoxelScatterManager::GetEditReaderOffsets(Mode->IsHeightmapBased(), Mode->GetWorldModeType() == EWorldMode::SphericalPlanet,
-				nullptr, ReaderOffsets);
+			UVoxelScatterManager::GetEditReaderOffsets(Mode->GetWorldModeType() == EWorldMode::SphericalPlanet, nullptr, ReaderOffsets);
 			int32 ReadsEdited = 0, OwnEdits = 0, Other = 0, ChangedPoints = 0;
 			TArray<FString> Kinds;
 			for (const UVoxelScatterManager::FFreshExtractionComparison& C : Stale)

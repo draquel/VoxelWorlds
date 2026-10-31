@@ -9,6 +9,9 @@
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelPlanetNoise.h"
 #include "VoxelTerrainConditioning.h"
+#include "VoxelCaveConfiguration.h"
+#include "InfinitePlaneWorldMode.h"
+#include "VoxelBiomeRegistry.h"
 
 namespace
 {
@@ -105,6 +108,87 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QuerySurfaceMaterialMixAt(
 	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode);
 	const FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(Surface.Position, Planet.GetPlanetParams().PlanetCenter);
 	return QueryPlanetSurfaceMaterialMixAt(Planet, Direction, Surface.Altitude, Continentalness, NoiseParams, BiomeSnapshot, Sea);
+}
+
+FVoxelData FVoxelSurfaceQuery::GenerateVoxelAt(
+	const IVoxelWorldMode& WorldMode,
+	const FVector& WorldPos,
+	float VoxelSize,
+	const FVoxelNoiseParams& NoiseParams,
+	const TArray<FVoxelConditioningZone>* Zones,
+	const UVoxelCaveConfiguration* Caves,
+	const FVoxelSeaSurface& Sea,
+	bool bEnableBiomes,
+	int32 BiomeHint,
+	const FVoxelTerrainSurfacePoint* Surface,
+	float Continentalness)
+{
+	FVoxelTerrainSurfacePoint Sampled;
+	if (!Surface)
+	{
+		Sampled = GetGeneratedSurface(WorldMode, WorldPos, NoiseParams, Zones, &Continentalness);
+		Surface = &Sampled;
+	}
+
+	// The generators' density and depth: a heightmap's signed distance to the generated height (InfinitePlane and
+	// IslandBowl alike), a planet's shell distance to the generated altitude along the voxel's direction.
+	uint8 Density = 0;
+	float DepthBelowSurface = 0.0f;
+	bool bUnderwater = false;
+	const FSphericalPlanetParams* PlanetParams = nullptr;
+	FVector Direction = FVector::UpVector;
+	const bool bPlanet = WorldMode.GetWorldModeType() == EWorldMode::SphericalPlanet;
+	if (!bPlanet)
+	{
+		const float GeneratedHeight = static_cast<float>(Surface->Position.Z);
+		Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(
+			FInfinitePlaneWorldMode::CalculateSignedDistance(static_cast<float>(WorldPos.Z), GeneratedHeight), VoxelSize);
+		DepthBelowSurface = (GeneratedHeight - static_cast<float>(WorldPos.Z)) / VoxelSize;
+		bUnderwater = Sea.bEnabled && GeneratedHeight < Sea.PlaneZ;
+	}
+	else
+	{
+		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode);
+		const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
+		const float Altitude = Surface->Altitude;
+		Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, Params.PlanetCenter);
+		const double Distance = FSphericalPlanetWorldMode::CalculateRadialDistance(WorldPos, Params.PlanetCenter);
+		const float SignedDistance = FSphericalPlanetWorldMode::ShellSignedDistance(Distance, Params.PlanetRadius + Altitude, Params);
+		Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
+		DepthBelowSurface = static_cast<float>((static_cast<double>(Altitude) - (Distance - Params.PlanetRadius)) / VoxelSize);
+		bUnderwater = Sea.bEnabled && static_cast<double>(Altitude) < Sea.Radius - Params.PlanetRadius;
+		PlanetParams = &Params;
+	}
+
+	// The cave carve where the voxel is solid and under the ground, as generation applies it. Without a biome hint the
+	// biome costs two climate fields on a planet, so the depth is checked against the layers' windows first (G72).
+	if (Caves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f
+		&& (BiomeHint >= 0 || Caves->AnyLayerReachesDepth(DepthBelowSurface)))
+	{
+		uint8 BiomeID = BiomeHint >= 0 ? static_cast<uint8>(BiomeHint) : 0;
+		if (BiomeHint < 0 && bPlanet && Caves->BiomeOverrides.Num() > 0 && bEnableBiomes)
+		{
+			const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode);
+			const FVoxelBiomeSnapshot& Snapshot = Planet.GetBiomeSnapshot();
+			const FVoxelNoiseParams TemperatureParams = FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + Snapshot.TemperatureSeedOffset,
+				Snapshot.TemperatureNoiseFrequency);
+			const FVoxelNoiseParams MoistureParams = FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + Snapshot.MoistureSeedOffset,
+				Snapshot.MoistureNoiseFrequency);
+			float Temperature = 0.0f;
+			float Moisture = 0.0f;
+			FSphericalPlanetWorldMode::SampleClimate(Direction, PlanetParams->PlanetRadius, TemperatureParams, MoistureParams, Temperature, Moisture);
+			BiomeID = Snapshot.bIsValid
+				? Snapshot.GetBiomeBlend(Temperature, Moisture, Continentalness).GetDominantBiome()
+				: FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f).GetDominantBiome();
+		}
+		const float Carve = FVoxelCPUNoiseGenerator::CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Caves, NoiseParams.Seed,
+			bUnderwater, PlanetParams);
+		if (Carve > 0.0f)
+		{
+			Density = static_cast<uint8>(FMath::Clamp(FMath::Max(0.0f, static_cast<float>(Density) - Carve * 255.0f), 0.0f, 255.0f));
+		}
+	}
+	return FVoxelData(0, Density);
 }
 
 float FVoxelSurfaceQuery::GetSurfaceHeight(

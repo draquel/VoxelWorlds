@@ -163,7 +163,7 @@ namespace VoxelScatterLineTopTestUtils
 
 	/**
 	 * Each chunk generated (GenerationZones, its layer in Edits merged in) and extracted along local up with a context like
-	 * the scatter manager's: ContextZones and the neighbours' touching edits (GatherPlanetTouchingEdits over Edits), or an
+	 * the scatter manager's: ContextZones and the neighbours' edits on the voxels past the faces (GatherPlanetTouchingEdits over Edits), or an
 	 * all-air shell.
 	 */
 	TArray<FChunkPoints> ExtractChunks(const UVoxelWorldConfiguration* Config, const IVoxelWorldMode& Mode, const TArray<FIntVector>& Coords,
@@ -183,12 +183,12 @@ namespace VoxelScatterLineTopTestUtils
 			{
 				Context.ConditioningZones = MakeShared<const TArray<FVoxelConditioningZone>>(ContextZones);
 			}
-			Context.TouchingEdits = Above == EVoxelAbove::AllAir
+			Context.OutsideEdits = Above == EVoxelAbove::AllAir
 				? AllAirTouching()
 				: UVoxelScatterManager::GatherPlanetTouchingEdits(Coord, ChunkSize, [&Edits](const FIntVector& C) { return Edits.Find(C); });
 			const TArray<FVoxelData> Voxels = GenerateChunk(Generator, Config, Coord, GenerationZones, Edits.Find(Coord));
 			FChunkSurfaceData Surface;
-			UVoxelScatterManager::ExtractPlanetSurfacePoints(Voxels, Coord, ChunkOrigin(Config, Coord), ChunkSize, VoxelSize, VoxelSize, Context, Surface);
+			UVoxelScatterManager::ExtractChunkSurfacePoints(false, Voxels, Coord, ChunkOrigin(Config, Coord), ChunkSize, VoxelSize, VoxelSize, {}, Context, Surface);
 			Out.Add({ Coord, MoveTemp(Surface.SurfacePoints) });
 		}
 		Generator.Shutdown();
@@ -802,9 +802,9 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 			FScatterExtractionContext Context;
 			Context.WorldMode = &*Mode;
 			Context.NoiseParams = Config->NoiseParams;
-			Context.TouchingEdits = UVoxelScatterManager::GatherPlanetTouchingEdits(Coord, ChunkSize, [&Edits](const FIntVector& C) { return Edits.Find(C); });
+			Context.OutsideEdits = UVoxelScatterManager::GatherPlanetTouchingEdits(Coord, ChunkSize, [&Edits](const FIntVector& C) { return Edits.Find(C); });
 			TestEqual(*FString::Printf(TEXT("%s: the context holds exactly the edits on the touching layers the shell reads"), Site.Key),
-				Context.TouchingEdits.IsValid() ? Context.TouchingEdits->Num() : 0, TouchingEditCount);
+				Context.OutsideEdits.IsValid() ? Context.OutsideEdits->Num() : 0, TouchingEditCount);
 
 			int32 Compared = 0, SolidMismatch = 0, DensityOff = 0, EditedCompared = 0;
 			for (const FIntVector& Offset : Offsets)
@@ -822,9 +822,9 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 						continue;
 					}
 					const FVoxelData& Expected = Voxels[In.X + In.Y * ChunkSize + In.Z * ChunkSize * ChunkSize];
-					const FVoxelData Actual = Context.GetPlanetVoxelOutsideChunk(Local, ChunkOrigin(Config, Coord) + FVector(Local) * VoxelSize, VoxelSize);
+					const FVoxelData Actual = Context.GetVoxelOutsideChunk(Local, ChunkOrigin(Config, Coord) + FVector(Local) * VoxelSize, VoxelSize);
 					++Compared;
-					EditedCompared += Context.TouchingEdits.IsValid() && Context.TouchingEdits->Contains(Local) ? 1 : 0;
+					EditedCompared += Context.OutsideEdits.IsValid() && Context.OutsideEdits->Contains(Local) ? 1 : 0;
 					SolidMismatch += Expected.IsSolid() != Actual.IsSolid() ? 1 : 0;
 					DensityOff += FMath::Abs(static_cast<int32>(Expected.Density) - static_cast<int32>(Actual.Density)) > 1 ? 1 : 0;
 				}
@@ -961,7 +961,7 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 
 // ---------------------------------------------------------------------------
 // World modes review G72 (WORLD_MODES_REVIEW_PLAN.md §14.1, §20.23): a planet chunk's rays read the voxels past its +X, +Y and
-// +Z faces in its last cells, made by FScatterExtractionContext::GetPlanetVoxelOutsideChunk. Those were the generated
+// +Z faces in its last cells, made by FScatterExtractionContext::GetVoxelOutsideChunk (GetPlanetVoxelOutsideChunk then). Those were the generated
 // altitude's alone, so where a cave opens such a voxel under the ground it was read as rock: the cave floor in that cell
 // got no point, and where the cave meets the face the rock made a floor in the air. They are now carved as generation
 // carves them (the cave configuration's layers, its biome overrides by the biome generation gives the direction, the sea's
@@ -1030,7 +1030,7 @@ namespace VoxelScatterPlanetFaceCavesTestUtils
 			return Voxels;
 		}
 
-		FScatterExtractionContext MakeContext(bool bCarve) const
+		FScatterExtractionContext MakeContext() const
 		{
 			FScatterExtractionContext Context;
 			Context.WorldMode = Mode.Get();
@@ -1038,7 +1038,6 @@ namespace VoxelScatterPlanetFaceCavesTestUtils
 			Context.Sea = FVoxelSeaSurface::FromConfig(*Config);
 			Context.CaveConfiguration = Caves;
 			Context.bEnableBiomes = Config->bEnableBiomes;
-			Context.bCarvePlanetFaceVoxels = bCarve;
 			return Context;
 		}
 	};
@@ -1092,14 +1091,14 @@ namespace VoxelScatterPlanetFaceCavesTestUtils
 		return Blocks;
 	}
 
-	FFaceResult Compare(const FCaveSetup& Setup, const FBlock& Block, bool bCarve)
+	FFaceResult Compare(const FCaveSetup& Setup, const FBlock& Block)
 	{
 		TArray<FIntVector> Shell;
 		UVoxelScatterManager::GetPlanetShellNeighbours(Shell);
 		const FVector Origin = ChunkOrigin(Setup.Config, Block.Coord);
 		FChunkSurfaceData Made, Reference;
-		UVoxelScatterManager::ExtractPlanetSurfacePoints(Block.Voxels, Block.Coord, Origin, ChunkSize, VoxelSize, VoxelSize, Setup.MakeContext(bCarve), Made);
-		FScatterExtractionContext RefContext = Setup.MakeContext(true);
+		UVoxelScatterManager::ExtractChunkSurfacePoints(false, Block.Voxels, Block.Coord, Origin, ChunkSize, VoxelSize, VoxelSize, {}, Setup.MakeContext(), Made);
+		FScatterExtractionContext RefContext = Setup.MakeContext();
 		RefContext.OutsideVoxelSource = [&Block, &Shell](const FIntVector& Local, FVoxelData& Out)
 		{
 			const FIntVector Offset(Local.X >= ChunkSize ? 1 : 0, Local.Y >= ChunkSize ? 1 : 0, Local.Z >= ChunkSize ? 1 : 0);
@@ -1112,7 +1111,7 @@ namespace VoxelScatterPlanetFaceCavesTestUtils
 			Out = Block.Neighbours[Index][N.X + N.Y * ChunkSize + N.Z * ChunkSize * ChunkSize];
 			return true;
 		};
-		UVoxelScatterManager::ExtractPlanetSurfacePoints(Block.Voxels, Block.Coord, Origin, ChunkSize, VoxelSize, VoxelSize, RefContext, Reference);
+		UVoxelScatterManager::ExtractChunkSurfacePoints(false, Block.Voxels, Block.Coord, Origin, ChunkSize, VoxelSize, VoxelSize, {}, RefContext, Reference);
 
 		auto Key = [](const FVoxelSurfacePoint& P)
 		{
@@ -1154,28 +1153,24 @@ bool FVoxelScatterPlanetFaceCavesTest::RunTest(const FString& Parameters)
 	using namespace VoxelScatterPlanetFaceCavesTestUtils;
 	FCaveSetup Setup;
 
-	auto RunAll = [this, &Setup](const TArray<FBlock>& Blocks, const TCHAR* Label, bool bCarve)
+	auto RunAll = [this, &Setup](const TArray<FBlock>& Blocks, const TCHAR* Label)
 	{
 		FFaceResult Total;
 		for (const FBlock& Block : Blocks)
 		{
-			Total.Add(Compare(Setup, Block, bCarve));
+			Total.Add(Compare(Setup, Block));
 		}
-		AddInfo(FString::Printf(TEXT("%s%s: %d chunks, %lld reference points (%lld underground); missed %lld, spurious %lld, reclassified %lld"),
-			Label, bCarve ? TEXT("") : TEXT(" (no cave carve, as before)"), Total.Chunks, Total.Reference, Total.ReferenceUnderground, Total.Missed,
-			Total.Spurious, Total.Reclassified));
+		AddInfo(FString::Printf(TEXT("%s: %d chunks, %lld reference points (%lld underground); missed %lld, spurious %lld, reclassified %lld"),
+			Label, Total.Chunks, Total.Reference, Total.ReferenceUnderground, Total.Missed, Total.Spurious, Total.Reclassified));
 		return Total;
 	};
 
 	const TArray<FBlock> Blocks = MakeBlocks(Setup);
-	const FFaceResult New = RunAll(Blocks, TEXT("Default caves"), true);
+	const FFaceResult New = RunAll(Blocks, TEXT("Default caves"));
 	TestEqual(TEXT("Default caves: no reference point missed"), New.Missed, static_cast<int64>(0));
 	TestEqual(TEXT("Default caves: no point the reference lacks"), New.Spurious, static_cast<int64>(0));
 	TestEqual(TEXT("Default caves: no point classified differently"), New.Reclassified, static_cast<int64>(0));
 	TestTrue(TEXT("Default caves: cave floors in the chunks (not vacuous)"), New.ReferenceUnderground > 100);
-	const FFaceResult Old = RunAll(Blocks, TEXT("Default caves"), false);
-	TestTrue(*FString::Printf(TEXT("Default caves: without the carve the face cells differ (%lld missed, %lld spurious)"), Old.Missed, Old.Spurious),
-		Old.Missed + Old.Spurious > 0);
 
 	// Biome overrides: caves only in the commonest biome of the chunks, from a shallower depth.
 	{
@@ -1207,7 +1202,7 @@ bool FVoxelScatterPlanetFaceCavesTest::RunTest(const FString& Parameters)
 			Setup.Caves->BiomeOverrides.Add(Override);
 		}
 		const TArray<FBlock> OverrideBlocks = MakeBlocks(Setup);
-		const FFaceResult Overrides = RunAll(OverrideBlocks, *FString::Printf(TEXT("Biome overrides (%d biomes, caves in %d)"), BiomeCounts.Num(), Common), true);
+		const FFaceResult Overrides = RunAll(OverrideBlocks, *FString::Printf(TEXT("Biome overrides (%d biomes, caves in %d)"), BiomeCounts.Num(), Common));
 		TestEqual(TEXT("Biome overrides: no point missed"), Overrides.Missed, static_cast<int64>(0));
 		TestEqual(TEXT("Biome overrides: no point added"), Overrides.Spurious, static_cast<int64>(0));
 		TestEqual(TEXT("Biome overrides: no point classified differently"), Overrides.Reclassified, static_cast<int64>(0));

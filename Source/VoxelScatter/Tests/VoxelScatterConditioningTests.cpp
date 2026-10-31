@@ -118,8 +118,7 @@ namespace VoxelScatterConditioningTestUtils
 	TArray<FVoxelSurfacePoint> Extract(EPath Path, const TArray<FVoxelData>& Voxels, const FIntVector& Coord, const FScatterExtractionContext& Context)
 	{
 		FChunkSurfaceData Surface;
-		UVoxelScatterManager::ExtractHeightmapSurfacePoints(Voxels, Coord, ChunkOrigin(Coord), ChunkSize, VoxelSize, VoxelSize,
-			Path == EPath::Cubic, Context, Surface);
+		UVoxelScatterManager::ExtractChunkSurfacePoints(Path == EPath::Cubic, Voxels, Coord, ChunkOrigin(Coord), ChunkSize, VoxelSize, VoxelSize, {}, Context, Surface);
 		return Surface.SurfacePoints;
 	}
 
