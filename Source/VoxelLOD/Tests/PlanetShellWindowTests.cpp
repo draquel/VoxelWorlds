@@ -1091,14 +1091,14 @@ bool FPlanetCutoverTest::RunTest(const FString& Parameters)
 			FProbeStrategy Default;
 			Default.Initialize(Config);
 			TestTrue(*FString::Printf(TEXT("%s: the cut-over defaults to three view distances"), Case.Name),
-				FMath::IsNearlyEqual(Default.GetPlanetCutoverAltitude(), FDistanceBandLODStrategy::DefaultCutoverViewDistances * ViewDistance, 1.0));
+				FMath::IsNearlyEqual(Default.GetConfiguredCutoverAltitude(), FDistanceBandLODStrategy::DefaultCutoverViewDistances * ViewDistance, 1.0));
 		}
 		// The checks below at the altitudes of a cut-over at the view distance.
 		Config->PlanetVoxelCutoverAltitude = ViewDistance;
 		FProbeStrategy Strategy;
 		Strategy.Initialize(Config);
 		const FTerrain Terrain(*Config);
-		const double Cutover = Strategy.GetPlanetCutoverAltitude();
+		const double Cutover = Strategy.GetConfiguredCutoverAltitude();
 		TestTrue(*FString::Printf(TEXT("%s: the configured cut-over"), Case.Name), FMath::IsNearlyEqual(Cutover, static_cast<double>(ViewDistance), 1.0));
 
 		for (const FSite& Site : GetSites())
@@ -1255,7 +1255,7 @@ bool FPlanetCutoverResumeGuardTest::RunTest(const FString& Parameters)
 		FProbeStrategy Strategy;
 		Strategy.Initialize(Config);
 		const FTerrain Terrain(*Config);
-		const double Cutover = Strategy.GetPlanetCutoverAltitude();
+		const double Cutover = Strategy.GetConfiguredCutoverAltitude();
 
 		for (const FSite& Site : GetSites())
 		{
@@ -1323,7 +1323,7 @@ bool FPlanetCutoverFarFieldGateTest::RunTest(const FString& Parameters)
 		FProbeStrategy Strategy;
 		Strategy.Initialize(Config);
 		const FTerrain Terrain(*Config);
-		const double Configured = Strategy.GetPlanetCutoverAltitude();
+		const double Configured = Strategy.GetConfiguredCutoverAltitude();
 		TestTrue(*FString::Printf(TEXT("%s: the configured cut-over"), Case.Name), FMath::IsNearlyEqual(Configured, static_cast<double>(ViewDistance), 1.0));
 
 		for (const FSite& Site : GetSites())
@@ -1348,7 +1348,7 @@ bool FPlanetCutoverFarFieldGateTest::RunTest(const FString& Parameters)
 				bWithFarField ? TEXT("suspended") : TEXT("active"), InForceWith, WithFarField, bGoneAgain ? TEXT("suspended") : TEXT("active"), GoneAgain));
 			TestFalse(*FString::Printf(TEXT("%s, %s: no far field, no cut-over: active at 1.5 cut-overs"), Case.Name, Site.Name), bNoFarField);
 			TestEqual(*FString::Printf(TEXT("%s, %s: no cut-over in force without a far field"), Case.Name, Site.Name), InForceWithout, 0.0);
-			TestTrue(*FString::Printf(TEXT("%s, %s: the configured altitude is kept"), Case.Name, Site.Name), FMath::IsNearlyEqual(Strategy.GetPlanetCutoverAltitude(), Configured, 1.0));
+			TestTrue(*FString::Printf(TEXT("%s, %s: the configured altitude is kept"), Case.Name, Site.Name), FMath::IsNearlyEqual(Strategy.GetConfiguredCutoverAltitude(), Configured, 1.0));
 			TestTrue(*FString::Printf(TEXT("%s, %s: with a far field the same viewer suspends the window"), Case.Name, Site.Name), bWithFarField);
 			TestTrue(*FString::Printf(TEXT("%s, %s: the cut-over in force with a far field"), Case.Name, Site.Name), FMath::IsNearlyEqual(InForceWith, Configured, 1.0));
 			TestEqual(*FString::Printf(TEXT("%s, %s: a suspended window holds no candidate"), Case.Name, Site.Name), WithFarField, 0);

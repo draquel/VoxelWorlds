@@ -519,7 +519,7 @@ bool FVoxelPlanetCutoverFarFieldGateTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("On the ground the window is active"), W.Manager->IsVoxelWindowSuspended());
 	TestEqual(TEXT("No cut-over in force without a far field"), W.Manager->GetLODStrategy()->GetCutoverAltitude(), 0.0);
 	TestTrue(TEXT("The configured cut-over is kept (the view distance)"),
-		FMath::IsNearlyEqual(static_cast<const FDistanceBandLODStrategy*>(W.Manager->GetLODStrategy())->GetPlanetCutoverAltitude(), static_cast<double>(ViewDistance), 1.0));
+		FMath::IsNearlyEqual(static_cast<const FDistanceBandLODStrategy*>(W.Manager->GetLODStrategy())->GetConfiguredCutoverAltitude(), static_cast<double>(ViewDistance), 1.0));
 
 	// Three view distances up (three cut-overs): never suspended, the ground disk kept, no transition.
 	TestTrue(TEXT("Settled three view distances up"), W.SettleAt(At(3.0 * ViewDistance)));
