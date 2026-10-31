@@ -432,7 +432,6 @@ void FVoxelStreamingBenchmark::TakeSample(float DeltaTime)
 	S.GenStoreMs = T.GenStoreMs;
 	S.GenNotifyMs = T.GenNotifyMs;
 	S.GenApplyCount = T.GenApplyCount;
-	S.MeshTickMs = T.MeshTickMs;
 	S.MeshLaunchMs = T.MeshLaunchMs;
 	S.MeshApplyMs = T.MeshApplyMs;
 	S.MeshSnapMs = T.MeshSnapshotMs;
@@ -756,7 +755,6 @@ FString FVoxelStreamingBenchmark::BuildRunMetadataJson() const
 		Str(TEXT("mesher"), Mesher ? Mesher->GetMesherTypeName() : FString(TEXT("none")));
 		Bool(TEXT("gpuGenerationConfigured"), Cfg->bUseGPUGeneration);
 		Bool(TEXT("gpuGenerationActive"), ChunkManager->IsUsingGPUGeneration());
-		Bool(TEXT("gpuMeshingConfigured"), Cfg->bUseGPUMeshing);
 		Bool(TEXT("forceCPU"), FParse::Param(FCommandLine::Get(), TEXT("VoxelForceCPU")));
 		Int(TEXT("worldSeed"), Cfg->WorldSeed);
 		Num(TEXT("voxelSize"), Cfg->VoxelSize);
@@ -852,15 +850,15 @@ void FVoxelStreamingBenchmark::WriteReport()
 	ReportCsvPath = Base + TEXT(".csv");
 
 	// ---- CSV time-series ----
-	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenApplyN,MeshTickMs,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs,FarOceanMs,FarOceanRebuildN,Altitude,LOD0N,LOD1N,LOD2N,LOD3N,LOD4N,ReachUU,GroundReachUU,BatchesN,BatchSkipN,GenDoneN,FarFieldMs,FarFieldPatchN,FarFieldMB,FarFieldBuiltN,Suspended,LeadUU,SurfAlt,ScatEditMs,ScatApplyMs,ScatLaunchMs,ScatDistMs,ScatFlushMs,ScatApplyN,ScatLaunchN,ScatAddN,ScatRelN,GTMs,RTMs,GPUMs,ScatBatchN,ScatCompactN,DecodeN,DecodeMs,SnapMB,ShellMB,ShadowBatchN\n");
+	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenApplyN,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendCPUMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs,FarOceanMs,FarOceanRebuildN,Altitude,LOD0N,LOD1N,LOD2N,LOD3N,LOD4N,ReachUU,GroundReachUU,BatchesN,BatchSkipN,GenDoneN,FarFieldMs,FarFieldPatchN,FarFieldMB,FarFieldBuiltN,Suspended,LeadUU,SurfAlt,ScatEditMs,ScatApplyMs,ScatLaunchMs,ScatDistMs,ScatFlushMs,ScatApplyN,ScatLaunchN,ScatAddN,ScatRelN,GTMs,RTMs,GPUMs,ScatBatchN,ScatCompactN,DecodeN,DecodeMs,SnapMB,ShellMB,ShadowBatchN\n");
 	for (const FSample& S : Samples)
 	{
-		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%d,%.1f,%d,%d,%d,%d,%d,%.0f,%.0f,%d,%d,%d,%.3f,%d,%.1f,%d,%d,%.0f,%.0f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%.3f,%.1f,%.1f,%d,%d\n"),
+		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%d,%.1f,%d,%d,%d,%d,%d,%.0f,%.0f,%d,%d,%d,%.3f,%d,%.1f,%d,%d,%.0f,%.0f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%.3f,%.1f,%.1f,%d,%d\n"),
 			S.SimTime, S.Phase, S.PosX, S.PosY, S.PosZ, S.GenQueue, S.MeshQueue, S.UnloadQueue, S.PendingUpload,
 			S.GenInFlight, S.LoadedChunks, S.TotalChunks, S.FrameMs, S.GenMs, S.MeshMs, S.LODMs, S.StreamMs, S.TotalMs,
 			S.RenderMs, S.CollMs, S.ScatMs,
 			S.GenLaunchMs, S.GenPollMs, S.GenApplyMs, S.GenStoreMs, S.GenNotifyMs, S.GenApplyCount,
-			S.MeshTickMs, S.MeshLaunchMs, S.MeshApplyMs,
+			S.MeshLaunchMs, S.MeshApplyMs,
 			S.MeshSnapMs, S.MeshDispMs, S.MeshLaunchCount,
 			S.RendMeshMs, S.RendSubRendMs, S.RendSubScatMs, S.RendSubWatMs,
 			S.RendUnloadMs, S.RendWTileMs, S.RendFlushMs, S.RendSubmitCount,

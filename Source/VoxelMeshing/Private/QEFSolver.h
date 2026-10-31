@@ -207,8 +207,8 @@ private:
 	 * the upper triangle, but the next rotation's update reads A[r][p] and A[r][q] below the diagonal too, so the stale
 	 * A[q][p] fed the decomposition and it "converged" to wrong eigenpairs (a rank-1 matrix 3 n n^T at a planet's
 	 * diagonal normal gave 3.16 and -0.16 for 3 and 0). Where a cell's normals were nearly parallel, an eigenvalue over
-	 * the SVD threshold that should not be there moved the vertex a voxel or more off the surface (DualContourMeshGeneration.usf's
-	 * port zeroed both sides).
+	 * the SVD threshold that should not be there moved the vertex a voxel or more off the surface (the GPU port, since
+	 * deleted, zeroed both sides).
 	 */
 	static void JacobiEigen3x3(float M[3][3], float OutEigenvalues[3], float OutEigenvectors[3][3], bool bSymmetric)
 	{

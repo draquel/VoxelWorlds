@@ -167,7 +167,7 @@ AVoxelWorldTestActor
 - Heightmap worlds keep one region: a single component at the world origin, as before.
 - The scene proxy stores vertices relative to its component's location (`FVoxelSceneProxy::RenderOrigin`,
   `ToRenderOffset`), so a float offset is at most a region across (under 0.01 uu anywhere;
-  `Rendering.Planet.RegionPrecision`). The GPU MC mesher writes chunk-local corners. Scatter keeps one HISM per type and
+  `Rendering.Planet.RegionPrecision`). Scatter keeps one HISM per type and
   region (`FVoxelScatterHISMKey`) at the region's origin.
 
 **FVoxelSceneProxy** (`VoxelRendering/Private/VoxelSceneProxy.cpp`)
@@ -199,7 +199,7 @@ AVoxelWorldTestActor
 [Mesher Output]
     FVoxelVertex (28 bytes)
     ↓
-[Conversion in UpdateChunkBuffers_RenderThread]
+[Conversion in UpdateChunkFromCPUData_RenderThread]
     FVoxelLocalVertex (32 bytes)
     ↓
 [GPU Buffer Creation]
@@ -342,10 +342,9 @@ public:
     // ==================== Mesh Updates ====================
     
     /**
-     * Update or create mesh for a chunk.
-     * @param RenderData Contains GPU buffers or vertex/index arrays
+     * Update or create a chunk's mesh from CPU-side mesh data (the chunk manager's path).
      */
-    virtual void UpdateChunkMesh(const FChunkRenderData& RenderData) = 0;
+    virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) = 0;
     
     /**
      * Remove chunk mesh from rendering.
@@ -425,11 +424,11 @@ The Custom Vertex Factory implementation provides maximum performance by keeping
 ```
 ChunkManager
     ↓
-FChunkRenderData (GPU buffers)
+FChunkMeshData (the mesher's output)
     ↓
-FVoxelCustomVFRenderer::UpdateChunkMesh()
+FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU()
     ↓
-Convert RDG → RHI buffers (stays on GPU!)
+Upload on the render thread (UpdateChunkFromCPUData_RenderThread)
     ↓
 FVoxelVertexFactory::UpdateBuffers()
     ↓
@@ -1290,11 +1289,11 @@ private:
 ### Chunk Generation → Rendering
 
 ```
-[Frame N] ChunkManager dispatches meshing compute shader
+[Frame N] ChunkManager dispatches the chunk mesh to a worker
     ↓
-[Frame N+1] GPU executes meshing, produces vertex/index buffers
+[Frame N+1] the worker meshes it (FChunkMeshData)
     ↓
-[Frame N+2] ChunkManager receives FChunkRenderData
+[Frame N+2] ChunkManager receives the mesh (ProcessCompletedAsyncMeshes)
     ↓
 ChunkManager::OnChunkMeshingComplete()
     ↓

@@ -4,8 +4,8 @@
 
 #include "CoreMinimal.h"
 #include "Components/PrimitiveComponent.h"
-#include "VoxelChunkGPUData.h"
 #include "ChunkRenderData.h"
+#include "VoxelVertex.h"
 #include "VoxelCrossfadeScheduler.h"
 #include "VoxelWorldComponent.generated.h"
 
@@ -50,25 +50,7 @@ public:
 	// ==================== Chunk Management ====================
 
 	/**
-	 * Update or add chunk buffers.
-	 * Enqueues update to render thread.
-	 *
-	 * @param RenderData Chunk render data with GPU buffers
-	 */
-	void UpdateChunkBuffers(const FChunkRenderData& RenderData);
-
-	/**
-	 * Update chunk from GPU data directly.
-	 * Enqueues update to render thread.
-	 *
-	 * @param GPUData Pre-constructed GPU data
-	 */
-	void UpdateChunkBuffersFromGPU(const FVoxelChunkGPUData& GPUData);
-
-	/**
-	 * Update chunk from CPU vertex/index data directly - FAST PATH.
-	 * Skips GPU buffer roundtrip by passing CPU data straight to render thread.
-	 * This is the preferred path for CPU-generated mesh data.
+	 * Update chunk from CPU vertex/index data: the mesh goes straight to the render thread.
 	 *
 	 * @param ChunkCoord Chunk coordinate
 	 * @param Vertices CPU vertex array (will be moved)

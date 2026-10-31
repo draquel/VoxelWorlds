@@ -4,12 +4,9 @@
 #include "Misc/AutomationTest.h"
 #include "VoxelCPUDualContourMesher.h"
 #include "VoxelCPUMarchingCubesMesher.h"
-#include "VoxelGPUMarchingCubesMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
-#include "RenderingThread.h"
-#include "RHI.h"             // GUsingNullRHI: the GPU half skips under -nullrhi
 #include "HAL/IConsoleManager.h"
 #include "QEFSolver.h"       // G81: the solve itself (VoxelMeshing/Private)
 
@@ -21,7 +18,7 @@
 // heightmap's vertical distance, a planet's radial one), saturating beyond it. The central difference about the voxel a
 // crossing floors to read the saturated rock under the surface, so a plane's normals tilted by 1.0-1.8 times its slope
 // with the surface's phase in the voxel grid: bands. The fitted gradient (voxel.Mesh.CrossingGradientNormals 1) is exact
-// for a plane at any phase. Pure CPU but for the GPU Marching Cubes half (a real RHI).
+// for a plane at any phase. Pure CPU.
 // ---------------------------------------------------------------------------
 
 namespace VoxelCrossingGradientTestUtils
@@ -206,23 +203,6 @@ namespace VoxelCrossingGradientTestUtils
 			&& (A.Positions.Num() == 0 || FMemory::Memcmp(A.Positions.GetData(), B.Positions.GetData(), A.Positions.Num() * sizeof(FVector3f)) == 0)
 			&& (A.Indices.Num() == 0 || FMemory::Memcmp(A.Indices.GetData(), B.Indices.GetData(), A.Indices.Num() * sizeof(uint32)) == 0);
 	}
-
-	bool MeshGPU(FVoxelGPUMarchingCubesMesher& GPUMesher, const FVoxelMeshingRequest& Request, FChunkMeshData& Out)
-	{
-		volatile bool bCompleted = false;
-		FVoxelMeshingHandle Handle = GPUMesher.GenerateMeshAsync(Request,
-			FOnVoxelMeshingComplete::CreateLambda([&bCompleted](FVoxelMeshingHandle, bool) { bCompleted = true; }));
-		const double StartTime = FPlatformTime::Seconds();
-		while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 30.0)
-		{
-			FlushRenderingCommands();
-			GPUMesher.Tick(0.0f);
-			FPlatformProcess::Sleep(0.002f);
-		}
-		const bool bOk = bCompleted && GPUMesher.ReadbackToCPU(Handle, Out);
-		GPUMesher.ReleaseHandle(Handle);
-		return bOk;
-	}
 }
 
 /**
@@ -230,8 +210,7 @@ namespace VoxelCrossingGradientTestUtils
  * (LOD 1 and 2 take LOD 0's estimator at a voxel crossing: G44, G61) are within a quarter of a degree of the plane's on
  * average with no band over the surface's phase in the voxel grid; with the central difference before G62 (0) LOD 0
  * bands by more than a degree in both meshers. Marching Cubes' vertex positions are the same either way (Dual
- * Contouring's QEF takes the fitted gradient since G80 and G81). With a real RHI the GPU Marching Cubes mesher's normals
- * match the CPU's in both settings.
+ * Contouring's QEF takes the fitted gradient since G80 and G81).
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCrossingGradientPlanesTest, "VoxelWorlds.Meshing.CrossingGradient.Planes",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -246,24 +225,10 @@ bool FVoxelCrossingGradientPlanesTest::RunTest(const FString& Parameters)
 	FVoxelCPUMarchingCubesMesher MCMesher;
 	MCMesher.Initialize();
 	MCMesher.SetConfig(MakeConfig());
-	const bool bGPU = !GUsingNullRHI;
-	FVoxelGPUMarchingCubesMesher GPUMesher;
-	if (bGPU)
-	{
-		GPUMesher.Initialize();
-		GPUMesher.SetConfig(MakeConfig());
-	}
-	else
-	{
-		AddInfo(TEXT("GPU half skipped: it needs a real RHI (run without -nullrhi)"));
-	}
-
 	const TArray<FRampPlane> Planes = MakePlanes();
 	// [Mode][Mesher: 0 DC, 1 MC][LOD]
 	FPlaneNormalStats Stats[2][2][3];
 	bool bPositionsSame[2][3] = { { true, true, true }, { true, true, true } };
-	double GPUSum[2][3] = {}, GPUMax[2][3] = {};
-	int32 GPUMatched[2][3] = {}, GPUVertices[2][3] = {};
 	for (int32 LOD = 0; LOD < 3; ++LOD)
 	{
 		const float Margin = 1.5f * (1 << LOD) + 1.0f;
@@ -279,35 +244,6 @@ bool FVoxelCrossingGradientPlanesTest::RunTest(const FString& Parameters)
 				for (int32 Mesher = 0; Mesher < 2; ++Mesher)
 				{
 					Stats[Mode][Mesher][LOD].Add(Meshes[Mode][Mesher], Plane.Normal(), Margin);
-				}
-				if (!bGPU)
-				{
-					continue;
-				}
-				FChunkMeshData GPUMesh;
-				TestTrue(TEXT("GPU MC meshing and readback succeed"), MeshGPU(GPUMesher, Request, GPUMesh));
-				// Each GPU vertex against the CPU vertex at its position (triangle soup: every match carries the cell's normal).
-				TMap<FIntVector, FVector3f> CPUNormals;
-				const FChunkMeshData& CPUMesh = Meshes[Mode][1];
-				for (int32 i = 0; i < CPUMesh.Positions.Num(); ++i)
-				{
-					const FVector3f& P = CPUMesh.Positions[i];
-					CPUNormals.Add(FIntVector(FMath::RoundToInt32(P.X), FMath::RoundToInt32(P.Y), FMath::RoundToInt32(P.Z)), CPUMesh.Normals[i]);
-				}
-				GPUVertices[Mode][LOD] += GPUMesh.Positions.Num();
-				for (int32 i = 0; i < GPUMesh.Positions.Num() && i < GPUMesh.Normals.Num(); ++i)
-				{
-					const FVector3f& P = GPUMesh.Positions[i];
-					const FVector3f* N = CPUNormals.Find(FIntVector(FMath::RoundToInt32(P.X), FMath::RoundToInt32(P.Y), FMath::RoundToInt32(P.Z)));
-					if (!N)
-					{
-						continue;
-					}
-					const double Diff = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(
-						static_cast<double>(FVector3f::DotProduct(N->GetSafeNormal(), GPUMesh.Normals[i].GetSafeNormal())), -1.0, 1.0)));
-					GPUSum[Mode][LOD] += Diff;
-					GPUMax[Mode][LOD] = FMath::Max(GPUMax[Mode][LOD], Diff);
-					++GPUMatched[Mode][LOD];
 				}
 			}
 			for (int32 Mesher = 0; Mesher < 2; ++Mesher)
@@ -339,23 +275,6 @@ bool FVoxelCrossingGradientPlanesTest::RunTest(const FString& Parameters)
 		}
 		TestTrue(*FString::Printf(TEXT("%s LOD 0: the central difference before G62 bands (%.2f deg)"), Names[Mesher], Stats[0][Mesher][0].Band()),
 			Stats[0][Mesher][0].Band() > 1.0);
-	}
-	if (bGPU)
-	{
-		for (int32 Mode = 0; Mode < 2; ++Mode)
-		{
-			for (int32 LOD = 0; LOD < 3; ++LOD)
-			{
-				const double Mean = GPUMatched[Mode][LOD] > 0 ? GPUSum[Mode][LOD] / GPUMatched[Mode][LOD] : 0.0;
-				AddInfo(FString::Printf(TEXT("GPU MC, setting %d LOD %d: %d of %d vertices at a CPU vertex, normals %.3f deg apart on average, %.3f at most"),
-					Mode, LOD, GPUMatched[Mode][LOD], GPUVertices[Mode][LOD], Mean, GPUMax[Mode][LOD]));
-				TestTrue(*FString::Printf(TEXT("GPU MC, setting %d LOD %d: most GPU vertices at a CPU vertex"), Mode, LOD),
-					GPUMatched[Mode][LOD] * 10 >= GPUVertices[Mode][LOD] * 9);
-				TestTrue(*FString::Printf(TEXT("GPU MC, setting %d LOD %d: GPU normals match the CPU's (mean %.3f deg)"), Mode, LOD, Mean),
-					GPUMatched[Mode][LOD] > 0 && Mean < 0.1);
-			}
-		}
-		GPUMesher.Shutdown();
 	}
 	MCMesher.Shutdown();
 	DCMesher.Shutdown();
@@ -476,8 +395,7 @@ namespace VoxelCrossingGradientTestUtils
  * G80 on exact planes: Dual Contouring's and Marching Cubes' vertices at LOD 1 and 2 against the plane, with the strided
  * crossings (voxel.Mesh.VoxelLODCrossings 0) and voxel crossings (1). The strided crossings band by more than a quarter
  * voxel at LOD 2 in both meshers; voxel crossings put Marching Cubes' vertices on the plane (the crossing itself) and
- * Dual Contouring's as close as LOD 0's, with no band. LOD 0 is the same in either setting. With a real RHI the GPU
- * Marching Cubes mesher's vertices are the CPU's in both settings.
+ * Dual Contouring's as close as LOD 0's, with no band. LOD 0 is the same in either setting.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelLODCrossingPlanesTest, "VoxelWorlds.Meshing.LODCrossings.Planes",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -492,24 +410,10 @@ bool FVoxelLODCrossingPlanesTest::RunTest(const FString& Parameters)
 	FVoxelCPUMarchingCubesMesher MCMesher;
 	MCMesher.Initialize();
 	MCMesher.SetConfig(MakeConfig());
-	const bool bGPU = !GUsingNullRHI;
-	FVoxelGPUMarchingCubesMesher GPUMesher;
-	if (bGPU)
-	{
-		GPUMesher.Initialize();
-		GPUMesher.SetConfig(MakeConfig());
-	}
-	else
-	{
-		AddInfo(TEXT("GPU half skipped: it needs a real RHI (run without -nullrhi)"));
-	}
-
 	const TArray<FRampPlane> Planes = MakePlanes();
 	// [Mode][Mesher: 0 DC, 1 MC][LOD]
 	FPlanePositionStats Stats[2][2][3];
 	bool bLOD0Same[2] = { true, true };
-	double GPUMax[2][3] = {};
-	int32 GPUMatched[2][3] = {}, GPUVertices[2][3] = {};
 	for (int32 LOD = 0; LOD < 3; ++LOD)
 	{
 		const float Margin = 1.5f * (1 << LOD) + 1.0f;
@@ -525,44 +429,6 @@ bool FVoxelLODCrossingPlanesTest::RunTest(const FString& Parameters)
 				for (int32 Mesher = 0; Mesher < 2; ++Mesher)
 				{
 					Stats[Mode][Mesher][LOD].Add(Meshes[Mode][Mesher], Plane, LOD, Margin);
-				}
-				if (!bGPU)
-				{
-					continue;
-				}
-				FChunkMeshData GPUMesh;
-				TestTrue(TEXT("GPU MC meshing and readback succeed"), MeshGPU(GPUMesher, Request, GPUMesh));
-				// Each GPU vertex against the nearest CPU vertex in its 1 uu cell or the cells around it.
-				TMultiMap<FIntVector, FVector3f> CPUPositions;
-				for (const FVector3f& P : Meshes[Mode][1].Positions)
-				{
-					CPUPositions.Add(FIntVector(FMath::FloorToInt32(P.X), FMath::FloorToInt32(P.Y), FMath::FloorToInt32(P.Z)), P);
-				}
-				GPUVertices[Mode][LOD] += GPUMesh.Positions.Num();
-				for (const FVector3f& P : GPUMesh.Positions)
-				{
-					const FIntVector Key(FMath::FloorToInt32(P.X), FMath::FloorToInt32(P.Y), FMath::FloorToInt32(P.Z));
-					double Best = TNumericLimits<double>::Max();
-					for (int32 DZ = -1; DZ <= 1; ++DZ)
-					{
-						for (int32 DY = -1; DY <= 1; ++DY)
-						{
-							for (int32 DX = -1; DX <= 1; ++DX)
-							{
-								TArray<FVector3f> Found;
-								CPUPositions.MultiFind(Key + FIntVector(DX, DY, DZ), Found);
-								for (const FVector3f& Q : Found)
-								{
-									Best = FMath::Min(Best, static_cast<double>(FVector3f::Dist(P, Q)));
-								}
-							}
-						}
-					}
-					if (Best < 1.0)
-					{
-						++GPUMatched[Mode][LOD];
-						GPUMax[Mode][LOD] = FMath::Max(GPUMax[Mode][LOD], Best);
-					}
 				}
 			}
 			if (LOD == 0)
@@ -608,20 +474,6 @@ bool FVoxelLODCrossingPlanesTest::RunTest(const FString& Parameters)
 					Stats[1][1][LOD].Max < 0.02);
 			}
 		}
-	}
-	if (bGPU)
-	{
-		for (int32 Mode = 0; Mode < 2; ++Mode)
-		{
-			for (int32 LOD = 0; LOD < 3; ++LOD)
-			{
-				AddInfo(FString::Printf(TEXT("GPU MC, setting %d LOD %d: %d of %d vertices within 1 uu of a CPU vertex, %.4f uu at most"),
-					Mode, LOD, GPUMatched[Mode][LOD], GPUVertices[Mode][LOD], GPUMax[Mode][LOD]));
-				TestTrue(*FString::Printf(TEXT("GPU MC, setting %d LOD %d: every GPU vertex at a CPU vertex"), Mode, LOD),
-					GPUVertices[Mode][LOD] > 0 && GPUMatched[Mode][LOD] == GPUVertices[Mode][LOD] && GPUMax[Mode][LOD] < 0.05);
-			}
-		}
-		GPUMesher.Shutdown();
 	}
 	MCMesher.Shutdown();
 	DCMesher.Shutdown();

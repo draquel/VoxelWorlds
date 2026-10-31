@@ -286,67 +286,6 @@ bool FVoxelCustomVFRenderer::IsInitialized() const
 
 // ==================== Mesh Updates ====================
 
-void FVoxelCustomVFRenderer::UpdateChunkMesh(const FChunkRenderData& RenderData)
-{
-	check(IsInGameThread());
-
-	if (!IsInitialized())
-	{
-		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelCustomVFRenderer::UpdateChunkMesh called before initialization"));
-		return;
-	}
-
-	if (!RenderData.HasValidGeometry())
-	{
-		// Empty mesh - remove if exists
-		RemoveChunk(RenderData.ChunkCoord);
-		return;
-	}
-
-	// Check if GPU buffers are provided
-	if (!RenderData.HasGPUBuffers())
-	{
-		UE_LOG(LogVoxelRendering, Warning,
-			TEXT("FVoxelCustomVFRenderer::UpdateChunkMesh: Chunk %s has no GPU buffers. Use UpdateChunkMeshFromCPU for CPU data."),
-			*RenderData.ChunkCoord.ToString());
-		return;
-	}
-
-	const FIntVector& ChunkCoord = RenderData.ChunkCoord;
-
-	// Update statistics
-	FChunkStats* ExistingStats = ChunkStatsMap.Find(ChunkCoord);
-	if (ExistingStats)
-	{
-		// Subtract old stats
-		TotalVertexCount -= ExistingStats->VertexCount;
-		TotalTriangleCount -= ExistingStats->TriangleCount;
-		TotalGPUMemory -= ExistingStats->MemoryUsage;
-	}
-
-	// Add new stats
-	FChunkStats& Stats = ChunkStatsMap.FindOrAdd(ChunkCoord);
-	Stats.VertexCount = RenderData.VertexCount;
-	Stats.TriangleCount = RenderData.IndexCount / 3;
-	Stats.LODLevel = RenderData.LODLevel;
-	Stats.MemoryUsage = RenderData.GetGPUMemoryUsage();
-	Stats.Bounds = RenderData.Bounds;
-	Stats.bIsVisible = true;
-
-	TotalVertexCount += Stats.VertexCount;
-	TotalTriangleCount += Stats.TriangleCount;
-	TotalGPUMemory += Stats.MemoryUsage;
-
-	// Forward to the chunk's region component
-	if (UVoxelWorldComponent* Component = GetOrCreateRegionComponent(ChunkCoord))
-	{
-		Component->UpdateChunkBuffers(RenderData);
-	}
-
-	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelCustomVFRenderer: Updated chunk %s (GPU path) - %d verts, %d tris"),
-		*ChunkCoord.ToString(), Stats.VertexCount, Stats.TriangleCount);
-}
-
 void FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU(
 	const FIntVector& ChunkCoord,
 	int32 LODLevel,

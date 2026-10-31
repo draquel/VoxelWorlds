@@ -151,7 +151,6 @@ namespace VoxelMapTileStoreTest
 		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInit = true; }
 		virtual void Shutdown() override { bInit = false; }
 		virtual bool IsInitialized() const override { return bInit; }
-		virtual void UpdateChunkMesh(const FChunkRenderData& RenderData) override {}
 		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override {}
 		virtual void RemoveChunk(const FIntVector& ChunkCoord) override {}
 		virtual void ClearAllChunks() override {}
