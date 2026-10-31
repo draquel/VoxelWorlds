@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelCPUNoiseGenerator.h"
+#include "VoxelHash.h"
 #include "VoxelGeneration.h"
 #include "VoxelTerrainConditioning.h"
 #include "InfinitePlaneWorldMode.h"
@@ -880,17 +881,8 @@ FIntVector FVoxelCPUNoiseGenerator::OreRarityKey(const FVector& PlanetRelativePo
 
 float FVoxelCPUNoiseGenerator::OreRarityHash(const FIntVector& Key, int32 Seed)
 {
-	// Mirrored bit for bit by GpuOreRarityHash (BiomeMaterial.ush): 32-bit wrapping multiplies and shifts only.
-	uint32 H = static_cast<uint32>(Key.X) * 0x8DA6B343u;
-	H ^= static_cast<uint32>(Key.Y) * 0xD8163841u;
-	H ^= static_cast<uint32>(Key.Z) * 0xCB1AB31Fu;
-	H ^= static_cast<uint32>(Seed) * 0x9E3779B9u;
-	H ^= H >> 16;
-	H *= 0x7FEB352Du;
-	H ^= H >> 15;
-	H *= 0x846CA68Bu;
-	H ^= H >> 16;
-	return static_cast<float>(H >> 8) * (1.0f / 16777216.0f);
+	// Mirrored bit for bit by GpuOreRarityHashKey (BiomeMaterial.ush): the shared hash's top 24 bits as a unit float.
+	return VoxelHash::Unit(VoxelHash::Lattice(static_cast<uint32>(Key.X), static_cast<uint32>(Key.Y), static_cast<uint32>(Key.Z), Seed));
 }
 
 bool FVoxelCPUNoiseGenerator::CheckOreVeinPlacement(

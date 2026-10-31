@@ -7,6 +7,7 @@
 #include "Curves/CurveFloat.h"
 #include "VoxelBiomeDefinition.h"
 #include "VoxelBiomeBlendDither.h"
+#include "VoxelGenerationShared.ush"
 #include "VoxelBiomeConfiguration.generated.h"
 
 /**
@@ -201,11 +202,11 @@ public:
 	/** float4s per baked record. Biome layout (5): [TempMin,TempMax,MoistMin,MoistMax][ContMin,ContMax,
 	 *  SurfaceDepth,SubsurfaceDepth][SurfMat,SubMat,DeepMat,UwSurfMat][UwSubMat,Priority,OreStart,OreCount]
 	 *  [BiomeID,0,0,0]. */
-	static constexpr int32 GPU_BIOME_FLOAT4_STRIDE = 5;
+	static constexpr int32 GPU_BIOME_FLOAT4_STRIDE = VOXELGEN_BIOME_FLOAT4_STRIDE;
 	/** Height-rule layout (2): [MinHeight,MaxHeight,MaxDepthBelowSurface,MaterialID][bSurfaceOnly,0,0,0]. */
-	static constexpr int32 GPU_HEIGHTRULE_FLOAT4_STRIDE = 2;
+	static constexpr int32 GPU_HEIGHTRULE_FLOAT4_STRIDE = VOXELGEN_HEIGHTRULE_FLOAT4_STRIDE;
 	/** Ore-vein layout (3): [MaterialID,MinDepth,MaxDepth,Shape][Frequency,Threshold,SeedOffset,Rarity][StreakStretch,0,0,0]. */
-	static constexpr int32 GPU_OREVEIN_FLOAT4_STRIDE = 3;
+	static constexpr int32 GPU_OREVEIN_FLOAT4_STRIDE = VOXELGEN_OREVEIN_FLOAT4_STRIDE;
 
 	/** Baked biomes (Biomes.Num() records × GPU_BIOME_FLOAT4_STRIDE float4s), in Biomes array order. */
 	TArray<FVector4f> BakedGpuBiomes;

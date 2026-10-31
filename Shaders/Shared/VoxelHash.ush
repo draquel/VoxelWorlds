@@ -1,0 +1,28 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+//
+// The one integer hash mix generation shares (code review CR2, CORE-21), the twin of VoxelHash.h bit for bit: 32-bit
+// wrapping multiplies, xors and shifts only. The noise lattice (PlanetNoise.ush), the ore Rarity (BiomeMaterial.ush)
+// and the biome blend dither (BiomeMaterial.ush) call it.
+
+#pragma once
+
+// A 32-bit hash of a lattice corner (wrapping coordinates) and a seed.
+uint VoxelLatticeHash(uint3 C, int Seed)
+{
+    uint H = C.x * 0x8DA6B343u;
+    H ^= C.y * 0xD8163841u;
+    H ^= C.z * 0xCB1AB31Fu;
+    H ^= asuint(Seed) * 0x9E3779B9u;
+    H ^= H >> 16;
+    H *= 0x7FEB352Du;
+    H ^= H >> 15;
+    H *= 0x846CA68Bu;
+    H ^= H >> 16;
+    return H;
+}
+
+// The hash as a float in [0, 1): its top 24 bits.
+float VoxelHashUnit(uint H)
+{
+    return (float)(H >> 8) * (1.0f / 16777216.0f);
+}

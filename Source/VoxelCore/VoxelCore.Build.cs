@@ -1,5 +1,6 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
+using System.IO;
 using UnrealBuildTool;
 
 public class VoxelCore : ModuleRules
@@ -10,6 +11,8 @@ public class VoxelCore : ModuleRules
 
 		PublicIncludePaths.AddRange(
 			new string[] {
+				// What CPU and GPU generation share by value (VoxelGenerationShared.ush), included by C++ and HLSL (code review CR2, CORE-22)
+				Path.Combine(PluginDirectory, "Shaders", "Shared"),
 			}
 		);
 

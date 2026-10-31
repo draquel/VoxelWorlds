@@ -13,32 +13,12 @@
 
 #pragma once
 
-// FVoxelPlanetNoise::LatticeHash: wrapping multiplies, xors and shifts only (the ore Rarity hash's mixing).
-uint PlanetLatticeHash(uint3 C, int Seed)
-{
-    uint H = C.x * 0x8DA6B343u;
-    H ^= C.y * 0xD8163841u;
-    H ^= C.z * 0xCB1AB31Fu;
-    H ^= asuint(Seed) * 0x9E3779B9u;
-    H ^= H >> 16;
-    H *= 0x7FEB352Du;
-    H ^= H >> 15;
-    H *= 0x846CA68Bu;
-    H ^= H >> 16;
-    return H;
-}
+// The lattice hash is VoxelLatticeHash (VoxelHash.ush, the one mix generation shares); the Simplex kernel's table and
+// constants are VOXELGEN_SIMPLEX_* (VoxelGenerationShared.ush), the same values the CPU's FVoxelPlanetNoise reads.
+#include "/Plugin/VoxelWorlds/Shared/VoxelHash.ush"
+#include "/Plugin/VoxelWorlds/Shared/VoxelGenerationShared.ush"
 
-// The hash as a float in [0, 1): its top 24 bits.
-float PlanetHashUnit(uint H)
-{
-    return (float)(H >> 8) * (1.0f / 16777216.0f);
-}
-
-static const int3 PlanetGrad3[12] = {
-    int3(1,1,0), int3(-1,1,0), int3(1,-1,0), int3(-1,-1,0),
-    int3(1,0,1), int3(-1,0,1), int3(1,0,-1), int3(-1,0,-1),
-    int3(0,1,1), int3(0,-1,1), int3(0,1,-1), int3(0,-1,-1)
-};
+static const int3 PlanetGrad3[12] = VOXELGEN_SIMPLEX_GRAD3(int3);
 
 // A simplex corner's contribution (FVoxelPlanetNoise's SimplexCorner). G43: the continuous kernel, (0.6 - d^2)^4 less its
 // value and slope at d^2 = 0.5, v^2 (v^2 + 0.4 v + 0.06) with v = 0.5 - d^2, reaches zero where the next simplex begins;
@@ -48,15 +28,15 @@ float PlanetSimplexCorner(uint Hash, float3 X)
     const int3 G = PlanetGrad3[Hash % 12u];
     if (SimplexContinuous != 0)
     {
-        const float V = 0.5f - X.x * X.x - X.y * X.y - X.z * X.z;
+        const float V = VOXELGEN_SIMPLEX_CONTINUOUS_RADIUS2 - X.x * X.x - X.y * X.y - X.z * X.z;
         if (V <= 0.0f)
         {
             return 0.0f;
         }
-        const float W = V * V * ((V + 0.4f) * V + 0.06f);
+        const float W = V * V * ((V + VOXELGEN_SIMPLEX_CONTINUOUS_B) * V + VOXELGEN_SIMPLEX_CONTINUOUS_C);
         return W * ((float)G.x * X.x + (float)G.y * X.y + (float)G.z * X.z);
     }
-    float R = 0.6f - X.x * X.x - X.y * X.y - X.z * X.z;
+    float R = VOXELGEN_SIMPLEX_CLASSIC_RADIUS2 - X.x * X.x - X.y * X.y - X.z * X.z;
     if (R < 0.0f)
     {
         return 0.0f;
@@ -68,8 +48,8 @@ float PlanetSimplexCorner(uint Hash, float3 X)
 // FVoxelPlanetNoise::Simplex: Simplex noise at the split origin (Cell, Frac in the skewed lattice) + Offset (noise units).
 float PlanetSimplex(uint3 Cell, float3 Frac, float3 Offset, int Seed)
 {
-    const float F3P = 1.0f / 3.0f;
-    const float G3P = 1.0f / 6.0f;
+    const float F3P = VOXELGEN_SIMPLEX_SKEW_F3;
+    const float G3P = VOXELGEN_SIMPLEX_UNSKEW_G3;
 
     const float S = (Offset.x + Offset.y + Offset.z) * F3P;
     const float3 G = float3(Frac.x + (Offset.x + S), Frac.y + (Offset.y + S), Frac.z + (Offset.z + S));
@@ -98,12 +78,12 @@ float PlanetSimplex(uint3 Cell, float3 Frac, float3 Offset, int Seed)
     const float3 X3 = X0 - 1.0f + 3.0f * G3P;
 
     const uint3 B = Cell + asuint(C);
-    const float N0 = PlanetSimplexCorner(PlanetLatticeHash(B, Seed), X0);
-    const float N1 = PlanetSimplexCorner(PlanetLatticeHash(B + asuint(I1), Seed), X1);
-    const float N2 = PlanetSimplexCorner(PlanetLatticeHash(B + asuint(I2), Seed), X2);
-    const float N3 = PlanetSimplexCorner(PlanetLatticeHash(B + uint3(1u, 1u, 1u), Seed), X3);
+    const float N0 = PlanetSimplexCorner(VoxelLatticeHash(B, Seed), X0);
+    const float N1 = PlanetSimplexCorner(VoxelLatticeHash(B + asuint(I1), Seed), X1);
+    const float N2 = PlanetSimplexCorner(VoxelLatticeHash(B + asuint(I2), Seed), X2);
+    const float N3 = PlanetSimplexCorner(VoxelLatticeHash(B + uint3(1u, 1u, 1u), Seed), X3);
     // The sum's scale: 33.25 gives the continuous kernel the classic one's spread (32).
-    return (SimplexContinuous != 0 ? 33.25f : 32.0f) * (N0 + N1 + N2 + N3);
+    return (SimplexContinuous != 0 ? VOXELGEN_SIMPLEX_SCALE_CONTINUOUS : VOXELGEN_SIMPLEX_SCALE_CLASSIC) * (N0 + N1 + N2 + N3);
 }
 
 float PlanetGrad(uint Hash, float X, float Y, float Z)
@@ -138,11 +118,11 @@ float PlanetPerlin(uint3 Cell, float3 Frac, float3 Offset, int Seed)
     const float W = PlanetFade(Z);
     return PlanetLerp(
         PlanetLerp(
-            PlanetLerp(PlanetGrad(PlanetLatticeHash(B, Seed), X, Y, Z), PlanetGrad(PlanetLatticeHash(B + uint3(1u, 0u, 0u), Seed), X - 1.0f, Y, Z), U),
-            PlanetLerp(PlanetGrad(PlanetLatticeHash(B + uint3(0u, 1u, 0u), Seed), X, Y - 1.0f, Z), PlanetGrad(PlanetLatticeHash(B + uint3(1u, 1u, 0u), Seed), X - 1.0f, Y - 1.0f, Z), U), V),
+            PlanetLerp(PlanetGrad(VoxelLatticeHash(B, Seed), X, Y, Z), PlanetGrad(VoxelLatticeHash(B + uint3(1u, 0u, 0u), Seed), X - 1.0f, Y, Z), U),
+            PlanetLerp(PlanetGrad(VoxelLatticeHash(B + uint3(0u, 1u, 0u), Seed), X, Y - 1.0f, Z), PlanetGrad(VoxelLatticeHash(B + uint3(1u, 1u, 0u), Seed), X - 1.0f, Y - 1.0f, Z), U), V),
         PlanetLerp(
-            PlanetLerp(PlanetGrad(PlanetLatticeHash(B + uint3(0u, 0u, 1u), Seed), X, Y, Z - 1.0f), PlanetGrad(PlanetLatticeHash(B + uint3(1u, 0u, 1u), Seed), X - 1.0f, Y, Z - 1.0f), U),
-            PlanetLerp(PlanetGrad(PlanetLatticeHash(B + uint3(0u, 1u, 1u), Seed), X, Y - 1.0f, Z - 1.0f), PlanetGrad(PlanetLatticeHash(B + uint3(1u, 1u, 1u), Seed), X - 1.0f, Y - 1.0f, Z - 1.0f), U), V), W);
+            PlanetLerp(PlanetGrad(VoxelLatticeHash(B + uint3(0u, 0u, 1u), Seed), X, Y, Z - 1.0f), PlanetGrad(VoxelLatticeHash(B + uint3(1u, 0u, 1u), Seed), X - 1.0f, Y, Z - 1.0f), U),
+            PlanetLerp(PlanetGrad(VoxelLatticeHash(B + uint3(0u, 1u, 1u), Seed), X, Y - 1.0f, Z - 1.0f), PlanetGrad(VoxelLatticeHash(B + uint3(1u, 1u, 1u), Seed), X - 1.0f, Y - 1.0f, Z - 1.0f), U), V), W);
 }
 
 // FVoxelPlanetNoise::Cellular: (F1, F2) over the 3x3x3 cells around the split origin + Offset.
@@ -165,9 +145,9 @@ float2 PlanetCellular(uint3 Cell, float3 Frac, float3 Offset, int Seed)
             for (int DX = -1; DX <= 1; ++DX)
             {
                 const uint3 N = B + asuint(int3(DX, DY, DZ));
-                const float DeltaX = (float)DX + PlanetHashUnit(PlanetLatticeHash(N, Seed)) - F.x;
-                const float DeltaY = (float)DY + PlanetHashUnit(PlanetLatticeHash(N, Seed + 1)) - F.y;
-                const float DeltaZ = (float)DZ + PlanetHashUnit(PlanetLatticeHash(N, Seed + 2)) - F.z;
+                const float DeltaX = (float)DX + VoxelHashUnit(VoxelLatticeHash(N, Seed)) - F.x;
+                const float DeltaY = (float)DY + VoxelHashUnit(VoxelLatticeHash(N, Seed + 1)) - F.y;
+                const float DeltaZ = (float)DZ + VoxelHashUnit(VoxelLatticeHash(N, Seed + 2)) - F.z;
                 const float DistSq = DeltaX * DeltaX + DeltaY * DeltaY + DeltaZ * DeltaZ;
                 if (DistSq < F1)
                 {
@@ -187,15 +167,15 @@ float2 PlanetCellular(uint3 Cell, float3 Frac, float3 Offset, int Seed)
 // FVoxelPlanetNoise::Sample: one octave of the noise type (Cellular: F1 mapped to [-1, 1]; Voronoi: F2 - F1).
 float PlanetNoiseSample(uint3 Cell, float3 Frac, float3 Offset, int NoiseType, int Seed)
 {
-    if (NoiseType == NOISE_TYPE_PERLIN)
+    if (NoiseType == VOXELGEN_NOISE_TYPE_PERLIN)
     {
         return PlanetPerlin(Cell, Frac, Offset, Seed);
     }
-    if (NoiseType == NOISE_TYPE_CELLULAR || NoiseType == NOISE_TYPE_VORONOI)
+    if (NoiseType == VOXELGEN_NOISE_TYPE_CELLULAR || NoiseType == VOXELGEN_NOISE_TYPE_VORONOI)
     {
         // One search for both, so it is inlined once (F2.13).
         const float2 Cel = PlanetCellular(Cell, Frac, Offset, Seed);
-        return (NoiseType == NOISE_TYPE_CELLULAR) ? (Cel.x * 2.0f - 1.0f) : ((Cel.y - Cel.x) * 2.0f - 1.0f);
+        return (NoiseType == VOXELGEN_NOISE_TYPE_CELLULAR) ? (Cel.x * 2.0f - 1.0f) : ((Cel.y - Cel.x) * 2.0f - 1.0f);
     }
     return PlanetSimplex(Cell, Frac, Offset, Seed);
 }

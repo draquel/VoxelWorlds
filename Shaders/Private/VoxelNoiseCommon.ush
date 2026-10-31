@@ -8,11 +8,8 @@
 
 #pragma once
 
-// Noise type enum (must match EVoxelNoiseType)
-#define NOISE_TYPE_PERLIN 0
-#define NOISE_TYPE_SIMPLEX 1
-#define NOISE_TYPE_CELLULAR 2
-#define NOISE_TYPE_VORONOI 3
+// The enum integers, flag bits, strides and tables CPU and GPU generation share (VoxelGenerationShared.ush, code review CR2).
+#include "/Plugin/VoxelWorlds/Shared/VoxelGenerationShared.ush"
 
 // ==================== Utility Functions ====================
 

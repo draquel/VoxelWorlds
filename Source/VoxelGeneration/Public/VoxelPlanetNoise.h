@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "VoxelCoreTypes.h"
+#include "VoxelHash.h"
 
 /**
  * A noise-space point split for precision (spherical Phase 6, WM-BP5): the integer lattice cell holding it and the
@@ -53,28 +54,10 @@ public:
 	/** Most octaves a field has (FVoxelNoiseParams::Octaves' ClampMax). */
 	static constexpr int32 MaxOctaves = 16;
 
-	/**
-	 * The lattice hash: a 32-bit value from a lattice corner and a seed, with wrapping multiplies, xors and shifts only
-	 * (the mixing of FVoxelCPUNoiseGenerator::OreRarityHash), mirrored by PlanetLatticeHash in PlanetNoise.ush.
-	 *
-	 * @param X Corner X (wrapping)
-	 * @param Y Corner Y
-	 * @param Z Corner Z
-	 * @param Seed The field's seed
-	 * @return The hash
-	 */
+	/** The lattice hash: VoxelHash::Lattice (the one mix generation shares, mirrored by VoxelHash.ush). */
 	static uint32 LatticeHash(uint32 X, uint32 Y, uint32 Z, int32 Seed)
 	{
-		uint32 H = X * 0x8DA6B343u;
-		H ^= Y * 0xD8163841u;
-		H ^= Z * 0xCB1AB31Fu;
-		H ^= static_cast<uint32>(Seed) * 0x9E3779B9u;
-		H ^= H >> 16;
-		H *= 0x7FEB352Du;
-		H ^= H >> 15;
-		H *= 0x846CA68Bu;
-		H ^= H >> 16;
-		return H;
+		return VoxelHash::Lattice(X, Y, Z, Seed);
 	}
 
 	/**

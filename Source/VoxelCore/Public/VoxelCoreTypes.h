@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelGenerationShared.ush"
 #include "VoxelCoreTypes.generated.h"
 
 /**
@@ -20,6 +21,11 @@ enum class EWorldMode : uint8
 	/** Island with bowl-shaped falloff at edges */
 	IslandBowl
 };
+
+// The GPU reads the same integers (VoxelGenerationShared.ush).
+static_assert(static_cast<int32>(EWorldMode::InfinitePlane) == VOXELGEN_WORLD_MODE_INFINITE_PLANE, "EWorldMode and the shader disagree");
+static_assert(static_cast<int32>(EWorldMode::SphericalPlanet) == VOXELGEN_WORLD_MODE_SPHERICAL_PLANET, "EWorldMode and the shader disagree");
+static_assert(static_cast<int32>(EWorldMode::IslandBowl) == VOXELGEN_WORLD_MODE_ISLAND_BOWL, "EWorldMode and the shader disagree");
 
 /**
  * Meshing algorithm for converting voxels to renderable geometry.
@@ -152,8 +158,8 @@ enum class EVoxelDataResidency : uint8
 	Compressed
 };
 
-/** Voxel density threshold - values below are air, at or above are solid */
-constexpr uint8 VOXEL_SURFACE_THRESHOLD = 127;
+/** Voxel density threshold - values below are air, at or above are solid (the GPU's value too: VoxelGenerationShared.ush) */
+constexpr uint8 VOXEL_SURFACE_THRESHOLD = VOXELGEN_SURFACE_THRESHOLD;
 
 /** Maximum supported LOD levels */
 constexpr int32 VOXEL_MAX_LOD_LEVELS = 8;
@@ -185,6 +191,12 @@ enum class EVoxelNoiseType : uint8
 	/** Voronoi noise - cell edge patterns, F2-F1 distance */
 	Voronoi
 };
+
+// The GPU reads the same integers (VoxelGenerationShared.ush).
+static_assert(static_cast<int32>(EVoxelNoiseType::Perlin) == VOXELGEN_NOISE_TYPE_PERLIN, "EVoxelNoiseType and the shader disagree");
+static_assert(static_cast<int32>(EVoxelNoiseType::Simplex) == VOXELGEN_NOISE_TYPE_SIMPLEX, "EVoxelNoiseType and the shader disagree");
+static_assert(static_cast<int32>(EVoxelNoiseType::Cellular) == VOXELGEN_NOISE_TYPE_CELLULAR, "EVoxelNoiseType and the shader disagree");
+static_assert(static_cast<int32>(EVoxelNoiseType::Voronoi) == VOXELGEN_NOISE_TYPE_VORONOI, "EVoxelNoiseType and the shader disagree");
 
 /**
  * Parameters controlling noise-based terrain generation.

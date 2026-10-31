@@ -96,14 +96,14 @@ struct VOXELCORE_API FVoxelData
 		Metadata = (Metadata & 0x0F) | ((Flags & 0x0F) << 4);
 	}
 
-	/** Water flag bit within the flags nibble */
-	static constexpr uint8 VOXEL_FLAG_WATER = 0x01;
+	/** Water flag bit within the flags nibble (the GPU's bits too: VoxelGenerationShared.ush) */
+	static constexpr uint8 VOXEL_FLAG_WATER = VOXELGEN_FLAG_WATER;
 
 	/** Cave-carved air flag bit within the flags nibble (temporary, cleared after water fill) */
-	static constexpr uint8 VOXEL_FLAG_CAVE = 0x02;
+	static constexpr uint8 VOXEL_FLAG_CAVE = VOXELGEN_FLAG_CAVE;
 
 	/** Persistent underground flag — air below terrain surface (caves, enclosed voids) */
-	static constexpr uint8 VOXEL_FLAG_UNDERGROUND = 0x04;
+	static constexpr uint8 VOXEL_FLAG_UNDERGROUND = VOXELGEN_FLAG_UNDERGROUND;
 
 	/** Check if this voxel is marked as containing water */
 	FORCEINLINE bool HasWaterFlag() const
