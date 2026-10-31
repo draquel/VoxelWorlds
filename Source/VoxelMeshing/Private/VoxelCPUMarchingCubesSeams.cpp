@@ -452,8 +452,7 @@ void FVoxelCPUMarchingCubesMesher::MeshSeamBandCells(
 		{
 			for (int32 X = BandMin.X; X < BandMaxEx.X; X += Stride)
 			{
-				ProcessCubeLOD(SyntheticRequest, X, Y, Z, Stride, OutMeshData, TriangleCount,
-					FColor(0, 0, 0, 0), TransitionMask);
+				ProcessCubeLOD(SyntheticRequest, X, Y, Z, Stride, OutMeshData, TriangleCount, TransitionMask);
 			}
 		}
 	}

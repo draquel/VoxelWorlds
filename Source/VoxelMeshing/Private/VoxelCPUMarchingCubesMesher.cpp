@@ -180,16 +180,6 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 	OutMeshData.Reset();
 	OutStats = FVoxelMeshingStats();
 
-	// Don't clear debug data automatically - let it accumulate across chunks
-	// so visualization can show data from multiple chunks. The caller should
-	// call ClearDebugData() when they want to reset the collection.
-	// Limit the size to prevent unbounded growth.
-	if (bCollectDebugVisualization && TransitionCellDebugData.Num() > 10000)
-	{
-		// Keep only the most recent entries
-		TransitionCellDebugData.RemoveAt(0, TransitionCellDebugData.Num() - 5000);
-	}
-
 	const int32 ChunkSize = Request.ChunkSize;
 
 	// Calculate LOD stride - each LOD level doubles the stride
@@ -243,26 +233,6 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 	// legacy boundary mechanism; inapplicable to the interior-only pass)
 	const uint8 TransitionMask = (Config.bUseTransvoxel && !bInteriorDomain) ? GetTransitionFaces(Request) : 0;
 	const bool bHasTransitions = TransitionMask != 0;
-
-	// Debug logging for transition cell processing
-	if (bDebugLogTransitionCells)
-	{
-		UE_LOG(LogVoxelMeshing, Warning, TEXT("=== MESH GENERATION START ==="));
-		UE_LOG(LogVoxelMeshing, Warning, TEXT("  Chunk: (%d,%d,%d) LOD: %d, Stride: %d"),
-			Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z,
-			Request.LODLevel, Stride);
-		UE_LOG(LogVoxelMeshing, Warning, TEXT("  Transvoxel: %s, TransitionMask: 0x%02X, HasTransitions: %s"),
-			Config.bUseTransvoxel ? TEXT("ON") : TEXT("OFF"),
-			TransitionMask,
-			bHasTransitions ? TEXT("Yes") : TEXT("No"));
-		UE_LOG(LogVoxelMeshing, Warning, TEXT("  Neighbor LODs: [-X:%d +X:%d -Y:%d +Y:%d -Z:%d +Z:%d]"),
-			Request.NeighborLODLevels[0], Request.NeighborLODLevels[1],
-			Request.NeighborLODLevels[2], Request.NeighborLODLevels[3],
-			Request.NeighborLODLevels[4], Request.NeighborLODLevels[5]);
-		UE_LOG(LogVoxelMeshing, Warning, TEXT("  Debug flags: Logging=%s, Visualization=%s"),
-			bDebugLogTransitionCells ? TEXT("ON") : TEXT("OFF"),
-			bCollectDebugVisualization ? TEXT("ON") : TEXT("OFF"));
-	}
 
 	if (bHasTransitions)
 	{
@@ -341,66 +311,8 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 		{
 			for (int32 X = CellLo; X < CellHiEx; X += Stride)
 			{
-				ProcessCubeLOD(Request, X, Y, Z, Stride, OutMeshData, TriangleCount,
-					FColor(0, 0, 0, 0), TransitionMask);
+				ProcessCubeLOD(Request, X, Y, Z, Stride, OutMeshData, TriangleCount, TransitionMask);
 			}
-		}
-	}
-
-	// Log debug summary for transition cells
-	if (bDebugLogTransitionCells)
-	{
-		UE_LOG(LogVoxelMeshing, Warning, TEXT("=== MESH GENERATION COMPLETE ==="));
-		UE_LOG(LogVoxelMeshing, Warning, TEXT("  Chunk (%d,%d,%d) LOD %d: %d transition cells in debug data"),
-			Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z,
-			Request.LODLevel, TransitionCellDebugData.Num());
-
-		if (TransitionCellDebugData.Num() > 0)
-		{
-			// Count by face
-			int32 FaceCounts[6] = {0, 0, 0, 0, 0, 0};
-			for (const auto& Cell : TransitionCellDebugData)
-			{
-				if (Cell.FaceIndex >= 0 && Cell.FaceIndex < 6)
-				{
-					FaceCounts[Cell.FaceIndex]++;
-				}
-			}
-			UE_LOG(LogVoxelMeshing, Warning, TEXT("  By face: -X:%d +X:%d -Y:%d +Y:%d -Z:%d +Z:%d"),
-				FaceCounts[0], FaceCounts[1], FaceCounts[2], FaceCounts[3], FaceCounts[4], FaceCounts[5]);
-		}
-		else
-		{
-			UE_LOG(LogVoxelMeshing, Warning, TEXT("  No transition cells collected (TransitionMask was 0x%02X, bCollectViz=%s)"),
-				TransitionMask, bCollectDebugVisualization ? TEXT("ON") : TEXT("OFF"));
-		}
-	}
-
-	// Anomaly detection summary
-	if (bDebugLogAnomalies && bCollectDebugVisualization && TransitionCellDebugData.Num() > 0)
-	{
-		const FTransitionDebugSummary Summary = GetTransitionDebugSummary();
-		UE_LOG(LogVoxelMeshing, Warning,
-			TEXT("=== ANOMALY SUMMARY Chunk (%d,%d,%d) LOD %d ==="),
-			Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z, Request.LODLevel);
-		UE_LOG(LogVoxelMeshing, Warning,
-			TEXT("  Transition cells: %d total, %d empty (fell back to MC)"),
-			Summary.TotalTransitionCells, Summary.EmptyCells);
-		UE_LOG(LogVoxelMeshing, Warning,
-			TEXT("  Per face: -X:%d +X:%d -Y:%d +Y:%d -Z:%d +Z:%d"),
-			Summary.PerFaceCounts[0], Summary.PerFaceCounts[1], Summary.PerFaceCounts[2],
-			Summary.PerFaceCounts[3], Summary.PerFaceCounts[4], Summary.PerFaceCounts[5]);
-		if (Summary.CellsWithDisagreement > 0 || Summary.CellsWithClampedVertices > 0
-			|| Summary.CellsWithFoldedTriangles > 0 || Summary.TotalFilteredTriangles > 0)
-		{
-			UE_LOG(LogVoxelMeshing, Warning,
-				TEXT("  Anomalies: %d disagreement, %d clamped, %d folded, %d filtered tris"),
-				Summary.CellsWithDisagreement, Summary.CellsWithClampedVertices,
-				Summary.CellsWithFoldedTriangles, Summary.TotalFilteredTriangles);
-		}
-		else
-		{
-			UE_LOG(LogVoxelMeshing, Warning, TEXT("  No anomalies detected"));
 		}
 	}
 
@@ -426,7 +338,6 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 	int32 Stride,
 	FChunkMeshData& OutMeshData,
 	uint32& OutTriangleCount,
-	FColor DebugColorOverride,
 	uint8 TransitionMask)
 {
 	const float VoxelSize = Request.VoxelSize;
@@ -573,18 +484,7 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 
 	// Emit triangles using CellData triangle indices
 	const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
-	FColor VertexColor(MaterialID, BiomeID, 0, 255);
-	if (bDebugColorTransitionCells)
-	{
-		if (DebugColorOverride.A != 0)
-		{
-			VertexColor = DebugColorOverride; // Caller-specified (blue for fallback MC)
-		}
-		else
-		{
-			VertexColor = FColor(0, 200, 0, 255); // Green for regular MC
-		}
-	}
+	const FColor VertexColor(MaterialID, BiomeID, 0, 255);
 	const FVector2f MaterialUV(static_cast<float>(MaterialID), 0.0f);
 
 	for (int32 t = 0; t < TriangleCount; t++)
@@ -1878,8 +1778,6 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	FChunkMeshData& OutMeshData,
 	uint32& OutTriangleCount)
 {
-	static const TCHAR* FaceNames[6] = { TEXT("-X"), TEXT("+X"), TEXT("-Y"), TEXT("+Y"), TEXT("-Z"), TEXT("+Z") };
-
 	// Get all 13 density samples for this transition cell
 	// Samples 0-8: face samples (3x3 grid on transition face)
 	// Samples 9-12: interior corners (at the opposite side of the cell)
@@ -1929,34 +1827,11 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	const bool bInverted = (CellClassData & 0x80) != 0;
 	const uint8 CellClass = CellClassData & 0x7F;
 
-	// Debug logging for transition cells
-	if (bDebugLogTransitionCells)
-	{
-		UE_LOG(LogVoxelMeshing, Log, TEXT("=== TRANSITION CELL ==="));
-		UE_LOG(LogVoxelMeshing, Log, TEXT("  Chunk: (%d,%d,%d) LOD: %d"),
-			Request.ChunkCoord.X, Request.ChunkCoord.Y, Request.ChunkCoord.Z, Request.LODLevel);
-		UE_LOG(LogVoxelMeshing, Log, TEXT("  Cell: (%d,%d,%d) Face: %s Stride: %d"),
-			X, Y, Z, FaceNames[FaceIndex], Stride);
-		UE_LOG(LogVoxelMeshing, Log, TEXT("  Neighbor LOD: %d"), Request.NeighborLODLevels[FaceIndex]);
-		UE_LOG(LogVoxelMeshing, Log, TEXT("  Case: %d (0x%03X) Class: %d Inverted: %s"),
-			CaseIndex, CaseIndex, CellClass, bInverted ? TEXT("Yes") : TEXT("No"));
-		UE_LOG(LogVoxelMeshing, Log, TEXT("  Face Densities: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]"),
-			Densities[0], Densities[1], Densities[2],
-			Densities[3], Densities[4], Densities[5],
-			Densities[6], Densities[7], Densities[8]);
-		UE_LOG(LogVoxelMeshing, Log, TEXT("  Interior Densities: [%.3f, %.3f, %.3f, %.3f]"),
-			Densities[9], Densities[10], Densities[11], Densities[12]);
-	}
-
 	// Early out for empty cases (class 0)
 	// No surface crosses the transition face in this cell. Adjacent non-boundary
 	// MC cells handle any interior crossings. No fallback MC needed.
 	if (CellClass == 0)
 	{
-		if (bDebugLogTransitionCells)
-		{
-			UE_LOG(LogVoxelMeshing, Log, TEXT("  Result: Empty (class 0) - falling back to regular MC"));
-		}
 		return false;
 	}
 
@@ -1983,40 +1858,6 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 		return false;
 	}
 
-	if (bDebugLogTransitionCells)
-	{
-		UE_LOG(LogVoxelMeshing, Log, TEXT("  Generating: %d vertices, %d triangles"), VertexCount, TriangleCount);
-	}
-
-	// ---- Anomaly Detection: Interior-Face Corner Disagreement ----
-	// Interior corners 9-12 correspond to face corners 0,2,6,8.
-	// If they disagree on inside/outside, the surface crosses between face and interior.
-	// This is expected but logged for diagnosis. Multiple disagreements can indicate
-	// the transition cell is producing a surface very different from what regular MC would.
-	uint8 DisagreementMask = 0;
-	if (bDebugLogAnomalies || bCollectDebugVisualization)
-	{
-		static constexpr int32 InteriorToFace[4] = { 0, 2, 6, 8 };
-		for (int32 i = 0; i < 4; i++)
-		{
-			const bool bFaceInside = (Densities[InteriorToFace[i]] >= IsoLevel);
-			const bool bInteriorInside = (Densities[9 + i] >= IsoLevel);
-			if (bFaceInside != bInteriorInside)
-			{
-				DisagreementMask |= (1 << i);
-			}
-		}
-		if (DisagreementMask != 0 && bDebugLogAnomalies)
-		{
-			UE_LOG(LogVoxelMeshing, Warning,
-				TEXT("ANOMALY [Disagreement] Cell (%d,%d,%d) Face %s: interior corners disagree mask=0x%X "
-					 "(densities: face[%.3f,%.3f,%.3f,%.3f] interior[%.3f,%.3f,%.3f,%.3f])"),
-				X, Y, Z, FaceNames[FaceIndex], DisagreementMask,
-				Densities[0], Densities[2], Densities[6], Densities[8],
-				Densities[9], Densities[10], Densities[11], Densities[12]);
-		}
-	}
-
 	// ZERO-THICKNESS cell: positions collapse onto the boundary plane (matching the
 	// density sampling in GetTransitionCellDensities). Face-parallel axes spread across
 	// the coarse cell at CoarserStride; the depth axis is pinned to the boundary plane
@@ -2041,31 +1882,6 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	FVector3f CellScale(FaceScale, FaceScale, FaceScale);
 	CellScale[DepthAxis] = 0.0f;
 
-	// Collect debug visualization data if enabled
-	FTransitionCellDebugData* DebugData = nullptr;
-	if (bCollectDebugVisualization)
-	{
-		DebugData = &TransitionCellDebugData.AddDefaulted_GetRef();
-		DebugData->ChunkCoord = Request.ChunkCoord;
-		DebugData->CellBasePos = BasePos;
-		DebugData->FaceIndex = FaceIndex;
-		DebugData->Stride = Stride;
-		DebugData->CurrentLOD = Request.LODLevel;
-		DebugData->NeighborLOD = Request.NeighborLODLevels[FaceIndex];
-		DebugData->CaseIndex = CaseIndex;
-		DebugData->CellClass = CellClass;
-		DebugData->bInverted = bInverted;
-		FMemory::Memcpy(DebugData->SampleDensities, Densities, sizeof(Densities));
-
-		// Store sample positions
-		DebugData->SamplePositions.Reserve(13);
-		for (int32 i = 0; i < 13; i++)
-		{
-			const FVector3f& Offset = TransvoxelTables::TransitionCellSampleOffsets[FaceIndex][i];
-			DebugData->SamplePositions.Add(BasePos + Offset * CellScale);
-		}
-	}
-
 	// Generate vertices
 	// The vertex data encoding (from Eric Lengyel's Transvoxel):
 	// - High byte: vertex reuse info (ignored for basic implementation)
@@ -2084,7 +1900,6 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	int32 VertexSamples[12][2];      // each vertex's edge (sample indices), for its normal at stride > 1 (G61)
 	CellVertices.Reserve(VertexCount);
 	VertexOnOuterFace.Reserve(VertexCount);
-	bool bHasClampedVertices = false;
 
 	// A sample's voxel (GetTransitionCellDensities' sampling: the depth axis pinned to the boundary plane, offsets of
 	// 0, 0.5 and 1 coarse cells on the face axes, integers since CoarserStride is even).
@@ -2164,32 +1979,6 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 			const FVector3f PosA = BasePos + OffsetA * CellScale;
 			const FVector3f PosB = BasePos + OffsetB * CellScale;
 
-			if (bDebugLogAnomalies || bCollectDebugVisualization)
-			{
-				const float Denom = DensityB - DensityA;
-				if (FMath::Abs(Denom) > KINDA_SMALL_NUMBER)
-				{
-					const float RawT = (IsoLevel - DensityA) / Denom;
-					if (RawT < 0.0f || RawT > 1.0f)
-					{
-						bHasClampedVertices = true;
-						if (bDebugLogAnomalies)
-						{
-							const TCHAR* EdgeType =
-								(SampleA >= 9 && SampleB >= 9) ? TEXT("corner-corner (outer)") :
-								(SampleA >= 9 || SampleB >= 9) ? TEXT("face-corner (depth)") :
-								TEXT("face-face (inner)");
-							UE_LOG(LogVoxelMeshing, Warning,
-								TEXT("ANOMALY [Clamped] Cell (%d,%d,%d) Face %s: vertex %d %s edge %d-%d "
-									 "t=%.3f (d=%.3f,%.3f) — both endpoints %s isosurface"),
-								X, Y, Z, FaceNames[FaceIndex], i, EdgeType, SampleA, SampleB,
-								RawT, DensityA, DensityB,
-								RawT < 0.0f ? TEXT("above") : TEXT("below"));
-						}
-					}
-				}
-			}
-
 			VertexPos = InterpolateEdge(DensityA, DensityB, PosA, PosB, IsoLevel);
 
 			// G80: a strided edge's vertex at its voxel crossing, as the coincident fine or coarse MC cell on the edge
@@ -2221,12 +2010,6 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 		// the coarser neighbour; everything touching the fine inner face uses the fine stride.
 		VertexOnOuterFace.Add(SampleA >= 9 && SampleB >= 9);
 
-		if (bDebugLogTransitionCells)
-		{
-			UE_LOG(LogVoxelMeshing, Log, TEXT("    Vertex %d: (%.1f, %.1f, %.1f) from samples %d-%d (d=%.3f,%.3f)"),
-				i, VertexPos.X, VertexPos.Y, VertexPos.Z, SampleA, SampleB,
-				Densities[SampleA], Densities[SampleB]);
-		}
 	}
 
 	// Geomorph the ribbon's FINE-side vertices toward the coarse surface, matching the (also
@@ -2245,12 +2028,6 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 		}
 	}
 
-	// Store generated vertices for debug visualization
-	if (DebugData)
-	{
-		DebugData->GeneratedVertices = CellVertices;
-	}
-
 	// Get material and biome info.
 	// Use natural-order solid mask (not Lengyel bit ordering) for MC-based material lookup.
 	uint8 NaturalSolidMask = 0;
@@ -2263,9 +2040,7 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	}
 	const uint8 MaterialID = GetDominantMaterialLOD(Request, X, Y, Z, CurrentStride, NaturalSolidMask);
 	const uint8 BiomeID = GetDominantBiomeLOD(Request, X, Y, Z, CurrentStride, NaturalSolidMask);
-	const FColor VertexColor = bDebugColorTransitionCells
-		? FColor(255, 128, 0, 255)  // Orange for transition cells
-		: FColor(MaterialID, BiomeID, 0, 255);
+	const FColor VertexColor(MaterialID, BiomeID, 0, 255);
 
 	// Add vertices to mesh
 	const uint32 BaseIndex = OutMeshData.Positions.Num();
@@ -2334,8 +2109,6 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 	// Triangles with edges longer than this are degenerate (fins from underground vertices).
 	const float MaxCellDim = FMath::Max3(CellScale.X, CellScale.Y, CellScale.Z);
 	const float MaxEdgeLengthSq = MaxCellDim * MaxCellDim * 4.0f; // 2× cell diagonal
-	int32 NumFilteredTriangles = 0;
-	bool bHasFoldedTriangles = false;
 
 	const uint8* Triangles = TransvoxelTables::TransitionCellTriangles[CellClass];
 	for (int32 t = 0; t < TriangleCount; t++)
@@ -2369,46 +2142,7 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 			const float EdgeSq20 = (V0 - V2).SizeSquared();
 			if (EdgeSq01 > MaxEdgeLengthSq || EdgeSq12 > MaxEdgeLengthSq || EdgeSq20 > MaxEdgeLengthSq)
 			{
-				NumFilteredTriangles++;
-				if (bDebugLogAnomalies)
-				{
-					UE_LOG(LogVoxelMeshing, Warning,
-						TEXT("ANOMALY [Filtered] Cell (%d,%d,%d) Face %s: tri %d filtered (edges: %.1f, %.1f, %.1f, max: %.1f)"),
-						X, Y, Z, FaceNames[FaceIndex], t,
-						FMath::Sqrt(EdgeSq01), FMath::Sqrt(EdgeSq12), FMath::Sqrt(EdgeSq20),
-						FMath::Sqrt(MaxEdgeLengthSq));
-				}
 				continue; // Skip this degenerate triangle
-			}
-
-			// Folded triangle detection: RENDERED face normal vs gradient at centroid
-			// Account for winding reversal to avoid false positives
-			// (The stride-scale gradient on purpose, not G61's voxel-crossing normal: a coarse centroid can lie more than a
-			// voxel off the surface, where LOD 0's taps all read saturated density; the sign-snapped direction is enough
-			// for a test against a fold of more than ~95 degrees.)
-			if (bDebugLogAnomalies || bCollectDebugVisualization)
-			{
-				const FVector3f TableNormal = FVector3f::CrossProduct(V1 - V0, V2 - V0);
-				const FVector3f FaceNormal = bUseOriginalWinding ? TableNormal : -TableNormal;
-				if (FaceNormal.SizeSquared() > KINDA_SMALL_NUMBER)
-				{
-					const FVector3f Centroid = (V0 + V1 + V2) / 3.0f;
-					const FVector3f GradNormal = CalculateGradientNormalLOD(Request,
-						Centroid.X / VoxelSize, Centroid.Y / VoxelSize, Centroid.Z / VoxelSize, CurrentStride);
-					const float Dot = FVector3f::DotProduct(FaceNormal.GetSafeNormal(), GradNormal);
-					if (Dot < -0.1f) // Face normal opposes gradient by more than ~95 degrees
-					{
-						bHasFoldedTriangles = true;
-						if (bDebugLogAnomalies)
-						{
-							UE_LOG(LogVoxelMeshing, Warning,
-								TEXT("ANOMALY [Folded] Cell (%d,%d,%d) Face %s: tri %d has face normal opposing gradient "
-									 "(dot=%.3f, verts: [%.1f,%.1f,%.1f] [%.1f,%.1f,%.1f] [%.1f,%.1f,%.1f])"),
-								X, Y, Z, FaceNames[FaceIndex], t, Dot,
-								V0.X, V0.Y, V0.Z, V1.X, V1.Y, V1.Z, V2.X, V2.Y, V2.Z);
-						}
-					}
-				}
 			}
 		}
 
@@ -2428,74 +2162,6 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 
 	OutTriangleCount += TriangleCount;
 
-	// Store anomaly flags in debug data
-	if (DebugData)
-	{
-		DebugData->bHasFaceInteriorDisagreement = (DisagreementMask != 0);
-		DebugData->bHasClampedVertices = bHasClampedVertices;
-		DebugData->bHasFoldedTriangles = bHasFoldedTriangles;
-		DebugData->NumFilteredTriangles = NumFilteredTriangles;
-		DebugData->DisagreementMask = DisagreementMask;
-	}
-
-	// ---- MC Comparison Mesh: generate what regular MC would produce ----
-	if (bDebugComparisonMesh && DebugData)
-	{
-		FChunkMeshData TempMeshData;
-		uint32 TempTriCount = 0;
-		for (int32 d1 = 0; d1 < Stride; d1 += CurrentStride)
-		{
-			for (int32 d0 = 0; d0 < Stride; d0 += CurrentStride)
-			{
-				int32 CX, CY, CZ;
-				switch (DepthAxis)
-				{
-				case 0: CX = X; CY = Y + d0; CZ = Z + d1; break;
-				case 1: CX = X + d0; CY = Y; CZ = Z + d1; break;
-				default: CX = X + d0; CY = Y + d1; CZ = Z; break;
-				}
-				if (CX < Request.ChunkSize && CY < Request.ChunkSize && CZ < Request.ChunkSize)
-				{
-					ProcessCubeLOD(Request, CX, CY, CZ, CurrentStride, TempMeshData, TempTriCount);
-				}
-			}
-		}
-		DebugData->MCComparisonVertices = MoveTemp(TempMeshData.Positions);
-		DebugData->MCComparisonIndices = MoveTemp(TempMeshData.Indices);
-	}
-
 	return true;
 }
 
-FVoxelCPUMarchingCubesMesher::FTransitionDebugSummary FVoxelCPUMarchingCubesMesher::GetTransitionDebugSummary() const
-{
-	FTransitionDebugSummary Summary;
-	Summary.TotalTransitionCells = TransitionCellDebugData.Num();
-
-	for (const FTransitionCellDebugData& Cell : TransitionCellDebugData)
-	{
-		if (Cell.FaceIndex >= 0 && Cell.FaceIndex < 6)
-		{
-			Summary.PerFaceCounts[Cell.FaceIndex]++;
-		}
-		if (Cell.CellClass == 0)
-		{
-			Summary.EmptyCells++;
-		}
-		if (Cell.bHasFaceInteriorDisagreement)
-		{
-			Summary.CellsWithDisagreement++;
-		}
-		if (Cell.bHasClampedVertices)
-		{
-			Summary.CellsWithClampedVertices++;
-		}
-		if (Cell.bHasFoldedTriangles)
-		{
-			Summary.CellsWithFoldedTriangles++;
-		}
-		Summary.TotalFilteredTriangles += Cell.NumFilteredTriangles;
-	}
-
-	return Summary;
-}

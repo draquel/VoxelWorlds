@@ -19,7 +19,7 @@ The actual implementation uses an **overlay architecture**:
 - Edits merged at mesh time via `ApplyToProceduralData()` (not stored in procedural data)
 - Relative edits with `DensityDelta` and `BrushMaterialID` for accumulation
 - Binary serialization format v2 with magic number `VETI`
-- Input-based testing via `VoxelWorldTestActor` with mouse/keyboard controls
+- Input-based testing via the game module's `AVoxelDemoActor` with mouse/keyboard controls
 - Discrete editing mode (`bUseDiscreteEditing`) for single-block operations
 
 ### How a new edit combines with the edit already on a voxel

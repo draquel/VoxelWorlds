@@ -37,9 +37,9 @@ VoxelWorlds is split into focused runtime modules (see `Source/`):
 
 ## See terrain in the editor
 
-The fastest path is the bundled test actor:
+The fastest path is the bundled world actor:
 
-1. Place an **`AVoxelWorldTestActor`** in a level.
+1. Place an **`AVoxelWorldActor`** in a level.
 2. Assign a **`UVoxelWorldConfiguration`** asset (world mode, voxel/chunk size, meshing mode).
 3. Press Play (PIE). The actor drives the full pipeline: noise → world mode → meshing → rendering,
    with distance-based chunk streaming and async mesh generation.

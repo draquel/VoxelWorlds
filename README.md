@@ -110,7 +110,7 @@ seam-closure and streaming tests, and GPU/CPU parity tests that exercise the rea
 - `UVoxelScatterManager` / `UVoxelScatterRenderer` — scatter placement + HISM rendering
 - `FVoxelTreeInjector` — deterministic cross-chunk voxel tree injection
 - `UVoxelMapSubsystem` — map/minimap subsystem
-- `AVoxelWorldTestActor` — test actor for runtime world instantiation
+- `AVoxelWorldActor` — the world actor: the chunk manager, the configuration and the renderer in a level
 - `UVoxelWorldConfiguration` — world configuration asset
 
 ### Key Data Structures
