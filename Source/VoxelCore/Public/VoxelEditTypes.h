@@ -160,14 +160,6 @@ struct VOXELCORE_API FVoxelEdit
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Edit")
 	FVoxelData NewData;
 
-	/**
-	 * The voxel before the edit as the edit layer knew it: the previous edit's NewData, or air when there was none (the
-	 * generated voxel is not known here). Kept in the edits file; undo does not read it but restores the operation's
-	 * FVoxelEditChange::Before, the whole previous edit (world modes review G60).
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Edit")
-	FVoxelData OriginalData;
-
 	/** Type of edit operation */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Edit")
 	EEditMode EditMode = EEditMode::Set;
@@ -180,18 +172,12 @@ struct VOXELCORE_API FVoxelEdit
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Edit")
 	uint8 BrushMaterialID = 1;
 
-	/** Timestamp when edit was applied */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Edit")
-	double Timestamp = 0.0;
-
 	FVoxelEdit() = default;
 
-	FVoxelEdit(const FIntVector& InLocalPos, const FVoxelData& InNewData, const FVoxelData& InOriginal, EEditMode InMode)
+	FVoxelEdit(const FIntVector& InLocalPos, const FVoxelData& InNewData, EEditMode InMode)
 		: LocalPosition(InLocalPos)
 		, NewData(InNewData)
-		, OriginalData(InOriginal)
 		, EditMode(InMode)
-		, Timestamp(FPlatformTime::Seconds())
 	{
 	}
 
@@ -200,7 +186,6 @@ struct VOXELCORE_API FVoxelEdit
 		, EditMode(InMode)
 		, DensityDelta(InDensityDelta)
 		, BrushMaterialID(InMaterialID)
-		, Timestamp(FPlatformTime::Seconds())
 	{
 	}
 
@@ -246,11 +231,6 @@ struct VOXELCORE_API FVoxelEdit
 			{
 				Result.MaterialID = BrushMaterialID;
 			}
-			break;
-
-		case EEditMode::Smooth:
-			// Smooth uses pre-computed NewData (calculated from neighbors)
-			Result = NewData;
 			break;
 		}
 

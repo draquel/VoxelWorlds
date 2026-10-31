@@ -144,11 +144,6 @@ struct FScatterExtractionContext
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnChunkScatterReady, const FIntVector& /*ChunkCoord*/, int32 /*SpawnPointCount*/);
 
 /**
- * Delegate fired when scatter data is removed for a chunk.
- */
-DECLARE_MULTICAST_DELEGATE_OneParam(FOnChunkScatterRemoved, const FIntVector& /*ChunkCoord*/);
-
-/**
  * Voxel Scatter Manager.
  *
  * Manages scatter generation for voxel terrain. Coordinates surface point
@@ -232,21 +227,6 @@ public:
 	void AddScatterDefinition(const FScatterDefinition& Definition);
 
 	/**
-	 * Remove a scatter type by ID.
-	 *
-	 * @param ScatterID ID of the scatter type to remove
-	 * @return True if found and removed
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
-	bool RemoveScatterDefinition(int32 ScatterID);
-
-	/**
-	 * Clear all scatter definitions.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
-	void ClearScatterDefinitions();
-
-	/**
 	 * Get all scatter definitions.
 	 */
 	const TArray<FScatterDefinition>& GetScatterDefinitions() const { return ScatterDefinitions; }
@@ -293,12 +273,6 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
 	bool HasScatterData(const FIntVector& ChunkCoord) const;
-
-	/**
-	 * Get number of chunks with scatter data.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
-	int32 GetScatterChunkCount() const { return ScatterDataCache.Num(); }
 
 	/**
 	 * Get read-only access to the scatter data cache.
@@ -444,41 +418,6 @@ public:
 		int32 ChangedPoints = 0;
 	};
 
-	/** What ComparePlanetFaceVoxels found (world modes review G72): made face voxels against the neighbours' own. */
-	struct FPlanetFaceStats
-	{
-		int32 Chunks = 0;
-		int32 SkippedPending = 0;
-		int32 SkippedCleared = 0;
-		int32 SkippedNoVoxels = 0;
-		/** A neighbour on the +X, +Y or +Z side had no voxels: the reference cannot be made. */
-		int32 SkippedNeighbours = 0;
-		/** Surface points with the neighbours' voxels past the faces (the reference). */
-		int64 ReferencePoints = 0;
-		/** Reference points with no point at their position when the voxels are made, and of them underground. */
-		int64 Missed = 0;
-		int64 MissedUnderground = 0;
-		/** Made-voxel points with no reference point at their position, and of them underground. */
-		int64 Spurious = 0;
-		int64 SpuriousUnderground = 0;
-		/** Points at the same position classified differently (underground, underwater). */
-		int64 Reclassified = 0;
-		int32 ChunksDiffering = 0;
-	};
-
-	/**
-	 * Planets (world modes review G72): every cached chunk extracted twice now, with the voxels past its +X, +Y and +Z faces
-	 * made (GetPlanetVoxelOutsideChunk, the context MakeExtractionContext builds now) and taken from its seven neighbours'
-	 * voxels (VoxelSource: their edit-merged snapshots), compared point by point. A difference is a rule that reads those
-	 * voxels wrongly: a cave floor in a face cell missed, or a floor where a cave meets a face read as rock.
-	 *
-	 * @param VoxelSource A chunk's edit-merged voxels, or null when it has none
-	 * @param OutChunkLines One line per differing chunk (coordinates and counts), worst first
-	 * @return The counts
-	 */
-	FPlanetFaceStats ComparePlanetFaceVoxels(TFunctionRef<TSharedPtr<const TArray<FVoxelData>>(const FIntVector&)> VoxelSource,
-		TArray<FString>& OutChunkLines) const;
-
 	/** What CompareWithFreshExtraction compared and skipped. */
 	struct FFreshExtractionStats
 	{
@@ -614,14 +553,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Exclusion")
 	bool HasScatterExclusionVolume(const FGuid& VolumeId) const { return ExclusionVolumes.Contains(VolumeId); }
 
-	/** Number of registered exclusion volumes. */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Exclusion")
-	int32 GetScatterExclusionVolumeCount() const { return ExclusionVolumes.Num(); }
-
-	/** True if WorldPosition lies inside any registered exclusion volume. */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Exclusion")
-	bool IsPointInExclusionVolume(const FVector& WorldPosition) const;
-
 	// ==================== Harvest (gameplay) ====================
 
 	/**
@@ -665,22 +596,10 @@ public:
 	void SetScatterRadius(float Radius);
 
 	/**
-	 * Get the current scatter radius.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
-	float GetScatterRadius() const { return ScatterRadius; }
-
-	/**
 	 * Set the target spacing between surface sample points.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
 	void SetSurfacePointSpacing(float Spacing);
-
-	/**
-	 * Get the current surface point spacing.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
-	float GetSurfacePointSpacing() const { return SurfacePointSpacing; }
 
 	/**
 	 * Set the world seed for deterministic scatter.
@@ -736,18 +655,6 @@ public:
 	// ==================== Debug ====================
 
 	/**
-	 * Enable or disable debug visualization.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Debug")
-	void SetDebugVisualizationEnabled(bool bEnabled);
-
-	/**
-	 * Check if debug visualization is enabled.
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter|Debug")
-	bool IsDebugVisualizationEnabled() const { return bDebugVisualization; }
-
-	/**
 	 * Draw debug visualization.
 	 * Call from tick or debug draw function.
 	 *
@@ -783,9 +690,6 @@ public:
 
 	/** Fired when scatter data is ready for a chunk */
 	FOnChunkScatterReady OnChunkScatterReady;
-
-	/** Fired when scatter data is removed for a chunk */
-	FOnChunkScatterRemoved OnChunkScatterRemoved;
 
 protected:
 	// ==================== Internal Methods ====================
@@ -1079,9 +983,6 @@ protected:
 
 	/** Process pending scatter generation queue */
 	void ProcessPendingGenerationQueue();
-
-	/** Generate scatter from cached pending data (used as fallback, normally async) */
-	void GenerateChunkScatterFromPending(const FPendingScatterGeneration& PendingData);
 
 	// ==================== Async Scatter Generation ====================
 

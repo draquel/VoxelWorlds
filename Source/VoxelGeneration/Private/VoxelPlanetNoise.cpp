@@ -63,7 +63,7 @@ namespace VoxelPlanetNoiseDetail
 		return A + Alpha * (B - A);
 	}
 
-	/** Ken Perlin's improved-noise gradient from the hash's low 4 bits (FVoxelCPUNoiseGenerator::Grad). */
+	/** Ken Perlin's improved-noise gradient from the hash's low 4 bits (the classic table noise's Grad). */
 	template <typename T>
 	FORCEINLINE T Grad(uint32 Hash, T X, T Y, T Z)
 	{

@@ -86,11 +86,9 @@ bool FVoxelScatterCubicCPUExtractionTest::RunTest(const FString& Parameters)
 	using namespace VoxelScatterCubicTestUtils;
 
 	// A cubic chunk whose interior mesh would be empty (its only faces lie on its boundary planes, which the
-	// seam jobs mesh) gets scatter: extraction reads voxels, never the mesh. bUseGPUScatterExtraction is set,
-	// and ignored (G27).
+	// seam jobs mesh) gets scatter: extraction reads voxels, never the mesh.
 	UVoxelWorldConfiguration* Cubic = NewObject<UVoxelWorldConfiguration>();
 	Cubic->MeshingMode = EMeshingMode::Cubic;
-	Cubic->bUseGPUScatterExtraction = true;
 	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelScatterCubicTestWorld"));
 	FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
 	Context.SetCurrentWorld(World);

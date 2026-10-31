@@ -217,15 +217,9 @@ struct FLODQueryContext {
     
     /** Viewer forward direction (normalized) */
     FVector ViewerForward;
-    
-    /** Viewer right direction (normalized) */
-    FVector ViewerRight;
-    
-    /** Viewer up direction (normalized) */
-    FVector ViewerUp;
-    
-    /** Maximum view distance (for culling) */
-    float ViewDistance;
+
+    // ViewerRight, ViewerUp, ViewDistance, AspectRatio, WorldRadius, MaxChunksToLoadPerFrame, TimeSliceMS,
+    // FrameNumber, GameTime, DeltaTime deleted in CR1 (STREAM-11)
     
     /** Field of view in degrees */
     float FieldOfView;
@@ -241,30 +235,10 @@ struct FLODQueryContext {
     /** World mode (Infinite, Spherical, Island) */
     EWorldMode WorldMode;
     
-    /** World radius (for spherical worlds) */
-    float WorldRadius;
-    
     // ==================== Performance Budgets ====================
-    
-    /** Maximum chunks to load per frame */
-    int32 MaxChunksToLoadPerFrame = 4;
     
     /** Maximum chunks to unload per frame */
     int32 MaxChunksToUnloadPerFrame = 8;
-    
-    /** Time slice for streaming operations (milliseconds) */
-    float TimeSliceMS = 2.0f;
-    
-    // ==================== Frame Information ====================
-
-    /** Current frame number (for temporal logic) - int64 for Blueprint compatibility */
-    int64 FrameNumber;
-
-    /** Current game time (seconds) */
-    float GameTime;
-
-    /** Time since last frame (seconds) */
-    float DeltaTime;
     
     // ==================== Optional Extended Data ====================
     
@@ -972,7 +946,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime) {
     }
 
     // 5. Process queues (time-sliced)
-    ProcessGenerationQueue(Context.TimeSliceMS);
+    ProcessGenerationQueue(Configuration->StreamingTimeSliceMS); // Context.TimeSliceMS deleted in CR1 (STREAM-11)
     ProcessUnloadQueue(Context.MaxChunksToUnloadPerFrame);
 
     // 6. LOD transitions only when viewer moved significantly
@@ -999,8 +973,6 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const {
         
         Context.ViewerPosition = Location;
         Context.ViewerForward = Rotation.Vector();
-        Context.ViewerRight = Rotation.RotateVector(FVector::RightVector);
-        Context.ViewerUp = Rotation.RotateVector(FVector::UpVector);
         
         // FOV and frustum
         Context.FieldOfView = PC->PlayerCameraManager->GetFOVAngle();
@@ -1010,17 +982,7 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const {
     // World-specific data
     Context.WorldOrigin = WorldConfiguration->GetWorldOrigin();
     Context.WorldMode = WorldConfiguration->GetWorldMode();
-    Context.WorldRadius = WorldConfiguration->GetWorldRadius();
-    Context.ViewDistance = WorldConfiguration->GetViewDistance();
-    
-    // Performance budgets
-    Context.MaxChunksToLoadPerFrame = WorldConfiguration->MaxChunksPerFrame;
-    Context.TimeSliceMS = WorldConfiguration->StreamingTimeSlice;
-    
-    // Frame info
-    Context.FrameNumber = GFrameNumber;
-    Context.GameTime = GetWorld()->GetTimeSeconds();
-    Context.DeltaTime = GetWorld()->GetDeltaSeconds();
+    // (the view distance, radius, budgets and frame fields were deleted in CR1, STREAM-11)
     
     // Optional extensions
     Context.BiomeSystem = BiomeSystem;

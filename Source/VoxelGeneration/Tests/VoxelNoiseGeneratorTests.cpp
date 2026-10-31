@@ -206,10 +206,6 @@ bool FVoxelGPUNoiseGeneratorAsyncTest::RunTest(const FString& Parameters)
 			}
 		}
 		TestTrue(TEXT("Should have some non-zero density voxels from GPU"), NonZeroDensityCount > 0);
-
-		// Test that GetGeneratedBuffer returns valid buffer
-		FRHIBuffer* Buffer = Generator.GetGeneratedBuffer(Handle);
-		TestNotNull(TEXT("Should be able to get generated buffer"), Buffer);
 	}
 
 	// Release handle

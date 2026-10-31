@@ -106,7 +106,6 @@ public:
 	 * Get chunks that need to be loaded (not currently loaded).
 	 *
 	 * Called by ChunkManager to determine what to generate/mesh.
-	 * Should respect MaxChunksToLoadPerFrame from context.
 	 *
 	 * @param OutLoad Output array of chunks to load (sorted by priority)
 	 * @param LoadedChunks Set of currently loaded chunk coordinates

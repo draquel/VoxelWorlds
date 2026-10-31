@@ -239,9 +239,3 @@ UMaterialInstanceDynamic* FVoxelBillboardMeshGenerator::CreateBillboardMaterial(
 
 	return MID;
 }
-
-void FVoxelBillboardMeshGenerator::ClearCache()
-{
-	CachedMeshes.Empty();
-	CachedRuntimeBillboardBaseMaterial.Reset();
-}

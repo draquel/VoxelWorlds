@@ -89,27 +89,18 @@ struct FLODQueryContext {
     // Camera/Viewer State
     FVector ViewerPosition;
     FVector ViewerForward;
-    FVector ViewerRight;
-    FVector ViewerUp;
-    float ViewDistance;
     float FieldOfView;
-    float AspectRatio;
     TArray<FPlane> FrustumPlanes;
 
     // World State
     FVector WorldOrigin;
     EWorldMode WorldMode;
-    float WorldRadius;
 
     // Performance Budgets
-    int32 MaxChunksToLoadPerFrame;
     int32 MaxChunksToUnloadPerFrame;
-    float TimeSliceMS;
 
-    // Frame Information
-    int64 FrameNumber;          // int64 for Blueprint compatibility
-    float GameTime;
-    float DeltaTime;
+    // ViewerRight, ViewerUp, ViewDistance, AspectRatio, WorldRadius, MaxChunksToLoadPerFrame, TimeSliceMS,
+    // FrameNumber, GameTime, DeltaTime deleted in CR1 (STREAM-11)
 };
 ```
 

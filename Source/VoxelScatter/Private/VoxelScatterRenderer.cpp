@@ -545,32 +545,6 @@ void UVoxelScatterRenderer::GetTypeHISMs(int32 ScatterTypeID, TArray<TPair<FIntV
 	}
 }
 
-void UVoxelScatterRenderer::RefreshAllComponents()
-{
-	if (!bIsInitialized || !ScatterManager)
-	{
-		return;
-	}
-
-	// Update configuration for all existing HISM components
-	for (auto& Pair : HISMComponents)
-	{
-		const int32 ScatterTypeID = Pair.Key.ScatterTypeID;
-		UHierarchicalInstancedStaticMeshComponent* HISM = Pair.Value;
-
-		if (!HISM)
-		{
-			continue;
-		}
-
-		const FScatterDefinition* Definition = ScatterManager->GetScatterDefinition(ScatterTypeID);
-		if (Definition)
-		{
-			ConfigureHISMComponent(HISM, *Definition);
-		}
-	}
-}
-
 int32 UVoxelScatterRenderer::GetTotalInstanceCount() const
 {
 	int32 Total = 0;
@@ -1174,47 +1148,6 @@ void UVoxelScatterRenderer::ConfigureHISMComponent(UHierarchicalInstancedStaticM
 
 	UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Configured HISM for %s: LODStart=%.0f, Cull=%.0f"),
 		*Definition.Name, Definition.LODStartDistance, Definition.CullDistance);
-}
-
-void UVoxelScatterRenderer::AddInstancesToHISM(
-	UHierarchicalInstancedStaticMeshComponent* HISM,
-	const TArray<FScatterSpawnPoint>& SpawnPoints,
-	const FScatterDefinition& Definition,
-	TArray<int32>& OutInstanceIndices)
-{
-	if (!HISM || SpawnPoints.Num() == 0)
-	{
-		return;
-	}
-
-	// Reserve space for indices
-	OutInstanceIndices.Reserve(OutInstanceIndices.Num() + SpawnPoints.Num());
-
-	// Build transforms array for batch add
-	TArray<FTransform> Transforms;
-	Transforms.Reserve(SpawnPoints.Num());
-
-	for (const FScatterSpawnPoint& Point : SpawnPoints)
-	{
-		// Get transform from spawn point (includes scale and rotation)
-		FTransform Transform = Point.GetTransform(Definition.bAlignToSurfaceNormal, Definition.SurfaceOffset);
-		Transforms.Add(Transform);
-	}
-
-	// Add instances in batch
-	// Note: AddInstances returns the index of the first added instance
-	const int32 FirstIndex = HISM->GetInstanceCount();
-
-	// Use batch add if available (UE 5.x)
-	for (int32 i = 0; i < Transforms.Num(); ++i)
-	{
-		const int32 NewIndex = HISM->AddInstance(Transforms[i], true); // bWorldSpace = true
-		OutInstanceIndices.Add(NewIndex);
-		TotalInstancesAdded++;
-	}
-
-	// Mark render state dirty for the component
-	HISM->MarkRenderStateDirty();
 }
 
 void UVoxelScatterRenderer::FlushPendingInstanceAdds()

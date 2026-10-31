@@ -32,7 +32,6 @@ public class VoxelScatter : ModuleRules
 			new string[]
 			{
 				"VoxelGeneration",
-				"VoxelMeshing",
 				"MeshDescription",
 				"StaticMeshDescription",
 			}

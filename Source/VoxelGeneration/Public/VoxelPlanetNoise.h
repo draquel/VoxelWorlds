@@ -25,7 +25,7 @@ struct VOXELGENERATION_API FVoxelNoiseSplit
  * for bit in its algebra, on the GPU (PlanetNoise.ush). The name is from spherical Phase 6, when planets alone had it;
  * FVoxelCPUNoiseGenerator::FBM3D, the heightmap entry point, has come through here since MP4 (GenerationVersion 3).
  *
- * Two things differ from the classic table noise heightmap worlds sampled before MP4 (FVoxelCPUNoiseGenerator::ClassicFBM3D):
+ * Two things differ from the classic table noise heightmap worlds sampled before MP4 (the tests' VoxelClassicNoiseControl::ClassicFBM3D):
  *
  * - A hashed integer lattice (LatticeHash, the ore Rarity hash's mixing) instead of Ken Perlin's 256-entry permutation
  *   table, so the noise has no period: the old table repeated every field every 256 lattice units, a 1,000 km planet's
