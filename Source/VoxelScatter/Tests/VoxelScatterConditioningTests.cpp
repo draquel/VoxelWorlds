@@ -44,7 +44,14 @@ namespace VoxelScatterConditioningTestUtils
 	/** A heightmap world mode whose natural terrain is a plane rising along +X: H = Slope * X. */
 	struct FSlopeWorldMode : public IVoxelWorldMode
 	{
-		virtual float GetTerrainHeightAt(float X, float, const FVoxelNoiseParams&) const override { return Slope * X; }
+		float GetTerrainHeightAt(float X, float, const FVoxelNoiseParams&) const { return Slope * X; }
+		virtual FVoxelTerrainSurfacePoint GetSurfaceOnUpLine(const FVector& P, const FVoxelNoiseParams& N) const override
+		{
+			FVoxelTerrainSurfacePoint S;
+			S.Position = FVector(P.X, P.Y, GetTerrainHeightAt(static_cast<float>(P.X), static_cast<float>(P.Y), N));
+			S.Altitude = static_cast<float>(S.Position.Z);
+			return S;
+		}
 		virtual bool IsHeightmapBased() const override { return true; }
 		virtual float GetDensityAt(const FVector&, int32, float) const override { return 0.0f; }
 		virtual FIntVector WorldToChunkCoord(const FVector&, int32, float) const override { return FIntVector::ZeroValue; }

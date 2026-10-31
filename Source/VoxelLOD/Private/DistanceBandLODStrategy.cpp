@@ -120,9 +120,9 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	// cull chunks holding real terrain.)
 	if (WorldMode == EWorldMode::InfinitePlane || WorldMode == EWorldMode::IslandBowl)
 	{
-		float BoundsMin = 0.0f;
-		float BoundsMax = 0.0f;
-		TerrainWorldMode->GetTerrainHeightBounds(BoundsMin, BoundsMax);
+		const FVoxelWorldBounds HeightBounds = TerrainWorldMode->GetWorldBounds();
+		const float BoundsMin = HeightBounds.MinZ;
+		const float BoundsMax = HeightBounds.MaxZ;
 
 		// One chunk of buffer on each side for terrain variation / meshing / edit slack.
 		TerrainMinHeight = BoundsMin - ChunkWorldSize;
@@ -316,8 +316,7 @@ void FDistanceBandLODStrategy::Update(const FLODQueryContext& Context, float Del
 			// One terrain sample when the viewer moves (as the planet's ground point).
 			if (Context.ViewerPosition != HeightmapGroundViewer)
 			{
-				HeightmapGroundZ = TerrainWorldMode->GetTerrainHeightAt(static_cast<float>(Context.ViewerPosition.X),
-					static_cast<float>(Context.ViewerPosition.Y), SlabNoiseParams);
+				HeightmapGroundZ = static_cast<float>(TerrainWorldMode->GetSurfaceOnUpLine(Context.ViewerPosition, SlabNoiseParams).Position.Z);
 				HeightmapGroundViewer = Context.ViewerPosition;
 			}
 			ViewerSurfaceAltitude = Context.ViewerPosition.Z - FMath::Max(HeightmapGroundZ, HeightmapSeaZ);

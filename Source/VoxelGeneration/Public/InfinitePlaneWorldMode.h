@@ -56,10 +56,22 @@ public:
 		int32 LODLevel,
 		float NoiseValue) const override;
 
-	virtual float GetTerrainHeightAt(
+	/** The natural surface at (X, Y): (X, Y, GetTerrainHeightAt), Normal = +Z, the altitude above SeaLevel. */
+	virtual FVoxelTerrainSurfacePoint GetSurfaceOnUpLine(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const override;
+
+	/**
+	 * This mode's terrain height at (X, Y): the natural surface's Z, what GetSurfaceOnUpLine returns as Position.Z (the
+	 * heightmap modes' own height since code review CR2, CORE-25; code that works in every mode uses GetSurfaceOnUpLine).
+	 *
+	 * @param X World X coordinate
+	 * @param Y World Y coordinate
+	 * @param NoiseParams Noise parameters for terrain generation
+	 * @return Z coordinate of the terrain surface at (X, Y)
+	 */
+	float GetTerrainHeightAt(
 		float X,
 		float Y,
-		const FVoxelNoiseParams& NoiseParams) const override;
+		const FVoxelNoiseParams& NoiseParams) const;
 
 	virtual FIntVector WorldToChunkCoord(
 		const FVector& WorldPos,
@@ -114,8 +126,8 @@ public:
 		BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(InBiomeConfig);
 	}
 
-	/** Per-mode vertical-cull bounds (IVoxelWorldMode): wraps the static using this mode's params + biome snapshot. */
-	virtual void GetTerrainHeightBounds(float& OutMin, float& OutMax) const override
+	/** This mode's vertical-cull bounds (GetWorldBounds' MinZ / MaxZ): the static using this mode's params + biome snapshot. */
+	void GetTerrainHeightBounds(float& OutMin, float& OutMax) const
 	{
 		FInfinitePlaneWorldMode::GetTerrainHeightBounds(TerrainParams, &BiomeSnapshot, OutMin, OutMax);
 	}

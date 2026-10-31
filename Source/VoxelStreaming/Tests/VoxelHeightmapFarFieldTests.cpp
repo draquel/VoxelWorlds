@@ -135,10 +135,8 @@ namespace VoxelHeightmapFarFieldTestUtils
 		Settings.RootChunks = RootChunks;
 		Settings.FarDistance = FarDistance;
 		Settings.Bounds = Mode.GetWorldBounds();
-		float MinHeight = 0.0f, MaxHeight = 0.0f;
-		Mode.GetTerrainHeightBounds(MinHeight, MaxHeight);
-		Settings.MinAltitude = MinHeight;
-		Settings.MaxAltitude = MaxHeight;
+		Settings.MinAltitude = Settings.Bounds.MinZ;
+		Settings.MaxAltitude = Settings.Bounds.MaxZ;
 		Settings.bSea = bSea;
 		Settings.SeaZ = Config.WaterLevel;
 		Settings.BandLevel = FVoxelFarFieldSettings::ComputeHeightmapBandLevel(RootChunks);
@@ -611,7 +609,7 @@ namespace VoxelHeightmapFarFieldTestUtils
 				Out.NonBlockVertices += Off > Out.Tolerance ? 1 : 0;
 				const double CornerX = FVoxelBlockSurface::ColumnCorner(XY.X, Settings.GridOrigin.X, Settings.VoxelSize);
 				const double CornerY = FVoxelBlockSurface::ColumnCorner(XY.Y, Settings.GridOrigin.Y, Settings.VoxelSize);
-				const double Raw = Rig.Mode->GetTerrainHeightAt(static_cast<float>(CornerX), static_cast<float>(CornerY), Rig.Config->NoiseParams);
+				const double Raw = static_cast<float>(Rig.Mode->GetSurfaceOnUpLine(FVector(CornerX, CornerY, 0.0), Rig.Config->NoiseParams).Position.Z);
 				// Between the height and a block over it, plus the density's rounding (0.004 voxel: a height just under a
 				// cell's bottom face still makes that cell solid, FVoxelBlockSurface::TopSolidLayerForHeight).
 				const double Over = Top - Raw;

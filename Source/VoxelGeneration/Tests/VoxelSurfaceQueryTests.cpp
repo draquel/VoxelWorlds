@@ -35,7 +35,7 @@ bool FVoxelSurfaceQueryConsistencyTest::RunTest(const FString& Parameters)
 	// 1. GetSurfaceHeight must match the world mode's own height sample (the "known sample").
 	const float DirectHeight = WorldMode.GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
 	const float QueryHeight = FVoxelSurfaceQuery::GetSurfaceHeight(WorldMode, WorldX, WorldY, NoiseParams);
-	TestEqual(TEXT("GetSurfaceHeight matches IVoxelWorldMode::GetTerrainHeightAt"), QueryHeight, DirectHeight);
+	TestEqual(TEXT("GetSurfaceHeight matches the mode's own height"), QueryHeight, DirectHeight);
 
 	// 2. SampleSurface aggregates the individual queries consistently.
 	// Default (invalid) snapshot = the former null-BiomeConfig case.
@@ -44,7 +44,7 @@ bool FVoxelSurfaceQueryConsistencyTest::RunTest(const FString& Parameters)
 		FVoxelBiomeSnapshot(), /*WorldSeed*/ 12345,
 		/*bEnableWaterLevel*/ false, /*WaterLevel*/ 0.0f);
 
-	TestEqual(TEXT("SampleSurface.Height matches GetSurfaceHeight"), Sample.Height, QueryHeight);
+	TestEqual(TEXT("SampleSurface Position.Z matches GetSurfaceHeight"), static_cast<float>(Sample.Position.Z), QueryHeight);
 
 	const float StandaloneSlope = FVoxelSurfaceQuery::ComputeSlopeDegrees(WorldMode, WorldX, WorldY, VoxelSize, NoiseParams);
 	TestEqual(TEXT("SampleSurface.SlopeDegrees matches ComputeSlopeDegrees"), Sample.SlopeDegrees, StandaloneSlope);

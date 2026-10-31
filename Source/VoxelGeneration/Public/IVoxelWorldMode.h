@@ -18,7 +18,8 @@ class UVoxelBiomeConfiguration;
  *
  * Each mode provides:
  * - Density calculation (SDF) for terrain generation
- * - Terrain height sampling for heightmap-based modes
+ * - The natural surface on the local up-line through a position (GetSurfaceOnUpLine, one sample; GetSurfacePoint with
+ *   its normal): the surface ladder's first rung (GLOSSARY.md), in every mode
  * - Coordinate transformations
  * - Vertical bounds for chunk streaming
  * - Where the world ends (IsInsideWorld, GetWorldBounds), a local frame (GetUpVector, GetAltitude,
@@ -60,23 +61,21 @@ public:
 		int32 LODLevel,
 		float NoiseValue) const = 0;
 
+	// ==================== The natural surface (the ladder's first rung) ====================
+
 	/**
-	 * Get terrain height at an X,Y position.
+	 * The natural surface on the local up-line through a position, one sample: the analytic surface generation produces,
+	 * without caves, conditioning zones or edits (code review CR2, CORE-25: the one primitive every mode implements; the
+	 * heightmap modes' GetTerrainHeightAt is their own height and no longer the interface's). Heightmap modes return
+	 * (X, Y, the terrain height at (X, Y)) with its altitude (GetAltitude); a planet the point along the direction from
+	 * its centre at the terrain's altitude there, exactly as it samples it. The normal is not computed: it is local up
+	 * (GetSurfacePoint samples the normal, at five times the cost). Thread-safe.
 	 *
-	 * For heightmap-based modes (InfinitePlane), this samples 2D noise
-	 * and returns the terrain surface Z coordinate. A planet has no height per (X, Y): it returns the Z where the vertical
-	 * line meets the terrain on the upper hemisphere and logs once (spherical SP-A3); code that must work on a planet uses
-	 * GetSurfacePoint, GetUpVector and GetAltitude instead.
-	 *
-	 * @param X World X coordinate
-	 * @param Y World Y coordinate
-	 * @param NoiseParams Noise parameters for terrain generation
-	 * @return Z coordinate of terrain surface at this X,Y
+	 * @param WorldPos Any position on the up-line (only X, Y in heightmap modes; only the direction on a planet)
+	 * @param NoiseParams Terrain noise parameters
+	 * @return The surface point, its altitude, and Normal = local up
 	 */
-	virtual float GetTerrainHeightAt(
-		float X,
-		float Y,
-		const FVoxelNoiseParams& NoiseParams) const = 0;
+	virtual FVoxelTerrainSurfacePoint GetSurfaceOnUpLine(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const = 0;
 
 	// ==================== Coordinate Transforms ====================
 
@@ -169,41 +168,29 @@ public:
 	// ==================== Analytic Height Context (optional) ====================
 
 	/**
-	 * Provide the biome configuration used for continentalness height modulation in the analytic height
-	 * query (GetTerrainHeightAt). Heightmap modes that apply continentalness (InfinitePlane, IslandBowl)
+	 * Provide the biome configuration used for continentalness height modulation in the analytic surface
+	 * query (GetSurfaceOnUpLine). Heightmap modes that apply continentalness (InfinitePlane, IslandBowl)
 	 * use it so the analytic surface matches generation; other modes ignore it. Non-owning — the caller
 	 * keeps the configuration alive. Default: no-op.
 	 */
 	virtual void SetBiomeContext(const UVoxelBiomeConfiguration* /*InBiomeConfig*/) {}
 
 	/**
-	 * Worst-case terrain-height bounds [OutMin, OutMax] over all (X,Y) for this mode — the authority for
-	 * vertical chunk-culling (VoxelLOD). A conservative superset that CONTAINS every value the generator can
-	 * produce, so culling to it never removes a chunk holding real terrain. Default: a very wide range (no
-	 * vertical culling). Heightmap modes override with tight bounds.
-	 */
-	virtual void GetTerrainHeightBounds(float& OutMin, float& OutMax) const
-	{
-		OutMin = -1.0e9f;
-		OutMax = 1.0e9f;
-	}
-
-	/**
-	 * Worst-case terrain bounds as altitudes above the datum (GetAltitude), over the whole world (spherical SP-A4): the
-	 * form of GetTerrainHeightBounds that works in every mode. Heightmap modes: the height bounds through GetAltitude
-	 * (Z - SeaLevel); a planet: its terrain shell, -MaxTerrainDepth to +MaxTerrainHeight. A conservative superset of
-	 * every surface altitude generation can produce, like GetTerrainHeightBounds. Consumers that shade or bound by height
-	 * (the map) use it so they need no planet special case.
+	 * Worst-case terrain bounds as altitudes above the datum (GetAltitude), over the whole world (spherical SP-A4; code
+	 * review CR2, CORE-26: the interface's one bounds method). Heightmap modes: their world-Z height bounds
+	 * (GetWorldBounds().MinZ / MaxZ, the authority for vertical chunk-culling) through GetAltitude (Z - SeaLevel); a
+	 * planet: its terrain shell, -MaxTerrainDepth to +MaxTerrainHeight. A conservative superset of every surface altitude
+	 * generation can produce, so culling to it never removes a chunk holding real terrain. Consumers that shade or bound
+	 * by height (the map) use it so they need no planet special case; the world-Z form is GetWorldBounds().
 	 *
 	 * @param OutMin Lowest altitude
 	 * @param OutMax Highest altitude
 	 */
 	virtual void GetAltitudeBounds(float& OutMin, float& OutMax) const
 	{
-		float MinZ = 0.0f, MaxZ = 0.0f;
-		GetTerrainHeightBounds(MinZ, MaxZ);
-		OutMin = GetAltitude(FVector(0.0, 0.0, MinZ));
-		OutMax = GetAltitude(FVector(0.0, 0.0, MaxZ));
+		const FVoxelWorldBounds Bounds = GetWorldBounds();
+		OutMin = GetAltitude(FVector(0.0, 0.0, Bounds.MinZ));
+		OutMax = GetAltitude(FVector(0.0, 0.0, Bounds.MaxZ));
 	}
 
 	/**
@@ -213,29 +200,28 @@ public:
 	 * D8, WM-S1). A planet's window is the column's crossing of the terrain shell instead (spherical SP-C1; a band
 	 * around the surface is SP-C5), so planets keep the default.
 	 *
-	 * Default: heightmap modes sample GetTerrainHeightAt at the footprint's four corners and its centre (variation
-	 * between the samples is the caller's slack); other modes return GetTerrainHeightBounds, the whole range. Cost: five
-	 * height samples, so callers memoize per column.
+	 * Default: heightmap modes sample GetSurfaceOnUpLine at the footprint's four corners and its centre (variation
+	 * between the samples is the caller's slack); other modes return the world's Z bounds, the whole range. Cost: five
+	 * surface samples, so callers memoize per column.
 	 *
 	 * @param MinXY Footprint minimum corner (world X, Y)
 	 * @param MaxXY Footprint maximum corner (world X, Y)
-	 * @param NoiseParams Terrain noise parameters, as for GetTerrainHeightAt
+	 * @param NoiseParams Terrain noise parameters, as for GetSurfaceOnUpLine
 	 * @return [lowest, highest] surface height over the footprint, world Z
 	 */
 	virtual FFloatInterval GetSurfaceRange(const FVector2D& MinXY, const FVector2D& MaxXY, const FVoxelNoiseParams& NoiseParams) const
 	{
 		if (!IsHeightmapBased())
 		{
-			float Min = 0.0f, Max = 0.0f;
-			GetTerrainHeightBounds(Min, Max);
-			return FFloatInterval(Min, Max);
+			const FVoxelWorldBounds Bounds = GetWorldBounds();
+			return FFloatInterval(Bounds.MinZ, Bounds.MaxZ);
 		}
 		const FVector2D Samples[5] = {
 			MinXY, FVector2D(MaxXY.X, MinXY.Y), FVector2D(MinXY.X, MaxXY.Y), MaxXY, (MinXY + MaxXY) * 0.5 };
 		FFloatInterval Range(TNumericLimits<float>::Max(), TNumericLimits<float>::Lowest());
 		for (const FVector2D& Sample : Samples)
 		{
-			const float Height = GetTerrainHeightAt(static_cast<float>(Sample.X), static_cast<float>(Sample.Y), NoiseParams);
+			const float Height = static_cast<float>(GetSurfaceOnUpLine(FVector(Sample.X, Sample.Y, 0.0), NoiseParams).Position.Z);
 			Range.Min = FMath::Min(Range.Min, Height);
 			Range.Max = FMath::Max(Range.Max, Height);
 		}
@@ -247,26 +233,30 @@ public:
 
 	/**
 	 * The terrain surface on the local up-line through a position, with its outward normal (spherical SP-A1): in
-	 * heightmap modes the point at (X, Y, GetTerrainHeightAt(X, Y)); on a planet the point along the direction from the
+	 * heightmap modes the point at (X, Y, the terrain height there); on a planet the point along the direction from the
 	 * centre, so a direction D maps to GetSurfacePoint(Centre + D). The analytic surface generation produces, without
-	 * caves, conditioning zones or edits. The normal comes from central differences SurfaceNormalStep either side.
+	 * caves, conditioning zones or edits: GetSurfaceOnUpLine with the normal from central differences SurfaceNormalStep
+	 * either side.
 	 *
-	 * Cost: five surface samples. Thread-safe like GetTerrainHeightAt.
+	 * Cost: five surface samples. Thread-safe like GetSurfaceOnUpLine.
 	 *
 	 * @param WorldPos Any position on the up-line (only X, Y in heightmap modes; only the direction on a planet)
-	 * @param NoiseParams Terrain noise parameters, as for GetTerrainHeightAt
+	 * @param NoiseParams Terrain noise parameters, as for GetSurfaceOnUpLine
 	 * @return The surface point, its normal and its altitude
 	 */
 	virtual FVoxelTerrainSurfacePoint GetSurfacePoint(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const
 	{
+		// The offsets are formed in float, as the heightmap height is sampled.
 		const float X = static_cast<float>(WorldPos.X);
 		const float Y = static_cast<float>(WorldPos.Y);
-		const float DX = GetTerrainHeightAt(X + SurfaceNormalStep, Y, NoiseParams) - GetTerrainHeightAt(X - SurfaceNormalStep, Y, NoiseParams);
-		const float DY = GetTerrainHeightAt(X, Y + SurfaceNormalStep, NoiseParams) - GetTerrainHeightAt(X, Y - SurfaceNormalStep, NoiseParams);
-		FVoxelTerrainSurfacePoint Point;
-		Point.Position = FVector(WorldPos.X, WorldPos.Y, GetTerrainHeightAt(X, Y, NoiseParams));
+		auto HeightAt = [this, &NoiseParams](float AtX, float AtY)
+		{
+			return static_cast<float>(GetSurfaceOnUpLine(FVector(AtX, AtY, 0.0), NoiseParams).Position.Z);
+		};
+		const float DX = HeightAt(X + SurfaceNormalStep, Y) - HeightAt(X - SurfaceNormalStep, Y);
+		const float DY = HeightAt(X, Y + SurfaceNormalStep) - HeightAt(X, Y - SurfaceNormalStep);
+		FVoxelTerrainSurfacePoint Point = GetSurfaceOnUpLine(WorldPos, NoiseParams);
 		Point.Normal = FVector(-DX, -DY, 2.0f * SurfaceNormalStep).GetSafeNormal();
-		Point.Altitude = GetAltitude(Point.Position);
 		return Point;
 	}
 
@@ -288,14 +278,17 @@ public:
 
 	/**
 	 * Where the world ends: unbounded for a plane, the R + falloff footprint for an island, the terrain shell for a
-	 * planet. IsInsideWorld agrees with FVoxelWorldBounds::ContainsXY.
+	 * planet. IsInsideWorld agrees with FVoxelWorldBounds::ContainsXY. MinZ / MaxZ are the terrain's world-Z extent, a
+	 * conservative superset of every surface height generation can produce (the heightmap modes' height bounds: the
+	 * authority for vertical chunk-culling; a planet's shell).
 	 *
 	 * @return The world's bounds, with the terrain's vertical extent
 	 */
 	virtual FVoxelWorldBounds GetWorldBounds() const
 	{
 		FVoxelWorldBounds Bounds;
-		GetTerrainHeightBounds(Bounds.MinZ, Bounds.MaxZ);
+		Bounds.MinZ = -1.0e9f; // no vertical culling for a mode that does not say
+		Bounds.MaxZ = 1.0e9f;
 		return Bounds;
 	}
 

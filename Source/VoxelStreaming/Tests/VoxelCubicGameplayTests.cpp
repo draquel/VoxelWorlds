@@ -277,9 +277,9 @@ bool FVoxelCubicBlockSurfaceGeneratedTest::RunTest(const FString& Parameters)
 		}
 
 		// What the isosurface (the query before WM-C5) gave for the column, at its sample point: up to a block under the top.
-		const float Iso = Manager->GetWorldMode()->GetTerrainHeightAt(
-			static_cast<float>(FVoxelBlockSurface::ColumnCorner(X, Origin.X, V)), static_cast<float>(FVoxelBlockSurface::ColumnCorner(Y, Origin.Y, V)),
-			Config->NoiseParams);
+		const float Iso = static_cast<float>(Manager->GetWorldMode()->GetSurfaceOnUpLine(
+			FVector(FVoxelBlockSurface::ColumnCorner(X, Origin.X, V), FVoxelBlockSurface::ColumnCorner(Y, Origin.Y, V), 0.0),
+			Config->NoiseParams).Position.Z);
 		if (FVector2D::Distance(FVector2D(X, Y), Pad.Center) > Pad.InnerRadius + Pad.FalloffWidth)
 		{
 			IsoBelowTop += Expected - Iso > 1.0f ? 1 : 0;
@@ -457,7 +457,7 @@ bool FVoxelCubicBlockSurfaceSmoothUnchangedTest::RunTest(const FString& Paramete
 		const double Y = Config->WorldOrigin.Y + Rng.FRandRange(-1500.0f, 1500.0f);
 
 		// GetGeneratedSurfaceHeight: the world mode's height with the zones blended in, bit for bit.
-		const float Natural = WM->GetTerrainHeightAt(static_cast<float>(X), static_cast<float>(Y), Config->NoiseParams);
+		const float Natural = static_cast<float>(WM->GetSurfaceOnUpLine(FVector(X, Y, 0.0), Config->NoiseParams).Position.Z);
 		const float Expected = FVoxelTerrainConditioning::ApplyToHeight(X, Y, Natural, { Pad });
 		Generated += Manager->GetGeneratedSurfaceHeight(X, Y) == Expected ? 1 : 0;
 

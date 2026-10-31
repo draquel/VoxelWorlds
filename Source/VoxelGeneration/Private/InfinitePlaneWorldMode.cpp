@@ -28,6 +28,14 @@ float FInfinitePlaneWorldMode::GetDensityAt(
 	return CalculateSignedDistance(WorldPos.Z, TerrainHeight);
 }
 
+FVoxelTerrainSurfacePoint FInfinitePlaneWorldMode::GetSurfaceOnUpLine(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const
+{
+	FVoxelTerrainSurfacePoint Point;
+	Point.Position = FVector(WorldPos.X, WorldPos.Y, GetTerrainHeightAt(static_cast<float>(WorldPos.X), static_cast<float>(WorldPos.Y), NoiseParams));
+	Point.Altitude = GetAltitude(Point.Position);
+	return Point;
+}
+
 float FInfinitePlaneWorldMode::GetTerrainHeightAt(
 	float X,
 	float Y,

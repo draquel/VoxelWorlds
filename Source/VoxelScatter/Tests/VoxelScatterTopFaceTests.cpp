@@ -62,7 +62,14 @@ namespace VoxelScatterTopFaceTestUtils
 		float Slope = 0.0f;
 		float Offset = 0.0f;
 		FPlaneWorldMode(float InSlope, float InOffset) : Slope(InSlope), Offset(InOffset) {}
-		virtual float GetTerrainHeightAt(float X, float, const FVoxelNoiseParams&) const override { return Slope * X + Offset; }
+		float GetTerrainHeightAt(float X, float, const FVoxelNoiseParams&) const { return Slope * X + Offset; }
+		virtual FVoxelTerrainSurfacePoint GetSurfaceOnUpLine(const FVector& P, const FVoxelNoiseParams& N) const override
+		{
+			FVoxelTerrainSurfacePoint S;
+			S.Position = FVector(P.X, P.Y, GetTerrainHeightAt(static_cast<float>(P.X), static_cast<float>(P.Y), N));
+			S.Altitude = static_cast<float>(S.Position.Z);
+			return S;
+		}
 		virtual bool IsHeightmapBased() const override { return true; }
 		virtual float GetDensityAt(const FVector&, int32, float) const override { return 0.0f; }
 		virtual FIntVector WorldToChunkCoord(const FVector&, int32, float) const override { return FIntVector::ZeroValue; }
@@ -77,7 +84,7 @@ namespace VoxelScatterTopFaceTestUtils
 
 	float HeightAt(const IVoxelWorldMode& Mode, double X)
 	{
-		return Mode.GetTerrainHeightAt(static_cast<float>(X), 0.0f, FVoxelNoiseParams());
+		return static_cast<float>(Mode.GetSurfaceOnUpLine(FVector(X, 0.0, 0.0), FVoxelNoiseParams()).Position.Z);
 	}
 
 	/** A chunk generated from the world mode's height with the heightmap generator's SDF (grass, no caves). */
@@ -614,7 +621,7 @@ namespace VoxelScatterBuriedTopFaceTestUtils
 			{
 				for (int32 X = 0; X < ChunkSize; ++X)
 				{
-					const float H = Mode->GetTerrainHeightAt((CX * ChunkSize + X) * VoxelSize, (CY * ChunkSize + Y) * VoxelSize, Config->NoiseParams);
+					const float H = static_cast<float>(Mode->GetSurfaceOnUpLine(FVector((CX * ChunkSize + X) * VoxelSize, (CY * ChunkSize + Y) * VoxelSize, 0.0), Config->NoiseParams).Position.Z);
 					Range.X = FMath::Min(Range.X, static_cast<double>(H));
 					Range.Y = FMath::Max(Range.Y, static_cast<double>(H));
 				}

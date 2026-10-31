@@ -325,7 +325,7 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 					uint8 NearBiome = 0;
 					if (VoxelCtx.ChunkManager->QueryEditMergedSurface(WorldX, WorldY, NearHeight, NearNormal, NearSlope, NearMaterial, NearBiome))
 					{
-						Sample.Height = NearHeight;
+						Sample.Position = FVector(WorldX, WorldY, NearHeight);
 						Sample.Normal = NearNormal;
 						Sample.SlopeDegrees = NearSlope;
 						Sample.MaterialID = NearMaterial;
@@ -344,7 +344,7 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 						VoxelCtx.bWaterEnabled, VoxelCtx.WaterLevel, &Zones);
 				}
 
-				const FVector Position(WorldX, WorldY, static_cast<double>(Sample.Height));
+				const FVector Position(WorldX, WorldY, Sample.Position.Z);
 				const FQuat Rotation = Settings->bAlignToSurfaceNormal
 					? FRotationMatrix::MakeFromZ(Sample.Normal).ToQuat()
 					: FQuat::Identity;

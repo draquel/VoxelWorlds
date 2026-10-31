@@ -632,14 +632,29 @@ public:
 	 * walks a digital line of edit-merged voxels along local up, one chunk either side (one voxel read per step, as the
 	 * column does) to the topmost solid voxel with air above it, then finds the crossing on the up-line itself in the
 	 * trilinear edit-merged density around it; the normal from that density's gradient (turned toward local up), the
-	 * slope against local up; Height is then the altitude. False when no loaded chunk holds the surface there (the caller falls back to
+	 * slope against local up. False when no loaded chunk holds the surface there (the caller falls back to
 	 * GetGeneratedSurfacePoint or FVoxelSurfaceQuery::SampleSurfacePoint). Game thread only.
 	 *
 	 * @param WorldPos Any position on the up-line
-	 * @param OutSample The surface (Position, Normal, Up, SlopeDegrees, Altitude, MaterialID, BiomeID; Height as above)
+	 * @param OutSample The surface (Position, Normal, Up, SlopeDegrees, Altitude, MaterialID, BiomeID)
 	 * @return true if a loaded edit-merged surface was found
 	 */
 	bool QueryEditMergedSurfacePoint(const FVector& WorldPos, FVoxelSurfaceSample& OutSample) const;
+
+	/**
+	 * The surface ladder at a position, in any world mode (code review CR2, CM-21: the one entry over the three rungs):
+	 * the natural surface (the world mode's, no zones), the generated surface (the conditioning zones there applied, and
+	 * on a block world the top face of the block column's topmost block, as GetGeneratedSurfaceHeight gives it), or the
+	 * edit-merged surface of the loaded voxels (QueryEditMergedSurfacePoint; false where none is loaded). The natural and
+	 * generated rungs sample the conditions through FVoxelSurfaceQuery::SampleSurfacePoint (the biome pipeline, no loaded
+	 * chunk needed) and always succeed once the manager is initialized. Game thread only.
+	 *
+	 * @param WorldPos Any position on the up-line
+	 * @param Layer Which rung
+	 * @param OutSample The surface (Position, Normal, Up, SlopeDegrees, Altitude, MaterialID, BiomeID)
+	 * @return true when the rung has a surface there
+	 */
+	bool QuerySurfacePoint(const FVector& WorldPos, EVoxelSurfaceLayer Layer, FVoxelSurfaceSample& OutSample) const;
 
 	/**
 	 * The generated (analytic) surface point on the local up-line through a position, without loaded chunks (spherical

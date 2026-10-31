@@ -155,71 +155,15 @@ float FSphericalPlanetWorldMode::GetDensityAt(
 	return ShellSignedDistanceAtAltitude(VoxelAltitude, NoiseToRadialDisplacement(NoiseValue, TerrainParams), PlanetParams);
 }
 
-float FSphericalPlanetWorldMode::GetTerrainHeightAt(
-	float X,
-	float Y,
-	const FVoxelNoiseParams& NoiseParams) const
+FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetSurfaceOnUpLine(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const
 {
-	// Legacy heightmap query (spherical SP-A3, Phase 4): every planet consumer uses GetSurfacePoint. A stray caller gets
-	// the world Z where the vertical line through (X, Y) meets the terrain on the upper hemisphere, not a radius.
-	static std::atomic<bool> bWarned{false};
-	if (!bWarned.exchange(true))
-	{
-		UE_LOG(LogVoxelGeneration, Warning, TEXT("FSphericalPlanetWorldMode::GetTerrainHeightAt called on a planet: it returns the terrain's Z "
-			"on the upper hemisphere above (X, Y). Use GetSurfacePoint / GetUpVector / GetAltitude (spherical SP-A3)."));
-	}
-
-	const FVector& Center = PlanetParams.PlanetCenter;
-	const double DX = static_cast<double>(X) - Center.X;
-	const double DY = static_cast<double>(Y) - Center.Y;
-	const double Rho2 = DX * DX + DY * DY;
-	const double Outer = PlanetParams.GetOuterRadius();
-	if (Rho2 >= Outer * Outer)
-	{
-		return static_cast<float>(Center.Z); // the line passes outside the terrain shell
-	}
-
-	// Along the line z (height above the centre), f(z) = |P(z) - C| - TerrainRadius(direction of P(z)) is positive
-	// above the terrain and negative below. March down from where the line enters the shell to the first point below the
-	// terrain (the topmost crossing), then bisect.
-	auto Above = [&](double Z) -> double
-	{
-		const FVector Direction = FVector(DX, DY, Z).GetSafeNormal();
-		const double TerrainRadius = PlanetParams.PlanetRadius
-			+ SampleRadialDisplacement(Direction.IsNearlyZero() ? FVector::UpVector : Direction, PlanetParams.PlanetRadius,
-				TerrainParams, NoiseParams, &BiomeSnapshot);
-		return FMath::Sqrt(Rho2 + Z * Z) - TerrainRadius;
-	};
-	constexpr double MarchStep = 200.0;
-	double High = FMath::Sqrt(Outer * Outer - Rho2);
-	double Low = High;
-	bool bCrossed = false;
-	while (Low > 0.0)
-	{
-		Low = FMath::Max(0.0, Low - MarchStep);
-		if (Above(Low) <= 0.0)
-		{
-			bCrossed = true;
-			break;
-		}
-		High = Low;
-	}
-	if (!bCrossed)
-	{
-		return static_cast<float>(Center.Z); // the line meets no terrain on the upper hemisphere
-	}
-	for (int32 Iteration = 0; Iteration < 40; ++Iteration)
-	{
-		const double Mid = 0.5 * (Low + High);
-		(Above(Mid) <= 0.0 ? Low : High) = Mid;
-	}
-	return static_cast<float>(Center.Z + 0.5 * (Low + High));
-}
-
-void FSphericalPlanetWorldMode::GetTerrainHeightBounds(float& OutMin, float& OutMax) const
-{
-	OutMin = static_cast<float>(PlanetParams.PlanetCenter.Z - PlanetParams.GetOuterRadius());
-	OutMax = static_cast<float>(PlanetParams.PlanetCenter.Z + PlanetParams.GetOuterRadius());
+	// The point as centre + direction x (R + altitude), the sum in double (WM-BP4), as GetSurfacePoint forms it.
+	const FVector Direction = GetDirectionFromCenter(WorldPos, PlanetParams.PlanetCenter);
+	FVoxelTerrainSurfacePoint Point;
+	Point.Altitude = GetTerrainAltitude(Direction, NoiseParams);
+	Point.Position = PlanetParams.PlanetCenter + Direction * (static_cast<double>(PlanetParams.PlanetRadius) + static_cast<double>(Point.Altitude));
+	Point.Normal = Direction;
+	return Point;
 }
 
 void FSphericalPlanetWorldMode::GetAltitudeBounds(float& OutMin, float& OutMax) const

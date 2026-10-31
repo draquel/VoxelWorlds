@@ -435,11 +435,11 @@ bool FPlanetSurfacePointTest::RunTest(const FString& Parameters)
 	for (const FVector2D XY : { FVector2D(0.0, 0.0), FVector2D(12345.0, -54321.0), FVector2D(-150000.0, 80000.0) })
 	{
 		const FVoxelTerrainSurfacePoint Point = PlaneMode->GetSurfacePoint(FVector(XY.X, XY.Y, 99999.0), PlaneConfig->NoiseParams);
-		const float Height = PlaneMode->GetTerrainHeightAt(XY.X, XY.Y, PlaneConfig->NoiseParams);
+		const float Height = static_cast<float>(PlaneMode->GetSurfaceOnUpLine(FVector(XY.X, XY.Y, 0.0), PlaneConfig->NoiseParams).Position.Z);
 		TestEqual(TEXT("Plane: the point is at the height query's Z"), static_cast<float>(Point.Position.Z), Height, 0.01f);
 		TestEqual(TEXT("Plane: the point keeps X"), Point.Position.X, XY.X, 0.001);
 		TestTrue(TEXT("Plane: the normal points up"), Point.Normal.Z > 0.0);
-		const float DX = PlaneMode->GetTerrainHeightAt(XY.X + 50.0f, XY.Y, PlaneConfig->NoiseParams) - PlaneMode->GetTerrainHeightAt(XY.X - 50.0f, XY.Y, PlaneConfig->NoiseParams);
+		const float DX = static_cast<float>(PlaneMode->GetSurfaceOnUpLine(FVector(XY.X + 50.0f, XY.Y, 0.0), PlaneConfig->NoiseParams).Position.Z) - static_cast<float>(PlaneMode->GetSurfaceOnUpLine(FVector(XY.X - 50.0f, XY.Y, 0.0), PlaneConfig->NoiseParams).Position.Z);
 		TestTrue(TEXT("Plane: the normal leans downhill"), FMath::Abs(DX) < 1.0f || FMath::Sign(Point.Normal.X) == -FMath::Sign(DX));
 	}
 

@@ -67,9 +67,9 @@ bool FPCGVoxelFarPointsConditionedTest::RunTest(const FString& Parameters)
 	const FVector2D CutCentre(40000.0, -25000.0);
 	const FVector2D RaisedCentre(-60000.0, 70000.0);
 	Manager->AddConditioningZone(FVoxelConditioningZone(CutCentre, InnerRadius, FalloffWidth,
-		Mode->GetTerrainHeightAt(static_cast<float>(CutCentre.X), static_cast<float>(CutCentre.Y), Noise) - 1500.0f, 1.0f));
+		static_cast<float>(Mode->GetSurfaceOnUpLine(FVector(CutCentre.X, CutCentre.Y, 0.0), Noise).Position.Z) - 1500.0f, 1.0f));
 	Manager->AddConditioningZone(FVoxelConditioningZone(RaisedCentre, InnerRadius, FalloffWidth,
-		Mode->GetTerrainHeightAt(static_cast<float>(RaisedCentre.X), static_cast<float>(RaisedCentre.Y), Noise) + 1500.0f, 1.0f));
+		static_cast<float>(Mode->GetSurfaceOnUpLine(FVector(RaisedCentre.X, RaisedCentre.Y, 0.0), Noise).Position.Z) + 1500.0f, 1.0f));
 
 	FVoxelCPUNoiseGenerator Generator;
 	Generator.Initialize();
@@ -135,24 +135,24 @@ bool FPCGVoxelFarPointsConditionedTest::RunTest(const FString& Parameters)
 				const FVoxelSurfaceSample With = FVoxelSurfaceQuery::SampleSurface(*Mode, static_cast<float>(X), static_cast<float>(Y), VoxelSize, Noise, NoBiomes, Noise.Seed, false, 0.0f, &Zones);
 				const FVoxelSurfaceSample Natural = FVoxelSurfaceQuery::SampleSurface(*Mode, static_cast<float>(X), static_cast<float>(Y), VoxelSize, Noise, NoBiomes, Noise.Seed, false, 0.0f);
 				const FVoxelSurfaceSample Point = FVoxelSurfaceQuery::SampleSurfacePoint(*Mode, FVector(X, Y, 0.0), VoxelSize, Noise, NoBiomes, Sea, &Zones);
-				const float Real = RealSurfaceZ(X, Y, With.Height, Zones);
+				const float Real = RealSurfaceZ(X, Y, static_cast<float>(With.Position.Z), Zones);
 				if (!TestTrue(*FString::Printf(TEXT("%s: a generated surface at (%.0f, %.0f)"), Site.Key, X, Y), Real != TNumericLimits<float>::Max()))
 				{
 					continue;
 				}
 				++Points;
-				const float ErrWith = FMath::Abs(With.Height - Real);
-				const float ErrNatural = FMath::Abs(Natural.Height - Real);
+				const float ErrWith = FMath::Abs(static_cast<float>(With.Position.Z) - Real);
+				const float ErrNatural = FMath::Abs(static_cast<float>(Natural.Position.Z) - Real);
 				WorstWith = FMath::Max(WorstWith, ErrWith);
 				Off += ErrWith >= VoxelSize ? 1 : 0;
-				PointDiffers += (Point.Height != With.Height || !Point.Position.Equals(FVector(X, Y, With.Height), 0.01)) ? 1 : 0;
+				PointDiffers += (static_cast<float>(Point.Position.Z) != static_cast<float>(With.Position.Z) || !Point.Position.Equals(FVector(X, Y, static_cast<float>(With.Position.Z)), 0.01)) ? 1 : 0;
 				if (Radius < InnerRadius + FalloffWidth)
 				{
 					WorstNatural = FMath::Max(WorstNatural, ErrNatural);
 				}
 				else
 				{
-					Changed += FMath::Abs(With.Height - Natural.Height) > 0.01f ? 1 : 0;
+					Changed += FMath::Abs(static_cast<float>(With.Position.Z) - static_cast<float>(Natural.Position.Z)) > 0.01f ? 1 : 0;
 				}
 				Sloped += (Radius <= 2000.0f && With.SlopeDegrees >= 1.0f) ? 1 : 0;
 			}
