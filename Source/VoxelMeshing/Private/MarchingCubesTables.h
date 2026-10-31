@@ -45,7 +45,6 @@
  * Edge 11: 3-7  (left back)
  *
  * @see FVoxelCPUMarchingCubesMesher
- * @see FVoxelGPUMarchingCubesMesher
  */
 namespace MarchingCubesTables
 {

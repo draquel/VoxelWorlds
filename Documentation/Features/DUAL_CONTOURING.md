@@ -3,11 +3,10 @@
 **Module**: VoxelMeshing
 **Last Updated**: 2026-02-19
 
-> **Status note (2026-06):** The GPU Dual Contouring path has since reached **CPU watertightness
-> parity** — the `GT1–GT7` GPU LOD-boundary suite mirrors the CPU `DT*` suite and is green (floor
-> normals, referenced-vertex gating, CPU-style quad ownership, and mass-point-pinned boundary cells).
-> DC LOD seams and 4-chunk corner seams are sealed (max-min-area quad diagonal). The algorithm
-> description below is unchanged; these are correctness/parity refinements on top of it.
+> **Status note (2026-10):** Dual Contouring runs on the CPU only. The GPU Dual Contouring mesher was
+> retired in seam ownership (its QEF solve was not bit-exact with the CPU seam rings) and deleted in code
+> review CR1 with its shader and the `GT1-GT7` suite that once pinned it; the sections below describe the
+> CPU mesher. DC LOD seams and 4-chunk corner seams are sealed (max-min-area quad diagonal).
 
 ## Table of Contents
 
@@ -16,11 +15,10 @@
 3. [Pipeline Detail](#pipeline-detail)
 4. [QEF Solver](#qef-solver)
 5. [LOD Boundary Merging](#lod-boundary-merging)
-6. [GPU Implementation](#gpu-implementation)
-7. [Configuration](#configuration)
-8. [Comparison with Marching Cubes](#comparison-with-marching-cubes)
-9. [Performance Considerations](#performance-considerations)
-10. [Troubleshooting](#troubleshooting)
+6. [Configuration](#configuration)
+7. [Comparison with Marching Cubes](#comparison-with-marching-cubes)
+8. [Performance Considerations](#performance-considerations)
+9. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -38,12 +36,9 @@ Both DC and Marching Cubes share the **smooth terrain rendering pipeline** — t
 
 | File | Purpose |
 |------|---------|
-| `VoxelCPUDualContourMesher.h/cpp` | CPU implementation |
-| `VoxelGPUDualContourMesher.h/cpp` | GPU compute implementation |
+| `VoxelCPUDualContourMesher.h/cpp` | The mesher (interior chunk meshes and the DC seam meshers) |
 | `QEFSolver.h` (Private) | QEF solver with Jacobi SVD |
-| `DualContourMeshGeneration.usf` | 4-pass GPU compute shader |
 | `VoxelMeshingTypes.h` | Shared config (`FVoxelMeshingConfig`) |
-| `MarchingCubesCommon.ush` | Shared shader utilities (voxel packing, vertex format) |
 
 ### Enum
 
@@ -298,72 +293,6 @@ Before merging:          After merging:
 
 The 4 fine-cell vertices are replaced by 1 merged vertex whose position is the QEF solution using all edge crossings from all 4 cells. This naturally matches the coarser neighbor's vertex spacing.
 
-### GPU Implementation
-
-On the GPU, the merge map is built as a **CPU pre-pass** and uploaded as a structured buffer:
-- Array of `uint` pairs: `[OriginalCellIndex, ReplacementCellIndex]`
-- During quad generation, each cell index is checked against the merge map and redirected if matched
-
----
-
-## GPU Implementation
-
-The GPU mesher (`FVoxelGPUDualContourMesher`) executes the same algorithm via **4 RDG compute shader passes** in a single render graph:
-
-### Compute Shader Passes
-
-| Pass | Kernel | Thread Group | Purpose |
-|------|--------|--------------|---------|
-| 0 | `DCResetCountersCS` | [1,1,1] | Zero atomic counters |
-| 1 | `DCEdgeCrossingCS` | [8,8,4] | Detect density sign changes |
-| 2 | `DCQEFSolveCS` | [8,8,4] | Solve 3x3 QEF per cell (Jacobi SVD in registers) |
-| 2.5 | `DCPrepareIndirectArgsCS` | [1,1,1] | Write indirect dispatch args from valid edge count |
-| 3 | `DCQuadGenerationCS` | [64,1,1] | Emit quads (indirect dispatch) |
-
-### GPU Intermediate Buffers
-
-```hlsl
-// Edge crossing hermite data (32 bytes per entry)
-struct FDCEdgeCrossingGPU {
-    float3 Position;      // Crossing point
-    float3 Normal;        // Gradient normal
-    uint PackedMaterial;  // MaterialID(8) | BiomeID(8)
-    uint Flags;           // bit 0 = bValid
-};
-
-// Cell vertex from QEF solve (32 bytes per entry)
-struct FDCCellVertexGPU {
-    float3 Position;      // QEF-solved position
-    uint PackedNormal;    // 10+10+10+2 packed
-    uint PackedMaterial;  // MaterialID(8) | BiomeID(8)
-    uint Flags;           // bit 0 = bValid
-    uint VertexIndex;     // Pre-assigned output mesh index
-    uint _Pad;            // Alignment
-};
-```
-
-### Async Readback State Machine
-
-The GPU mesher uses a multi-phase async readback for PMC renderer compatibility:
-
-```
-WaitingForCounters → CopyingCounters → WaitingForData → CopyingData → Complete
-```
-
-1. **WaitingForCounters**: Counter readback enqueued, polling `IsReady()`
-2. **CopyingCounters**: Lock/copy/unlock vertex and index counts
-3. **WaitingForData**: Vertex/index readback enqueued with correct sizes
-4. **CopyingData**: Lock/copy/unlock mesh data into `FChunkMeshData`
-5. **Complete**: Data ready on CPU, `OnComplete` callback fired
-
-### Shader Path
-
-```
-/Plugin/VoxelWorlds/Private/DualContourMeshGeneration.usf
-```
-
-Includes `MarchingCubesCommon.ush` for shared utilities: voxel packing/unpacking, vertex format (`FVoxelVertexGPU`), normal packing, material data packing.
-
 ---
 
 ## Configuration
@@ -386,7 +315,6 @@ float QEFBiasStrength = 0.5f;
 
 DC also uses these shared smooth meshing fields:
 - `IsoLevel` — Isosurface threshold (default 0.5 = density 127)
-- `MaxVerticesPerChunk` / `MaxIndicesPerChunk` — Buffer capacity limits
 
 ### Recommended Settings
 
@@ -434,7 +362,6 @@ Both meshers share:
 - Triplanar UV computation (dominant-axis projection)
 - Material and biome assignment from solid voxels
 - Neighbor data handling (face, edge, corner slices)
-- `MarchingCubesCommon.ush` shader utilities (GPU path)
 - Renderer compatibility (both Custom VF and PMC)
 
 ### When to Use Which
@@ -523,15 +450,6 @@ Intermediate buffers are allocated per-dispatch and released after readback.
 
 **Solution**: Check winding order determination. The flip condition is `D0 < IsoLevel` where `D0` is the density at the edge's starting cell position.
 
-### GPU Shader Compilation Issues
-
-**Symptom**: Shader compile errors or visual artifacts on GPU path
-
-**Solutions**:
-1. Ensure `JacobiEigen3x3` uses `[loop]` not `[unroll]` for the iteration loop
-2. Check that `GridDim` uniform matches the actual buffer allocation
-3. Verify `MaxVertexCount` / `MaxIndexCount` bounds checks prevent buffer overflows
-
 ---
 
 ## References
@@ -543,4 +461,4 @@ Intermediate buffers are allocated per-dispatch and released after readback.
 
 ---
 
-**Status**: Implemented — CPU and GPU Dual Contouring with LOD boundary merging, QEF solver with Jacobi SVD
+**Status**: Implemented — CPU Dual Contouring with LOD boundary merging, QEF solver with Jacobi SVD

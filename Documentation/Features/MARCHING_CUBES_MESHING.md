@@ -24,7 +24,7 @@ The Marching Cubes meshing system generates organic, curved terrain surfaces usi
 - **Marching Cubes**: Core algorithm for isosurface extraction from density fields
 - **LOD Support**: Strided sampling for level-of-detail rendering
 - **LOD-seam handling**: Shipped via **geomorph** (bending the fine surface toward the coarse
-  contour at the boundary) on both the CPU and GPU MC paths — see
+  contour at the boundary) — see
   [Research/GEOMORPH_IMPLEMENTATION_PLAN.md](../Research/GEOMORPH_IMPLEMENTATION_PLAN.md).
   The Transvoxel transition-cell approach described later in this doc was implemented but is
   **disabled** (`bUseTransvoxel=false`); see
@@ -45,7 +45,6 @@ The Marching Cubes meshing system generates organic, curved terrain surfaces usi
 |------|---------|
 | `VoxelCPUMarchingCubesMesher.h/cpp` | CPU implementation |
 | `VoxelCPUMarchingCubesSeams.cpp` | CPU seam jobs (face, edge and corner seams between chunks) |
-| `VoxelGPUMarchingCubesMesher.h/cpp` | GPU compute implementation |
 | `MarchingCubesTables.h/cpp` | Lookup tables for standard Marching Cubes |
 | `TransvoxelTables.h/cpp` | Lookup tables for LOD transitions |
 | `VoxelMeshingTypes.h` | Configuration structures |
@@ -79,7 +78,7 @@ Both smooth meshers implement the `IVoxelMesher` interface and produce the same 
 - **Output**: `FChunkMeshData` (positions, normals, UVs, colors, indices)
 - **Config**: `FVoxelMeshingConfig` (shared fields + algorithm-specific fields)
 
-Both use the same neighbor data system (face slices, edge strips, corner voxels) for seamless chunk boundaries. Both share the `MarchingCubesCommon.ush` shader include for GPU-side voxel packing, vertex format, and normal encoding.
+Both use the same neighbor data system (face slices, edge strips, corner voxels) for seamless chunk boundaries.
 
 **MC seam jobs** (`VoxelCPUMarchingCubesSeams.cpp`, seam ownership P3) mesh each participant's boundary band through the
 same `ProcessCubeLOD`, ribbon and geomorph code as a chunk. Each participant frame reads the participants' snapshots in
@@ -193,8 +192,7 @@ at LOD 2 each gradient component is a sign and the normal snaps toward one of th
 planets, streaks on heightmap slopes). So at stride > 1 an edge vertex's normal is LOD 0's (`CalculateShadingNormal`) at
 the voxel crossing on its edge nearest it (`CalculateEdgeShadingNormal`: the edge walked from its min end in voxel steps). It is a function of the
 edge alone, so every cell, seam band and transition ribbon sharing the edge gives the vertex the same normal, and the
-boundary geomorph (which moves vertices) does not change it. Positions are unchanged. The GPU shader
-(`MarchingCubesMeshGeneration.usf`) does the same. `voxel.Mesh.VoxelShadingNormals 0` (shared with Dual Contouring's
+boundary geomorph (which moves vertices) does not change it. Positions are unchanged. `voxel.Mesh.VoxelShadingNormals 0` (shared with Dual Contouring's
 G44) restores the stride-scale normals (`CalculateGradientNormalLOD`) for A/B. See `WORLD_MODES_REVIEW_PLAN.md` §20.9.
 
 **Vertices at a stride (G80).** The same saturation put an interpolated strided vertex toward the edge's middle, whatever
@@ -362,19 +360,11 @@ Config.bUseTransvoxel = true;
 
 ## Implementation Details
 
-### CPU vs GPU
+### The mesher
 
-**CPU Mesher (`FVoxelCPUMarchingCubesMesher`):**
-- Synchronous execution
-- Good for debugging
-- Used when GPU mesher unavailable
-- Performance: ~30-80ms per 32^3 chunk at LOD 0
-
-**GPU Mesher (`FVoxelGPUMarchingCubesMesher`):**
-- Asynchronous compute shaders
-- Much faster for large worlds
-- Requires RDG/RHI setup
-- Performance: ~1-5ms per chunk
+`FVoxelCPUMarchingCubesMesher` runs synchronously on the chunk manager's worker tasks (interior chunk
+meshes and the MC seam jobs). The GPU Marching Cubes mesher that mirrored it was never dispatched by a
+world and was deleted in code review CR1.
 
 ### Neighbor Data Handling
 
@@ -525,10 +515,9 @@ Per 32^3 chunk at LOD 0:
 **Symptoms**: Slow chunk generation, frame drops
 
 **Solutions**:
-1. Switch to GPU mesher
-2. Increase LOD aggressiveness
-3. Reduce MaxChunksPerFrame in config
-4. Profile with Unreal Insights
+1. Increase LOD aggressiveness
+2. Reduce MaxChunksPerFrame in config
+3. Profile with Unreal Insights
 
 ### Missing Geometry at Chunk Edges
 
@@ -586,7 +575,7 @@ arithmetic). On a planet:
   as LOD 0 does).
 - The CPU geomorph morphs along the **axis nearest `LocalUp`**, its steepness gate on the normal along that axis as on
   the plane (`Meshing.MarchingCubes.PlanetGeomorph`); the gate skips vertices more than 60° off the axis, as it skips
-  steep slopes on the plane. The GPU MC path (idle at runtime) turns the geomorph off on planets.
+  steep slopes on the plane.
 
 Planets mesh with Dual Contouring by default, so these run only on an MC planet.
 

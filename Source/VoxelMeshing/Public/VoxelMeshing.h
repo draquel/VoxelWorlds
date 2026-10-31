@@ -7,12 +7,13 @@
 DECLARE_LOG_CATEGORY_EXTERN(LogVoxelMeshing, Log, All);
 
 /**
- * VoxelMeshing module - GPU and CPU mesh generation for VoxelWorlds.
+ * VoxelMeshing module - CPU mesh generation for VoxelWorlds.
  *
- * Provides compute shader-based cubic meshing with face culling
- * and CPU fallback for testing and editor scenarios.
+ * The cubic, Marching Cubes and Dual Contouring meshers behind IVoxelMesher: interior chunk meshes
+ * and the seam jobs between chunks, run on the chunk manager's worker tasks. Nothing in the module
+ * touches the GPU (the GPU meshers were deleted in code review CR1).
  *
- * Dependencies: VoxelCore, RenderCore, RHI
+ * Dependencies: VoxelCore
  *
  * @see IVoxelMesher
  * @see Documentation/ARCHITECTURE.md

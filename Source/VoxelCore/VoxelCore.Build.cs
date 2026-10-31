@@ -24,7 +24,6 @@ public class VoxelCore : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
-				"RHI", // ChunkRenderData.h: FBufferRHIRef / FShaderResourceViewRHIRef (RHIResources.h)
 			}
 		);
 

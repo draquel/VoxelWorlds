@@ -3,12 +3,9 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelCPUMarchingCubesMesher.h"
-#include "VoxelGPUMarchingCubesMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
-#include "RenderingThread.h"
-#include "RHI.h"             // GUsingNullRHI: GPU tests skip under -nullrhi
 #include "HAL/IConsoleManager.h"
 
 // ==================== Helper Functions ====================
@@ -439,288 +436,6 @@ bool FMarchingCubesMeshingChunkBoundaryTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-// ==================== GPU MarchingCubes Mesher Tests ====================
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingGPUAsyncTest, "VoxelWorlds.Meshing.MarchingCubes.GPUAsync",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FMarchingCubesMeshingGPUAsyncTest::RunTest(const FString& Parameters)
-{
-	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
-
-	FVoxelGPUMarchingCubesMesher Mesher;
-	Mesher.Initialize();
-	Mesher.SetConfig(CreateMCConfig());
-
-	TestTrue(TEXT("GPU MarchingCubes Mesher should be initialized"), Mesher.IsInitialized());
-
-	// Create half-solid request for testing
-	FVoxelMeshingRequest Request = CreateHalfSolidRequest(8);
-
-	// Track completion
-	volatile bool bCompleted = false;
-	volatile bool bSucceeded = false;
-	FVoxelMeshingHandle ResultHandle;
-
-	// Generate mesh asynchronously
-	FVoxelMeshingHandle Handle = Mesher.GenerateMeshAsync(Request,
-		FOnVoxelMeshingComplete::CreateLambda([&bCompleted, &bSucceeded, &ResultHandle](FVoxelMeshingHandle InHandle, bool bSuccess)
-		{
-			ResultHandle = InHandle;
-			bSucceeded = bSuccess;
-			bCompleted = true;
-		}));
-
-	TestTrue(TEXT("Handle should be valid"), Handle.IsValid());
-
-	// Wait for completion (with timeout). FlushRenderingCommands runs the queued compute +
-	// readback-copy commands; Mesher.Tick advances the async readback state machine
-	// (WaitingForCounters -> ... -> Complete) and fires the completion callback. The engine's
-	// normal tick loop does NOT run during a synchronous RunTest, so we must tick the mesher
-	// ourselves — flushing alone never completes it. 30s, not 5s: the very first GPU dispatch
-	// in a process pays a multi-second cold-start cost (compute PSO creation, driver
-	// shader-cache warmup); every subsequent dispatch is sub-100ms.
-	double StartTime = FPlatformTime::Seconds();
-	double TimeoutSeconds = 30.0;
-
-	while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < TimeoutSeconds)
-	{
-		FlushRenderingCommands();
-		Mesher.Tick(0.0f);
-		FPlatformProcess::Sleep(0.002f);
-	}
-
-	TestTrue(TEXT("GPU smooth meshing should complete within timeout"), bCompleted);
-	TestTrue(TEXT("GPU smooth meshing should succeed"), bSucceeded);
-
-	if (bCompleted && bSucceeded)
-	{
-		// Get buffer counts
-		uint32 VertexCount, IndexCount;
-		bool bGotCounts = Mesher.GetBufferCounts(Handle, VertexCount, IndexCount);
-		TestTrue(TEXT("Should be able to get buffer counts"), bGotCounts);
-
-		AddInfo(FString::Printf(TEXT("GPU smooth mesh: %d vertices, %d indices"),
-			VertexCount, IndexCount));
-
-		TestTrue(TEXT("GPU smooth mesh should have vertices"), VertexCount > 0);
-		TestTrue(TEXT("GPU smooth mesh should have indices"), IndexCount > 0);
-
-		// Test buffer access
-		FRHIBuffer* VertexBuffer = Mesher.GetVertexBuffer(Handle);
-		TestNotNull(TEXT("Should be able to get vertex buffer"), VertexBuffer);
-
-		FRHIBuffer* IndexBuffer = Mesher.GetIndexBuffer(Handle);
-		TestNotNull(TEXT("Should be able to get index buffer"), IndexBuffer);
-	}
-
-	Mesher.ReleaseHandle(Handle);
-	Mesher.Shutdown();
-
-	return true;
-}
-
-// ==================== CPU vs GPU Consistency Test ====================
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingCPUvsGPUTest, "VoxelWorlds.Meshing.MarchingCubes.CPUvsGPU",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FMarchingCubesMeshingCPUvsGPUTest::RunTest(const FString& Parameters)
-{
-	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
-
-	FVoxelCPUMarchingCubesMesher CPUMesher;
-	FVoxelGPUMarchingCubesMesher GPUMesher;
-
-	FVoxelMeshingConfig MCConfig = CreateMCConfig();
-
-	CPUMesher.Initialize();
-	CPUMesher.SetConfig(MCConfig);
-	GPUMesher.Initialize();
-	GPUMesher.SetConfig(MCConfig);
-
-	// Create half-solid request for comparison
-	FVoxelMeshingRequest Request = CreateHalfSolidRequest(8);
-
-	// Generate on CPU
-	FChunkMeshData CPUMeshData;
-	FVoxelMeshingStats CPUStats;
-	bool bCPUSuccess = CPUMesher.GenerateMeshCPU(Request, CPUMeshData, CPUStats);
-	TestTrue(TEXT("CPU smooth meshing should succeed"), bCPUSuccess);
-
-	// Generate on GPU
-	volatile bool bCompleted = false;
-	FVoxelMeshingHandle Handle = GPUMesher.GenerateMeshAsync(Request,
-		FOnVoxelMeshingComplete::CreateLambda([&bCompleted](FVoxelMeshingHandle, bool)
-		{
-			bCompleted = true;
-		}));
-
-	// Flush runs the GPU work; Tick drives the mesher's readback state machine and fires the
-	// callback (see the GPUAsync test above). 30s budget covers the first-dispatch cold start.
-	double StartTime = FPlatformTime::Seconds();
-	while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 30.0)
-	{
-		FlushRenderingCommands();
-		GPUMesher.Tick(0.0f);
-		FPlatformProcess::Sleep(0.002f);
-	}
-	TestTrue(TEXT("GPU smooth meshing should complete"), bCompleted);
-
-	// Readback GPU data
-	FChunkMeshData GPUMeshData;
-	bool bReadbackSuccess = GPUMesher.ReadbackToCPU(Handle, GPUMeshData);
-	TestTrue(TEXT("GPU readback should succeed"), bReadbackSuccess);
-
-	// Compare vertex counts
-	AddInfo(FString::Printf(TEXT("CPU: %d vertices, %d indices"),
-		CPUMeshData.GetVertexCount(), CPUMeshData.Indices.Num()));
-	AddInfo(FString::Printf(TEXT("GPU: %d vertices, %d indices"),
-		GPUMeshData.GetVertexCount(), GPUMeshData.Indices.Num()));
-
-	// Due to atomic counter ordering, GPU vertex order may differ, but counts should be similar
-	// Allow some tolerance since floating point calculations may differ slightly
-	const int32 VertexDiff = FMath::Abs(CPUMeshData.GetVertexCount() - GPUMeshData.GetVertexCount());
-	const int32 IndexDiff = FMath::Abs(CPUMeshData.Indices.Num() - GPUMeshData.Indices.Num());
-
-	// Counts should be identical or very close
-	TestTrue(TEXT("Vertex counts should be similar"),
-		VertexDiff < CPUMeshData.GetVertexCount() * 0.1f);
-	TestTrue(TEXT("Index counts should be similar"),
-		IndexDiff < CPUMeshData.Indices.Num() * 0.1f);
-
-	// Compare vertex positions as sets
-	if (CPUMeshData.GetVertexCount() > 0 && GPUMeshData.GetVertexCount() > 0)
-	{
-		int32 MatchCount = 0;
-		const float Tolerance = 1.0f;  // 1 unit tolerance
-
-		for (int32 GPUIdx = 0; GPUIdx < GPUMeshData.GetVertexCount(); ++GPUIdx)
-		{
-			const FVector3f& GPUPos = GPUMeshData.Positions[GPUIdx];
-
-			for (int32 CPUIdx = 0; CPUIdx < CPUMeshData.GetVertexCount(); ++CPUIdx)
-			{
-				if (GPUPos.Equals(CPUMeshData.Positions[CPUIdx], Tolerance))
-				{
-					MatchCount++;
-					break;
-				}
-			}
-		}
-
-		float MatchPercent = (float)MatchCount / GPUMeshData.GetVertexCount() * 100.0f;
-		AddInfo(FString::Printf(TEXT("Vertex set match: %.1f%% (%d/%d GPU vertices found in CPU set)"),
-			MatchPercent, MatchCount, GPUMeshData.GetVertexCount()));
-
-		// At least 85% of GPU vertices should exist in the CPU vertex set
-		TestTrue(TEXT("At least 85% of GPU vertices should match CPU vertices"),
-			MatchPercent >= 85.0f);
-	}
-
-	GPUMesher.ReleaseHandle(Handle);
-	CPUMesher.Shutdown();
-	GPUMesher.Shutdown();
-
-	return true;
-}
-
-// ==================== Performance Test ====================
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingPerformanceTest, "VoxelWorlds.Meshing.MarchingCubes.Performance",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::MediumPriority)
-
-bool FMarchingCubesMeshingPerformanceTest::RunTest(const FString& Parameters)
-{
-	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
-
-	FVoxelCPUMarchingCubesMesher CPUMesher;
-	FVoxelGPUMarchingCubesMesher GPUMesher;
-
-	FVoxelMeshingConfig MCConfig = CreateMCConfig();
-
-	CPUMesher.Initialize();
-	CPUMesher.SetConfig(MCConfig);
-	GPUMesher.Initialize();
-	GPUMesher.SetConfig(MCConfig);
-
-	// Create 32^3 terrain request (standard chunk size)
-	FVoxelMeshingRequest Request = CreateHalfSolidRequest(32);
-
-	const int32 NumIterations = 5;
-
-	// Benchmark CPU meshing
-	double CPUTotalTime = 0.0;
-	for (int32 i = 0; i < NumIterations; ++i)
-	{
-		Request.ChunkCoord = FIntVector(i, 0, 0);
-		FChunkMeshData MeshData;
-		FVoxelMeshingStats Stats;
-
-		double StartTime = FPlatformTime::Seconds();
-		CPUMesher.GenerateMeshCPU(Request, MeshData, Stats);
-		CPUTotalTime += FPlatformTime::Seconds() - StartTime;
-	}
-	double CPUAvgMs = (CPUTotalTime / NumIterations) * 1000.0;
-
-	// Benchmark GPU meshing (including count readback)
-	double GPUTotalTime = 0.0;
-	for (int32 i = 0; i < NumIterations; ++i)
-	{
-		Request.ChunkCoord = FIntVector(i + 100, 0, 0);
-
-		volatile bool bCompleted = false;
-		double StartTime = FPlatformTime::Seconds();
-
-		FVoxelMeshingHandle Handle = GPUMesher.GenerateMeshAsync(Request,
-			FOnVoxelMeshingComplete::CreateLambda([&bCompleted](FVoxelMeshingHandle, bool)
-			{
-				bCompleted = true;
-			}));
-
-		// Time dispatch + counter readback (what the "<5ms" budget was written against).
-		// The pump must Tick the mesher to advance its readback state machine (see the
-		// GPUAsync test above); no sleep here so pump latency doesn't pollute the timing.
-		uint32 VertexCount = 0, IndexCount = 0;
-		const double CountTimeout = FPlatformTime::Seconds() + 30.0;
-		while (!GPUMesher.GetBufferCounts(Handle, VertexCount, IndexCount)
-			&& FPlatformTime::Seconds() < CountTimeout)
-		{
-			FlushRenderingCommands();
-			GPUMesher.Tick(0.0f);
-		}
-
-		GPUTotalTime += FPlatformTime::Seconds() - StartTime;
-
-		// Pump the remaining (untimed) vertex/index data readback to completion so the
-		// handle isn't released mid-readback.
-		const double CompleteTimeout = FPlatformTime::Seconds() + 30.0;
-		while (!bCompleted && FPlatformTime::Seconds() < CompleteTimeout)
-		{
-			FlushRenderingCommands();
-			GPUMesher.Tick(0.0f);
-			FPlatformProcess::Sleep(0.002f);
-		}
-		GPUMesher.ReleaseHandle(Handle);
-	}
-	double GPUAvgMs = (GPUTotalTime / NumIterations) * 1000.0;
-
-	AddInfo(FString::Printf(TEXT("32^3 chunk smooth meshing performance:")));
-	AddInfo(FString::Printf(TEXT("  CPU average: %.2f ms"), CPUAvgMs));
-	AddInfo(FString::Printf(TEXT("  GPU average (with count readback): %.2f ms"), GPUAvgMs));
-
-	// Performance targets: CPU < 100ms, GPU < 5ms
-	// MarchingCubes meshing is more complex than cubic meshing
-	TestTrue(TEXT("CPU smooth meshing should complete in < 100ms"), CPUAvgMs < 100.0);
-	TestTrue(TEXT("GPU smooth meshing should complete in < 5ms"), GPUAvgMs < 5.0);
-
-	CPUMesher.Shutdown();
-	GPUMesher.Shutdown();
-
-	return true;
-}
-
-
 // ==================== LOD Vertex Normals (G61) ====================
 
 namespace MarchingCubesMeshingTestHelpers
@@ -802,7 +517,7 @@ namespace MarchingCubesMeshingTestHelpers
  * G61 (WORLD_MODES_REVIEW_PLAN.md §14.1, §20.9): on a tilted plane whose density saturates a voxel either side of the
  * surface, Marching Cubes' LOD 1 and 2 vertex normals are as close to the plane's as LOD 0's (voxel.Mesh.VoxelShadingNormals
  * 1), where the stride-scale gradient before G61 (0) snaps them toward the cube directions; positions are the same either
- * way. With a real RHI, the GPU mesher's normals match the CPU's at every LOD in both modes.
+ * way.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingLODNormalsTest, "VoxelWorlds.Meshing.MarchingCubes.LODNormals",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -815,35 +530,6 @@ bool FMarchingCubesMeshingLODNormalsTest::RunTest(const FString& Parameters)
 	FVoxelCPUMarchingCubesMesher CPUMesher;
 	CPUMesher.Initialize();
 	CPUMesher.SetConfig(CreateMCConfig());
-
-	auto MeshGPU = [](FVoxelGPUMarchingCubesMesher& GPUMesher, const FVoxelMeshingRequest& Request, FChunkMeshData& Out)
-	{
-		volatile bool bCompleted = false;
-		FVoxelMeshingHandle Handle = GPUMesher.GenerateMeshAsync(Request,
-			FOnVoxelMeshingComplete::CreateLambda([&bCompleted](FVoxelMeshingHandle, bool) { bCompleted = true; }));
-		const double StartTime = FPlatformTime::Seconds();
-		while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < 30.0)
-		{
-			FlushRenderingCommands();
-			GPUMesher.Tick(0.0f);
-			FPlatformProcess::Sleep(0.002f);
-		}
-		const bool bOk = bCompleted && GPUMesher.ReadbackToCPU(Handle, Out);
-		GPUMesher.ReleaseHandle(Handle);
-		return bOk;
-	};
-
-	const bool bGPU = !GUsingNullRHI;
-	FVoxelGPUMarchingCubesMesher GPUMesher;
-	if (bGPU)
-	{
-		GPUMesher.Initialize();
-		GPUMesher.SetConfig(CreateMCConfig());
-	}
-	else
-	{
-		AddInfo(TEXT("GPU half skipped: it needs a real RHI (run without -nullrhi)"));
-	}
 
 	double Angle[2][3] = {};
 	for (int32 Mode = 0; Mode < 2; ++Mode)
@@ -858,40 +544,6 @@ bool FMarchingCubesMeshingLODNormalsTest::RunTest(const FString& Parameters)
 			// Away from the chunk's faces, where the taps clamp (no neighbour data here).
 			Angle[Mode][LOD] = MeanAngleInside(CPUMesh, Normal, Request.VoxelSize, ChunkSize, 1.5f * (1 << LOD) + 1.0f, Count);
 			TestTrue(*FString::Printf(TEXT("Normals %d LOD %d: vertices measured (%d)"), Mode, LOD, Count), Count > 50);
-
-			if (!bGPU)
-			{
-				continue;
-			}
-			FChunkMeshData GPUMesh;
-			TestTrue(*FString::Printf(TEXT("Normals %d LOD %d: GPU meshing and readback succeed"), Mode, LOD), MeshGPU(GPUMesher, Request, GPUMesh));
-			// Each GPU vertex against the CPU vertex at its position (triangle soup: every match carries the cell's normal).
-			TMap<FIntVector, FVector3f> CPUNormals;
-			for (int32 i = 0; i < CPUMesh.Positions.Num(); ++i)
-			{
-				const FVector3f& P = CPUMesh.Positions[i];
-				CPUNormals.Add(FIntVector(FMath::RoundToInt32(P.X), FMath::RoundToInt32(P.Y), FMath::RoundToInt32(P.Z)), CPUMesh.Normals[i]);
-			}
-			int32 Matched = 0;
-			double SumDiff = 0.0, MaxDiff = 0.0;
-			for (int32 i = 0; i < GPUMesh.Positions.Num() && i < GPUMesh.Normals.Num(); ++i)
-			{
-				const FVector3f& P = GPUMesh.Positions[i];
-				const FVector3f* N = CPUNormals.Find(FIntVector(FMath::RoundToInt32(P.X), FMath::RoundToInt32(P.Y), FMath::RoundToInt32(P.Z)));
-				if (!N)
-				{
-					continue;
-				}
-				const double Diff = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector3f::DotProduct(N->GetSafeNormal(), GPUMesh.Normals[i].GetSafeNormal()), -1.0f, 1.0f)));
-				SumDiff += Diff;
-				MaxDiff = FMath::Max(MaxDiff, Diff);
-				++Matched;
-			}
-			AddInfo(FString::Printf(TEXT("Normals %d LOD %d: %d of %d GPU vertices at a CPU vertex, normals %.3f deg apart on average, %.3f at most"),
-				Mode, LOD, Matched, GPUMesh.Positions.Num(), Matched > 0 ? SumDiff / Matched : 0.0, MaxDiff));
-			TestTrue(*FString::Printf(TEXT("Normals %d LOD %d: most GPU vertices at a CPU vertex"), Mode, LOD), Matched * 10 >= GPUMesh.Positions.Num() * 9);
-			TestTrue(*FString::Printf(TEXT("Normals %d LOD %d: GPU normals match the CPU's (mean %.3f deg)"), Mode, LOD, Matched > 0 ? SumDiff / Matched : 0.0),
-				Matched > 0 && SumDiff / Matched < 0.5);
 		}
 	}
 	AddInfo(FString::Printf(TEXT("Mean angle from the plane's normal, LOD 0/1/2: before G61 %.2f / %.2f / %.2f deg, after %.2f / %.2f / %.2f deg"),
@@ -905,10 +557,6 @@ bool FMarchingCubesMeshingLODNormalsTest::RunTest(const FString& Parameters)
 	TestTrue(*FString::Printf(TEXT("The stride-scale normals before G61 snap at LOD 2 (%.2f deg against LOD 0's %.2f)"), Angle[0][2], Angle[0][0]),
 		Angle[0][2] > Angle[0][0] + 3.0);
 
-	if (bGPU)
-	{
-		GPUMesher.Shutdown();
-	}
 	CPUMesher.Shutdown();
 	return true;
 }

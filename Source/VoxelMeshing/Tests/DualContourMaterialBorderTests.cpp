@@ -1,6 +1,6 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
-// Material-border tests for the Dual Contouring meshers (CPU + GPU).
+// Material-border tests for the Dual Contouring mesher.
 //
 // Regression tests for the material-border striping bug: MaterialID travels to
 // the pixel shader as a float in UV1.x, which the hardware interpolates across
@@ -9,29 +9,19 @@
 // every intermediate index, rendering stripes of unrelated materials along the
 // border. The fix assigns materials per-QUAD (from the owned edge's solid
 // endpoint) and duplicates cell vertices shared by quads of different
-// materials, so every emitted triangle is material-uniform. The GPU mesher
-// mirrors this in DualContourMeshGeneration.usf Pass 3 (crossing-stored
-// material + duplicate allocation).
+// materials, so every emitted triangle is material-uniform.
 //
-//   MB1  CPU LOD0 two-material split  -> every triangle uniform, only source IDs emitted
-//   MB2  CPU LOD1 (stride 2) split    -> same invariants under LOD striding
-//   MB3  GPU LOD0 two-material split  -> SKIPPED: GPU DC interior meshing retired
-//   MB4  GPU LOD1 (stride 2) split    -> SKIPPED: GPU DC interior meshing retired
+//   MB1  LOD0 two-material split  -> every triangle uniform, only source IDs emitted
+//   MB2  LOD1 (stride 2) split    -> same invariants under LOD striding
 //
-// MB3/MB4 are retained but skipped. The GPU DC path produces zero geometry (Pass 3's writes
-// are not visible to the counter readback), and CPU interior routing is the shipped
-// configuration. They are kept rather than deleted so a revival inherits the parity check
-// instead of rebuilding it — the GT0-GT7 suite was deleted along with the weld in P4a, and
-// its absence is why this regression went unnoticed for so long.
+// MB3/MB4, the same invariants on the GPU Dual Contouring mesher, went with that mesher
+// (code review CR1, MESH-01/16).
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelCPUDualContourMesher.h"
-#include "VoxelGPUDualContourMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
-#include "RenderingThread.h" // FlushRenderingCommands — driving the GPU mesher's async readback
-#include "RHI.h"             // GUsingNullRHI — skip GPU tests under -nullrhi
 
 namespace DualContourMaterialBorderTestHelpers
 {
@@ -102,71 +92,6 @@ namespace DualContourMaterialBorderTestHelpers
 		const bool bOk = Mesher.GenerateMeshCPU(Request, OutMesh);
 		Mesher.Shutdown();
 		return bOk;
-	}
-
-	/**
-	 * Mesh via the GPU Dual Contouring mesher and block until the async readback
-	 * completes (same Sleep + FlushRenderingCommands + Tick pump as the GT tests
-	 * in DualContourLODBoundaryTests). Requires a real RHI — callers gate on
-	 * GUsingNullRHI before invoking this.
-	 */
-	bool MeshChunkGPU(const FVoxelMeshingRequest& Request, FChunkMeshData& OutMesh)
-	{
-		FVoxelGPUDualContourMesher Mesher;
-		Mesher.Initialize();
-		Mesher.SetConfig(MakeConfig());
-
-		volatile bool bCompleted = false;
-		volatile bool bSucceeded = false;
-		FVoxelMeshingHandle Handle = Mesher.GenerateMeshAsync(Request,
-			FOnVoxelMeshingComplete::CreateLambda([&bCompleted, &bSucceeded](FVoxelMeshingHandle, bool bSuccess)
-			{
-				bSucceeded = bSuccess;
-				bCompleted = true;
-			}));
-
-		if (!Handle.IsValid())
-		{
-			Mesher.Shutdown();
-			return false;
-		}
-
-		// 30s budget: the first GPU DC dispatch after a .usf change pays PSO/shader
-		// cold-start costs; subsequent dispatches are sub-100ms.
-		const double StartTime = FPlatformTime::Seconds();
-		const double TimeoutSeconds = 30.0;
-		while (!bCompleted && (FPlatformTime::Seconds() - StartTime) < TimeoutSeconds)
-		{
-			FlushRenderingCommands();
-			Mesher.Tick(0.0f);
-			FPlatformProcess::Sleep(0.002f);
-		}
-
-		const bool bOk = bCompleted && bSucceeded && Mesher.ReadbackToCPU(Handle, OutMesh);
-		Mesher.ReleaseHandle(Handle);
-		Mesher.Shutdown();
-		return bOk;
-	}
-
-	/**
-	 * GPU DC interior meshing is retired: the path produces zero geometry (Pass 3's writes are
-	 * not visible to the counter readback, so IndexCount is always 0 and the empty-mesh branch
-	 * reports success). MB3/MB4 are the guard for it and stay in the suite, skipped, so a
-	 * revival has a ready-made parity check rather than starting from nothing.
-	 * See Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md 7.2 option C.
-	 */
-	/**
-	 * Flip to false together with the Pass 3 readback repair to re-arm MB3/MB4. Kept as a
-	 * constant rather than deleting the calls so the GPU harness below stays compiled and
-	 * referenced — a revival flips one line instead of reconstructing the test.
-	 */
-	constexpr bool bGPUDualContourRetired = true;
-
-	FString GPUDCRetiredSkipReason()
-	{
-		return TEXT("Skipped: GPU DC interior meshing is retired and produces no geometry ")
-			   TEXT("(Pass 3 readback race). Re-enable this test with the repair — see ")
-			   TEXT("SEAM_OWNERSHIP_ARCHITECTURE.md 7.2 option C.");
 	}
 
 	using FDCMeshFn = bool(*)(const FVoxelMeshingRequest&, FChunkMeshData&);
@@ -266,29 +191,5 @@ bool FDCMaterialBorderMB2LOD1Test::RunTest(const FString& Parameters)
 {
 	using namespace DualContourMaterialBorderTestHelpers;
 	RunMaterialBorderInvariants(*this, 1, &MeshChunkCPU);
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB3GPULOD0Test, "VoxelWorlds.Meshing.DualContour.MaterialBorder.MB3_GPU_LOD0_UniformTriangles",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FDCMaterialBorderMB3GPULOD0Test::RunTest(const FString& Parameters)
-{
-	using namespace DualContourMaterialBorderTestHelpers;
-	if (bGPUDualContourRetired) { AddInfo(GPUDCRetiredSkipReason()); return true; }
-	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU DC tests require a real RHI (run without -nullrhi)")); return true; }
-	RunMaterialBorderInvariants(*this, 0, &MeshChunkGPU);
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB4GPULOD1Test, "VoxelWorlds.Meshing.DualContour.MaterialBorder.MB4_GPU_LOD1_UniformTriangles",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FDCMaterialBorderMB4GPULOD1Test::RunTest(const FString& Parameters)
-{
-	using namespace DualContourMaterialBorderTestHelpers;
-	if (bGPUDualContourRetired) { AddInfo(GPUDCRetiredSkipReason()); return true; }
-	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU DC tests require a real RHI (run without -nullrhi)")); return true; }
-	RunMaterialBorderInvariants(*this, 1, &MeshChunkGPU);
 	return true;
 }

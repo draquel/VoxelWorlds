@@ -1,11 +1,14 @@
 # GPU Compute Pipeline
 
-**Modules**: VoxelGeneration, VoxelMeshing
+**Modules**: VoxelGeneration
 **Dependencies**: VoxelCore
 
 ## Overview
 
-The GPU compute pipeline handles all voxel generation and meshing on the GPU, minimizing CPU overhead and maximizing parallelism.
+The GPU compute pipeline generates each chunk's voxel data (the density, biome and material fields, then the water
+and underground post-passes) in one render graph and reads the finished voxels back. Meshing is not on the GPU: the
+chunk meshers run on CPU workers (`MARCHING_CUBES_MESHING.md`, `DUAL_CONTOURING.md`); the GPU meshers that once
+followed generation here were never dispatched by a world and were deleted in code review CR1.
 
 ## Module Configuration
 
@@ -83,81 +86,6 @@ chunk's local down (`WaterLineSeedCS`, `UndergroundLinesCS`, one thread per line
 computes for the CPU passes) and floods inside the sea sphere (`WaterFloodSweepRadialCS`). The `GPUvsCPU*Parity`
 tests compare the finished data with the CPU's.
 
-### Stage 2: Cubic Meshing
-
-**Input**: VoxelData buffer
-**Output**: Vertex and index buffers
-
-```hlsl
-// GenerateCubicMesh.usf
-[numthreads(8,8,1)]
-void GenerateCubicMesh(uint3 DispatchThreadID : SV_DispatchThreadID) {
-    // For each voxel
-    uint3 VoxelPos = DispatchThreadID;
-    VoxelData Voxel = InputBuffer[FlatIndex(VoxelPos)];
-    
-    if (Voxel.Density < 127) return; // Air voxel
-    
-    // Check each face
-    for (int Face = 0; Face < 6; Face++) {
-        // Neighbor culling
-        uint3 NeighborPos = VoxelPos + FaceOffset[Face];
-        VoxelData Neighbor = InputBuffer[FlatIndex(NeighborPos)];
-        
-        if (Neighbor.Density >= 127) continue; // Face hidden
-        
-        // Greedy meshing (optional)
-        uint2 QuadSize = CalculateGreedyQuad(VoxelPos, Face);
-        
-        // Calculate ambient occlusion
-        float4 AO = CalculateAO(VoxelPos, Face);
-        
-        // Get atlas UV
-        float2 AtlasUV = GetAtlasUV(Voxel.MaterialID, Face);
-        
-        // Emit quad
-        EmitQuad(VoxelPos, Face, QuadSize, AO, AtlasUV);
-    }
-}
-```
-
-### Stage 3: Smooth Meshing (Marching Cubes)
-
-**Input**: VoxelData buffer
-**Output**: Vertex and index buffers
-
-```hlsl
-// GenerateSmoothMesh.usf
-[numthreads(4,4,4)]
-void GenerateSmoothMesh(uint3 DispatchThreadID : SV_DispatchThreadID) {
-    // Sample 8 corners
-    float Density[8];
-    for (int i = 0; i < 8; i++) {
-        uint3 CornerPos = DispatchThreadID + CubeCorner[i];
-        Density[i] = InputBuffer[FlatIndex(CornerPos)].Density / 255.0;
-    }
-    
-    // Calculate case index
-    uint CaseIndex = CalculateMarchingCubesCase(Density);
-    
-    if (CaseIndex == 0 || CaseIndex == 255) return;
-    
-    // Get triangle configuration
-    int TriCount = TriangleTable[CaseIndex].Count;
-    
-    for (int tri = 0; tri < TriCount; tri++) {
-        // Interpolate vertices
-        for (int vert = 0; vert < 3; vert++) {
-            int EdgeIndex = TriangleTable[CaseIndex].Edges[tri * 3 + vert];
-            float3 Position = InterpolateEdge(EdgeIndex, Density);
-            float3 Normal = CalculateGradient(Position);
-            
-            EmitVertex(Position, Normal);
-        }
-    }
-}
-```
-
 ## C++ Integration
 
 ### Dispatching Compute Shaders
@@ -207,21 +135,10 @@ void UVoxelChunkManager::GenerateChunkOnGPU(FIntVector ChunkCoord, int32 LOD) {
 - Total threads: 32,768 (one per voxel)
 - Estimated time: 0.3-0.5ms
 
-**Cubic Meshing** (32³ chunk):
-- Thread groups: Variable (based on solid voxels)
-- Typical output: 5,000-10,000 vertices
-- Estimated time: 0.5-1.0ms
-
-**Smooth Meshing** (32³ chunk):
-- Thread groups: 32×32×32 = 32,768 groups
-- Typical output: 10,000-20,000 vertices
-- Estimated time: 1.0-2.0ms
-
 ## Optimization Strategies
 
 1. **Batch multiple chunks** per dispatch
 2. **Use async compute** queues
 3. **Cache noise samples** for overlapping chunks
 4. **Implement early-out** for empty/full chunks
-5. **Use GPU occlusion** for visibility
 

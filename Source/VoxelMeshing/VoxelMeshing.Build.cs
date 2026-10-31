@@ -24,7 +24,6 @@ public class VoxelMeshing : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
-				"RHI", // IVoxelMesher.h (RHI.h), the GPU meshers' FRHIGPUBufferReadback (RHIGPUReadback.h)
 				"VoxelCore",
 			}
 		);
@@ -32,9 +31,6 @@ public class VoxelMeshing : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				// RDG / FGlobalShader in the GPU meshers' .cpps and the tests; the public headers only
-				// forward-declare FRDGPooledBuffer
-				"RenderCore",
 			}
 		);
 

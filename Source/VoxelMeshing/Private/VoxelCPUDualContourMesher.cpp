@@ -6,8 +6,7 @@
 #include "VoxelCrossingGradient.h"
 #include "HAL/IConsoleManager.h"
 
-// Shared with the Marching Cubes meshers (VoxelCPUMarchingCubesMesher.cpp, VoxelGPUMarchingCubesMesher.cpp) through
-// VoxelCrossingGradient.h (G62).
+// Shared with the Marching Cubes mesher (VoxelCPUMarchingCubesMesher.cpp) through VoxelCrossingGradient.h (G62).
 TAutoConsoleVariable<int32> CVarVoxelCrossingGradientNormals(
 	TEXT("voxel.Mesh.CrossingGradientNormals"),
 	1,
@@ -19,7 +18,7 @@ TAutoConsoleVariable<int32> CVarVoxelCrossingGradientNormals(
 	TEXT("mesh: interior meshes and seam jobs read it per job."),
 	ECVF_Default);
 
-// Shared with the Marching Cubes meshers (VoxelCPUMarchingCubesMesher.cpp, VoxelGPUMarchingCubesMesher.cpp: G61).
+// Shared with the Marching Cubes mesher (VoxelCPUMarchingCubesMesher.cpp: G61).
 TAutoConsoleVariable<int32> CVarVoxelShadingNormals(
 	TEXT("voxel.Mesh.VoxelShadingNormals"),
 	1,
@@ -31,7 +30,7 @@ TAutoConsoleVariable<int32> CVarVoxelShadingNormals(
 	TEXT("jobs read it per job."),
 	ECVF_Default);
 
-// Shared with the Marching Cubes meshers (VoxelCPUMarchingCubesMesher.cpp, VoxelGPUMarchingCubesMesher.cpp: G80).
+// Shared with the Marching Cubes mesher (VoxelCPUMarchingCubesMesher.cpp: G80).
 TAutoConsoleVariable<int32> CVarVoxelLODCrossings(
 	TEXT("voxel.Mesh.VoxelLODCrossings"),
 	1,
@@ -374,7 +373,6 @@ void FVoxelCPUDualContourMesher::Shutdown()
 		return;
 	}
 
-	ReleaseAllHandles();
 	bIsInitialized = false;
 	UE_LOG(LogVoxelMeshing, Log, TEXT("CPU Dual Contouring Mesher shutdown"));
 }
@@ -3814,112 +3812,8 @@ bool FVoxelCPUDualContourMesher::GenerateCornerSeamMeshCPU(
 }
 
 // ============================================================================
-// Async Pattern (wraps sync for CPU mesher)
+// Configuration
 // ============================================================================
-
-FVoxelMeshingHandle FVoxelCPUDualContourMesher::GenerateMeshAsync(
-	const FVoxelMeshingRequest& Request,
-	FOnVoxelMeshingComplete OnComplete)
-{
-	const uint64 RequestId = NextRequestId.fetch_add(1);
-	FVoxelMeshingHandle Handle(RequestId, Request.ChunkCoord);
-
-	FCachedResult Result;
-	Result.bSuccess = GenerateMeshCPU(Request, Result.MeshData, Result.Stats);
-
-	{
-		FScopeLock Lock(&CacheLock);
-		CachedResults.Add(RequestId, MoveTemp(Result));
-	}
-
-	Handle.bIsComplete = true;
-	Handle.bWasSuccessful = Result.bSuccess;
-
-	if (OnComplete.IsBound())
-	{
-		OnComplete.Execute(Handle, Handle.bWasSuccessful);
-	}
-
-	return Handle;
-}
-
-bool FVoxelCPUDualContourMesher::IsComplete(const FVoxelMeshingHandle& Handle) const
-{
-	return Handle.bIsComplete;
-}
-
-bool FVoxelCPUDualContourMesher::WasSuccessful(const FVoxelMeshingHandle& Handle) const
-{
-	return Handle.bWasSuccessful;
-}
-
-FRHIBuffer* FVoxelCPUDualContourMesher::GetVertexBuffer(const FVoxelMeshingHandle& Handle)
-{
-	return nullptr;
-}
-
-FRHIBuffer* FVoxelCPUDualContourMesher::GetIndexBuffer(const FVoxelMeshingHandle& Handle)
-{
-	return nullptr;
-}
-
-bool FVoxelCPUDualContourMesher::GetBufferCounts(
-	const FVoxelMeshingHandle& Handle,
-	uint32& OutVertexCount,
-	uint32& OutIndexCount) const
-{
-	FScopeLock Lock(&CacheLock);
-	const FCachedResult* Result = CachedResults.Find(Handle.RequestId);
-	if (Result && Result->bSuccess)
-	{
-		OutVertexCount = Result->MeshData.GetVertexCount();
-		OutIndexCount = Result->MeshData.Indices.Num();
-		return true;
-	}
-	return false;
-}
-
-bool FVoxelCPUDualContourMesher::GetRenderData(
-	const FVoxelMeshingHandle& Handle,
-	FChunkRenderData& OutRenderData)
-{
-	FScopeLock Lock(&CacheLock);
-	const FCachedResult* Result = CachedResults.Find(Handle.RequestId);
-	if (Result && Result->bSuccess)
-	{
-		OutRenderData.ChunkCoord = Handle.ChunkCoord;
-		OutRenderData.VertexCount = Result->MeshData.GetVertexCount();
-		OutRenderData.IndexCount = Result->MeshData.Indices.Num();
-		return true;
-	}
-	return false;
-}
-
-bool FVoxelCPUDualContourMesher::ReadbackToCPU(
-	const FVoxelMeshingHandle& Handle,
-	FChunkMeshData& OutMeshData)
-{
-	FScopeLock Lock(&CacheLock);
-	const FCachedResult* Result = CachedResults.Find(Handle.RequestId);
-	if (Result && Result->bSuccess)
-	{
-		OutMeshData = Result->MeshData;
-		return true;
-	}
-	return false;
-}
-
-void FVoxelCPUDualContourMesher::ReleaseHandle(const FVoxelMeshingHandle& Handle)
-{
-	FScopeLock Lock(&CacheLock);
-	CachedResults.Remove(Handle.RequestId);
-}
-
-void FVoxelCPUDualContourMesher::ReleaseAllHandles()
-{
-	FScopeLock Lock(&CacheLock);
-	CachedResults.Empty();
-}
 
 void FVoxelCPUDualContourMesher::SetConfig(const FVoxelMeshingConfig& InConfig)
 {
@@ -3929,18 +3823,4 @@ void FVoxelCPUDualContourMesher::SetConfig(const FVoxelMeshingConfig& InConfig)
 const FVoxelMeshingConfig& FVoxelCPUDualContourMesher::GetConfig() const
 {
 	return Config;
-}
-
-bool FVoxelCPUDualContourMesher::GetStats(
-	const FVoxelMeshingHandle& Handle,
-	FVoxelMeshingStats& OutStats) const
-{
-	FScopeLock Lock(&CacheLock);
-	const FCachedResult* Result = CachedResults.Find(Handle.RequestId);
-	if (Result)
-	{
-		OutStats = Result->Stats;
-		return true;
-	}
-	return false;
 }

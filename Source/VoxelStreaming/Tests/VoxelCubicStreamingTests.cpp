@@ -45,7 +45,6 @@ namespace VoxelCubicStreamingTestUtils
 		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
 		virtual void Shutdown() override { bInitialized = false; }
 		virtual bool IsInitialized() const override { return bInitialized; }
-		virtual void UpdateChunkMesh(const FChunkRenderData& RenderData) override {}
 		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override
 		{
 			++ChunkSubmits;
@@ -216,7 +215,6 @@ namespace VoxelCubicStreamingTestUtils
 			Config->VoxelSize = 100.0f;
 			Config->ViewDistance = 4000.0f;
 			Config->bUseGPUGeneration = false;
-			Config->bUseGPUMeshing = false;
 			Config->bGenerateCollision = false;
 			Config->bEnableScatter = false;
 			Config->bEnableWaterLevel = false;

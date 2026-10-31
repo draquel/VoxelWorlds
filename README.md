@@ -8,15 +8,14 @@ water, ore, scatter).
 ## Key Features
 
 - **Three meshing algorithms** — Cubic (Minecraft-style, greedy), **Marching Cubes** (smooth), and
-  **Dual Contouring** (smooth, sharp-feature-preserving via QEF), behind the `IVoxelMesher` interface.
-  Marching Cubes and Dual Contouring also have GPU compute meshers; cubic meshes on the CPU (the GPU
-  cubic mesher was test-only and is deleted, world modes review WM-C4).
+  **Dual Contouring** (smooth, sharp-feature-preserving via QEF), behind the `IVoxelMesher` interface,
+  all on CPU workers (the GPU meshers were never dispatched by a world and are deleted: the GPU cubic
+  mesher in world modes review WM-C4, the GPU Marching Cubes and Dual Contouring meshers in code review CR1).
 - **Seam ownership** — every mode meshes chunk interiors only and gives each chunk boundary to one seam
   job that reads both sides' voxels, so a chunk never waits for, or re-meshes on, a neighbour
   (`Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md`; cubic since world modes review M5).
 - **Watertight LOD seams** — MC seams handled by **geomorph** (bending the fine surface toward the
-  coarse contour at the boundary); DC LOD seams and 4-chunk corner seams sealed. The GPU DC path has
-  reached **CPU watertightness parity** (verified by the `GT1–GT7` LOD-boundary test suite).
+  coarse contour at the boundary); DC LOD seams and 4-chunk corner seams sealed.
 - **Pluggable LOD** — swappable strategies via `IVoxelLODStrategy` (distance-band default) with
   asymmetric refine/coarsen hysteresis and material-parameter-collection LOD morphing. Cubic meshing
   runs without LOD: greedy meshing is its answer to distance.
@@ -100,8 +99,8 @@ seam-closure and streaming tests, and GPU/CPU parity tests that exercise the rea
 - `FInfinitePlaneWorldMode` / `FIslandBowlWorldMode` / `FSphericalPlanetWorldMode` — world modes
 - `FVoxelCPUNoiseGenerator` / `FVoxelGPUNoiseGenerator` — noise generation
 - `FVoxelCPUCubicMesher` — cubic meshing (CPU, greedy or simple), interior domain plus face seams
-- `FVoxelCPUMarchingCubesMesher` / `FVoxelGPUMarchingCubesMesher` — Marching Cubes meshing
-- `FVoxelCPUDualContourMesher` / `FVoxelGPUDualContourMesher` — Dual Contouring meshing
+- `FVoxelCPUMarchingCubesMesher` — Marching Cubes meshing
+- `FVoxelCPUDualContourMesher` — Dual Contouring meshing
 - `FVoxelWaterMesher` — water surface meshing
 - `FVoxelCustomVFRenderer` — GPU-driven renderer (UE `FLocalVertexFactory`)
 - `FVoxelPMCRenderer` — `ProceduralMeshComponent` fallback renderer
@@ -118,7 +117,7 @@ seam-closure and streaming tests, and GPU/CPU parity tests that exercise the rea
 ### Key Data Structures
 - `FVoxelData` — per-voxel data (MaterialID, Density, BiomeID, Metadata)
 - `FVoxelVertex` — GPU vertex format
-- `FChunkDescriptor` / `FChunkMeshData` / `FChunkRenderData` — chunk metadata, CPU mesh, GPU render data
+- `FChunkDescriptor` / `FChunkMeshData` — chunk metadata, the chunk's mesh
 - `FVoxelMeshingRequest` — mesh generation request with face + deep-neighbor data for seamless LOD boundaries
 - `FVoxelNoiseParams` — noise generation parameters
 - `FWorldModeTerrainParams` — terrain configuration (SeaLevel, HeightScale, etc.)

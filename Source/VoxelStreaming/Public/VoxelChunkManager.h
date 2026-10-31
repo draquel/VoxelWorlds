@@ -1191,7 +1191,7 @@ public:
 	{
 		/** Chunk mesh jobs dispatched to a worker. */
 		int64 ChunkMeshJobs = 0;
-		/** Their worker time (CPU meshers; a GPU mesher's jobs count 0). */
+		/** Their worker time. */
 		double ChunkMeshWorkerMs = 0.0;
 		/** Seam jobs dispatched to a worker. */
 		int64 SeamJobs = 0;
@@ -1438,14 +1438,13 @@ public:
 		float GenNotifyMs = 0.0f;   // apply: OnChunkGenerationComplete (queues + neighbors + delegates)
 		int32 GenApplyCount = 0;    // completions applied this tick
 
-		// Meshing sub-phases (MeshingMs = tick + launch + apply)
-		float MeshTickMs = 0.0f;    // Mesher->Tick: GPU meshers poll readbacks here
+		// Meshing sub-phases (MeshingMs = launch + apply)
 		float MeshLaunchMs = 0.0f;  // ProcessMeshingQueue: snapshot + slices + dispatch
 		float MeshApplyMs = 0.0f;   // ProcessCompletedAsyncMeshes
 
 		// Launch-path breakdown (subsets of MeshLaunchMs)
 		float MeshSnapshotMs = 0.0f;  // voxel-data snapshot copy + edit merge
-		float MeshDispatchMs = 0.0f;  // LaunchAsyncMeshGeneration (worker handoff for DC/MC GPU)
+		float MeshDispatchMs = 0.0f;  // LaunchAsyncMeshGeneration (worker handoff)
 		int32 MeshLaunchCount = 0;    // mesh jobs launched this tick
 
 		// Seam pipeline (seam-ownership P1+): TickSeamScheduler total — registry scheduling,
@@ -2180,11 +2179,10 @@ protected:
 	uint64 SeamTickCounter = 0;
 
 	/**
-	 * Dedicated CPU mesher for seam jobs (created lazily when the pipeline activates), matching
+	 * Dedicated mesher for seam jobs (created lazily when the pipeline activates), matching
 	 * the configured meshing mode (CPU DC for Dual Contouring configs, CPU MC for Marching
-	 * Cubes — P3). Seam jobs ALWAYS mesh on the CPU worker pool — with a GPU main mesher the
-	 * interior meshes route here too (voxel.Seam.CPUInteriorRouting). Seam strips are tiny, so
-	 * CPU meshing them is cheap; a dedicated instance also keeps their Config stable.
+	 * Cubes — P3, cubic since M5). Seam strips are tiny, so meshing them is cheap; a dedicated
+	 * instance keeps their Config stable.
 	 */
 	TUniquePtr<IVoxelMesher> SeamMesher;
 

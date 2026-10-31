@@ -113,35 +113,8 @@ public:
 		const FVoxelCornerSeamRequest& SeamRequest,
 		FChunkMeshData& OutMeshData) override;
 
-	virtual FVoxelMeshingHandle GenerateMeshAsync(
-		const FVoxelMeshingRequest& Request,
-		FOnVoxelMeshingComplete OnComplete) override;
-
-	virtual bool IsComplete(const FVoxelMeshingHandle& Handle) const override;
-	virtual bool WasSuccessful(const FVoxelMeshingHandle& Handle) const override;
-
-	virtual FRHIBuffer* GetVertexBuffer(const FVoxelMeshingHandle& Handle) override;
-	virtual FRHIBuffer* GetIndexBuffer(const FVoxelMeshingHandle& Handle) override;
-	virtual bool GetBufferCounts(
-		const FVoxelMeshingHandle& Handle,
-		uint32& OutVertexCount,
-		uint32& OutIndexCount) const override;
-	virtual bool GetRenderData(
-		const FVoxelMeshingHandle& Handle,
-		FChunkRenderData& OutRenderData) override;
-	virtual bool ReadbackToCPU(
-		const FVoxelMeshingHandle& Handle,
-		FChunkMeshData& OutMeshData) override;
-
-	virtual void ReleaseHandle(const FVoxelMeshingHandle& Handle) override;
-	virtual void ReleaseAllHandles() override;
-
 	virtual void SetConfig(const FVoxelMeshingConfig& Config) override;
 	virtual const FVoxelMeshingConfig& GetConfig() const override;
-
-	virtual bool GetStats(
-		const FVoxelMeshingHandle& Handle,
-		FVoxelMeshingStats& OutStats) const override;
 
 	virtual FString GetMesherTypeName() const override { return TEXT("CPU Dual Contouring"); }
 
@@ -284,14 +257,4 @@ private:
 
 	bool bIsInitialized = false;
 	FVoxelMeshingConfig Config;
-	std::atomic<uint64> NextRequestId{1};
-
-	struct FCachedResult
-	{
-		FChunkMeshData MeshData;
-		FVoxelMeshingStats Stats;
-		bool bSuccess = false;
-	};
-	TMap<uint64, FCachedResult> CachedResults;
-	mutable FCriticalSection CacheLock;
 };

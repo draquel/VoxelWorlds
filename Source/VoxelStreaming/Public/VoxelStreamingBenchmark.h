@@ -151,7 +151,7 @@ private:
 		float RenderMs, CollMs, ScatMs;
 		float GenLaunchMs, GenPollMs, GenApplyMs, GenStoreMs, GenNotifyMs;
 		int32 GenApplyCount;
-		float MeshTickMs, MeshLaunchMs, MeshApplyMs;
+		float MeshLaunchMs, MeshApplyMs;
 		float MeshSnapMs, MeshDispMs;
 		int32 MeshLaunchCount;
 		float RendMeshMs, RendSubRendMs, RendSubScatMs, RendSubWatMs;
