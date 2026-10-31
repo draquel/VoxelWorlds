@@ -230,18 +230,10 @@ public:
 	float WaterRadius = 100000.0f;
 
 	/**
-	 * Show a visual water plane in the world.
-	 * Creates a simple static mesh plane at the water level for visualization.
-	 * Only used as fallback when WaterMeshMaterial is not set.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water", meta = (EditCondition = "bEnableWaterLevel"))
-	bool bShowWaterPlane = true;
-
-	/**
 	 * Material for per-chunk water surface rendering.
 	 * Should use translucent or Single Layer Water shading model.
 	 * When set, each chunk generates its own cave-aware water mesh (no water inside caves).
-	 * If null, falls back to single water plane (bShowWaterPlane) which renders water everywhere.
+	 * If null, no water is drawn (the demo actor's fallback plane aside: AVoxelDemoActor::bShowWaterPlane).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water", meta = (EditCondition = "bEnableWaterLevel"))
 	TObjectPtr<UMaterialInterface> WaterMeshMaterial;

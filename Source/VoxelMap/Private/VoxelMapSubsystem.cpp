@@ -9,7 +9,6 @@
 #include "VoxelBiomeSnapshot.h"
 #include "VoxelMaterialAtlas.h"
 #include "VoxelSurfaceQuery.h"
-#include "VoxelWorldTestActor.h"
 #include "VoxelCoordinates.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelCPUNoiseGenerator.h"
@@ -371,19 +370,14 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 	// actual terrain textures) over the material registry's hardcoded debug palette, so map
 	// colors read like the world does. Falls back per-material inside GetMapColor.
 	{
-		const UVoxelMaterialAtlas* Atlas = nullptr;
-		if (const AVoxelWorldTestActor* WorldActor = Cast<AVoxelWorldTestActor>(ChunkMgr->GetOwner()))
-		{
-			Atlas = WorldActor->MaterialAtlas;
-		}
-
+		const UVoxelMaterialAtlas* Atlas = ChunkMgr->GetMaterialAtlas();
 		if (Atlas)
 		{
 			Atlas->BuildMapPalette(CachedMaterialPalette);
 		}
 		else
 		{
-			// No atlas reachable (custom world actor): registry palette for every material.
+			// No atlas: registry palette for every material.
 			CachedMaterialPalette.SetNumUninitialized(256);
 			for (int32 i = 0; i < 256; ++i)
 			{

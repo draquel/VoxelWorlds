@@ -95,7 +95,7 @@ After extensive debugging, the project switched to using Epic's **FLocalVertexFa
 ### Architecture Overview
 
 ```
-AVoxelWorldTestActor
+AVoxelWorldActor
     │
     ├── UVoxelChunkManager (component)
     │   └── Coordinates chunk streaming

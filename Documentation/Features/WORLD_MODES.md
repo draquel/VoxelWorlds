@@ -51,7 +51,7 @@ placement all use it. `MakeFingerprint` and `GenerationVersion` describe the wor
 **Reaching it from game code and Blueprint.** The chunk manager (a component of the world actor) exposes the configured
 mode's bounds and frame as `BlueprintPure` functions in the `Voxel|World` category: `IsInsideWorld`, `GetWorldBounds`,
 `GetUpVectorAt`, `GetAltitudeAt`, `WorldToSurface`, `SurfaceToWorld` and `GetWorldFingerprint`. VoxelWorlds does not
-depend on the game plugins; they call these through `AVoxelWorldTestActor::GetChunkManager()`, as they already do for
+depend on the game plugins; they call these through `AVoxelWorldActor::GetChunkManager()`, as they alreadydo for
 the surface queries.
 
 ---
@@ -650,7 +650,7 @@ it by the `VoxelWorlds.Generation.GPUvsCPU*` parity tests:
 World mode can only be set at initialization time. Changing modes requires reinitializing the voxel world:
 
 ```cpp
-void AVoxelWorldTestActor::InitializeVoxelWorld()
+void AVoxelWorldActor::InitializeVoxelWorld()
 {
     // Get configuration (mode is set in Configuration asset or defaults)
     UVoxelWorldConfiguration* Config = Configuration;
