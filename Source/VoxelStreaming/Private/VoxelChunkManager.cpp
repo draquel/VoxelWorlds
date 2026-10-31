@@ -1657,11 +1657,67 @@ void UVoxelChunkManager::Initialize(
 		Configuration->VoxelSize, Configuration->ChunkSize);
 }
 
+// ==================== Finding the manager ====================
+
+namespace
+{
+	// The last manager Find returned (code review CR2): validated against the caller's world and the initialized
+	// requirement on every hit, dropped by that manager's Shutdown.
+	TWeakObjectPtr<UVoxelChunkManager> GLastFoundChunkManager;
+}
+
+UVoxelChunkManager* UVoxelChunkManager::Find(const UWorld* World, bool bRequireInitialized)
+{
+	if (!World)
+	{
+		return nullptr;
+	}
+	if (UVoxelChunkManager* Cached = GLastFoundChunkManager.Get())
+	{
+		if (Cached->GetWorld() == World && (!bRequireInitialized || Cached->IsInitialized()))
+		{
+			return Cached;
+		}
+	}
+	GLastFoundChunkManager.Reset();
+	for (TActorIterator<AActor> It(const_cast<UWorld*>(World)); It; ++It)
+	{
+		UVoxelChunkManager* Candidate = It->FindComponentByClass<UVoxelChunkManager>();
+		if (Candidate && (!bRequireInitialized || Candidate->IsInitialized()))
+		{
+			GLastFoundChunkManager = Candidate;
+			return Candidate;
+		}
+	}
+	return nullptr;
+}
+
+TArray<UVoxelChunkManager*> UVoxelChunkManager::FindAll(const UWorld* World)
+{
+	TArray<UVoxelChunkManager*> Managers;
+	if (!World)
+	{
+		return Managers;
+	}
+	for (TActorIterator<AActor> It(const_cast<UWorld*>(World)); It; ++It)
+	{
+		if (UVoxelChunkManager* Candidate = It->FindComponentByClass<UVoxelChunkManager>())
+		{
+			Managers.Add(Candidate);
+		}
+	}
+	return Managers;
+}
+
 void UVoxelChunkManager::Shutdown()
 {
 	if (!bIsInitialized)
 	{
 		return;
+	}
+	if (GLastFoundChunkManager.Get() == this)
+	{
+		GLastFoundChunkManager.Reset();
 	}
 
 	// Clear water tile state
@@ -8905,15 +8961,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 			return;
 		}
 
-		UVoxelChunkManager* CM = nullptr;
-		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
-		{
-			if (UVoxelChunkManager* Found = It->FindComponentByClass<UVoxelChunkManager>())
-			{
-				CM = Found;
-				break;
-			}
-		}
+		UVoxelChunkManager* CM = UVoxelChunkManager::Find(TargetWorld, /*bRequireInitialized*/ false);
 		if (!CM)
 		{
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: no UVoxelChunkManager found in the game world"));
@@ -9161,9 +9209,8 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelRemeshAllCmd(
 
 		int32 Managers = 0;
 		int32 TotalDirtied = 0;
-		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
 		{
-			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
 			if (!CM) { continue; }
 			++Managers;
 			TArray<FIntVector> Loaded;
@@ -9206,9 +9253,8 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterStatsCmd(
 		}
 
 		int32 Managers = 0;
-		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
 		{
-			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
 			if (!CM) { continue; }
 			UVoxelScatterManager* ScatterMgr = CM->GetScatterManager();
 			if (!ScatterMgr) { continue; }
@@ -9277,9 +9323,8 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterEditAuditCmd(
 			return;
 		}
 		const int32 MaxLines = Args.Num() > 0 ? FMath::Max(0, FCString::Atoi(*Args[0])) : 20;
-		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
 		{
-			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
 			const UVoxelScatterManager* ScatterMgr = CM ? CM->GetScatterManager() : nullptr;
 			const UVoxelWorldConfiguration* Config = CM ? CM->GetConfiguration() : nullptr;
 			const UVoxelEditManager* EditMgr = CM ? CM->GetEditManager() : nullptr;
@@ -9389,9 +9434,8 @@ static void RunDebugSystemEdit(const TArray<FString>& InArgs, UWorld* World, boo
 	// voxel.Edit.System's snap: "edge" moves the centre onto the chunk edge nearest it that runs closest to local up (the two
 	// other axes onto chunk boundaries), "corner" onto the nearest chunk corner.
 	const FString Snap = (!bLayers && Args.Num() > 5) ? Args[5].ToLower() : FString(TEXT("none"));
-	for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+	for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
 	{
-		UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
 		UVoxelEditManager* EditMgr = CM ? CM->GetEditManager() : nullptr;
 		const UVoxelWorldConfiguration* Config = CM ? CM->GetConfiguration() : nullptr;
 		if (!EditMgr || !Config)
@@ -9522,9 +9566,8 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelEditMeshWorkCmd(
 			return;
 		}
 		const bool bReset = Args.Num() > 0 && Args[0].Equals(TEXT("reset"), ESearchCase::IgnoreCase);
-		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
 		{
-			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
 			if (!CM)
 			{
 				continue;
@@ -9582,9 +9625,8 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 			Column = FVector(FCString::Atod(*Args[0]), FCString::Atod(*Args[1]), 0.0);
 			bColumn = true;
 		}
-		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
 		{
-			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
 			if (!CM)
 			{
 				continue;
@@ -9640,9 +9682,9 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterTileAuditCmd(
 		}
 		const int32 MaxList = Args.Num() > 0 ? FMath::Max(0, FCString::Atoi(*Args[0])) : 8;
 		const FIntPoint Detail = Args.Num() >= 3 ? FIntPoint(FCString::Atoi(*Args[1]), FCString::Atoi(*Args[2])) : FIntPoint(MAX_int32, MAX_int32);
-		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
 		{
-			if (UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>())
+			if (CM)
 			{
 				CM->AuditWaterTiles(MaxList, Detail);
 			}
@@ -9661,9 +9703,9 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterResendTilesCmd(
 		{
 			return;
 		}
-		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
 		{
-			if (UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>())
+			if (CM)
 			{
 				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.ResendTiles: %d tile(s) marked dirty"), CM->ResendWaterTiles());
 			}
@@ -9699,9 +9741,8 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelFarCompressionStatsCmd(
 		}
 
 		int32 Managers = 0;
-		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
 		{
-			UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
 			if (!CM) { continue; }
 			++Managers;
 			const UVoxelChunkManager::FVoxelMemoryStats M = CM->GetVoxelMemoryStats();
@@ -9744,9 +9785,9 @@ static FAutoConsoleCommand GVoxelFarCompressionDecodesCmd(
 				{
 					continue;
 				}
-				for (TActorIterator<AActor> It(World); It; ++It)
+				for (const UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(World))
 				{
-					if (const UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>())
+					if (CM)
 					{
 						UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.FarCompression.Decodes: snapshot decodes on workers (session): %lld"),
 							CM->GetSnapshotDecodeCount());
@@ -9782,9 +9823,9 @@ static FAutoConsoleCommand GVoxelSnapshotStatsCmd(
 			{
 				continue;
 			}
-			for (TActorIterator<AActor> It(World); It; ++It)
+			for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(World))
 			{
-				if (UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>())
+				if (CM)
 				{
 					if (bReset)
 					{
@@ -9834,9 +9875,8 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelAuditResidencyCmd(
 		}
 
 		int32 Managers = 0;
-		for (TActorIterator<AActor> It(TargetWorld); It; ++It)
+		for (const UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
 		{
-			const UVoxelChunkManager* CM = It->FindComponentByClass<UVoxelChunkManager>();
 			if (!CM) { continue; }
 			++Managers;
 			FString Report;
@@ -9845,7 +9885,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelAuditResidencyCmd(
 			Report.ParseIntoArrayLines(Lines);
 			for (const FString& Line : Lines)
 			{
-				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Stream.AuditResidency [%s] %s"), *It->GetName(), *Line);
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Stream.AuditResidency [%s] %s"), *GetNameSafe(CM->GetOwner()), *Line);
 			}
 		}
 		if (Managers == 0)

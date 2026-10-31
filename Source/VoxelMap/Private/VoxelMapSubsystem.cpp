@@ -323,17 +323,7 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 		return false;
 	}
 
-	// Search for chunk manager
-	UVoxelChunkManager* ChunkMgr = nullptr;
-	for (TActorIterator<AActor> It(const_cast<UWorld*>(World)); It; ++It)
-	{
-		ChunkMgr = It->FindComponentByClass<UVoxelChunkManager>();
-		if (ChunkMgr && ChunkMgr->IsInitialized())
-		{
-			break;
-		}
-		ChunkMgr = nullptr;
-	}
+	UVoxelChunkManager* ChunkMgr = UVoxelChunkManager::Find(World);
 
 	if (!ChunkMgr)
 	{
