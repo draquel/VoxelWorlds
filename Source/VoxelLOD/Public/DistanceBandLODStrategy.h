@@ -50,11 +50,6 @@ public:
 		const FLODQueryContext& Context
 	) const override;
 
-	virtual float GetLODMorphFactor(
-		const FIntVector& ChunkCoord,
-		const FLODQueryContext& Context
-	) const override;
-
 	virtual TArray<FChunkLODRequest> GetVisibleChunks(
 		const FLODQueryContext& Context
 	) const override;
@@ -89,10 +84,6 @@ public:
 
 	/** Set LOD bands configuration. The next Update rebuilds the balanced LOD cache. */
 	void SetLODBands(const TArray<FLODBand>& InBands);
-
-	/** Enable/disable LOD morphing */
-	void SetMorphingEnabled(bool bEnabled) { bEnableMorphing = bEnabled; }
-	bool IsMorphingEnabled() const { return bEnableMorphing; }
 
 	/** Enable/disable view frustum culling */
 	void SetFrustumCullingEnabled(bool bEnabled) { bEnableFrustumCulling = bEnabled; }
@@ -578,9 +569,6 @@ protected:
 
 	/** Master LOD enable flag - when false, all chunks use LOD 0 */
 	bool bEnableLOD = true;
-
-	/** Enable smooth LOD transitions via vertex morphing */
-	bool bEnableMorphing = true;
 
 	/** Enable view frustum culling for chunk visibility */
 	bool bEnableFrustumCulling = true;

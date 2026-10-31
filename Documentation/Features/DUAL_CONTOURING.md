@@ -362,7 +362,6 @@ Both meshers share:
 - Triplanar UV computation (dominant-axis projection)
 - Material and biome assignment from solid voxels
 - Neighbor data handling (face, edge, corner slices)
-- Renderer compatibility (both Custom VF and PMC)
 
 ### When to Use Which
 

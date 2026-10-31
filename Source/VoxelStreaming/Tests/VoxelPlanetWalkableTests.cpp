@@ -41,8 +41,6 @@ namespace VoxelPlanetWalkableTestUtils
 		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override {}
 		virtual void RemoveChunk(const FIntVector& ChunkCoord) override {}
 		virtual void ClearAllChunks() override {}
-		virtual void SetChunkVisible(const FIntVector& ChunkCoord, bool bVisible) override {}
-		virtual void SetAllChunksVisible(bool bVisible) override {}
 		virtual void SetMaterial(UMaterialInterface* Material) override {}
 		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
 		virtual void UpdateMaterialParameters() override {}
@@ -50,7 +48,6 @@ namespace VoxelPlanetWalkableTestUtils
 		virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 SeamSlot) override {}
 		virtual void ClearAllSeamMeshes() override {}
 		virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override {}
-		virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override {}
 		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return false; }
 		virtual int32 GetLoadedChunkCount() const override { return 0; }
 		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override {}

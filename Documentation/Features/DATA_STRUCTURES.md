@@ -43,8 +43,7 @@ struct FChunkDescriptor {
     FBox Bounds;
     bool bIsDirty;
     bool bHasEdits;
-    float MorphFactor;
-    int32 GenerationSeed;       // int32 for Blueprint compatibility
+    int32 GenerationSeed;// int32 for Blueprint compatibility
     EChunkState State;          // Streaming lifecycle state
 };
 ```
@@ -96,7 +95,6 @@ struct FChunkLODRequest {
     FIntVector ChunkCoord;
     int32 LODLevel;
     float Priority;
-    float MorphFactor;
 };
 ```
 
@@ -110,7 +108,6 @@ struct FLODBand {
     int32 LODLevel;
     int32 VoxelStride;
     int32 ChunkSize;
-    float MorphRange;
 };
 ```
 

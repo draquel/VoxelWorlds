@@ -30,7 +30,7 @@ VoxelWorlds is split into focused runtime modules (see `Source/`):
 | `VoxelGeneration` | CPU/GPU noise, world modes, tree injection |
 | `VoxelMeshing` | Cubic, Marching Cubes, Dual Contouring meshers (CPU + GPU); water mesher |
 | `VoxelLOD` | Pluggable LOD strategy (distance-band) |
-| `VoxelRendering` | Scene proxy, custom renderer (FLocalVertexFactory) + PMC fallback, world component |
+| `VoxelRendering` | Scene proxy, the FLocalVertexFactory renderer, world component |
 | `VoxelStreaming` | Chunk manager, collision manager, water propagation, benchmark, test actor |
 | `VoxelScatter` | Foliage/scatter placement and HISM rendering |
 | `VoxelMap` | Map/minimap subsystem |

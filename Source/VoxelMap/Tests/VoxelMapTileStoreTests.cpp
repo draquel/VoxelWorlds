@@ -154,12 +154,9 @@ namespace VoxelMapTileStoreTest
 		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override {}
 		virtual void RemoveChunk(const FIntVector& ChunkCoord) override {}
 		virtual void ClearAllChunks() override {}
-		virtual void SetChunkVisible(const FIntVector& ChunkCoord, bool bVisible) override {}
-		virtual void SetAllChunksVisible(bool bVisible) override {}
 		virtual void SetMaterial(UMaterialInterface* Material) override {}
 		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
 		virtual void UpdateMaterialParameters() override {}
-		virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override {}
 		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return false; }
 		virtual int32 GetLoadedChunkCount() const override { return 0; }
 		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override { OutChunks.Reset(); }

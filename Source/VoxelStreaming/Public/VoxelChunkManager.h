@@ -67,10 +67,6 @@ struct FVoxelChunkState
 	UPROPERTY()
 	int32 MeshedLODLevel = 0;
 
-	/** Current morph factor for LOD transitions */
-	UPROPERTY()
-	float MorphFactor = 0.0f;
-
 	/** Frame number when state last changed */
 	UPROPERTY()
 	int64 LastStateChangeFrame = 0;
@@ -1388,7 +1384,6 @@ public:
 	{
 		int64 VoxelDataBytes = 0;      // ChunkStates voxel data
 		int64 EditDataBytes = 0;       // Edit manager memory
-		int64 RendererCPUBytes = 0;    // Renderer CPU-side memory
 		int64 RendererGPUBytes = 0;    // Renderer GPU memory
 		int64 CollisionBytes = 0;      // Collision manager memory
 		int64 ScatterBytes = 0;        // Scatter manager + renderer memory
@@ -1707,12 +1702,6 @@ protected:
 	 * @return Number of candidates: tracked chunks whose committed LOD differs from the strategy's.
 	 */
 	int32 EvaluateLODLevelChanges(const FLODQueryContext& Context, int32& OutQueued, bool& OutCapReached);
-
-	/**
-	 * Update LOD morph factors for loaded chunks.
-	 * Only morph factor interpolation — no level change detection.
-	 */
-	void UpdateLODMorphFactors(const FLODQueryContext& Context);
 
 	// ==================== Chunk State Management ====================
 
@@ -2351,12 +2340,6 @@ private:
 	FVector LastStreamingUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 
 	/**
-	 * Last position where LOD transitions were updated.
-	 * LOD updates are more sensitive to position changes than streaming decisions.
-	 */
-	FVector LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
-
-	/**
 	 * Flag to force streaming update on next tick.
 	 * Set by ForceStreamingUpdate(), cleared after use.
 	 */
@@ -2364,12 +2347,6 @@ private:
 
 	/** When EvaluateLODLevelChanges runs (viewer movement, cap left-overs, idle sweep); see FVoxelLODEvalSchedule. */
 	FVoxelLODEvalSchedule LODEvalSchedule;
-
-	/**
-	 * Threshold for LOD morph factor update position delta (squared).
-	 * Morph factors should update when viewer moves ~100 units.
-	 */
-	static constexpr float LODUpdateThresholdSq = 100.0f * 100.0f;  // 100 units
 
 	// ==================== Statistics ====================
 

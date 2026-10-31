@@ -46,12 +46,9 @@ namespace VoxelTesting
 		}
 		virtual void RemoveChunk(const FIntVector& ChunkCoord) override { ChunkMeshes.Remove(ChunkCoord); }
 		virtual void ClearAllChunks() override { ChunkMeshes.Reset(); }
-		virtual void SetChunkVisible(const FIntVector& ChunkCoord, bool bVisible) override {}
-		virtual void SetAllChunksVisible(bool bVisible) override {}
 		virtual void SetMaterial(UMaterialInterface* Material) override {}
 		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
 		virtual void UpdateMaterialParameters() override {}
-		virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override {}
 		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return ChunkMeshes.Contains(ChunkCoord); }
 		virtual int32 GetLoadedChunkCount() const override { return ChunkMeshes.Num(); }
 		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override { ChunkMeshes.GetKeys(OutChunks); }

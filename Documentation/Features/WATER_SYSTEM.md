@@ -29,7 +29,6 @@ The water system renders water surfaces where water-flagged air voxels exist in 
 - 2D tile-based water meshing (decoupled from 3D terrain chunks)
 - 3-cell dilation at shorelines to tuck water under terrain
 - Greedy rectangle merging for minimal quad count
-- Dual renderer support (Custom VF GPU renderer + PMC fallback)
 - Separate water material (translucent / Single Layer Water)
 
 ---
@@ -63,11 +62,9 @@ VoxelMeshing
 
 VoxelRendering
     └── IVoxelMeshRenderer (interface)
-        ├── FVoxelCustomVFRenderer (GPU) ← NEW
-        │   └── UVoxelWorldComponent
-        │       └── FVoxelSceneProxy (second render pass)
-        └── FVoxelPMCRenderer (CPU fallback)
-            └── Dedicated PMC per water tile
+        └── FVoxelCustomVFRenderer
+            └── UVoxelWorldComponent
+                └── FVoxelSceneProxy (second render pass)
 ```
 
 ---
@@ -462,18 +459,6 @@ FMaterialRelevance WaterMaterialRelevance;
 
 **Buffer creation**: Water vertices go through the same `FVoxelVertex → FVoxelLocalVertex` conversion pipeline as terrain, creating identical GPU buffer structures (vertex, color SRV, tangent SRV, texcoord SRV, index buffer, FLocalVertexFactory).
 
-### PMC Renderer (FVoxelPMCRenderer)
-
-**Files**: `VoxelPMCRenderer.h/.cpp`
-
-Creates one `UProceduralMeshComponent` per water tile:
-- Attached to the container actor
-- Water material applied separately from terrain material
-- Single mesh section containing all water quads for the tile
-- Component pooling for reuse on tile removal/recreation
-
----
-
 ## Configuration
 
 **File**: `VoxelCore/Public/VoxelWorldConfiguration.h`
@@ -532,8 +517,7 @@ project does: the mark pass costs about 0.02 ms more at 1280 x 720.
     │   ├─ Greedy rectangle merge
     │   └─ Emit water quads (MaterialID=254)
     └─ MeshRenderer->UpdateWaterTileMesh()
-        ├─ GPU: ConvertToVoxelVertices → ENQUEUE_RENDER_COMMAND → GPU buffers
-        └─ PMC: CreateMeshSection on dedicated component
+        └─ ConvertToVoxelVertices → ENQUEUE_RENDER_COMMAND → GPU buffers
 ```
 
 ### Terrain Edit to Water Fill
@@ -647,4 +631,4 @@ WORLD_MODES.md, "Beyond the edge".
 
 ---
 
-**Status**: Implementation Complete (PMC + GPU Renderer)
+**Status**: Implementation Complete

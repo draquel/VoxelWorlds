@@ -6,68 +6,44 @@
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Hybrid Architecture](#hybrid-architecture)
+2. [Architecture](#architecture)
 3. [Vertex Factory Evolution](#vertex-factory-evolution)
 4. [Current Implementation](#current-implementation)
 5. [Renderer Interface](#renderer-interface)
 6. [Custom Vertex Factory](#custom-vertex-factory)
-7. [PMC Renderer](#pmc-renderer)
-8. [LOD Morphing System](#lod-morphing-system)
-9. [Vertex Color Encoding](#vertex-color-encoding)
-10. [Water Tile Rendering](#water-tile-rendering)
-11. [Collision System](#collision-system)
-12. [Integration Flow](#integration-flow)
-13. [Performance Comparison](#performance-comparison)
-14. [Implementation Guide](#implementation-guide)
+7. [Vertex Color Encoding](#vertex-color-encoding)
+8. [Water Tile Rendering](#water-tile-rendering)
+9. [Collision System](#collision-system)
+10. [Integration Flow](#integration-flow)
+11. [Implementation Guide](#implementation-guide)
 
 ---
 
 ## Overview
 
-The rendering system uses a **hybrid architecture** with two implementations of the `IVoxelMeshRenderer` interface:
-
-1. **Custom Vertex Factory** (Runtime) - GPU-driven, maximum performance
-2. **ProceduralMeshComponent** (Editor/Tools) - Simple fallback, full UE compatibility
-
-This design allows shipping with optimized runtime performance while maintaining editor tool simplicity.
+The rendering system has one implementation of the `IVoxelMeshRenderer` interface, `FVoxelCustomVFRenderer`: a
+`UVoxelWorldComponent` per render region, whose `FVoxelSceneProxy` uploads each chunk, seam and water mesh into
+UE's `FLocalVertexFactory` and crossfades mesh swaps. The `ProceduralMeshComponent` fallback renderer the design
+started with was deleted in code review CR1 (D-CR7): no asset or script ever selected it, and it had not implemented
+the seam, fade, lost-data or water-draw members since seam ownership. The streaming tests record into a stub.
 
 ### Design Goals
 
-- **Performance**: Zero CPU overhead for runtime rendering
-- **Flexibility**: Swappable renderer implementations
-- **Compatibility**: Full Unreal Engine feature support where needed
-- **Maintainability**: Clean interface separation
+- **Performance**: no CPU-side copy of a mesh after its upload
+- **Maintainability**: one renderer behind one interface, the chunk manager's view of it
 
 ---
 
-## Hybrid Architecture
+## Architecture
 
 ```
 IVoxelMeshRenderer (Interface)
     │
-    ├── FVoxelCustomVFRenderer (Runtime)
-    │   ├── FLocalVertexFactory (per-chunk; see "Vertex Factory Evolution" below)
-    │   ├── FVoxelSceneProxy (Scene integration)
-    │   └── GPU Buffers (Direct compute → render)
-    │
-    └── FVoxelPMCRenderer (Editor/Tools)
-        ├── ProceduralMeshComponents
-        └── CPU-side mesh generation
+    └── FVoxelCustomVFRenderer
+        ├── UVoxelWorldComponent (one per render region, WM-BP7)
+        ├── FVoxelSceneProxy (Scene integration)
+        └── FLocalVertexFactory per chunk, seam and water-tile mesh
 ```
-
-### When to Use Each
-
-**Custom Vertex Factory**:
-- ✅ Packaged game (runtime)
-- ✅ Play-in-editor (PIE)
-- ✅ Maximum performance needed
-- ✅ Large-scale worlds (1000+ chunks)
-
-**PMC Renderer**:
-- ✅ Editor viewport (non-PIE)
-- ✅ Debugging mesh generation
-- ✅ Prototyping/development
-- ✅ Tools that need mesh data on CPU
 
 ---
 
@@ -126,13 +102,10 @@ AVoxelWorldTestActor
     │
     └── IVoxelMeshRenderer (interface)
         │
-        ├── FVoxelCustomVFRenderer (GPU-driven)
-        │   └── UVoxelWorldComponent
-        │       └── FVoxelSceneProxy
-        │           └── FLocalVertexFactory (per chunk)
-        │
-        └── FVoxelPMCRenderer (CPU fallback)
-            └── ProceduralMeshComponents
+        └── FVoxelCustomVFRenderer
+            └── UVoxelWorldComponent (per render region)
+                └── FVoxelSceneProxy
+                    └── FLocalVertexFactory (per mesh)
 ```
 
 ### Key Components
@@ -214,64 +187,6 @@ AVoxelWorldTestActor
 
 ---
 
-## LOD Morphing System
-
-### Material Parameter Collection Approach
-
-Since FLocalVertexFactory doesn't support custom uniform buffers for per-chunk data, LOD morphing is achieved via **Material Parameter Collection (MPC)**:
-
-1. **MPC Asset** (`MPC_VoxelLOD`) contains scalar parameters:
-   - `LODStartDistance`: Distance where MorphFactor = 0
-   - `LODEndDistance`: Distance where MorphFactor = 1
-   - `LODInvRange`: Pre-calculated 1/(End-Start) for efficiency
-
-2. **Component updates MPC** via `UVoxelWorldComponent::UpdateLODParameterCollection()`
-
-3. **Material calculates per-pixel MorphFactor**:
-   ```hlsl
-   Distance = length(WorldPosition - CameraPosition)
-   MorphFactor = saturate((Distance - LODStartDistance) * LODInvRange)
-   ```
-
-### Configuration Pipeline
-
-```
-AVoxelWorldTestActor (Details panel)
-    │
-    ├── LODParameterCollection (MPC asset reference)
-    ├── LODStartDistance (float)
-    └── LODEndDistance (float)
-    │
-    ↓ InitializeVoxelWorld()
-    │
-IVoxelMeshRenderer::SetLODParameterCollection()
-    │
-    ↓
-FVoxelCustomVFRenderer::SetLODParameterCollection()
-    │
-    ↓
-UVoxelWorldComponent::SetLODParameterCollection()
-    │
-    ↓
-UMaterialParameterCollectionInstance::SetScalarParameterValue()
-    │
-    ↓
-Material reads via CollectionParameter nodes
-```
-
-### Material Setup
-
-In your voxel material:
-1. Add **CollectionParameter** nodes referencing `MPC_VoxelLOD`
-2. Calculate distance: `Length(WorldPosition - CameraPositionWS)`
-3. Compute MorphFactor: `Saturate((Distance - LODStartDistance) * LODInvRange)`
-4. Use MorphFactor for:
-   - Dithered opacity (masked material)
-   - Detail texture fading
-   - Normal map intensity reduction
-
----
-
 ## Vertex Color Encoding
 
 ### Channel Layout
@@ -313,8 +228,8 @@ Note: Chunks must be re-meshed after changing debug mode.
 /**
  * Voxel Mesh Renderer Interface
  * 
- * Abstract interface for rendering voxel chunks. Implementations handle
- * the actual rendering strategy (Custom VF vs PMC).
+ * Abstract interface for rendering voxel chunks: what the chunk manager
+ * asks of the renderer.
  * 
  * Thread Safety: All methods called from game thread only.
  */
@@ -369,19 +284,7 @@ public:
      * Update material parameters (e.g., atlas texture).
      */
     virtual void UpdateMaterialParameters() = 0;
-    
-    // ==================== LOD Transitions ====================
-    
-    /**
-     * Update LOD transition morph factor for a chunk.
-     * @param ChunkCoord Chunk coordinate
-     * @param MorphFactor Blend factor 0-1 (0=current LOD, 1=next LOD)
-     */
-    virtual void UpdateLODTransition(
-        FIntVector ChunkCoord, 
-        float MorphFactor
-    ) = 0;
-    
+
     // ==================== Queries ====================
     
     /**
@@ -417,6 +320,10 @@ public:
 
 ## Custom Vertex Factory
 
+> The code in this section is the original design's custom `FVoxelVertexFactory` with a per-chunk uniform buffer; the
+> shipped renderer uses `FLocalVertexFactory` (see "Vertex Factory Evolution") and has no LOD morph uniform: LOD flips
+> crossfade between meshes instead (code review CR1 deleted the unused morph chain, REND-05).
+
 The Custom Vertex Factory implementation provides maximum performance by keeping all data on GPU and avoiding CPU-GPU transfers.
 
 ### Architecture
@@ -443,7 +350,7 @@ Rendering (vertex shader reads GPU buffers)
 /**
  * Optimized vertex format for voxel rendering.
  * 
- * Total: 28 bytes per vertex (vs PMC's 48+ bytes)
+ * Total: 28 bytes per vertex
  * Packed data reduces memory bandwidth and cache misses.
  */
 struct FVoxelVertex {
@@ -922,183 +829,15 @@ FVoxelVertexFactoryInterpolantsVSToPS Main(FVoxelVertexFactoryInput Input) {
 
 ---
 
-## PMC Renderer
-
-The ProceduralMeshComponent renderer provides a simpler fallback implementation for editor tools and debugging.
-
-### Implementation
-
-```cpp
-/**
- * ProceduralMeshComponent-based voxel renderer.
- * 
- * Simpler implementation for editor and tools. Requires CPU-side mesh data.
- */
-class FVoxelPMCRenderer : public IVoxelMeshRenderer {
-public:
-    virtual void Initialize(UWorld* World, const FVoxelWorldConfiguration& Config) override {
-        OwnerWorld = World;
-        VoxelMaterial = Config.VoxelMaterial;
-        
-        // Pre-create component pool
-        for (int32 i = 0; i < InitialPoolSize; ++i) {
-            ComponentPool.Enqueue(CreatePMC());
-        }
-    }
-    
-    virtual void UpdateChunkMesh(const FChunkRenderData& RenderData) override {
-        // Must readback from GPU (slow!)
-        TArray<FVector> Vertices;
-        TArray<int32> Triangles;
-        TArray<FVector> Normals;
-        TArray<FVector2D> UVs;
-        TArray<FColor> VertexColors;
-        TArray<FProcMeshTangent> Tangents;
-        
-        // Readback compute buffers to CPU
-        ReadbackComputeBuffers(RenderData, Vertices, Triangles, Normals, UVs, VertexColors);
-        
-        // Get or create PMC for this chunk
-        UProceduralMeshComponent* PMC = GetOrCreatePMC(RenderData.ChunkCoord);
-        
-        // Create mesh section
-        PMC->CreateMeshSection(
-            0,
-            Vertices,
-            Triangles,
-            Normals,
-            UVs,
-            VertexColors,
-            Tangents,
-            true // Create collision
-        );
-        
-        // Set material
-        PMC->SetMaterial(0, VoxelMaterial);
-        
-        ChunkComponents.Add(RenderData.ChunkCoord, PMC);
-    }
-    
-    virtual void RemoveChunk(FIntVector ChunkCoord) override {
-        if (UProceduralMeshComponent** PMCPtr = ChunkComponents.Find(ChunkCoord)) {
-            UProceduralMeshComponent* PMC = *PMCPtr;
-            PMC->ClearAllMeshSections();
-            
-            // Return to pool
-            ComponentPool.Enqueue(PMC);
-            
-            ChunkComponents.Remove(ChunkCoord);
-        }
-    }
-    
-    virtual void UpdateLODTransition(FIntVector ChunkCoord, float MorphFactor) override {
-        // PMC doesn't support LOD morphing - just swap meshes at threshold
-        if (MorphFactor > 0.5f && !ChunkComponents.Contains(ChunkCoord)) {
-            // Regenerate at next LOD
-            // (Handled by chunk manager)
-        }
-    }
-    
-private:
-    /** Owner world */
-    UWorld* OwnerWorld;
-    
-    /** Voxel material */
-    UMaterialInterface* VoxelMaterial;
-    
-    /** Per-chunk PMC instances */
-    TMap<FIntVector, UProceduralMeshComponent*> ChunkComponents;
-    
-    /** PMC pool for reuse */
-    TQueue<UProceduralMeshComponent*> ComponentPool;
-    
-    static constexpr int32 InitialPoolSize = 100;
-    
-    /**
-     * Create new PMC.
-     */
-    UProceduralMeshComponent* CreatePMC() {
-        UProceduralMeshComponent* PMC = NewObject<UProceduralMeshComponent>(OwnerWorld);
-        PMC->bUseAsyncCooking = true;
-        PMC->RegisterComponent();
-        return PMC;
-    }
-    
-    /**
-     * Get existing PMC or create new one.
-     */
-    UProceduralMeshComponent* GetOrCreatePMC(FIntVector ChunkCoord) {
-        if (UProceduralMeshComponent** Existing = ChunkComponents.Find(ChunkCoord)) {
-            return *Existing;
-        }
-        
-        UProceduralMeshComponent* PMC;
-        if (ComponentPool.Dequeue(PMC)) {
-            return PMC;
-        }
-        
-        return CreatePMC();
-    }
-    
-    /**
-     * Readback GPU buffers to CPU arrays.
-     * THIS IS THE BOTTLENECK - avoid in runtime!
-     */
-    void ReadbackComputeBuffers(
-        const FChunkRenderData& RenderData,
-        TArray<FVector>& OutVertices,
-        TArray<int32>& OutTriangles,
-        TArray<FVector>& OutNormals,
-        TArray<FVector2D>& OutUVs,
-        TArray<FColor>& OutVertexColors)
-    {
-        // Read vertex buffer from GPU
-        TArray<FVoxelVertex> GPUVertices;
-        ReadBuffer(RenderData.ComputeVertexBuffer, GPUVertices);
-        
-        // Read index buffer from GPU
-        TArray<uint32> GPUIndices;
-        ReadBuffer(RenderData.ComputeIndexBuffer, GPUIndices);
-        
-        // Convert to PMC format
-        OutVertices.Reserve(GPUVertices.Num());
-        OutNormals.Reserve(GPUVertices.Num());
-        OutUVs.Reserve(GPUVertices.Num());
-        OutVertexColors.Reserve(GPUVertices.Num());
-        
-        for (const FVoxelVertex& Vertex : GPUVertices) {
-            OutVertices.Add(FVector(Vertex.Position));
-            
-            FVector3f Normal;
-            uint8 AO;
-            FVoxelVertex::UnpackNormalAndAO(Vertex.PackedNormalAndAO, Normal, AO);
-            OutNormals.Add(FVector(Normal));
-            
-            OutUVs.Add(FVector2D(Vertex.UV));
-            
-            // Pack AO into vertex color
-            OutVertexColors.Add(FColor(AO, AO, AO, 255));
-        }
-        
-        OutTriangles.Reserve(GPUIndices.Num());
-        for (uint32 Index : GPUIndices) {
-            OutTriangles.Add((int32)Index);
-        }
-    }
-};
-```
-
----
-
 ## Water Tile Rendering
 
-Both renderer implementations support water tile rendering via the `IVoxelMeshRenderer` water tile API. Water tiles are keyed by `FIntVector2` (XY chunk column), separate from terrain chunks keyed by `FIntVector`.
+The renderer draws water tiles through the `IVoxelMeshRenderer` water tile API.Water tiles are keyed by `FIntVector2` (XY chunk column), separate from terrain chunks keyed by `FIntVector`.
 
 See [WATER_SYSTEM.md](WATER_SYSTEM.md) for the full water system architecture (flag storage, propagation, meshing, tile management).
 
 An island's far ocean (WM-E1) is not drawn by the renderer: the chunk manager builds it on its own procedural mesh
 components, using `IVoxelMeshRenderer::GetSurfaceMaterial()` (the material terrain is drawn with: the world component's
-atlas instance for the custom VF renderer, the dynamic instance for the PMC renderer) for its seabed.
+atlas instance) for its seabed.
 
 The far field (a planet's since spherical Phase 6, WM-BP9; a plane's and an island's since the world modes review's
 WM-MP1; [LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field") is not drawn by the renderer either: the chunk manager keeps one
@@ -1164,14 +903,6 @@ FVoxelSceneProxy::GetDynamicMeshElements()
 **GetViewRelevance**: Water material relevance is OR'd with terrain material relevance so the scene proxy correctly reports translucency support when water uses a translucent or Single Layer Water material.
 
 **CreateSceneProxy**: When the scene proxy is recreated, water material is re-synced via `ENQUEUE_RENDER_COMMAND`.
-
-### PMC Water Rendering
-
-The PMC renderer creates one `UProceduralMeshComponent` per water tile:
-- Dedicated PMC attached to the container actor
-- Water material applied separately from terrain material
-- Single mesh section per tile containing all greedy-merged water quads
-- Component pooling for reuse on tile removal/recreation
 
 ### Water Material Requirements
 
@@ -1297,69 +1028,12 @@ private:
     ↓
 ChunkManager::OnChunkMeshingComplete()
     ↓
-    ├→ MeshRenderer->UpdateChunkMesh(RenderData)
-    │   ├→ [Custom VF] Direct GPU buffer binding (zero copy!)
-    │   └→ [PMC] Readback + CreateMeshSection (slow)
+    ├→ MeshRenderer->UpdateChunkMeshFromCPU(ChunkCoord, LOD, MeshData)
+    │   └→ batched upload on the render thread (ProcessBatchUpdate_RenderThread)
     │
     └→ CollisionManager->QueueCollisionUpdate(RenderData)
         └→ Async collision generation (lower LOD)
 ```
-
-### LOD Transition Update
-
-```
-[Every Frame] ChunkManager::UpdateLODTransitions()
-    ↓
-For each loaded chunk:
-    ↓
-    LODStrategy->GetLODMorphFactor(ChunkCoord)
-    ↓
-    If MorphFactor changed:
-        ↓
-        MeshRenderer->UpdateLODTransition(ChunkCoord, MorphFactor)
-        ↓
-        [Custom VF] Update vertex shader uniform
-        │           └→ Vertex shader morphs positions
-        │
-        [PMC] No morphing support
-                └→ Swap mesh at threshold
-```
-
----
-
-## Performance Comparison
-
-### Memory per Chunk (LOD 0, 32³)
-
-| Component | Custom VF | PMC |
-|-----------|-----------|-----|
-| Vertex Data | ~50 KB | ~50 KB |
-| Index Data | ~30 KB | ~30 KB |
-| CPU Copy | 0 KB | ~80 KB |
-| **Total** | **~80 KB** | **~160 KB** |
-
-Custom VF uses **50% less memory** (no CPU-side duplicate).
-
-### Update Performance
-
-| Operation | Custom VF | PMC |
-|-----------|-----------|-----|
-| Mesh Update | 0.1 ms | 2-5 ms |
-| LOD Transition | 0.01 ms | N/A |
-| **Per Frame (4 chunks)** | **0.4 ms** | **8-20 ms** |
-
-Custom VF is **20-50x faster** for mesh updates.
-
-### Feature Comparison
-
-| Feature | Custom VF | PMC |
-|---------|-----------|-----|
-| GPU-driven | ✅ Yes | ❌ No |
-| LOD Morphing | ✅ Yes | ❌ No |
-| Zero CPU overhead | ✅ Yes | ❌ No |
-| Physics collision | ⚠️ Separate | ✅ Automatic |
-| Debug tools | ⚠️ Complex | ✅ Simple |
-| UE compatibility | ⚠️ Limited | ✅ Full |
 
 ---
 
@@ -1374,24 +1048,7 @@ class IVoxelMeshRenderer {
 };
 ```
 
-### Step 2: Implement PMC Renderer (simpler, first)
-
-```cpp
-// Source/VoxelRendering/Private/VoxelPMCRenderer.cpp
-class FVoxelPMCRenderer : public IVoxelMeshRenderer {
-    // ... (implementation as shown above)
-};
-```
-
-### Step 3: Test with PMC
-
-```cpp
-// Verify mesh generation pipeline works end-to-end
-// Debug visual output
-// Profile performance baseline
-```
-
-### Step 4: Implement Custom Vertex Factory
+### Step 2: Implement Custom Vertex Factory
 
 ```cpp
 // Source/VoxelRendering/Public/VoxelVertexFactory.h
@@ -1400,14 +1057,14 @@ class FVoxelVertexFactory : public FVertexFactory {
 };
 ```
 
-### Step 5: Implement Vertex Shader
+### Step 3: Implement Vertex Shader
 
 ```hlsl
 // Shaders/VoxelVertexFactory.usf
 // ... (shader as shown above)
 ```
 
-### Step 6: Implement Custom VF Renderer
+### Step 4: Implement Custom VF Renderer
 
 ```cpp
 // Source/VoxelRendering/Private/VoxelCustomVFRenderer.cpp
@@ -1416,28 +1073,9 @@ class FVoxelCustomVFRenderer : public IVoxelMeshRenderer {
 };
 ```
 
-### Step 7: Runtime Selection
-
-```cpp
-void UVoxelChunkManager::Initialize(UVoxelWorldConfiguration* Config) {
-    if (Config->bUseCustomVertexFactory && !GIsEditor) {
-        MeshRenderer = MakeShared<FVoxelCustomVFRenderer>();
-    } else {
-        MeshRenderer = MakeShared<FVoxelPMCRenderer>();
-    }
-    
-    MeshRenderer->Initialize(GetWorld(), *Config);
-}
-```
-
 ---
 
 ## Debugging Tips
-
-### PMC Debugging
-- Use "Show Collision" in viewport
-- Enable "Wireframe" view mode
-- Check vertex/index counts in output log
 
 ### Custom VF Debugging
 - Use RenderDoc to capture frame
@@ -1454,5 +1092,4 @@ void UVoxelChunkManager::Initialize(UVoxelWorldConfiguration* Config) {
 ---
 
 **Status**: Implementation Complete (Phase 3 + Per-Material Opacity)
-**Current Architecture**: FLocalVertexFactory-based renderer with MPC LOD morphing
-**Fallback**: PMC renderer available for editor/debugging use cases, supports masked material section splitting
+**Current Architecture**: FLocalVertexFactory-based renderer, mesh-swap crossfades for LOD flips (no LOD morphing; code review CR1)

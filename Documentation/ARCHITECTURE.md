@@ -32,7 +32,7 @@ VoxelWorlds is a **GPU-driven voxel terrain system** designed for high-performan
 - Multiple world modes (infinite plane, spherical planet, island/bowl)
 - Three meshing algorithms (cubic, Marching Cubes, Dual Contouring)
 - Pluggable LOD system (distance bands, quadtree, octree)
-- Hybrid rendering (Custom VF + PMC fallback)
+- One renderer on UE's FLocalVertexFactory
 - GPU compute pipeline for generation; meshing on CPU workers
 - Biome system with material assignment
 - Edit layer for terrain modification
@@ -82,17 +82,13 @@ VoxelWorld (Root Container)
 │   ├── Atlas Configuration (cubic)
 │   └── Physical Properties
 │
-├── RenderingSystem (Hybrid) ◄── ENHANCED
-│   ├── IVoxelMeshRenderer Interface (Pluggable)
-│   │   ├── VoxelCustomVFRenderer (GPU-driven, runtime)
-│   │   │   ├── FVoxelVertexFactory
-│   │   │   ├── FVoxelSceneProxy
-│   │   │   ├── Per-Chunk GPU Buffers
-│   │   │   ├── LOD Morphing (Vertex Shader)
-│   │   │   └── Water Tile Rendering (second pass)
-│   │   └── VoxelPMCRenderer (Editor/tools)
-│   │       ├── ProceduralMeshComponents
-│   │       └── Water Tile PMCs (dedicated)
+├── RenderingSystem
+│   ├── IVoxelMeshRenderer Interface
+│   │   └── VoxelCustomVFRenderer
+│   │       ├── UVoxelWorldComponent (one per render region)
+│   │       ├── FVoxelSceneProxy (FLocalVertexFactory per mesh)
+│   │       ├── Mesh-swap crossfades
+│   │       └── Water Tile Rendering (second pass)
 │   ├── MeshingSystem (3 algorithms)
 │   │   ├── CubicMesher (Face-culling, Greedy, AO)
 │   │   ├── MarchingCubesMesher (Isosurface + Transvoxel LOD)
@@ -140,7 +136,6 @@ struct FChunkDescriptor {
     FBox Bounds;               // World-space bounds
     bool bIsDirty;             // Needs remeshing
     bool bHasEdits;            // Has edit layer modifications
-    float MorphFactor;         // LOD transition blend (0-1)
     
     int32 GenerationSeed;      // For deterministic regeneration (int32 for BP)
 };
@@ -181,8 +176,6 @@ struct FVoxelVertex {
     uint32 PackedMaterialData;   // 4 bytes (MaterialID, BiomeID, Metadata)
 };
 ```
-
-**Comparison**: PMC uses ~48+ bytes per vertex
 
 ---
 
@@ -244,8 +237,7 @@ VoxelWorldsEditor → VoxelCore, VoxelGeneration, VoxelMeshing, VoxelRendering,
 
 **VoxelRendering**
 - IVoxelMeshRenderer interface
-- Custom Vertex Factory implementation
-- PMC renderer fallback
+- The FLocalVertexFactory renderer
 - Collision manager
 
 **VoxelStreaming**
@@ -308,7 +300,6 @@ See: [LOD_SYSTEM.md](LOD_SYSTEM.md) for complete details.
 ```cpp
 class IVoxelLODStrategy {
     virtual int32 GetLODForChunk(FIntVector ChunkCoord, const FLODQueryContext& Context) const = 0;
-    virtual float GetLODMorphFactor(FIntVector ChunkCoord, const FLODQueryContext& Context) const = 0;
     virtual TArray<FChunkLODRequest> GetVisibleChunks(const FLODQueryContext& Context) const = 0;
     virtual void GetChunksToLoad(TArray<FChunkLODRequest>& OutLoad, const FLODQueryContext& Context) const = 0;
     virtual void GetChunksToUnload(TArray<FIntVector>& OutUnload, const FLODQueryContext& Context) const = 0;
@@ -321,13 +312,12 @@ class IVoxelLODStrategy {
 - Distance-based LOD rings
 - Simple and predictable
 - Configurable bands per world mode
-- LOD morphing support
 
 **Future Implementations**:
 - `FQuadtreeLODStrategy` - Screen-space adaptive for infinite plane
 - `FOctreeLODStrategy` - 3D adaptive for spherical worlds
 
-### 2. Hybrid Rendering System
+### 2. Rendering System
 
 See: [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) for complete details.
 
@@ -338,22 +328,13 @@ class IVoxelMeshRenderer {
     virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) = 0;
     virtual void RemoveChunk(FIntVector ChunkCoord) = 0;
     virtual void SetMaterial(UMaterialInterface* Material) = 0;
-    virtual void UpdateLODTransition(FIntVector ChunkCoord, float MorphFactor) = 0;
 };
 ```
 
-**Runtime**: `FVoxelCustomVFRenderer`
-- Custom Vertex Factory (`FVoxelVertexFactory`)
-- GPU-driven rendering (no CPU readback)
-- Direct compute shader → vertex shader pipeline
-- LOD morphing in vertex shader
-- Maximum performance
-
-**Editor/Tools**: `FVoxelPMCRenderer`
-- ProceduralMeshComponent-based
-- Requires GPU→CPU readback
-- Simpler for debugging and tools
-- Full UE feature compatibility
+`FVoxelCustomVFRenderer` is the one implementation: a `UVoxelWorldComponent` per render region, its
+`FVoxelSceneProxy` uploading each chunk, seam and water mesh into UE's `FLocalVertexFactory`, LOD flips
+and corrections crossfading between the old and new mesh. (The ProceduralMeshComponent fallback was
+deleted in code review CR1, D-CR7.)
 
 ### 3. GPU Compute Pipeline
 
@@ -376,8 +357,7 @@ Output: FChunkMeshData, uploaded by the renderer
 
 **Phase 3: Rendering**
 ```
-Custom VF: Direct GPU buffer binding (no CPU copy)
-PMC: Readback to CPU, then CreateMeshSection
+FVoxelCustomVFRenderer: the mesh uploaded into per-mesh FLocalVertexFactory buffers
 ```
 
 ### 4. World Modes
@@ -417,7 +397,7 @@ See: [WATER_SYSTEM.md](WATER_SYSTEM.md) for complete details.
 
 **2D Water Tiles** (`FIntVector2`-keyed) aggregate water from multiple Z-level chunks per XY column. `FVoxelWaterMesher` builds column masks, dilates by 3 cells for shoreline overlap, and greedy-merges into minimal quads.
 
-**Rendering**: Both `FVoxelCustomVFRenderer` (GPU — second render pass with separate water material) and `FVoxelPMCRenderer` (dedicated PMC per tile) support water tiles via `IVoxelMeshRenderer` water tile API.
+**Rendering**: `FVoxelCustomVFRenderer` draws water tiles in a second render pass with the separate water material, through the `IVoxelMeshRenderer` water tile API.
 
 ### 7. Biome System
 
@@ -448,7 +428,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime) {
     // Phase 2 Optimization: Only update streaming when viewer crosses chunk boundary
     bool bViewerChunkChanged = (CurrentViewerChunk != CachedViewerChunk);
 
-    // Always update LOD strategy for morph factor interpolation
+    // Always update LOD strategy
     LODStrategy->Update(Context, DeltaTime);
 
     // Streaming decisions only when necessary
@@ -530,21 +510,6 @@ Chunk visible on screen
 ### LOD Transition Flow
 ```
 [Continuous]
-ChunkManager::Update()
-    ↓
-For each loaded chunk:
-    ↓
-    LODStrategy::GetLODMorphFactor()
-    ↓
-    If MorphFactor changed:
-        ↓
-        MeshRenderer::UpdateLODTransition()
-        ↓
-        Update vertex shader uniform
-        ↓
-        Vertex shader morphs positions
-```
-
 ---
 
 ## Performance Considerations
@@ -590,7 +555,7 @@ At player speed 1000 cm/s:
 1. **GPU generation**: one compute dispatch per chunk, one readback
 2. **Batch Operations**: Process multiple chunks per compute dispatch
 3. **Async Compute**: Overlap generation with rendering
-4. **LOD Morphing**: Smooth transitions without regeneration
+4. **Mesh-swap crossfades**: LOD flips without popping
 5. **Collision Throttling**: Update less frequently than visuals
 6. **Frustum Culling**: Don't generate off-screen chunks
 7. **Chunk Pooling**: Reuse memory allocations
@@ -606,7 +571,6 @@ The streaming system has been optimized to eliminate per-frame overhead:
 
 **Phase 2: Decision Caching**
 - `CachedViewerChunk`: Only recompute visible chunks when viewer crosses chunk boundary
-- `LastLODUpdatePosition`: Skip LOD morph factor updates when viewer moved < 100 units
 - `bForceStreamingUpdate`: Flag for manual refresh when needed
 
 **Future Phase 3: LOD Hysteresis** (if needed)
@@ -634,23 +598,6 @@ The streaming system has been optimized to eliminate per-frame overhead:
 - More initial architecture work
 
 **Conclusion**: Worth it for flexibility and future-proofing.
-
-### Why Hybrid Rendering?
-
-**Decision**: Two renderer implementations via interface.
-
-**Rationale**:
-- Custom VF maximizes runtime performance (zero CPU overhead)
-- PMC provides editor/tools simplicity and compatibility
-- Clean separation allows independent optimization
-- Can ship runtime on Custom VF, debug with PMC
-
-**Trade-offs**:
-- Maintain two code paths
-- Custom VF has steep learning curve
-- More testing surface area
-
-**Conclusion**: Performance gains justify maintenance cost.
 
 ### Why GPU Generation and CPU Meshing?
 
@@ -710,7 +657,7 @@ See [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) for development roadmap
 **Phase 1 (Current)**: Foundation
 - Core data structures
 - LOD interface and distance band implementation
-- Hybrid rendering interface
+- Rendering interface
 - Chunk manager skeleton
 
 **Phase 2**: Generation

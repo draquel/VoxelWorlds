@@ -10,23 +10,19 @@
 class UWorld;
 class UMaterialInterface;
 class UVoxelWorldConfiguration;
-class UMaterialParameterCollection;
 class UVoxelMaterialAtlas;
 
 /**
  * Voxel Mesh Renderer Interface.
  *
- * Abstract interface for rendering voxel chunks. Implementations handle
- * the actual rendering strategy (Custom Vertex Factory vs PMC).
- *
- * The hybrid architecture allows:
- * - FVoxelCustomVFRenderer: GPU-driven rendering for maximum runtime performance
- * - FVoxelPMCRenderer: ProceduralMeshComponent fallback for editor/tools
+ * What the chunk manager asks of the renderer: chunk, seam and water-tile meshes in and out, the
+ * materials, the mesh-swap crossfades, bounds and statistics. FVoxelCustomVFRenderer is the one
+ * implementation (the ProceduralMeshComponent fallback was deleted in code review CR1, D-CR7); the
+ * streaming tests use a recording stub.
  *
  * Thread Safety: All methods must be called from game thread only.
  *
  * @see FVoxelCustomVFRenderer
- * @see FVoxelPMCRenderer
  * @see Documentation/RENDERING_SYSTEM.md
  */
 class VOXELRENDERING_API IVoxelMeshRenderer
@@ -113,23 +109,6 @@ public:
 	 * Removes and releases resources for all loaded chunks.
 	 */
 	virtual void ClearAllChunks() = 0;
-
-	// ==================== Visibility ====================
-
-	/**
-	 * Set visibility for a specific chunk.
-	 *
-	 * @param ChunkCoord Chunk coordinate
-	 * @param bVisible Whether chunk should be visible
-	 */
-	virtual void SetChunkVisible(const FIntVector& ChunkCoord, bool bVisible) = 0;
-
-	/**
-	 * Set visibility for all chunks.
-	 *
-	 * @param bVisible Whether all chunks should be visible
-	 */
-	virtual void SetAllChunksVisible(bool bVisible) = 0;
 
 	// ==================== Material Management ====================
 
@@ -387,39 +366,7 @@ public:
 		return nullptr;
 	}
 
-	// ==================== LOD Transitions ====================
-
-	/**
-	 * Update LOD transition morph factor for a chunk.
-	 *
-	 * Used for smooth LOD transitions in the vertex shader.
-	 * Only applicable for Custom VF renderer.
-	 *
-	 * @param ChunkCoord Chunk coordinate
-	 * @param MorphFactor Blend factor 0-1 (0 = current LOD, 1 = next LOD)
-	 */
-	virtual void UpdateLODTransition(
-		const FIntVector& ChunkCoord,
-		float MorphFactor
-	) = 0;
-
-	/**
-	 * Batch update LOD transitions for multiple chunks.
-	 *
-	 * More efficient than calling UpdateLODTransition individually.
-	 *
-	 * @param Transitions Array of chunk coordinates and morph factors
-	 */
-	virtual void UpdateLODTransitionsBatch(
-		const TArray<TPair<FIntVector, float>>& Transitions
-	)
-	{
-		// Default: call individual updates
-		for (const auto& Pair : Transitions)
-		{
-			UpdateLODTransition(Pair.Key, Pair.Value);
-		}
-	}
+	// ==================== Batched Operations ====================
 
 	/**
 	 * Flush all pending render operations as a single batched command.
@@ -432,39 +379,6 @@ public:
 	virtual void FlushPendingOperations()
 	{
 		// Default: no-op (renderer doesn't batch operations)
-	}
-
-	// ==================== LOD Configuration ====================
-
-	/**
-	 * Set the Material Parameter Collection used for LOD parameters.
-	 *
-	 * The MPC should contain scalar parameters:
-	 *   - LODStartDistance: Distance where MorphFactor = 0
-	 *   - LODEndDistance: Distance where MorphFactor = 1
-	 *   - LODInvRange: 1.0 / (EndDistance - StartDistance)
-	 *
-	 * @param Collection The Material Parameter Collection to use
-	 */
-	virtual void SetLODParameterCollection(UMaterialParameterCollection* Collection)
-	{
-		// Default: no-op (renderer doesn't support material-based LOD)
-	}
-
-	/**
-	 * Set LOD transition distances for material-based morphing.
-	 *
-	 * These values are written to the Material Parameter Collection.
-	 * The material can calculate per-pixel MorphFactor using:
-	 *   Distance = length(WorldPosition - CameraPosition)
-	 *   MorphFactor = saturate((Distance - StartDistance) * InvRange)
-	 *
-	 * @param StartDistance Distance where MorphFactor = 0
-	 * @param EndDistance Distance where MorphFactor = 1
-	 */
-	virtual void SetLODTransitionDistances(float StartDistance, float EndDistance)
-	{
-		// Default: no-op (renderer doesn't support material-based LOD)
 	}
 
 	// ==================== Queries ====================
@@ -490,13 +404,6 @@ public:
 	 * @param OutChunks Array to fill with loaded chunk coordinates
 	 */
 	virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const = 0;
-
-	/**
-	 * Get total CPU-side memory usage (approximate).
-	 *
-	 * @return CPU memory in bytes used by renderer data structures
-	 */
-	virtual int64 GetCPUMemoryUsage() const { return 0; }
 
 	/**
 	 * Get total GPU memory usage (approximate).
@@ -564,22 +471,7 @@ public:
 	/**
 	 * Get renderer type name for debugging.
 	 *
-	 * @return "CustomVF", "PMC", etc.
+	 * @return "CustomVF", or a test stub's name
 	 */
 	virtual FString GetRendererTypeName() const = 0;
-};
-
-/**
- * Renderer type enumeration.
- */
-enum class EVoxelRendererType : uint8
-{
-	/** GPU-driven Custom Vertex Factory renderer */
-	CustomVertexFactory,
-
-	/** ProceduralMeshComponent-based renderer */
-	ProceduralMeshComponent,
-
-	/** Automatically select based on context (PIE vs Editor) */
-	Auto
 };

@@ -50,7 +50,6 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	BaseChunkSize = WorldConfig->ChunkSize;
 	WorldMode = WorldConfig->WorldMode;
 	bEnableLOD = WorldConfig->IsLODEnabled(); // off for cubic regardless of bEnableLOD
-	bEnableMorphing = WorldConfig->bEnableLODMorphing;
 	bEnableFrustumCulling = WorldConfig->bEnableFrustumCulling;
 
 	// Asymmetric LOD hysteresis (eager refine / damped coarsen). Read from config, then
@@ -88,7 +87,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	MaxViewDistance = WorldConfig->ViewDistance;
 
 	// Benchmark/iteration override: -VoxelLODScale=N scales every band boundary
-	// (Min/Max/MorphRange) by N while leaving MaxViewDistance (the field size /
+	// (Min/Max) by N while leaving MaxViewDistance (the field size /
 	// chunk budget) fixed. N<1 pulls the fine-LOD reach inward (coarser sooner =
 	// less re-mesh thrash, lower visual detail); N>1 pushes it outward (clamped to
 	// view distance). Lets us A/B the thrash-vs-detail tradeoff without re-authoring
@@ -101,7 +100,6 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		{
 			Band.MinDistance = FMath::Min(Band.MinDistance * LODScale, MaxViewDistance);
 			Band.MaxDistance = FMath::Min(Band.MaxDistance * LODScale, MaxViewDistance);
-			Band.MorphRange *= LODScale;
 		}
 		UE_LOG(LogVoxelLOD, Warning, TEXT("  -VoxelLODScale=%.3f applied: band boundaries scaled (view distance fixed at %.0f)"),
 			LODScale, MaxViewDistance);
@@ -419,27 +417,6 @@ int32 FDistanceBandLODStrategy::GetDistanceBandLOD(
 	return GetRawLODForDistance(GetDistanceToViewer(ChunkCoordToWorldCenter(ChunkCoord), Context));
 }
 
-float FDistanceBandLODStrategy::GetLODMorphFactor(
-	const FIntVector& ChunkCoord,
-	const FLODQueryContext& Context) const
-{
-	if (!bEnableMorphing)
-	{
-		return 0.0f;
-	}
-
-	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
-	const float Distance = GetDistanceToViewer(ChunkCenter, Context);
-
-	const FLODBand* Band = FindBandForDistance(Distance);
-	if (Band)
-	{
-		return Band->GetMorphFactor(Distance);
-	}
-
-	return 0.0f;
-}
-
 TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 	const FLODQueryContext& Context) const
 {
@@ -473,22 +450,13 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 
 		// Determine LOD level
 		int32 LODLevel = 0;
-		float MorphFactor = 0.0f;
 
 		if (bEnableLOD)
 		{
 			// Use the balanced LOD (2:1 adjacency + hysteresis) so loaded/
 			// meshed chunks never differ from a neighbor by more than one
-			// level. Morph still derives from the raw band the chunk sits in.
+			// level.
 			LODLevel = GetLODForChunk(ChunkCoord, Context);
-			if (bEnableMorphing)
-			{
-				const float Distance = GetDistanceToViewer(ChunkCenter, Context);
-				if (const FLODBand* Band = FindBandForDistance(Distance))
-				{
-					MorphFactor = Band->GetMorphFactor(Distance);
-				}
-			}
 		}
 		// When LOD disabled: LODLevel stays 0 (full detail for all chunks)
 
@@ -503,7 +471,6 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 		Request.ChunkCoord = ChunkCoord;
 		Request.LODLevel = LODLevel;
 		Request.Priority = CalculatePriority(ChunkCoord, Context);
-		Request.MorphFactor = MorphFactor;
 
 		Requests.Add(Request);
 	};
@@ -647,7 +614,6 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 	Info += FString::Printf(TEXT("  Initialized: %s\n"), bIsInitialized ? TEXT("Yes") : TEXT("No"));
 	Info += FString::Printf(TEXT("  LOD Bands: %d\n"), LODBands.Num());
 	Info += FString::Printf(TEXT("  Max View Distance: %.0f\n"), MaxViewDistance);
-	Info += FString::Printf(TEXT("  Morphing: %s\n"), bEnableMorphing ? TEXT("Enabled") : TEXT("Disabled"));
 	Info += FString::Printf(TEXT("  Frustum Culling: %s\n"), bEnableFrustumCulling ? TEXT("Enabled") : TEXT("Disabled"));
 	Info += FString::Printf(TEXT("  Viewer Chunk: (%d, %d, %d)\n"),
 		CachedViewerChunk.X, CachedViewerChunk.Y, CachedViewerChunk.Z);
@@ -702,8 +668,8 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 	for (int32 i = 0; i < LODBands.Num(); ++i)
 	{
 		const FLODBand& Band = LODBands[i];
-		Info += FString::Printf(TEXT("    [%d] LOD%d: %.0f - %.0f (stride: %d, morph: %.0f)\n"),
-			i, Band.LODLevel, Band.MinDistance, Band.MaxDistance, Band.VoxelStride, Band.MorphRange);
+		Info += FString::Printf(TEXT("    [%d] LOD%d: %.0f - %.0f (stride: %d)\n"),
+			i, Band.LODLevel, Band.MinDistance, Band.MaxDistance, Band.VoxelStride);
 	}
 
 	return Info;
@@ -742,25 +708,6 @@ void FDistanceBandLODStrategy::DrawDebugVisualization(
 			false
 		);
 
-		// Draw morph start circle if morphing enabled
-		if (bEnableMorphing && Band.MorphRange > 0.0f)
-		{
-			const float MorphStart = Band.MaxDistance - Band.MorphRange;
-			DrawDebugCircle(
-				World,
-				ViewerPos,
-				MorphStart,
-				64,
-				FColor(Color.R / 2, Color.G / 2, Color.B / 2),
-				false,
-				-1.0f,
-				0,
-				2.0f,
-				FVector::RightVector,
-				FVector::ForwardVector,
-				false
-			);
-		}
 	}
 
 	// Draw viewer position

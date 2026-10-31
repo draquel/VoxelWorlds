@@ -10,9 +10,8 @@
 3. [Distance Band Strategy](#distance-band-strategy)
 4. [Future Strategies](#future-strategies)
 5. [Integration with ChunkManager](#integration-with-chunkmanager)
-6. [LOD Morphing](#lod-morphing)
-7. [Performance Considerations](#performance-considerations)
-8. [Implementation Guide](#implementation-guide)
+6. [Performance Considerations](#performance-considerations)
+7. [Implementation Guide](#implementation-guide)
 
 ---
 
@@ -78,18 +77,7 @@ public:
         const FLODQueryContext& Context
     ) const;
     
-    /**
-     * Get morph factor for LOD transition blending.
-     * @param ChunkCoord Chunk position in chunk space
-     * @param Context Query context with viewer state
-     * @return Morph factor 0-1 (0 = current LOD, 1 = next LOD)
-     */
-    virtual float GetLODMorphFactor(
-        FIntVector ChunkCoord, 
-        const FLODQueryContext& Context
-    ) const = 0;
-    
-    // ==================== Visibility & Streaming ====================
+// ==================== Visibility & Streaming ====================
     
     /**
      * Get all chunks that should be visible this frame.
@@ -247,10 +235,7 @@ struct FChunkLODRequest {
     
     /** Priority for sorting (higher = more important) */
     float Priority;
-    
-    /** Morph factor for LOD transitions (0-1) */
-    float MorphFactor;
-    
+
     /** Comparison operator for priority queue (descending order) */
     bool operator<(const FChunkLODRequest& Other) const {
         return Priority > Other.Priority;
@@ -276,15 +261,11 @@ public:
         int32 LODLevel;         // 0 = finest detail
         int32 VoxelStride;      // Sampling stride (1, 2, 4, 8, ...)
         int32 ChunkSize;        // Voxels per chunk edge
-        float MorphRange;       // Distance to blend to next LOD
     };
-    
+
     /** LOD bands (sorted by distance) */
     TArray<FLODBand> LODBands;
-    
-    /** Enable LOD morphing? */
-    bool bEnableMorphing = true;
-    
+
     /** Enable frustum culling? */
     bool bViewFrustumCulling = true;
 };
@@ -340,39 +321,6 @@ int32 FDistanceBandLODStrategy::GetLODForChunk(
     return LODBands.Last().LODLevel;
 }
 
-float FDistanceBandLODStrategy::GetLODMorphFactor(
-    FIntVector ChunkCoord, 
-    const FLODQueryContext& Context) const
-{
-    if (!bEnableMorphing) return 0.0f;
-    
-    FVector ChunkCenter = ChunkCoordToWorldPosition(ChunkCoord, Context);
-    float Distance = GetDistanceToViewer(ChunkCenter, Context);
-    int32 CurrentLOD = GetLODForChunk(ChunkCoord, Context);
-    
-    if (CurrentLOD >= LODBands.Num() - 1) {
-        return 0.0f; // No transition at max LOD
-    }
-    
-    const FLODBand& Band = LODBands[CurrentLOD];
-    float TransitionStart = Band.MaxDistance - Band.MorphRange;
-    
-    if (Distance > TransitionStart) {
-        // In transition zone
-        return FMath::Clamp(
-            (Distance - TransitionStart) / Band.MorphRange, 
-            0.0f, 
-            1.0f
-        );
-    }
-    
-    return 0.0f;
-}
-```
-
-### Visible Chunks Algorithm
-
-```cpp
 TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
     const FLODQueryContext& Context) const
 {
@@ -412,8 +360,7 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
                     Request.ChunkCoord = ChunkCoord;
                     Request.LODLevel = Band.LODLevel;
                     Request.Priority = CalculatePriority(ChunkCoord, Context);
-                    Request.MorphFactor = GetLODMorphFactor(ChunkCoord, Context);
-                    
+
                     Requests.Add(Request);
                 }
             }
@@ -904,7 +851,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime) {
     bool bViewerChunkChanged = (CurrentViewerChunk != CachedViewerChunk);
     bool bNeedStreamingUpdate = bForceStreamingUpdate || bViewerChunkChanged;
 
-    // 3. Always update LOD strategy (for morph interpolation)
+    // 3. Always update LOD strategy
     LODStrategy->Update(Context, DeltaTime);
 
     // 4. Streaming decisions only when viewer crosses chunk boundary
@@ -973,64 +920,6 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const {
 
 ---
 
-## LOD Morphing
-
-LOD morphing smoothly transitions between LOD levels to avoid popping artifacts.
-
-### Vertex Shader Implementation
-
-```hlsl
-// In VoxelVertexFactory.usf
-
-struct FVoxelVertexFactoryInput {
-    float3 Position : ATTRIBUTE0;
-    // ... other attributes
-};
-
-float3 MorphVertex(float3 CurrentPos, float3 NextLODPos, float MorphFactor) {
-    return lerp(CurrentPos, NextLODPos, MorphFactor);
-}
-
-FVertexFactoryInterpolantsVSToPS Main(FVoxelVertexFactoryInput Input) {
-    // Get LOD morph factor from uniform
-    float MorphFactor = VoxelUniforms.LODMorphFactor;
-    
-    // Calculate next LOD position (simplified)
-    float3 NextLODPos = CalculateNextLODPosition(Input.Position, CurrentLOD);
-    
-    // Morph between current and next LOD
-    float3 MorphedPos = MorphVertex(Input.Position, NextLODPos, MorphFactor);
-    
-    // Transform to world space
-    Output.Position = mul(float4(MorphedPos, 1.0), LocalToWorld);
-    
-    return Output;
-}
-```
-
-### C++ Uniform Update
-
-```cpp
-void UVoxelChunkManager::UpdateLODTransitions(const FLODQueryContext& Context) {
-    for (auto& Pair : LoadedChunks) {
-        FIntVector ChunkCoord = Pair.Key;
-        FChunkState& State = Pair.Value;
-        
-        // Query current morph factor
-        float NewMorphFactor = LODStrategy->GetLODMorphFactor(ChunkCoord, Context);
-        
-        if (FMath::Abs(State.MorphFactor - NewMorphFactor) > 0.01f) {
-            State.MorphFactor = NewMorphFactor;
-            
-            // Update renderer (sets vertex shader uniform)
-            MeshRenderer->UpdateLODTransition(ChunkCoord, NewMorphFactor);
-        }
-    }
-}
-```
-
----
-
 ## Performance Considerations
 
 ### Query Frequency
@@ -1055,8 +944,7 @@ With **Phase 2 streaming optimizations**, query frequency is dramatically reduce
 
 **Phase 2: Decision Caching**
 1. **Chunk Boundary Caching**: `CachedViewerChunk` tracks viewer's current chunk
-2. **Position Delta Threshold**: Skip LOD updates when viewer moved < 100 units
-3. **Cached Positions**: `LastStreamingUpdatePosition`, `LastLODUpdatePosition`
+2. **Cached Position**: `LastStreamingUpdatePosition`
 
 **Future Phase 3: LOD Hysteresis** (if needed)
 1. **Buffer Zones**: Prevent rapid LOD switching at band boundaries

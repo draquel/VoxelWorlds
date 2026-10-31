@@ -164,7 +164,7 @@ half of 512 x 512 x 4 bytes a slice on disk (the source, delta-coded and Kraken-
   `NeedsTextureArrayRebuild()`). Editing the atlas's configs or `TextureArraySize`, or reimporting a source texture,
   makes them stale; renaming a material does not. An atlas with no source texture and no array (a packed atlas for
   cubic terrain only) is never stale.
-- **Binding.** `UVoxelWorldComponent::UpdateMaterialAtlasParameters` and `FVoxelPMCRenderer::UpdateMaterialAtlasParameters`
+- **Binding.** `UVoxelWorldComponent::UpdateMaterialAtlasParameters`
   call `EnsureTextureArrays()` and bind the arrays. In the editor, missing or stale arrays are rebuilt there first, with
   a warning naming the atlas (save the atlas and its arrays to keep them; a packaged game uses the saved ones); up to
   date ones are only bound, so an editor session's first PIE builds nothing (0.28 s on `PlanetTest`; a rebuild of the
@@ -925,14 +925,6 @@ face rows to encode per-material flags:
 
 Previously the A channel was unused (always 255). Now it encodes flags as a bitfield.
 
-### PMC Section Splitting
-
-When a chunk contains masked materials, the PMC renderer splits the mesh into two sections:
-- **Section 0 (opaque)**: All triangles with opaque materials — uses standard `BLEND_Opaque` material
-- **Section 1 (masked)**: All triangles with masked materials — uses `BLEND_Masked` material instance with `OpacityMaskClipValue = 0.333`
-
-Chunks without any masked materials remain single-section (no overhead).
-
 ### Non-Occluding Face Generation (Cubic Mesher)
 
 For non-occluding materials, `ShouldRenderFace()` returns true if **either** the current voxel or the neighbor voxel has `bNonOccluding` set. This generates all boundary faces for visual density.
@@ -953,7 +945,7 @@ For masked materials to work:
 ### Master Material Setup
 
 The master material (M_VoxelMaster) must:
-1. Use `BLEND_Masked` as its blend mode (the PMC renderer creates a separate masked MID that inherits this)
+1. Use `BLEND_Masked` as its blend mode
 2. Connect the atlas albedo **alpha channel** to the **Opacity Mask** pin
 3. Set `Opacity Mask Clip Value` to 0.333 (or desired threshold)
 
@@ -978,7 +970,6 @@ The material system is fully implemented with:
 9. ✅ Automatic mode sync from UVoxelWorldConfiguration::MeshingMode
 10. ✅ VoxelTriplanarCommon.ush shader utilities
 11. ✅ Per-material opacity flags (`bIsMasked`, `bNonOccluding`)
-12. ✅ PMC section splitting (opaque + masked sections)
 13. ✅ LUT A-channel flag encoding
 14. ✅ Non-occluding face generation in cubic mesher
 

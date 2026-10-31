@@ -9,7 +9,6 @@
 
 class UVoxelWorldComponent;
 class UMaterialInterface;
-class UMaterialParameterCollection;
 class UVoxelMaterialAtlas;
 class UWorld;
 class UVoxelWorldConfiguration;
@@ -62,10 +61,6 @@ public:
 	virtual void RemoveChunk(const FIntVector& ChunkCoord) override;
 	virtual void ClearAllChunks() override;
 
-	// Visibility
-	virtual void SetChunkVisible(const FIntVector& ChunkCoord, bool bVisible) override;
-	virtual void SetAllChunksVisible(bool bVisible) override;
-
 	// Material Management
 	virtual void SetMaterial(UMaterialInterface* Material) override;
 	virtual UMaterialInterface* GetMaterial() const override;
@@ -100,16 +95,8 @@ public:
 	virtual bool ConsumeLostRenderData(TArray<FIntVector>& OutChunks) override;
 	virtual bool GetWaterTileDrawInfo(const FIntVector2& TileCoord, FString& Out) const override;
 
-	// LOD Transitions
-	virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override;
-	virtual void UpdateLODTransitionsBatch(const TArray<TPair<FIntVector, float>>& Transitions) override;
-
 	// Batched Operations
 	virtual void FlushPendingOperations() override;
-
-	// LOD Configuration
-	virtual void SetLODParameterCollection(UMaterialParameterCollection* Collection) override;
-	virtual void SetLODTransitionDistances(float StartDistance, float EndDistance) override;
 
 	// Queries
 	virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override;
@@ -212,10 +199,6 @@ private:
 
 	/** Settings replayed on a new region component */
 	TWeakObjectPtr<UVoxelMaterialAtlas> CurrentAtlas;
-	TWeakObjectPtr<UMaterialParameterCollection> CurrentLODCollection;
-	bool bHasLODDistances = false;
-	float LODStartDistance = 0.0f;
-	float LODEndDistance = 0.0f;
 	bool bHasViewerPosition = false;
 	FVector CurrentViewerPosition = FVector::ZeroVector;
 
@@ -238,7 +221,6 @@ private:
 		int32 LODLevel = 0;
 		SIZE_T MemoryUsage = 0;
 		FBox Bounds = FBox(ForceInit);
-		bool bIsVisible = true;
 	};
 
 	/** Game thread chunk tracking */
