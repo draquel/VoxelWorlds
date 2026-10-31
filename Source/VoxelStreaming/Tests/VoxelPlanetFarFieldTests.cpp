@@ -1129,11 +1129,12 @@ bool FFarFieldPlanetChunkManagerTest::RunTest(const FString& Parameters)
 			}
 		}
 
-		// voxel.World.FarField 0: no far field, the shell draws the sea; and back.
+		// voxel.World.FarField 0 (a development switch, code review CR1 D-CR13): no far field, the ocean shell as with
+		// it on (a small planet's shell, a big planet no sea); and back.
 		Manager->SetFarFieldEnabled(false);
 		TestFalse(*FString::Printf(TEXT("%s: off, no far field"), *Prefix), Manager->HasFarField());
 		TestEqual(*FString::Printf(TEXT("%s: off, its components are gone"), *Prefix), Manager->GetFarFieldComponentCount(), 0);
-		TestTrue(*FString::Printf(TEXT("%s: off, the ocean shell draws the sea"), *Prefix), Manager->HasPlanetOcean());
+		TestEqual(*FString::Printf(TEXT("%s: off, the ocean shell as with the far field on"), *Prefix), Manager->HasPlanetOcean(), !bExpectFarFieldSea);
 		Manager->SetFarFieldEnabled(true);
 		TestTrue(*FString::Printf(TEXT("%s: on again"), *Prefix), Manager->HasFarField());
 		TestEqual(*FString::Printf(TEXT("%s: on again, the sea as before"), *Prefix), Manager->HasPlanetOcean(), !bExpectFarFieldSea);

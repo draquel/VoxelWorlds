@@ -1796,7 +1796,7 @@ namespace VoxelPlanetStreamingTestUtils
 			}
 			return FVoxelData::Air();
 		};
-		VoxelNeighborSlices::Extract(CS, Coord, Manager->IsDeepSliceOff(), Manager->IsDeepSliceFull(), Has, Get, Request);
+		VoxelNeighborSlices::Extract(CS, Coord, Has, Get, Request);
 		FChunkMeshData Mesh;
 		Manager->GetMesherPtr()->GenerateMeshCPU(Request, Mesh);
 		uint32 Crc = FCrc::MemCrc32(&Missing, sizeof(Missing));
@@ -1875,8 +1875,7 @@ namespace VoxelPlanetStreamingTestUtils
 
 		for (const int32 LOD : { 0, 1 })
 		{
-			const int32 Depth = VoxelNeighborSlices::GetNeighborDepth(LOD, World.Manager->IsDeepSliceOff(), World.Manager->IsDeepSliceFull(),
-				World.Config->ChunkSize);
+			const int32 Depth = VoxelNeighborSlices::GetNeighborDepth(LOD, World.Config->ChunkSize);
 			TArray<uint32> Before, After;
 			int32 Neighbors = 0, ShellReads = 0, Different = 0, Meshed = 0, NeighborsBefore = 0;
 			EvictSnapshotCaches(World);

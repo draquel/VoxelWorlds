@@ -671,15 +671,15 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   dry strip at the window's edge seen from above). A plane has no horizon, so its far field splits far more patches
   than a planet's at the same screen error (on `VoxelDemo` at 2 px about 1,500 patches and 300 MB from the ground,
   against a planet's 29-56 MB): heightmap worlds take their own budget, `voxel.World.FarFieldHeightmapError` (4 px; 0 =
-  `voxel.World.FarFieldError`). An island's far ocean keeps its open sea past the bounds box and its static seabed and
-  builds no grid water or floor while the far field is on (D37: two seas inside the bounds would z-fight;
-  `voxel.World.FarField 0` brings the grid back). Heightmap conditioning zones rebuild the patches they meet
+  `voxel.World.FarFieldError`). An island's far ocean is its open sea past the bounds box and its static seabed (D37: two
+  seas inside the bounds would z-fight; the grid water that stood in for unloaded columns while the far field was off
+  went in code review CR1, D-CR13). Heightmap conditioning zones rebuild the patches they meet
   (`InvalidateBox`), a planet's radial ones the caps. The build queue's priority offset for non-root patches is 1e12
   (it was 1e30, which a double adds a distance to without change, so with six builds a tick the patches under the
   camera could starve behind thousands of far ones: found on the plane, the planet's six roots and horizon hid it).
 
-`voxel.World.FarField 0` drops the far field (the ocean shell draws a planet's sea and an island's far ocean its grid
-water, as before); `voxel.World.FarFieldStats`, `vox.Planet` / `vox.World` and the bench's `FarFieldMs`, `FarFieldPatchN`,
+`voxel.World.FarField 0` drops the far field, a development switch (code review CR1, D-CR13: nothing is drawn past the
+voxel window but a small planet's ocean shell or an island's open sea and seabed); `voxel.World.FarFieldStats`, `vox.Planet` / `vox.World` and the bench's `FarFieldMs`, `FarFieldPatchN`,
 `FarFieldMB`, `FarFieldBuiltN` and `FarFieldStandInN` (stand-ins over band patches the chunks cover, VP4) report it;
 `voxel.World.FarFieldTrace 1` logs every update with such a stand-in and why.
 
