@@ -1210,18 +1210,14 @@ bool FFarFieldPlaneChunkManagerTest::RunTest(const FString& Parameters)
 		UProceduralMeshComponent* Static = W.Manager->GetFarOceanStaticComponent();
 		TestTrue(TEXT("Island: the far ocean's seabed and open sea are built"), Static && Static->GetNumSections() >= 2
 			&& Static->GetProcMeshSection(0)->ProcVertexBuffer.Num() > 0 && Static->GetProcMeshSection(1)->ProcVertexBuffer.Num() > 0);
-		TestNull(TEXT("Island: no grid water with the far field (D37)"), W.Manager->GetFarOceanGridComponent());
-		TestNull(TEXT("Island: no grid window with the far field"), W.Manager->GetFarOceanWindowComponent());
 		AddInfo(FString::Printf(TEXT("Island with the far field: far ocean %s; far field %s"), *W.Manager->GetFarOceanDebugString(), *W.Manager->GetFarFieldDebugString()));
 
 		W.Manager->SetFarFieldEnabled(false);
 		TestFalse(TEXT("Island: off, no far field"), W.Manager->HasFarField());
 		TestTrue(TEXT("Island: off, the far ocean stays"), W.Manager->HasFarOcean());
-		TestNotNull(TEXT("Island: off, the grid water is back"), W.Manager->GetFarOceanGridComponent());
 		AddInfo(FString::Printf(TEXT("Island without the far field: far ocean %s"), *W.Manager->GetFarOceanDebugString()));
 		W.Manager->SetFarFieldEnabled(true);
 		TestTrue(TEXT("Island: on again"), W.Manager->HasFarField());
-		TestNull(TEXT("Island: on again, no grid water"), W.Manager->GetFarOceanGridComponent());
 		W.Stop();
 	}
 	return true;

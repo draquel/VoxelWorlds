@@ -165,10 +165,7 @@ private:
 		// Far-compression sweep (G6): GT time, encodes started, async results installed this tick
 		float FarCompMs;
 		int32 FarCompDispatchN, FarCompApplyN;
-		// Far ocean (WM-E1): GT time finding open columns and rebuilding the grid water, rebuilds this tick
-		float FarOceanMs;
-		int32 FarOceanRebuildN;
-		// Memory (MB) and far-compression residency, refreshed every MemorySampleIntervalSec
+// Memory (MB) and far-compression residency, refreshed every MemorySampleIntervalSec
 		float VoxelMB, EditMB, RendGPUMB, CollMB, ScatMB, ProcessMB;
 		int32 ResidentN, UniformN, CompressedN, EmptyN;
 		// LOD evaluation this tick (KI12): candidates found (-1 = no evaluation) and re-meshes queued; and
