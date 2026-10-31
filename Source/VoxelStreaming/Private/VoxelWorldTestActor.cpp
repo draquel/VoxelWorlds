@@ -5,9 +5,7 @@
 #include "VoxelChunkManager.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelMaterialAtlas.h"
-#include "Materials/MaterialParameterCollection.h" // Config->LODParameterCollection; VoxelWorldConfiguration.h only forward-declares it
 #include "DistanceBandLODStrategy.h"
-#include "VoxelPMCRenderer.h"
 #include "VoxelCustomVFRenderer.h"
 #include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelEditManager.h"
@@ -243,97 +241,40 @@ void AVoxelWorldTestActor::InitializeVoxelWorld()
 	FDistanceBandLODStrategy* DistanceBandStrategy = new FDistanceBandLODStrategy();
 	LODStrategy = DistanceBandStrategy;
 
-	// Create mesh renderer based on configuration
-	if (Config->bUseGPURenderer)
+	// Create the mesh renderer
+	FVoxelCustomVFRenderer* CustomVFRenderer = new FVoxelCustomVFRenderer();
+
+	// Set material BEFORE Initialize - REQUIRED for Custom VF renderer
+	// The scene proxy is created during Initialize, so material must be set first
+	if (VoxelMaterial)
 	{
-		// Use GPU-driven Custom Vertex Factory renderer
-		FVoxelCustomVFRenderer* CustomVFRenderer = new FVoxelCustomVFRenderer();
-
-		// Set material BEFORE Initialize - REQUIRED for Custom VF renderer
-		// The scene proxy is created during Initialize, so material must be set first
-		if (VoxelMaterial)
-		{
-			CustomVFRenderer->SetMaterial(VoxelMaterial);
-			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using material '%s'"), *VoxelMaterial->GetName());
-		}
-		else
-		{
-			UE_LOG(LogVoxelStreaming, Warning,
-				TEXT("VoxelWorldTestActor: No VoxelMaterial assigned! Custom VF renderer requires a custom material. ")
-				TEXT("Create a simple opaque material and assign it to the VoxelMaterial property."));
-		}
-
-		CustomVFRenderer->Initialize(World, Config);
-
-		// Configure LOD material parameters (after Initialize creates the WorldComponent)
-		if (Config->LODParameterCollection)
-		{
-			CustomVFRenderer->SetLODParameterCollection(Config->LODParameterCollection);
-
-			const float LODStart = Config->GetMaterialLODStartDistance();
-			const float LODEnd = Config->GetMaterialLODEndDistance();
-			CustomVFRenderer->SetLODTransitionDistances(LODStart, LODEnd);
-
-			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: LOD MPC configured (Start=%.0f, End=%.0f, derived from LODBands)"),
-				LODStart, LODEnd);
-		}
-		else
-		{
-			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: No LOD Parameter Collection assigned in Configuration. ")
-				TEXT("Material-based LOD morphing disabled."));
-		}
-
-		// Configure material atlas for face variants and texture lookup
-		if (MaterialAtlas)
-		{
-			CustomVFRenderer->SetMaterialAtlas(MaterialAtlas);
-			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Material atlas configured with %d materials"),
-				MaterialAtlas->GetMaterialCount());
-		}
-		else
-		{
-			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: No Material Atlas assigned. ")
-				TEXT("Face variants and LUT-based texture lookup disabled."));
-		}
-
-		MeshRenderer = CustomVFRenderer;
-		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using Custom Vertex Factory renderer (GPU-driven)"));
+		CustomVFRenderer->SetMaterial(VoxelMaterial);
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using material '%s'"), *VoxelMaterial->GetName());
 	}
 	else
 	{
-		// Use PMC fallback renderer
-		FVoxelPMCRenderer* PMCRenderer = new FVoxelPMCRenderer();
-
-		// Set material BEFORE Initialize (similar to CustomVF path)
-		if (VoxelMaterial)
-		{
-			PMCRenderer->SetMaterial(VoxelMaterial);
-			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: PMC using material '%s'"), *VoxelMaterial->GetName());
-		}
-		else
-		{
-			UE_LOG(LogVoxelStreaming, Warning,
-				TEXT("VoxelWorldTestActor: No VoxelMaterial assigned for PMC renderer. Using default vertex color material."));
-		}
-
-		PMCRenderer->Initialize(World, Config);
-
-		// Configure material atlas for face variants and texture lookup
-		if (MaterialAtlas)
-		{
-			PMCRenderer->SetMaterialAtlas(MaterialAtlas);
-			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: PMC material atlas configured with %d materials"),
-				MaterialAtlas->GetMaterialCount());
-		}
-		else
-		{
-			UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: No Material Atlas assigned for PMC. ")
-				TEXT("Face variants and LUT-based texture lookup disabled."));
-		}
-
-		MeshRenderer = PMCRenderer;
-		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using PMC renderer (CPU fallback)"));
+		UE_LOG(LogVoxelStreaming, Warning,
+			TEXT("VoxelWorldTestActor: No VoxelMaterial assigned! Custom VF renderer requires a custom material. ")
+			TEXT("Create a simple opaque material and assign it to the VoxelMaterial property."));
 	}
+
+	CustomVFRenderer->Initialize(World, Config);
+
+	// Configure material atlas for face variants and texture lookup
+	if (MaterialAtlas)
+	{
+		CustomVFRenderer->SetMaterialAtlas(MaterialAtlas);
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Material atlas configured with %d materials"),
+			MaterialAtlas->GetMaterialCount());
+	}
+	else
+	{
+		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: No Material Atlas assigned. ")
+			TEXT("Face variants and LUT-based texture lookup disabled."));
+	}
+
+	MeshRenderer = CustomVFRenderer;
+	UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelWorldTestActor: Using Custom Vertex Factory renderer (GPU-driven)"));
 
 	// Initialize chunk manager
 	if (ChunkManager)
@@ -463,7 +404,6 @@ UVoxelWorldConfiguration* AVoxelWorldTestActor::CreateDefaultConfiguration()
 
 	// LOD bands matched to ViewDistance (default 10000)
 	// ChunkSize=32, VoxelSize=100 -> 3200 units per chunk
-	// MorphRange = 25% of band width for smooth transitions
 	Config->LODBands.Empty();
 
 	FLODBand Band0;
@@ -471,7 +411,6 @@ UVoxelWorldConfiguration* AVoxelWorldTestActor::CreateDefaultConfiguration()
 	Band0.MinDistance = 0.0f;
 	Band0.MaxDistance = 4000.0f;
 	Band0.VoxelStride = 1;
-	Band0.MorphRange = 1000.0f;
 	Config->LODBands.Add(Band0);
 
 	FLODBand Band1;
@@ -479,7 +418,6 @@ UVoxelWorldConfiguration* AVoxelWorldTestActor::CreateDefaultConfiguration()
 	Band1.MinDistance = 4000.0f;
 	Band1.MaxDistance = 7000.0f;
 	Band1.VoxelStride = 2;
-	Band1.MorphRange = 750.0f;
 	Config->LODBands.Add(Band1);
 
 	FLODBand Band2;
@@ -487,7 +425,6 @@ UVoxelWorldConfiguration* AVoxelWorldTestActor::CreateDefaultConfiguration()
 	Band2.MinDistance = 7000.0f;
 	Band2.MaxDistance = 10000.0f;
 	Band2.VoxelStride = 4;
-	Band2.MorphRange = 750.0f;
 	Config->LODBands.Add(Band2);
 
 	// Streaming settings - balanced for ViewDistance=10000 (~500 chunks)
@@ -497,9 +434,7 @@ UVoxelWorldConfiguration* AVoxelWorldTestActor::CreateDefaultConfiguration()
 	Config->StreamingTimeSliceMS = 3.0f;
 
 	// Rendering settings
-	Config->bUseGPURenderer = true;  // Use Custom Vertex Factory renderer
 	Config->bGenerateCollision = true;
-	Config->bEnableLODMorphing = true;
 	Config->bEnableFrustumCulling = true;
 
 	return Config;
@@ -1890,10 +1825,9 @@ void AVoxelWorldTestActor::DrawPerformanceHUD() const
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, MemColor,
 		FString::Printf(TEXT("Voxel Memory: %.0f MB [Target: <%.0f MB]"), VoxelMB, TargetVoxelMemoryMB));
 	GEngine->AddOnScreenDebugMessage(LineKey--, 0.0f, FColor::White,
-		FString::Printf(TEXT("  VoxelData=%.1fMB Edit=%.1fMB CPU=%.1fMB GPU=%.1fMB Coll=%.1fMB Scat=%.1fMB"),
+		FString::Printf(TEXT("  VoxelData=%.1fMB Edit=%.1fMB GPU=%.1fMB Coll=%.1fMB Scat=%.1fMB"),
 			MemStats.VoxelDataBytes / (1024.0f * 1024.0f),
 			MemStats.EditDataBytes / (1024.0f * 1024.0f),
-			MemStats.RendererCPUBytes / (1024.0f * 1024.0f),
 			MemStats.RendererGPUBytes / (1024.0f * 1024.0f),
 			MemStats.CollisionBytes / (1024.0f * 1024.0f),
 			MemStats.ScatterBytes / (1024.0f * 1024.0f)));

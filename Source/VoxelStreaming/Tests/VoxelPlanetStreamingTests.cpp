@@ -64,8 +64,6 @@ namespace VoxelPlanetStreamingTestUtils
 		}
 		virtual void RemoveChunk(const FIntVector& ChunkCoord) override { ChunkMeshes.Remove(ChunkCoord); }
 		virtual void ClearAllChunks() override { ChunkMeshes.Reset(); }
-		virtual void SetChunkVisible(const FIntVector& ChunkCoord, bool bVisible) override {}
-		virtual void SetAllChunksVisible(bool bVisible) override {}
 		virtual void SetMaterial(UMaterialInterface* Material) override {}
 		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
 		virtual void UpdateMaterialParameters() override {}
@@ -83,7 +81,6 @@ namespace VoxelPlanetStreamingTestUtils
 		virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 SeamSlot) override { SeamBuckets.Remove(OwnerChunkCoord); }
 		virtual void ClearAllSeamMeshes() override { SeamBuckets.Reset(); }
 		virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override { SeamBuckets.GetKeys(OutOwners); }
-		virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override {}
 		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return ChunkMeshes.Contains(ChunkCoord); }
 		virtual int32 GetLoadedChunkCount() const override { return ChunkMeshes.Num(); }
 		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override { ChunkMeshes.GetKeys(OutChunks); }
@@ -1799,7 +1796,7 @@ namespace VoxelPlanetStreamingTestUtils
 			}
 			return FVoxelData::Air();
 		};
-		VoxelNeighborSlices::Extract(CS, Coord, Manager->IsDeepSliceOff(), Manager->IsDeepSliceFull(), Has, Get, Request);
+		VoxelNeighborSlices::Extract(CS, Coord, Has, Get, Request);
 		FChunkMeshData Mesh;
 		Manager->GetMesherPtr()->GenerateMeshCPU(Request, Mesh);
 		uint32 Crc = FCrc::MemCrc32(&Missing, sizeof(Missing));
@@ -1878,8 +1875,7 @@ namespace VoxelPlanetStreamingTestUtils
 
 		for (const int32 LOD : { 0, 1 })
 		{
-			const int32 Depth = VoxelNeighborSlices::GetNeighborDepth(LOD, World.Manager->IsDeepSliceOff(), World.Manager->IsDeepSliceFull(),
-				World.Config->ChunkSize);
+			const int32 Depth = VoxelNeighborSlices::GetNeighborDepth(LOD, World.Config->ChunkSize);
 			TArray<uint32> Before, After;
 			int32 Neighbors = 0, ShellReads = 0, Different = 0, Meshed = 0, NeighborsBefore = 0;
 			EvictSnapshotCaches(World);

@@ -574,7 +574,7 @@ int32 UVoxelCollisionManager::OnChunkVoxelDataAvailable(const FIntVector& ChunkC
 	bool bFetchedArrived = false;
 	const int32 ChunkSize = Configuration->ChunkSize;
 	// How deep a cook's results depend on the voxels across a face at its stride. The neighbour's planes go stride + 1
-	// deep (2 * stride with -VoxelDeepFull; the larger is taken). On the chunk's own side the boundary cells span the
+	// deep (2 * stride is taken, the larger). On the chunk's own side the boundary cells span the
 	// stride, and the gradient normals at a crossing up to a stride inside it reach across the face too: with two
 	// strides of air there, no crossing's normal reads the neighbour.
 	const int32 Stride = 1 << FMath::Clamp(CollisionLODLevel, 0, 7);
@@ -1084,14 +1084,12 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	const FIntVector ChunkCoord = Request.ChunkCoord;
 	const int32 LODLevel = Request.LODLevel;
 	TWeakObjectPtr<UVoxelCollisionManager> WeakThis(this);
-	const bool bDeepOff = ChunkManager->IsDeepSliceOff();
-	const bool bDeepFull = ChunkManager->IsDeepSliceFull();
 	const int32 ChunkSizeCapture = Configuration->ChunkSize;
 
 	LastPrepMs += static_cast<float>((FPlatformTime::Seconds() - PrepT0) * 1000.0);
 
 	// Launch async task: mesh generation + Chaos trimesh construction on thread pool
-	Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), NeighborShells = MoveTemp(NeighborShells), ChunkCoord, LODLevel, bDeepOff, bDeepFull, ChunkSizeCapture, SnapshotDecodes = MoveTemp(SnapshotDecodes)]() mutable
+	Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), NeighborShells = MoveTemp(NeighborShells), ChunkCoord, LODLevel, ChunkSizeCapture, SnapshotDecodes = MoveTemp(SnapshotDecodes)]() mutable
 	{
 		for (UE::Tasks::FTask& Decode : SnapshotDecodes)
 		{
@@ -1148,8 +1146,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 				const int32 Index = X + Y * CS + Z * CS * CS;
 				return MemoArr->IsValidIndex(Index) ? (*MemoArr)[Index] : FVoxelData::Air();
 			};
-			VoxelNeighborSlices::Extract(CS, ChunkCoord, bDeepOff, bDeepFull,
-				HasNeighborData, GetNeighborVoxel, MeshRequest);
+			VoxelNeighborSlices::Extract(CS, ChunkCoord, HasNeighborData, GetNeighborVoxel, MeshRequest);
 			NeighborSnapshots.Empty();
 			NeighborShells.Empty();
 		}

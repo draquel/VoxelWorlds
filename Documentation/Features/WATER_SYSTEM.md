@@ -29,7 +29,6 @@ The water system renders water surfaces where water-flagged air voxels exist in 
 - 2D tile-based water meshing (decoupled from 3D terrain chunks)
 - 3-cell dilation at shorelines to tuck water under terrain
 - Greedy rectangle merging for minimal quad count
-- Dual renderer support (Custom VF GPU renderer + PMC fallback)
 - Separate water material (translucent / Single Layer Water)
 
 ---
@@ -63,11 +62,9 @@ VoxelMeshing
 
 VoxelRendering
     └── IVoxelMeshRenderer (interface)
-        ├── FVoxelCustomVFRenderer (GPU) ← NEW
-        │   └── UVoxelWorldComponent
-        │       └── FVoxelSceneProxy (second render pass)
-        └── FVoxelPMCRenderer (CPU fallback)
-            └── Dedicated PMC per water tile
+        └── FVoxelCustomVFRenderer
+            └── UVoxelWorldComponent
+                └── FVoxelSceneProxy (second render pass)
 ```
 
 ---
@@ -462,18 +459,6 @@ FMaterialRelevance WaterMaterialRelevance;
 
 **Buffer creation**: Water vertices go through the same `FVoxelVertex → FVoxelLocalVertex` conversion pipeline as terrain, creating identical GPU buffer structures (vertex, color SRV, tangent SRV, texcoord SRV, index buffer, FLocalVertexFactory).
 
-### PMC Renderer (FVoxelPMCRenderer)
-
-**Files**: `VoxelPMCRenderer.h/.cpp`
-
-Creates one `UProceduralMeshComponent` per water tile:
-- Attached to the container actor
-- Water material applied separately from terrain material
-- Single mesh section containing all water quads for the tile
-- Component pooling for reuse on tile removal/recreation
-
----
-
 ## Configuration
 
 **File**: `VoxelCore/Public/VoxelWorldConfiguration.h`
@@ -532,8 +517,7 @@ project does: the mark pass costs about 0.02 ms more at 1280 x 720.
     │   ├─ Greedy rectangle merge
     │   └─ Emit water quads (MaterialID=254)
     └─ MeshRenderer->UpdateWaterTileMesh()
-        ├─ GPU: ConvertToVoxelVertices → ENQUEUE_RENDER_COMMAND → GPU buffers
-        └─ PMC: CreateMeshSection on dedicated component
+        └─ ConvertToVoxelVertices → ENQUEUE_RENDER_COMMAND → GPU buffers
 ```
 
 ### Terrain Edit to Water Fill
@@ -561,33 +545,27 @@ project does: the mark pass costs about 0.02 ms more at 1280 x 720.
 
 ## Far Ocean (Islands)
 
-**Files**: `VoxelStreaming/Public/VoxelFarOcean.h` (geometry), `UVoxelChunkManager::RebuildFarOcean` / `UpdateFarOceanGrid`
+**Files**: `VoxelStreaming/Public/VoxelFarOcean.h` (geometry), `UVoxelChunkManager::RebuildFarOcean`
 
 Water tiles exist only for loaded chunk columns, so an island's sea used to end at the edge of what was streamed and the
 island floated in a void seen from outside (world modes review KI2). Since milestone M6 (WM-E1) a bounded heightmap world
-with `bIslandFarOcean` draws the sea past that: procedural mesh components on the world actor, at `WaterLevel` with
+with `bIslandFarOcean` draws the sea past that: a procedural mesh component on the world actor, at `WaterLevel` with
 `WaterMeshMaterial` and world-space UVs as the tiles (one seamless surface), out to `IslandFarOceanDistance` past the edge.
 
-- **No overlap with the tiles.** The far ocean's grid covers every chunk column the streaming has not opened; a column
-  opens when it holds a chunk with voxel data or has a water tile. The grid is rebuilt in the same tick the open set
-  changes, after the water tiles are processed, so a tile and the far ocean never cover the same column (the material is
-  translucent: two layers would draw darker) and no column is left without water. Only a window around the open columns
-  is rebuilt each time; the rest of the grid only when the window moves.
+- **From the bounds box outward.** Inside the island's bounds box the far field draws the land and the sea at
+  `WaterLevel` (mode parity WM-MP1, decision D37, 2026-10-26: a band patch's sea hidden with its terrain where the
+  window's chunks and tiles are, so a tile and the far field never overlap); the far ocean's open sea starts at the box.
+  The far field's sea uses the tiles' UVs too (world X and Y over the voxel size), one pattern across the three. (The
+  grid water that covered unloaded columns inside the box while the far field was off went in code review CR1, D-CR13.)
 - **Under it:** a seabed that continues the island's (`FIslandBowlWorldMode::GetSeabedHeight`), half a voxel under it
-  so the loaded voxel seabed covers it, and a floor under unloaded columns inside the island's edge.
-- **From below:** the undersides are separate sections shown only while the viewer is under the water plane (the tiles
+  so the loaded voxel seabed covers it.
+- **From below:** the underside is a separate section shown only while the viewer is under the water plane (the tiles
   are drawn two-sided always).
-- **Proxy recreation (G15):** the far ocean's meshes live on their own components, so a recreated terrain scene proxy
-  does not lose them; nothing needs re-sending.
-- **With the far field (mode parity WM-MP1, decision D37, 2026-10-26):** a heightmap world's far field draws the land and
-  the sea at `WaterLevel` inside the island's bounds box (a band patch's sea hidden with its terrain where the window's
-  chunks and tiles are, so a tile and the far field never overlap), so the far ocean builds no grid water or floor and
-  keeps its open sea from the box outward and its seabed; the far field's sea uses the tiles' UVs too (world X and Y over
-  the voxel size), one pattern across the three. `voxel.World.FarField 0` builds the grid again
-  ([LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field").
+- **Proxy recreation (G15):** the far ocean's mesh lives on its own component, so a recreated terrain scene proxy does
+  not lose it; nothing needs re-sending.
 
-Details, cvars (`voxel.World.FarOcean`, `voxel.World.FarOceanInland`, `voxel.World.FarOceanStats`) and the trade-offs:
-WORLD_MODES.md, "Beyond the edge".
+Details, cvars (`voxel.World.FarOcean`, `voxel.World.FarOceanStats`) and the trade-offs: WORLD_MODES.md, "Beyond the
+edge".
 
 ## Design Decisions
 
@@ -647,4 +625,4 @@ WORLD_MODES.md, "Beyond the edge".
 
 ---
 
-**Status**: Implementation Complete (PMC + GPU Renderer)
+**Status**: Implementation Complete

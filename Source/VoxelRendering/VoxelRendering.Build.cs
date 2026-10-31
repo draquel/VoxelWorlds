@@ -33,7 +33,6 @@ public class VoxelRendering : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"ProceduralMeshComponent",
 				"Projects", // VoxelRendering.cpp: IPluginManager for the shader directory mapping
 				"Renderer", // VoxelSceneProxy.cpp: PrimitiveSceneInfo.h
 			}

@@ -23,7 +23,7 @@ class IVoxelMeshRenderer;
  * This is a minimal test harness that wires up:
  * - UVoxelWorldConfiguration (created programmatically or from asset)
  * - FDistanceBandLODStrategy (LOD management)
- * - FVoxelPMCRenderer (ProceduralMeshComponent rendering)
+ * - FVoxelCustomVFRenderer (rendering)
  * - UVoxelChunkManager (streaming coordinator)
  *
  * Place this actor in a level and enter PIE to test chunk generation.

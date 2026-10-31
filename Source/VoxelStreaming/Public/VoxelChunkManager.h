@@ -67,10 +67,6 @@ struct FVoxelChunkState
 	UPROPERTY()
 	int32 MeshedLODLevel = 0;
 
-	/** Current morph factor for LOD transitions */
-	UPROPERTY()
-	float MorphFactor = 0.0f;
-
 	/** Frame number when state last changed */
 	UPROPERTY()
 	int64 LastStateChangeFrame = 0;
@@ -890,41 +886,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
 	bool HasFarOcean() const { return FarOceanStatic != nullptr; }
 
-	/**
-	 * Number of chunk columns the far ocean leaves open to the streaming now (columns holding loaded chunks or a water
-	 * tile); every other grid column is covered by the far ocean's water.
-	 *
-	 * @return Open column count
-	 */
-	UFUNCTION(BlueprintPure, Category = "Voxel|World")
-	int32 GetFarOceanOpenColumnCount() const { return FarOceanOpenColumns.Num(); }
-
-	/** Show or hide the far ocean (voxel.World.FarOcean). */
+/** Show or hide the far ocean (voxel.World.FarOcean). */
 	void SetFarOceanVisible(bool bVisible);
 
 	/** One-line summary of the far ocean for logs (voxel.World.FarOceanStats). */
 	FString GetFarOceanDebugString() const;
 
-	/**
-	 * The far ocean's grid outside its window (rebuilt when the window moves): section 0 the water, 1 the floor under it,
-	 * 2 the water's underside (null without one).
-	 */
-	UProceduralMeshComponent* GetFarOceanGridComponent() const { return FarOceanGrid; }
-
-	/** The far ocean's grid inside its window around the open columns (rebuilt when they change): sections as the grid's. */
-	UProceduralMeshComponent* GetFarOceanWindowComponent() const { return FarOceanWindow; }
-
-	/** The window's columns (Min inclusive, Max exclusive): the open columns' bounds plus a margin when it last moved. */
-	const FIntRect& GetFarOceanWindowColumns() const { return FarOceanWindowColumns; }
-
-	/** The far ocean's static meshes: section 0 the seabed, 1 the open-sea water, 2 its underside (null without one). */
+	/** The far ocean's meshes: section 0 the seabed, 1 the open-sea water, 2 its underside (null without one). */
 	UProceduralMeshComponent* GetFarOceanStaticComponent() const { return FarOceanStatic; }
 
 	/** The settings the far ocean was built with. */
 	const FVoxelFarOceanSettings& GetFarOceanSettings() const { return FarOceanSettings; }
-
-	/** The columns the far ocean leaves open (see GetFarOceanOpenColumnCount). */
-	const TSet<FIntPoint>& GetFarOceanOpenColumns() const { return FarOceanOpenColumns; }
 
 	// ==================== Planet Ocean (spherical SP-E2) ====================
 
@@ -964,7 +936,7 @@ public:
 	/** Whether the far field draws the sea, in place of the ocean shell (at scale: FVoxelPlanetFarField::ShouldDrawSea). */
 	bool DoesFarFieldDrawSea() const;
 
-	/** A built patch's component (section 0 terrain, 1 sea, 2 the sea's underside), or null. */
+/** A built patch's component (section 0 terrain, 1 sea, 2 the sea's underside), or null. */
 	UProceduralMeshComponent* GetFarFieldComponent(uint64 PackedPatchKey) const;
 
 	/** Patch components alive. */
@@ -1368,11 +1340,7 @@ public:
 	 */
 	bool ShouldUseCollisionShells(int32 Depth) const;
 
-	/** Whether -VoxelDeepOff / -VoxelDeepFull were set (worker-side slice extraction needs them). */
-	bool IsDeepSliceOff() const { return bDeepDepthOff; }
-	bool IsDeepSliceFull() const { return bDeepDepthFull; }
-
-	/**
+/**
 	 * Get raw pointer to the mesher (for async dispatch).
 	 * The mesher's GenerateMeshCPU is stateless and thread-safe.
 	 */
@@ -1388,7 +1356,6 @@ public:
 	{
 		int64 VoxelDataBytes = 0;      // ChunkStates voxel data
 		int64 EditDataBytes = 0;       // Edit manager memory
-		int64 RendererCPUBytes = 0;    // Renderer CPU-side memory
 		int64 RendererGPUBytes = 0;    // Renderer GPU memory
 		int64 CollisionBytes = 0;      // Collision manager memory
 		int64 ScatterBytes = 0;        // Scatter manager + renderer memory
@@ -1456,9 +1423,6 @@ public:
 		float FarCompressMs = 0.0f;
 		int32 FarCompressDispatchCount = 0; // fresh encodes started this tick
 
-		// Far ocean (WM-E1): finding the open columns and, when they changed, rebuilding the grid water
-		float FarOceanMs = 0.0f;
-		int32 FarOceanRebuildCount = 0;     // grid water rebuilds this tick (0 or 1)
 		int32 FarCompressApplyCount = 0;    // finished async encodes installed this tick
 
 		// Render-submit breakdown (RenderSubmitMs = mesh drain + unload + water tiles; flush is separate)
@@ -1707,12 +1671,6 @@ protected:
 	 * @return Number of candidates: tracked chunks whose committed LOD differs from the strategy's.
 	 */
 	int32 EvaluateLODLevelChanges(const FLODQueryContext& Context, int32& OutQueued, bool& OutCapReached);
-
-	/**
-	 * Update LOD morph factors for loaded chunks.
-	 * Only morph factor interpolation — no level change detection.
-	 */
-	void UpdateLODMorphFactors(const FLODQueryContext& Context);
 
 	// ==================== Chunk State Management ====================
 
@@ -2351,12 +2309,6 @@ private:
 	FVector LastStreamingUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 
 	/**
-	 * Last position where LOD transitions were updated.
-	 * LOD updates are more sensitive to position changes than streaming decisions.
-	 */
-	FVector LastLODUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
-
-	/**
 	 * Flag to force streaming update on next tick.
 	 * Set by ForceStreamingUpdate(), cleared after use.
 	 */
@@ -2364,12 +2316,6 @@ private:
 
 	/** When EvaluateLODLevelChanges runs (viewer movement, cap left-overs, idle sweep); see FVoxelLODEvalSchedule. */
 	FVoxelLODEvalSchedule LODEvalSchedule;
-
-	/**
-	 * Threshold for LOD morph factor update position delta (squared).
-	 * Morph factors should update when viewer moves ~100 units.
-	 */
-	static constexpr float LODUpdateThresholdSq = 100.0f * 100.0f;  // 100 units
 
 	// ==================== Statistics ====================
 
@@ -2690,38 +2636,13 @@ private:
 
 	// ==================== Far Ocean (WM-E1) ====================
 
-	/**
-	 * The far ocean's grid water outside the window, the frame: rebuilt only when the window moves (owned by this
-	 * component's actor). Rebuilding the whole grid on every change cost about 1.3 ms on island M and grew with the island.
-	 */
-	UPROPERTY(Transient)
-	TObjectPtr<UProceduralMeshComponent> FarOceanGrid;
-
-	/** The far ocean's grid water inside the window around the open columns: rebuilt whenever they change */
-	UPROPERTY(Transient)
-	TObjectPtr<UProceduralMeshComponent> FarOceanWindow;
-
-	/** The window's columns (Min inclusive, Max exclusive); empty until a column opens */
-	FIntRect FarOceanWindowColumns;
-
-	/** Columns of margin the window keeps around the open columns' bounds when it moves */
-	static constexpr int32 FarOceanWindowMarginColumns = 8;
-
-	/** The far ocean's static meshes: the seabed (section 0, terrain material) and the open sea (section 1, water) */
+	/** The far ocean's meshes (owned by this component's actor): the seabed (section 0, terrain material) and the open sea
+	 *  (section 1, water; section 2 its underside). Inside the footprint's box the far field draws the land and the sea. */
 	UPROPERTY(Transient)
 	TObjectPtr<UProceduralMeshComponent> FarOceanStatic;
 
 	/** What the far ocean was built with */
 	FVoxelFarOceanSettings FarOceanSettings;
-
-	/** Columns the grid water leaves open: they hold a chunk with voxel data or a water tile */
-	TSet<FIntPoint> FarOceanOpenColumns;
-
-	/** Grid water quads after the last rebuild (frame and window), and rebuilds this session (window; frame) */
-	int32 FarOceanFrameQuads = 0;
-	int32 FarOceanGridQuads = 0;
-	int32 FarOceanRebuilds = 0;
-	int32 FarOceanFrameRebuilds = 0;
 
 	/** Whether the water's undersides (sections 2) are shown: only while the viewer is under the water plane */
 	bool bFarOceanUndersideShown = false;
@@ -2729,27 +2650,11 @@ private:
 	/** Show the water's undersides when the viewer is under the water plane, hide them when it is not. */
 	void UpdateFarOceanUnderside(const FVector& ViewerPosition);
 
-	/**
-	 * Build the far ocean from the world mode's bounds and the island's seabed (game worlds, islands, bIslandFarOcean).
-	 *
-	 * @param bFarFieldEnabled The far field is on (WM-MP1, D37): the grid water and its floor over the unloaded columns inside
-	 *        the bounds are not built, since the far field draws the terrain and the sea there; the open sea and the seabed stay
-	 */
-	void RebuildFarOcean(bool bFarFieldEnabled);
+	/** Build the far ocean from the world mode's bounds and the island's seabed (game worlds, islands, bIslandFarOcean). */
+	void RebuildFarOcean();
 
-	/** The far ocean's grid water and floor were left out because the far field draws inside the bounds (WM-MP1) */
-	bool bFarOceanGridRetired = false;
-
-	/** Destroy the far ocean's components. */
+	/** Destroy the far ocean's component. */
 	void DestroyFarOcean();
-
-	/**
-	 * Find the open columns and rebuild the grid water when they changed: the window always, the frame only when the
-	 * open columns left the window (which then moves around them).
-	 * @param bForce Rebuild both even when nothing changed
-	 * @return True if the grid water was rebuilt
-	 */
-	bool UpdateFarOceanGrid(bool bForce);
 
 	/** The voxel material generation gives the seabed beyond the edge (the most common one around it). */
 	uint8 ResolveFarSeabedMaterial(const FIslandBowlParams& Island) const;
@@ -2895,18 +2800,7 @@ private:
 	int32 SchedOverridePending = -1;
 	bool bSchedPinned = false;
 
-	/** Deep neighbour-data depth override for per-job cost (command line, parsed at Initialize).
-	 *  Default = stride+1 (geometry-only: watertight, one-sided boundary normals, the cheaper job).
-	 *  -VoxelDeepFull => 2*stride (adds central-difference boundary-normal reach, the old default);
-	 *  -VoxelDeepOff => 1 (no deep data). Applied by the collision cook's slice extraction. */
-	bool bDeepDepthFull = false;
-	bool bDeepDepthOff = false;
-
-	/** Stale-cull: skip meshing chunks the viewer has already moved past (beyond the unload
-	 *  horizon) instead of meshing them and unloading on arrival. Default on; -VoxelNoStaleCull disables. */
-	bool bStaleCull = true;
-
-	/** Latest viewer world position, cached each tick for the stale-cull distance test. */
+/** Latest viewer world position, cached each tick for the stale-cull distance test. */
 	FVector CurrentViewerPosition = FVector::ZeroVector;
 
 	/** Previous-tick viewer position for the speed estimate (FLT_MAX until first tick). */

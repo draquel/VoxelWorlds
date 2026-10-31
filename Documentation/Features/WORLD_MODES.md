@@ -239,26 +239,23 @@ uses for its tiles). The cull used to keep a ring out to a chunk diagonal past t
 chunks) holding the floor and the water; nothing past the walls needs it now.
 
 **The far ocean (M6, WM-E1).** The chunk manager draws the sea and the seabed past what is streamed, out to
-`IslandFarOceanDistance` past the edge (`FVoxelFarOcean`; `UVoxelChunkManager::RebuildFarOcean`), on three procedural
-mesh components of the world actor (the static meshes, the grid's frame and the grid's window):
+`IslandFarOceanDistance` past the edge (`FVoxelFarOcean`; `UVoxelChunkManager::RebuildFarOcean`), on one procedural
+mesh component of the world actor:
 
 | Mesh | Covers | Material | Updated |
 |------|--------|----------|---------|
-| Grid water | Every chunk column of the footprint's box (plus two columns) that the streaming has not opened: a column opens when it holds a chunk with voxel data or a water tile. **Not built while the far field is on** (mode parity WM-MP1, decision D37, 2026-10-26): the far field's patches draw the land and the sea inside the box, hidden where the window's chunks and tiles are | `WaterMeshMaterial`, at `WaterLevel` like the water tiles | Whenever the open columns change (same tick, so a column's water tile and the far ocean never overlap: the water is translucent). Only the window around the open columns (their bounds plus 8 columns) is rebuilt then; the frame outside it is rebuilt when the open columns leave the window and it moves, so the cost does not grow with the island |
-| Grid floor | Under the grid water's columns that touch the footprint: flat at `EdgeHeight` inside the edge, the seabed outside. Not built while the far field is on (D37) | The terrain's material instance, with the seabed's material id | With the grid water |
 | Open sea | From the grid's rectangle out to the footprint's box plus `IslandFarOceanDistance`, in widening rings | `WaterMeshMaterial` | Built once |
 | Seabed | From the edge out to the open sea's corners, half a voxel under the seabed profile, so the loaded voxel seabed hides it | Terrain material, seabed material id (the most common one generation gives just past the edge) | Built once |
 
-The water's undersides are separate sections, shown only while the viewer is under the water plane. The components are
-their own primitives, so a recreated terrain scene proxy (G15) does not touch them. With the far field off
-(`voxel.World.FarField 0`) the grid water is built as before M6's successor: inside the island, columns past the view
-distance get the far ocean's water, so unloaded land there reads as sea at the horizon; `voxel.World.FarOceanInland <uu>`
-limits that water to columns within that distance of the edge (0 = only those that reach it). With the far field on
-(the default since WM-MP1) the island's land and inland water are the far field's out to the bounds box, whose corners
-past the circle hold the far field's sea, and the open sea starts at the box. `voxel.World.FarOcean 0` hides the far
-ocean, `voxel.World.FarOceanStats` logs its state; the water needs `bEnableWaterLevel` and `WaterMeshMaterial` (without
-them the world actor draws its fallback plane), the seabed is drawn either way. `GetSettingsWarnings` flags an
-`IslandEdgeHeight` at or above the water.
+The water's underside is a separate section, shown only while the viewer is under the water plane. The component is
+its own primitive, so a recreated terrain scene proxy (G15) does not touch it. The island's land and inland water are
+the far field's out to the bounds box (WM-MP1), whose corners past the circle hold the far field's sea, and the open sea
+starts at the box. The grid water and floor that stood in for unloaded columns inside the box while the far field was
+off went in code review CR1 (D-CR13: `voxel.World.FarField 0` is a development switch, and with it an island draws
+nothing inside its box past the voxel window). `voxel.World.FarOcean 0` hides the far ocean, `voxel.World.FarOceanStats`
+logs its state; the water needs `bEnableWaterLevel` and `WaterMeshMaterial` (without them the world actor draws its
+fallback plane), the seabed is drawn either way. `GetSettingsWarnings` flags an `IslandEdgeHeight` at or above the
+water.
 
 **Saves.** The seabed shapes only terrain past `R + F`, where a save holds nothing (POIs, map tiles and edits stay inside
 the walls), so it is not part of the save fingerprint and `FVoxelWorldModeFactory::GenerationVersion` stays 1: saves

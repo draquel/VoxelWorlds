@@ -21,25 +21,21 @@ struct FVoxelData;
 namespace VoxelNeighborSlices
 {
 	/**
-	 * How many planes Extract reads from each neighbour next to the shared face (plane 0 included): 1 at stride 1 or with
-	 * bDeepOff, stride + 1 by default, 2 * stride with bDeepFull; at most ChunkSize. A neighbour's boundary shell of this
-	 * depth (FVoxelChunkShell) holds everything Extract reads from it (G69).
+	 * How many planes Extract reads from each neighbour next to the shared face (plane 0 included): 1 at stride 1,
+	 * stride + 1 otherwise; at most ChunkSize. A neighbour's boundary shell of this depth (FVoxelChunkShell) holds
+	 * everything Extract reads from it (G69).
 	 *
 	 * @param LODLevel  The request's LOD level (stride 2^LOD)
-	 * @param bDeepOff  -VoxelDeepOff
-	 * @param bDeepFull -VoxelDeepFull
 	 * @param ChunkSize Voxels per chunk axis
 	 * @return Planes per face
 	 */
-	int32 GetNeighborDepth(int32 LODLevel, bool bDeepOff, bool bDeepFull, int32 ChunkSize);
+	int32 GetNeighborDepth(int32 LODLevel, int32 ChunkSize);
 
 	/**
 	 * Fill OutRequest's neighbor slice/edge/corner arrays + flags from an arbitrary voxel source.
 	 *
 	 * @param ChunkSize        Voxels per chunk axis.
 	 * @param ChunkCoord       The chunk whose neighbors are extracted.
-	 * @param bDeepOff         -VoxelDeepOff: single plane only (no deep data).
-	 * @param bDeepFull        -VoxelDeepFull: 2*stride deep planes (else stride+1).
 	 * @param HasNeighborData  Whether a neighbor chunk has voxel data available.
 	 * @param GetNeighborVoxel Read one (edit-merged) voxel from a neighbor chunk.
 	 * @param OutRequest       Request to fill (LODLevel must already be set).
@@ -47,8 +43,6 @@ namespace VoxelNeighborSlices
 	void Extract(
 		int32 ChunkSize,
 		const FIntVector& ChunkCoord,
-		bool bDeepOff,
-		bool bDeepFull,
 		TFunctionRef<bool(const FIntVector&)> HasNeighborData,
 		TFunctionRef<FVoxelData(const FIntVector&, int32, int32, int32)> GetNeighborVoxel,
 		FVoxelMeshingRequest& OutRequest);

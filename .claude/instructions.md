@@ -14,10 +14,11 @@ All LOD strategies implement the `IVoxelLODStrategy` interface. This allows swap
 
 See: `Documentation/LOD_SYSTEM.md`
 
-### 2. Hybrid Rendering Architecture
-Two renderer implementations via `IVoxelMeshRenderer` interface:
-- **Runtime**: `FVoxelCustomVFRenderer` - Custom Vertex Factory, GPU-driven, zero CPU overhead
-- **Editor**: `FVoxelPMCRenderer` - ProceduralMeshComponent fallback for tools
+### 2. Rendering
+One renderer behind the `IVoxelMeshRenderer` interface: `FVoxelCustomVFRenderer`, a `UVoxelWorldComponent`
+per render region whose `FVoxelSceneProxy` draws the chunk, seam and water meshes through UE's
+`FLocalVertexFactory`. (The `ProceduralMeshComponent` fallback was deleted in code review CR1, D-CR7; the
+streaming tests use a recording stub.)
 
 See: `Documentation/RENDERING_SYSTEM.md`
 
@@ -47,7 +48,6 @@ Clear module boundaries with interface-based integration:
 
 class IVoxelLODStrategy {
     virtual int32 GetLODForChunk(FIntVector ChunkCoord, const FLODQueryContext& Context) const = 0;
-    virtual float GetLODMorphFactor(FIntVector ChunkCoord, const FLODQueryContext& Context) const = 0;
     virtual TArray<FChunkLODRequest> GetVisibleChunks(const FLODQueryContext& Context) const = 0;
     // ... see LOD_SYSTEM.md for complete interface
 };
@@ -61,7 +61,6 @@ class IVoxelLODStrategy {
 class IVoxelMeshRenderer {
     virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) = 0;
     virtual void RemoveChunk(FIntVector ChunkCoord) = 0;
-    virtual void UpdateLODTransition(FIntVector ChunkCoord, float MorphFactor) = 0;
     // ... see RENDERING_SYSTEM.md for complete interface
 };
 ```
@@ -180,7 +179,6 @@ struct FChunkDescriptor {
     int32 ChunkSize;
     TSharedPtr<TArray<FVoxelData>> VoxelArray; // shared copy-on-write: read via GetVoxelDataForRead, write via GetVoxelDataMutable
     FBox Bounds;
-    float MorphFactor;
     // ... see DATA_STRUCTURES.md
 };
 ```
@@ -410,9 +408,6 @@ See: `Documentation/PERFORMANCE_TARGETS.md`
 
 ### Why Pluggable LOD?
 Allows experimentation and optimization without refactoring core systems. Can ship with simple distance bands and add complex strategies later based on profiling.
-
-### Why Hybrid Rendering?
-Custom Vertex Factory maximizes runtime performance (GPU-driven, zero CPU overhead), while PMC provides simplicity for editor tools and debugging.
 
 ### Why GPU generation and CPU meshing?
 Generation is one thread per voxel and the GPU does it in a fraction of a millisecond per chunk. Meshing

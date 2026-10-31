@@ -10,7 +10,6 @@
 #include "VoxelWorldConfiguration.generated.h"
 
 class UMaterialInterface;
-class UMaterialParameterCollection;
 class UVoxelBiomeConfiguration;
 class UVoxelCaveConfiguration;
 class UVoxelScatterConfiguration;
@@ -347,10 +346,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (EditCondition = "bEnableLOD"))
 	TArray<FLODBand> LODBands;
 
-	/** Enable smooth LOD transitions (morphing) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (EditCondition = "bEnableLOD"))
-	bool bEnableLODMorphing = true;
-
 	/**
 	 * Enable LOD seam handling (skirts, Transvoxel, etc.).
 	 * When disabled, no seam geometry is generated between LOD levels.
@@ -396,19 +391,6 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (ClampMin = "0", EditCondition = "bEnableLOD"))
 	float LODCoarsenHysteresis = 0.5f;
-
-	/**
-	 * Material Parameter Collection for LOD morphing.
-	 *
-	 * Create an MPC asset with these scalar parameters:
-	 *   - LODStartDistance: Distance where MorphFactor = 0
-	 *   - LODEndDistance: Distance where MorphFactor = 1
-	 *   - LODInvRange: 1.0 / (EndDistance - StartDistance)
-	 *
-	 * Values are auto-calculated from LODBands configuration.
-	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD", meta = (EditCondition = "bEnableLODMorphing"))
-	TObjectPtr<UMaterialParameterCollection> LODParameterCollection;
 
 	// ==================== Streaming Settings ====================
 
@@ -457,10 +439,6 @@ public:
 	float UVScale = 1.0f;
 
 	// ==================== Rendering Settings ====================
-
-	/** Use GPU-driven custom vertex factory (true) or PMC fallback (false) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering")
-	bool bUseGPURenderer = true;
 
 	/** Generate collision meshes */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering")
@@ -656,18 +634,6 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Configuration")
 	TArray<FString> GetSettingsWarnings() const;
-
-	/**
-	 * Get the start distance for material-based LOD morphing.
-	 * Derived from LODBands: first band's (MaxDistance - MorphRange)
-	 */
-	float GetMaterialLODStartDistance() const;
-
-	/**
-	 * Get the end distance for material-based LOD morphing.
-	 * Derived from LODBands: last band's MaxDistance (clamped to ViewDistance)
-	 */
-	float GetMaterialLODEndDistance() const;
 
 	/**
 	 * Get the spawn position for spherical planet mode over the datum (no terrain: the configuration has no world mode).

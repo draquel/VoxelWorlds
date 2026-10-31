@@ -41,7 +41,7 @@ extern VOXELRENDERING_API int32 GVoxelVertexColorDebugMode;
  *   UV1.y = FaceType (0=Top, 1=Side, 2=Bottom as float)
  *
  * Color channel encoding (for AO and BiomeID):
- *   R: Reserved (legacy MaterialID for compatibility)
+ *   R: the far field's first material of a two-material quad (G45); 0 on chunk meshes
  *   G: BiomeID (0-255)
  *   B: AO in top 2 bits - (VertexColor.B * 255) >> 6 gives AO 0-3
  *   A: Reserved (1.0)
@@ -52,17 +52,6 @@ extern VOXELRENDERING_API int32 GVoxelVertexColorDebugMode;
  *   BiomeID = round(VertexColor.G * 255)
  *   AO = floor(VertexColor.B * 4)  // 0-3 range
  *   AOFactor = 1.0 - (AO * 0.25)   // For darkening
- *
- * LOD Morphing via Material Parameter Collection (MPC):
- *   Create an MPC with scalar parameters:
- *     - LODStartDistance: Distance where MorphFactor = 0
- *     - LODEndDistance: Distance where MorphFactor = 1
- *     - LODInvRange: 1.0 / (End - Start) for efficient calculation
- *   Assign MPC to UVoxelWorldComponent::LODParameterCollection
- *
- * In material graph, use CollectionParameter nodes to calculate per-pixel MorphFactor:
- *   Distance = length(WorldPosition - CameraPosition)
- *   MorphFactor = saturate((Distance - LODStartDistance) * LODInvRange)
  */
 struct VOXELRENDERING_API FVoxelLocalVertex
 {
@@ -92,23 +81,6 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 		TangentZ.Vector.W = 127;
 	}
 
-	// Legacy constructor for compatibility
-	FVoxelLocalVertex(const FVector3f& InPos, const FVector3f& InNormal, const FVector2f& InUV, const FColor& InColor)
-		: Position(InPos)
-		, TexCoord(InUV)
-		, TexCoord1(FVector2f::ZeroVector)
-		, Color(InColor)
-	{
-		// Compute tangent from normal
-		FVector3f RefVector = FMath::Abs(InNormal.Z) < 0.999f ? FVector3f(0, 0, 1) : FVector3f(1, 0, 0);
-		FVector3f TangentVec = FVector3f::CrossProduct(RefVector, InNormal).GetSafeNormal();
-
-		TangentX = FPackedNormal(TangentVec);
-		TangentZ = FPackedNormal(InNormal);
-		// Set W component of TangentZ to encode binormal sign (127 = positive/no flip)
-		TangentZ.Vector.W = 127;
-	}
-
 	/**
 	 * Convert from FVoxelVertex.
 	 *
@@ -117,7 +89,7 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 	 *   UV1.y = FaceType (0=Top, 1=Side, 2=Bottom as float)
 	 *
 	 * Vertex color encoding:
-	 *   R: Reserved (legacy MaterialID for compatibility)
+	 *   R: the far field's first material of a two-material quad (G45); 0 on chunk meshes
 	 *   G: BiomeID (0-255)
 	 *   B: AO << 6 (top 2 bits encode AO 0-3)
 	 *   A: 255
@@ -279,12 +251,6 @@ struct VOXELRENDERING_API FVoxelChunkRenderData
 	/** World position of chunk origin */
 	FVector ChunkWorldPosition = FVector::ZeroVector;
 
-	/** LOD morph factor for smooth transitions */
-	float MorphFactor = 0.0f;
-
-	/** Visibility flag */
-	bool bIsVisible = true;
-
 	/** Interleaved vertex buffer (FVoxelLocalVertex format) */
 	FBufferRHIRef VertexBufferRHI;
 
@@ -408,7 +374,6 @@ private:
 
 /**
  * Helper function to initialize FLocalVertexFactory with voxel vertex data.
- * Uses the same pattern as LocalVFTestComponent.
  *
  * @param RHICmdList RHI command list
  * @param VertexFactory Vertex factory to initialize

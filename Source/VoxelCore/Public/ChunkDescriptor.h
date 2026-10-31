@@ -132,10 +132,6 @@ struct VOXELCORE_API FChunkDescriptor
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chunk")
 	bool bHasEdits = false;
 
-	/** LOD transition blend factor (0 = this LOD, 1 = next LOD) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chunk")
-	float MorphFactor = 0.0f;
-
 	/** Seed used for procedural generation (stored as int32 for Blueprint compatibility) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chunk")
 	int32 GenerationSeed = 0;

@@ -9,7 +9,6 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "Materials/MaterialInterface.h"
-#include "Materials/MaterialParameterCollection.h" // CurrentLODCollection.Get(); VoxelWorldConfiguration.h only forward-declares it
 #include "VT/RuntimeVirtualTexture.h"
 #include "RHICommandList.h"
 #include "RenderingThread.h"
@@ -164,14 +163,6 @@ UVoxelWorldComponent* FVoxelCustomVFRenderer::CreateRegionComponent(const FIntVe
 			Component->CreateVoxelMaterialInstance(CurrentMaterial.Get());
 		}
 	}
-	if (CurrentLODCollection.IsValid())
-	{
-		Component->SetLODParameterCollection(CurrentLODCollection.Get());
-	}
-	if (bHasLODDistances)
-	{
-		Component->SetLODTransitionDistances(LODStartDistance, LODEndDistance);
-	}
 	if (bHasViewerPosition)
 	{
 		Component->SetFadeViewerPosition(CurrentViewerPosition);
@@ -266,8 +257,6 @@ void FVoxelCustomVFRenderer::Shutdown()
 	CurrentMaterial.Reset();
 	CurrentWaterMaterial.Reset();
 	CurrentAtlas.Reset();
-	CurrentLODCollection.Reset();
-	bHasLODDistances = false;
 	bHasViewerPosition = false;
 
 	ChunkStatsMap.Empty();
@@ -351,7 +340,6 @@ void FVoxelCustomVFRenderer::SubmitChunkMeshInternal(
 	Stats.MemoryUsage = (Vertices.Num() * sizeof(FVoxelVertex)) + (Indices.Num() * sizeof(uint32));
 	// Bounds are in local space here, will be offset in scene proxy
 	Stats.Bounds = LocalBounds;
-	Stats.bIsVisible = true;
 
 	TotalVertexCount += Stats.VertexCount;
 	TotalTriangleCount += Stats.TriangleCount;
@@ -412,45 +400,6 @@ void FVoxelCustomVFRenderer::ClearAllChunks()
 		if (Pair.Value)
 		{
 			Pair.Value->ClearAllChunks();
-		}
-	}
-}
-
-// ==================== Visibility ====================
-
-void FVoxelCustomVFRenderer::SetChunkVisible(const FIntVector& ChunkCoord, bool bVisible)
-{
-	check(IsInGameThread());
-
-	FChunkStats* Stats = ChunkStatsMap.Find(ChunkCoord);
-	if (Stats)
-	{
-		Stats->bIsVisible = bVisible;
-	}
-
-	if (UVoxelWorldComponent* Component = FindRegionComponent(ChunkCoord))
-	{
-		Component->SetChunkVisible(ChunkCoord, bVisible);
-	}
-}
-
-void FVoxelCustomVFRenderer::SetAllChunksVisible(bool bVisible)
-{
-	check(IsInGameThread());
-
-	for (auto& Pair : ChunkStatsMap)
-	{
-		Pair.Value.bIsVisible = bVisible;
-	}
-
-	// Set visibility for all chunks via their region components
-	TArray<FIntVector> Chunks;
-	GetLoadedChunks(Chunks);
-	for (const FIntVector& ChunkCoord : Chunks)
-	{
-		if (UVoxelWorldComponent* Component = FindRegionComponent(ChunkCoord))
-		{
-			Component->SetChunkVisible(ChunkCoord, bVisible);
 		}
 	}
 }
@@ -801,34 +750,7 @@ bool FVoxelCustomVFRenderer::GetWaterTileDrawInfo(const FIntVector2& TileCoord, 
 	return bHeld;
 }
 
-// ==================== LOD Transitions ====================
-
-void FVoxelCustomVFRenderer::UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor)
-{
-	check(IsInGameThread());
-
-	if (UVoxelWorldComponent* Component = FindRegionComponent(ChunkCoord))
-	{
-		Component->UpdateChunkMorphFactor(ChunkCoord, MorphFactor);
-	}
-}
-
-void FVoxelCustomVFRenderer::UpdateLODTransitionsBatch(const TArray<TPair<FIntVector, float>>& Transitions)
-{
-	check(IsInGameThread());
-
-	if (!WorldComponent || Transitions.Num() == 0)
-	{
-		return;
-	}
-
-	// DISABLED: Morph factor updates send too many render commands and cause overflow
-	// The morph factor infrastructure exists but is not visually used yet (shader doesn't apply it)
-	// Re-enable when vertex morphing is implemented in the shader
-	//
-	// For now, just skip morph factor updates entirely to prevent overflow
-	return;
-}
+// ==================== Batched Operations ====================
 
 void FVoxelCustomVFRenderer::FlushPendingOperations()
 {
@@ -845,38 +767,6 @@ void FVoxelCustomVFRenderer::FlushPendingOperations()
 
 	// Then retire the regions left with nothing to draw (their removals are queued ahead of the proxy's destruction)
 	RetireEmptyRegions();
-}
-
-// ==================== LOD Configuration ====================
-
-void FVoxelCustomVFRenderer::SetLODParameterCollection(UMaterialParameterCollection* Collection)
-{
-	check(IsInGameThread());
-
-	CurrentLODCollection = Collection;
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
-	{
-		if (Pair.Value)
-		{
-			Pair.Value->SetLODParameterCollection(Collection);
-		}
-	}
-}
-
-void FVoxelCustomVFRenderer::SetLODTransitionDistances(float StartDistance, float EndDistance)
-{
-	check(IsInGameThread());
-
-	bHasLODDistances = true;
-	LODStartDistance = StartDistance;
-	LODEndDistance = EndDistance;
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
-	{
-		if (Pair.Value)
-		{
-			Pair.Value->SetLODTransitionDistances(StartDistance, EndDistance);
-		}
-	}
 }
 
 // ==================== Queries ====================
@@ -934,7 +824,7 @@ FBox FVoxelCustomVFRenderer::GetTotalBounds() const
 
 	for (const auto& Pair : ChunkStatsMap)
 	{
-		if (Pair.Value.bIsVisible && Pair.Value.Bounds.IsValid)
+		if (Pair.Value.Bounds.IsValid)
 		{
 			TotalBounds += Pair.Value.Bounds;
 		}

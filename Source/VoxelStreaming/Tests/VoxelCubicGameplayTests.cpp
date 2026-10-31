@@ -40,8 +40,6 @@ namespace VoxelCubicGameplayTestUtils
 		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override { Chunks.Add(ChunkCoord); }
 		virtual void RemoveChunk(const FIntVector& ChunkCoord) override { Chunks.Remove(ChunkCoord); }
 		virtual void ClearAllChunks() override { Chunks.Reset(); }
-		virtual void SetChunkVisible(const FIntVector& ChunkCoord, bool bVisible) override {}
-		virtual void SetAllChunksVisible(bool bVisible) override {}
 		virtual void SetMaterial(UMaterialInterface* Material) override {}
 		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
 		virtual void UpdateMaterialParameters() override {}
@@ -49,7 +47,6 @@ namespace VoxelCubicGameplayTestUtils
 		virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 SeamSlot) override {}
 		virtual void ClearAllSeamMeshes() override {}
 		virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override { OutOwners.Reset(); }
-		virtual void UpdateLODTransition(const FIntVector& ChunkCoord, float MorphFactor) override {}
 		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return Chunks.Contains(ChunkCoord); }
 		virtual int32 GetLoadedChunkCount() const override { return Chunks.Num(); }
 		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override { OutChunks = Chunks.Array(); }

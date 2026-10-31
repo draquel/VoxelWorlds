@@ -98,7 +98,8 @@ struct FVoxelChunkFadeState
  */
 struct FVoxelChunkDrawInfo
 {
-	/** Triangles of the current mesh (0 = none), its LOD and visibility */
+	/** Triangles of the current mesh (0 = none) and its LOD; a chunk with a mesh is visible (the per-chunk
+	 *  visibility toggle was deleted in code review CR1, REND-11) */
 	uint32 CurrentTriangles = 0;
 	int32 LODLevel = -1;
 	bool bVisible = false;
@@ -175,29 +176,6 @@ public:
 	// ==================== Chunk Management (Render Thread) ====================
 
 	/**
-	 * Update or add a chunk's mesh from CPU vertex data.
-	 * Must be called on render thread.
-	 *
-	 * @param RHICmdList RHI command list for resource initialization
-	 * @param ChunkCoord Chunk coordinate
-	 * @param Vertices CPU vertex array (will be moved)
-	 * @param Indices CPU index array (will be moved)
-	 * @param LODLevel LOD level of the mesh
-	 * @param ChunkLocalBounds Local bounds of the mesh
-	 * @param ChunkWorldPosition World position of chunk origin
-	 * @param bCrossfade If true and the chunk already has a mesh, retain it as the crossfade Previous set instead of releasing it
-	 */
-	void UpdateChunkFromCPUData_RenderThread(
-		FRHICommandListBase& RHICmdList,
-		const FIntVector& ChunkCoord,
-		TArray<FVoxelVertex>&& Vertices,
-		TArray<uint32>&& Indices,
-		int32 LODLevel,
-		const FBox& ChunkLocalBounds,
-		const FVector& ChunkWorldPosition,
-		bool bCrossfade = false);
-
-	/**
 	 * Remove a chunk.
 	 * Must be called on render thread.
 	 *
@@ -231,18 +209,6 @@ public:
 	 * Must be called on render thread.
 	 */
 	void ClearAllChunks_RenderThread();
-
-	/**
-	 * Set chunk visibility.
-	 * Must be called on render thread.
-	 */
-	void SetChunkVisible_RenderThread(const FIntVector& ChunkCoord, bool bVisible);
-
-	/**
-	 * Update LOD morph factor for a chunk.
-	 * Must be called on render thread.
-	 */
-	void UpdateChunkMorphFactor_RenderThread(const FIntVector& ChunkCoord, float MorphFactor);
 
 	/**
 	 * Update the material used for rendering.
@@ -284,7 +250,7 @@ public:
 
 	/**
 	 * Per-tick fade alpha updates for all transitioning chunks (bookkeeping copy — the MIDs
-	 * carry the visually-effective parameter). Also mirrors into the legacy MorphFactor field.
+	 * carry the visually-effective parameter).
 	 * Must be called on render thread.
 	 */
 	void UpdateChunkFadeAlphasBatch_RenderThread(const TArray<TPair<FIntVector, float>>& Alphas);
