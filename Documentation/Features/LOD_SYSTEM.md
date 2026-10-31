@@ -1306,9 +1306,7 @@ See [DUAL_CONTOURING.md](DUAL_CONTOURING.md) for detailed boundary merging docum
 
 ```cpp
 // Marching Cubes LOD transitions
-bool bUseTransvoxel = true;  // Recommended for MC
-bool bGenerateSkirts = true;  // Fallback if Transvoxel disabled
-float SkirtDepth = 2.0f;
+bool bUseTransvoxel = true;  // Recommended for MC (the skirt fallback was deleted in CR1, MESH-05)
 
 // Dual Contouring LOD transitions
 // No explicit config — uses NeighborLODLevels from FVoxelMeshingRequest

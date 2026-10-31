@@ -81,10 +81,8 @@ static FVoxelCPUMarchingCubesMesher& Mesher()
 	{
 		M.Initialize();
 		FVoxelMeshingConfig C;
-		C.bUseSmoothMeshing = true;
 		C.IsoLevel = 0.5f;
 		C.bUseTransvoxel = true;
-		C.bGenerateSkirts = false;
 		M.SetConfig(C);
 	}
 	return M;

@@ -70,14 +70,6 @@ const FVector3f FVoxelCPUCubicMesher::QuadVertices[6][4] = {
 	}
 };
 
-// UV coordinates for quad vertices (legacy)
-const FVector2f FVoxelCPUCubicMesher::QuadUVs[4] = {
-	FVector2f(0.0f, 0.0f),
-	FVector2f(1.0f, 0.0f),
-	FVector2f(1.0f, 1.0f),
-	FVector2f(0.0f, 1.0f)
-};
-
 // Per-face UV coordinates ensuring consistent texture orientation
 // For each face, UVs are mapped so:
 // - U increases left-to-right when viewing the face from outside the voxel

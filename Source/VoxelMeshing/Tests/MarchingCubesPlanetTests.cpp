@@ -125,12 +125,10 @@ namespace MarchingCubesPlanetTestUtils
 	FVoxelMeshingConfig MakeConfig(bool bUseTransvoxel)
 	{
 		FVoxelMeshingConfig Config;
-		Config.bUseSmoothMeshing = true;
 		Config.IsoLevel = 0.5f;
 		Config.bGenerateUVs = true;
 		Config.bCalculateAO = false;
 		Config.bUseTransvoxel = bUseTransvoxel;
-		Config.bGenerateSkirts = false;
 		return Config;
 	}
 
