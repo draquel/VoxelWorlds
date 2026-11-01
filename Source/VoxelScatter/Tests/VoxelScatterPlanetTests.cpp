@@ -19,7 +19,7 @@
 // ---------------------------------------------------------------------------
 // Spherical Phase 4: scatter along local up (WORLD_MODES_REVIEW_PLAN.md §18, WM-SY6; SP-G1). Real planet chunks from
 // the CPU generator (a 250,000 uu planet like Review_Planet, voxel 75, chunk 32), extracted by
-// UVoxelScatterManager::ExtractPlanetSurfacePoints (ExtractSurfacePointsAlongUp) at the poles, 45 degrees, the equator and a cube corner.
+// UVoxelScatterManager::ExtractSurfacePointsAlongUp at the poles, 45 degrees, the equator and a cube corner.
 //
 // - AlongLocalUp: the open points lie on the analytic surface along their direction; local up is radial; slope and
 //   face type are measured against it; an instance not aligned to the normal stands on local up.
@@ -98,8 +98,7 @@ namespace VoxelScatterPlanetTestUtils
 			TArray<FVoxelData> Voxels;
 			Generator.GenerateChunkCPU(Request, Voxels);
 			FChunkSurfaceData Surface;
-			UVoxelScatterManager::ExtractPlanetSurfacePoints(Voxels, Coord, Config->WorldOrigin + FVector(Coord) * ChunkWorld,
-				ChunkSize, VoxelSize, VoxelSize, Context, Surface);
+			UVoxelScatterManager::ExtractChunkSurfacePoints(false, Voxels, Coord, Config->WorldOrigin + FVector(Coord) * ChunkWorld, ChunkSize, VoxelSize, VoxelSize, {}, Context, Surface);
 			Out.Append(Surface.SurfacePoints);
 		}
 		Generator.Shutdown();

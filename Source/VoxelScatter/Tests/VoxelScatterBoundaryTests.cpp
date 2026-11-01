@@ -116,8 +116,7 @@ bool FVoxelScatterBoundaryEveryLayerTest::RunTest(const FString& Parameters)
 				const FIntVector Coord(CX, CY, CZ);
 				const FVector Origin = ChunkOrigin(Coord);
 				FChunkSurfaceData Surface;
-				UVoxelScatterManager::ExtractHeightmapSurfacePoints(MakeChunk(Coord, Mode), Coord, Origin, ChunkSize, VoxelSize, VoxelSize, false,
-					Context, Surface);
+				UVoxelScatterManager::ExtractChunkSurfacePoints(false, MakeChunk(Coord, Mode), Coord, Origin, ChunkSize, VoxelSize, VoxelSize, {}, Context, Surface);
 				for (const FVoxelSurfacePoint& Point : Surface.SurfacePoints)
 				{
 					if (Point.bIsUnderground)

@@ -59,6 +59,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves|Underwater", meta = (ClampMin = "0"))
 	float UnderwaterMinDepth = 0.0f;
 
+	/**
+	 * Whether any enabled layer can carve at a depth under the ground (voxels) for some biome, under the sea or not: its
+	 * depth window (MinDepth less the fade, MaxDepth plus it), the minimum depth the shallowest of the layer's own, a biome
+	 * override's and the underwater one (CalculateCaveDensity replaces the layer's with those). Outside every layer's window
+	 * the carve is 0 for any biome, so a reader need not find the biome first (world modes review G72).
+	 *
+	 * @param DepthBelowSurface Depth under the generated ground, in voxels
+	 * @return True when a layer's window holds the depth
+	 */
+	bool AnyLayerReachesDepth(float DepthBelowSurface) const;
+
 	// ==================== Cave Wall Material ====================
 
 	/** Override material on cave wall surfaces */

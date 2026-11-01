@@ -283,7 +283,7 @@ anywhere else.
   (underground, water) and the material, biome and AO; the normal is the trilinear gradient.
 - **Past the faces.** The chunk's last cell on each axis reaches the voxels past its +X, +Y and +Z faces, which its
   data cannot show: they are taken as the planet generator makes them there, with the neighbour's edits applied
-  (`FScatterExtractionContext::GetPlanetVoxelOutsideChunk`; `TouchingEdits` from the seven neighbours on those sides,
+  (`FScatterExtractionContext::GetVoxelOutsideChunk`; `OutsideEdits` from the seven neighbours on those sides,
   `UVoxelScatterManager::GetPlanetShellNeighbours` / `GatherPlanetTouchingEdits`), each computed the first time a ray
   needs it (at most 12,481 for a 64³ chunk). Since world modes review G72 (§20.23) they are carved by the caves as
   generation carves them: `CalculateCaveDensity` at the voxel's depth along local up, for the biome generation gives
@@ -291,9 +291,10 @@ anywhere else.
   the sea's minimum depth (`FScatterExtractionContext::CaveConfiguration`). Before, a cave within a voxel past a
   chunk's max face read as rock: the cave floor in that cell got no point, and where the cave met the face the rock
   made a floor in the air (on `Review_Planet` 1.3-1.6% of the points missed and up to 7% added).
-  `voxel.Scatter.PlanetFaceCaves 0` restores that for A/B; `voxel.Scatter.PlanetFaceAudit` and
-  `UVoxelScatterManager::ComparePlanetFaceVoxels` were deleted in CR1 (SCAT-29; `Scatter.Planet.FaceCaves` builds the same
-  reference through `OutsideVoxelSource`). The voxels past the faces are the CPU formula's, which the GPU generator matches to a density step or two at a few
+  `voxel.Scatter.PlanetFaceAudit` and `UVoxelScatterManager::ComparePlanetFaceVoxels` were deleted in CR1 (SCAT-29;
+  `Scatter.Planet.FaceCaves` builds the same reference through `OutsideVoxelSource`), and the switch back to the rule
+  before (`voxel.Scatter.PlanetFaceCaves`) in CR2 with the one outside-voxel source (SCAT-13:
+  `FVoxelSurfaceQuery::GenerateVoxelAt` makes the voxel for both world modes). The voxels past the faces are the CPU formula's, which the GPU generator matches to a density step or two at a few
   voxels (`Generation.GPUvsCPUSphericalParity`), so on the GPU path a crossing at a face is very rarely doubled (one
   point in about two million on `Review_Planet`). A point on a face is interpolated from the same four voxels on both
   sides (fractions within 1e-7 of a cell face snap to it), so a voxel exactly at the threshold there cannot leave the
@@ -683,9 +684,9 @@ chunk need it (world modes review G33, `WORLD_MODES_REVIEW_PLAN.md` §19.11):
   edit-merged voxels to scatter.
 - **The chunks whose extraction reads its edited voxels**, from past their own faces (`FScatterExtractionContext`):
   - on a heightmap world, the chunk below: the voxel over its top layer is the edited chunk's bottom layer
-    (`AboveLayerEdits`, G26);
+    (`OutsideEdits`, keyed in the reader's frame at Z = ChunkSize, G26);
   - on a planet, the seven chunks at -X, -Y and -Z: a planet chunk's last cell on each axis reads the voxels past its +X,
-    +Y and +Z faces (`TouchingEdits`, G29, G31). A face neighbour reads the layer facing it, an edge neighbour the column
+    +Y and +Z faces (`OutsideEdits`, G29, G31). A face neighbour reads the layer facing it, an edge neighbour the column
     along the shared edge, the corner neighbour the corner voxel.
 
   `UVoxelScatterManager::GetEditReaders` gives them for the layers the edit reached: `UVoxelEditManager::GetBroadcastEditBounds`

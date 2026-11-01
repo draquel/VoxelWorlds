@@ -40,59 +40,40 @@ struct FScatterExtractionContext
 	 * extractors compare with is the generated ground, not the natural one. Heightmap worlds: the buried-chunk test
 	 * compares the chunk's top with the natural height plus these zones (FVoxelTerrainConditioning::ApplyToHeight;
 	 * world modes review G23). Planets (spherical SP-B10): the voxels past a chunk's +X, +Y and +Z faces
-	 * (GetPlanetVoxelOutsideChunk) are generated on the flattened ground (ApplyToAltitude). Each kind of zone applies only
+	 * (GetVoxelOutsideChunk) are generated on the flattened ground (ApplyToAltitude). Each kind of zone applies only
 	 * in its own kind of world.
 	 * Null or empty: the world mode's natural surface.
 	 */
 	TSharedPtr<const TArray<FVoxelConditioningZone>> ConditioningZones;
 
 	/**
-	 * Heightmap worlds: the edits of the chunk above on its bottom layer (local Z 0), keyed by local X + Y * ChunkSize
-	 * (world modes review G26). The voxel over a chunk's top layer is that layer's, which the chunk's own data cannot
-	 * show: GetVoxelAboveChunk applies these to the voxel the generator made there. Null: no edits on that layer.
-	 */
-	TSharedPtr<const TMap<int32, FVoxelEdit>> AboveLayerEdits;
-
-	/**
 	 * The world's cave configuration when its caves are on, so the voxels a chunk's extraction reads past its own data are
-	 * carved as generation carves them: on a heightmap the voxel over the chunk's top layer under deeper ground
-	 * (GetVoxelAboveChunk, world modes review G28), on a planet the voxels past its +X, +Y and +Z faces
-	 * (GetPlanetVoxelOutsideChunk, G72). Null: no caves (the terrain's voxel alone). Non-owning: the world configuration's
-	 * asset.
+	 * carved as generation carves them (GetVoxelOutsideChunk: on a heightmap the voxel over the chunk's top layer, world
+	 * modes review G26 / G28; on a planet the voxels past its +X, +Y and +Z faces, G72). Null: no caves (the terrain's
+	 * voxel alone). Non-owning: the world configuration's asset.
 	 */
 	const UVoxelCaveConfiguration* CaveConfiguration = nullptr;
 
 	/** Whether the world's biomes are on (bEnableBiomes): which biome generation gives a planet voxel, for the cave
-	 *  configuration's biome overrides (GetPlanetVoxelOutsideChunk). */
+	 *  configuration's biome overrides (GetVoxelOutsideChunk). */
 	bool bEnableBiomes = false;
 
 	/**
-	 * Planets (G72, voxel.Scatter.PlanetFaceCaves): the voxels past a chunk's +X, +Y and +Z faces are carved by the caves,
-	 * as generation carves them. False: the generated altitude alone, as before (a cave opening such a voxel read as rock).
-	 */
-	bool bCarvePlanetFaceVoxels = true;
-
-	/**
-	 * Planets, for audits and tests (G72): when set, the voxels past the chunk's +X, +Y and +Z faces come from here (the
-	 * neighbours' own voxels, LocalCoord in this chunk's frame as GetPlanetVoxelOutsideChunk takes it) instead of being
-	 * made; returning false falls back to GetPlanetVoxelOutsideChunk. Unset in the streaming.
+	 * For audits and tests (G72): when set, the voxels outside the chunk come from here (the neighbours' own voxels,
+	 * LocalCoord in this chunk's frame as GetVoxelOutsideChunk takes it) instead of being made; returning false falls back
+	 * to GetVoxelOutsideChunk. Unset in the streaming.
 	 */
 	TFunction<bool(const FIntVector& LocalCoord, FVoxelData& OutVoxel)> OutsideVoxelSource;
 
 	/**
-	 * Heightmap worlds (G28, voxel.Scatter.BuriedTopFace): the scans decide the voxel over a chunk's top layer at any depth
-	 * (GetVoxelAboveChunk, caves included), so a buried chunk's top face carries no copy of the rock above it. False: only
-	 * within the band the buried-chunk test lets through (G26), the voxel taken for air under deeper ground, as before.
+	 * The edits in the voxels just outside the chunk that its extraction reads (code review CR2, SCAT-16: one overlay for
+	 * both modes), keyed by the voxel's coordinate in this chunk's frame: on a heightmap world the chunk above's bottom
+	 * layer, the voxels over this chunk's top layer (local (X, Y, ChunkSize); world modes review G26); on a planet the
+	 * layers of the seven neighbours past its +X, +Y and +Z faces that touch it (each component in [-1, ChunkSize], one of
+	 * them ChunkSize; G29, G31). GetVoxelOutsideChunk applies these to the voxel the generator made there. Null: no edits
+	 * there.
 	 */
-	bool bDecideVoxelAboveAtAnyDepth = true;
-
-	/**
-	 * Planets: the edits in the voxels just past the chunk's +X, +Y and +Z faces, which its last cell on each axis reaches
-	 * (world modes review G29, G31): the layers of the seven neighbours on those sides (GetPlanetShellNeighbours) that
-	 * touch the chunk. Keyed by the voxel's coordinate in this chunk's frame (each component in [0, ChunkSize], one of
-	 * them ChunkSize). GetPlanetVoxelOutsideChunk applies these to the voxel the generator made there. Null: no edits there.
-	 */
-	TSharedPtr<const TMap<FIntVector, FVoxelEdit>> TouchingEdits;
+	TSharedPtr<const TMap<FIntVector, FVoxelEdit>> OutsideEdits;
 
 	/**
 	 * Heightmap worlds: the generated terrain height at a world X,Y, the world mode's natural height with
@@ -104,38 +85,23 @@ struct FScatterExtractionContext
 	float GetGeneratedTerrainHeight(double WorldX, double WorldY) const;
 
 	/**
-	 * Heightmap worlds (world modes review G26, G28): the voxel over a chunk's top layer at a column, the chunk above's
-	 * bottom voxel, as the heightmap generators make it: the generated height's signed distance at the chunk's top (solid
-	 * where that height reaches the top), less the cave carve there (CaveConfiguration: FVoxelCPUNoiseGenerator's
-	 * CalculateCaveDensity at the voxel's depth under the generated ground, for the column's biome, under the sea or not),
-	 * with the chunk above's edit there applied (AboveLayerEdits). Only Density and MaterialID are meaningful.
-	 * @param LocalX Column X in the chunk
-	 * @param LocalY Column Y in the chunk
-	 * @param ChunkSize Voxels per chunk edge
-	 * @param SamplePos The voxel's sample position: the column's X, Y (the chunk's origin + LocalX, LocalY * VoxelSize) at
-	 *        the chunk's top Z, as generation samples the chunk above's bottom layer
-	 * @param GeneratedHeight The generated height at the column's sample position (GetGeneratedTerrainHeight)
-	 * @param VoxelSize Voxel edge in world units
-	 * @param BiomeID The column's biome (a column has one: any of its generated voxels' BiomeID), for the cave
-	 *        configuration's biome overrides
-	 * @return The voxel above the chunk's top layer
-	 */
-	FVoxelData GetVoxelAboveChunk(int32 LocalX, int32 LocalY, int32 ChunkSize, const FVector& SamplePos, float GeneratedHeight, float VoxelSize,
-		uint8 BiomeID) const;
-
-	/**
-	 * Planets (world modes review G29, G72): a voxel just outside the chunk, in a neighbour's layer touching it, which the
-	 * chunk's own data cannot show, as the planet generator makes it: the signed distance to the generated altitude along
-	 * its direction (ConditioningZones applied), less the cave carve where it is solid under the ground (CaveConfiguration:
-	 * CalculateCaveDensity at its depth along local up, for the biome generation gives its direction, under the sea or not;
-	 * bCarvePlanetFaceVoxels), with the neighbour's edit there applied (TouchingEdits). Only Density and MaterialID are
-	 * meaningful. Requires a spherical planet WorldMode.
+	 * A voxel just outside the chunk that its extraction reads, which the chunk's own data cannot show, as generation
+	 * makes it (FVoxelSurfaceQuery::GenerateVoxelAt: the signed distance to the generated surface, the cave carve where it
+	 * is solid under the ground, CaveConfiguration), with the neighbour's edit there applied (OutsideEdits). On a heightmap
+	 * world the voxel over a column's top layer (the chunk above's bottom voxel; world modes review G26, G28), on a planet
+	 * a voxel past the chunk's +X, +Y or +Z face (G29, G72). Only Density and MaterialID are meaningful. The one
+	 * outside-voxel source (code review CR2, SCAT-16).
 	 * @param LocalCoord The voxel's coordinate in this chunk's frame (ChunkSize on at least one axis)
 	 * @param WorldPos The voxel's sample position (the chunk's origin + LocalCoord * VoxelSize, as generation samples it)
 	 * @param VoxelSize Voxel edge in world units
+	 * @param BiomeHint The biome generation gives the voxel when the caller knows it (a heightmap column's, which the
+	 *        chunk's own voxels carry), else -1 (a planet derives it when a cave override needs it)
+	 * @param GeneratedHeight Heightmap worlds: the generated height the caller sampled for the column
+	 *        (GetGeneratedTerrainHeight), so the voxel is judged against the height the scan judges the column by
 	 * @return The voxel as generated, with any edit applied
 	 */
-	FVoxelData GetPlanetVoxelOutsideChunk(const FIntVector& LocalCoord, const FVector& WorldPos, float VoxelSize) const;
+	FVoxelData GetVoxelOutsideChunk(const FIntVector& LocalCoord, const FVector& WorldPos, float VoxelSize, int32 BiomeHint = -1,
+		const float* GeneratedHeight = nullptr) const;
 };
 
 /**
@@ -323,32 +289,37 @@ public:
 	FString ComputeCacheResidency(TArray<FString>* OutMismatchLines = nullptr) const;
 
 	/**
-	 * The heightmap extractors without cleared volumes, for tests and tools (world modes review G23): the column scan
-	 * (ExtractSurfacePointsFromVoxelData) or, with bCubic, the block-face scan (ExtractSurfacePointsCubic, one point per
-	 * voxel). Pure and thread-safe.
+	 * Cleared scatter volume - represents an area where scatter should not regenerate.
+	 * Used for player edits to surgically remove scatter in the affected area only.
 	 */
-	static void ExtractHeightmapSurfacePoints(
-		const TArray<FVoxelData>& VoxelData,
-		const FIntVector& ChunkCoord,
-		const FVector& ChunkWorldOrigin,
-		int32 ChunkSize,
-		float VoxelSize,
-		float PointSpacing,
-		bool bCubic,
-		const FScatterExtractionContext& Context,
-		FChunkSurfaceData& OutSurfaceData);
+	struct FClearedScatterVolume
+	{
+		FVector Center;
+		float Radius;
+
+		FClearedScatterVolume() : Center(FVector::ZeroVector), Radius(0.0f) {}
+		FClearedScatterVolume(const FVector& InCenter, float InRadius) : Center(InCenter), Radius(InRadius) {}
+
+		bool ContainsPoint(const FVector& Point) const
+		{
+			return FVector::DistSquared(Center, Point) <= (Radius * Radius);
+		}
+	};
 
 	/**
-	 * ExtractSurfacePointsAlongUp without cleared volumes (spherical SP-G1): a planet chunk's surface points along local
-	 * up, for tests and tools. Pure and thread-safe.
+	 * The extractor a chunk's pass runs: the block-face scan in cubic (bCubic), the radial rays on a planet (the context's
+	 * world mode), the column scan otherwise. The async pass and CompareWithFreshExtraction both call it, and the tests
+	 * and tools with no cleared volumes (code review CR2, SCAT-25: the one extractor entry). Pure and thread-safe.
 	 */
-	static void ExtractPlanetSurfacePoints(
+	static void ExtractChunkSurfacePoints(
+		bool bCubic,
 		const TArray<FVoxelData>& VoxelData,
 		const FIntVector& ChunkCoord,
 		const FVector& ChunkWorldOrigin,
 		int32 ChunkSize,
 		float VoxelSize,
 		float PointSpacing,
+		const TArray<FClearedScatterVolume>& ClearedVolumes,
 		const FScatterExtractionContext& Context,
 		FChunkSurfaceData& OutSurfaceData);
 
@@ -362,7 +333,7 @@ public:
 
 	/**
 	 * Planets (world modes review G29, G31): the edits in the layers of GetPlanetShellNeighbours's neighbours touching a
-	 * chunk, keyed by their coordinate in the chunk's frame, for FScatterExtractionContext::TouchingEdits.
+	 * chunk, keyed by their coordinate in the chunk's frame, for FScatterExtractionContext::OutsideEdits.
 	 * MakeExtractionContext calls it with the chunk manager's edit layers (SetEditLayerSource).
 	 * @param ChunkCoord The chunk
 	 * @param ChunkSize Voxels per chunk edge
@@ -373,21 +344,30 @@ public:
 		TFunctionRef<const FChunkEditLayer*(const FIntVector&)> EditLayerSource);
 
 	/**
+	 * Heightmap worlds: the edits of the chunk above on its bottom layer (local Z 0), the voxels over this chunk's top
+	 * layer, keyed by their coordinate in this chunk's frame ((X, Y, ChunkSize); world modes review G26), for
+	 * FScatterExtractionContext::OutsideEdits. Null when the layer has none.
+	 */
+	static TSharedPtr<const TMap<FIntVector, FVoxelEdit>> GatherAboveLayerEdits(const FIntVector& ChunkCoord, int32 ChunkSize,
+		TFunctionRef<const FChunkEditLayer*(const FIntVector&)> EditLayerSource);
+
+	/**
 	 * Which other chunks' extraction reads a chunk's edited voxels, as chunk coordinate offsets from it (world modes review
-	 * G33): the inverse of what MakeExtractionContext reads past a chunk. On a heightmap world (bHeightmapReads) the chunk
-	 * below, whose top layer's voxel above is the bottom layer here (AboveLayerEdits, G26): offset (0, 0, -1) when the edit
-	 * reached local Z 0. On a planet (bPlanetReads) the chunks whose GetPlanetShellNeighbours include this one: offset -D
+	 * G33): the inverse of what MakeExtractionContext reads past a chunk. On a heightmap world the chunk below, whose top
+	 * layer's voxel above is the bottom layer here (OutsideEdits at Z = ChunkSize, G26): offset (0, 0, -1) when the edit
+	 * reached local Z 0. On a planet (bPlanet) the chunks whose GetPlanetShellNeighbours include this one: offset -D
 	 * for each of their offsets D, when the edit reached local 0 on every axis where D is 1 (a face neighbour reads the
 	 * layer facing it, an edge neighbour the column along the shared edge, the corner neighbour the corner voxel;
-	 * TouchingEdits, G29, G31). Pure.
+	 * OutsideEdits, G29, G31). Pure.
 	 *
-	 * @param bHeightmapReads Whether extraction reads the voxels over a chunk's top layer (a heightmap world with edits)
-	 * @param bPlanetReads Whether extraction reads the voxels past a chunk's +X, +Y and +Z faces (a planet with edits)
+	 * @param bPlanet Whether the world is a planet (extraction reads the voxels past a chunk's +X, +Y and +Z faces) or a
+	 *        heightmap world (the voxels over a chunk's top layer); the caller passes nothing when extraction reads no
+	 *        edits at all
 	 * @param EditMin The lowest chunk-local coordinate the edit reached on each axis (UVoxelEditManager::
 	 *                GetBroadcastEditBounds); null when not known, which gives every chunk that could read it
 	 * @param OutOffsets Receives the offsets (appended)
 	 */
-	static void GetEditReaderOffsets(bool bHeightmapReads, bool bPlanetReads, const FIntVector* EditMin, TArray<FIntVector>& OutOffsets);
+	static void GetEditReaderOffsets(bool bPlanet, const FIntVector* EditMin, TArray<FIntVector>& OutOffsets);
 
 	/**
 	 * The chunks whose extraction reads an edited chunk's voxels on this world (GetEditReaderOffsets with this manager's
@@ -620,8 +600,8 @@ public:
 	/**
 	 * Where a chunk's edit layer lives (the chunk manager's edit manager), so a heightmap chunk's extraction knows the
 	 * voxel over its top layer, the chunk above's bottom voxel (world modes review G26): MakeExtractionContext copies the
-	 * chunk above's edits on that layer into FScatterExtractionContext::AboveLayerEdits. On a planet it copies the edits in
-	 * the layers past the chunk's +X, +Y and +Z faces into FScatterExtractionContext::TouchingEdits (G29, G31). Called on
+	 * chunk above's edits on that layer into FScatterExtractionContext::OutsideEdits (keyed at Z = ChunkSize). On a planet
+	 * it copies the edits in the layers past the chunk's +X, +Y and +Z faces into the same map (G29, G31). Called on
 	 * the game thread when a chunk's extraction is set up. Unset: no edits (the generated voxel).
 	 */
 	void SetEditLayerSource(TFunction<const FChunkEditLayer*(const FIntVector& /*ChunkCoord*/)> InSource)
@@ -750,6 +730,18 @@ protected:
 		return Def.SpawnDistance > 0.0f ? Def.SpawnDistance : ScatterRadius;
 	}
 
+	/**
+	 * Whether a definition spawns in a chunk at a distance: enabled, the tree-mode rule (PassesTreeModeRule) and within
+	 * its effective spawn distance. The one eligibility rule of the hand-off and the regrow (code review CR2, SCAT-17).
+	 */
+	bool IsDefinitionEligible(const FScatterDefinition& Def, float ChunkDistance) const;
+
+	/** The chunks a world box touches, floored on the chunk grid (code review CR2, SCAT-18: the one range loop). */
+	void ForEachChunkInBounds(const FBox& Bounds, TFunctionRef<void(const FIntVector&)> Visit) const;
+
+	/** Each affected type's instances in a chunk replaced with its surviving spawn points (the flash-free edit path). */
+	void ReplaceChunkTypeInstances(const FIntVector& ChunkCoord, const FChunkScatterData& ScatterData, const TSet<int32>& AffectedTypes);
+
 	/** Whether the hand-off's tree-mode rule lets a type spawn at this distance (VoxelInjection types only). */
 	bool PassesTreeModeRule(const FScatterDefinition& Def, float ChunkDistance) const;
 
@@ -786,24 +778,6 @@ protected:
 
 	/** Per-chunk scatter data cache */
 	TMap<FIntVector, FChunkScatterData> ScatterDataCache;
-
-	/**
-	 * Cleared scatter volume - represents an area where scatter should not regenerate.
-	 * Used for player edits to surgically remove scatter in the affected area only.
-	 */
-	struct FClearedScatterVolume
-	{
-		FVector Center;
-		float Radius;
-
-		FClearedScatterVolume() : Center(FVector::ZeroVector), Radius(0.0f) {}
-		FClearedScatterVolume(const FVector& InCenter, float InRadius) : Center(InCenter), Radius(InRadius) {}
-
-		bool ContainsPoint(const FVector& Point) const
-		{
-			return FVector::DistSquared(Center, Point) <= (Radius * Radius);
-		}
-	};
 
 	/** Per-chunk list of cleared volumes from player edits */
 	TMap<FIntVector, TArray<FClearedScatterVolume>> ClearedVolumesPerChunk;
@@ -852,7 +826,7 @@ protected:
 	 * Scans voxel columns top-down for surface transitions, interpolates exact Z,
 	 * computes normals from density gradient, reads MaterialID/BiomeID from voxel data.
 	 * Produces consistent results regardless of which LOD level the mesh was generated at.
-	 * The voxel over the top layer is the chunk above's: the context's GetVoxelAboveChunk (solid: the top voxel is
+	 * The voxel over the top layer is the chunk above's: the context's GetVoxelOutsideChunk (solid: the top voxel is
 	 * no surface and the column below it is covered, world modes review G26; at any depth, caves included, G28).
 	 */
 	static void ExtractSurfacePointsFromVoxelData(
@@ -875,7 +849,7 @@ protected:
 	 * sign); every rise through the surface threshold going down is a point (the first on the ray open, the rest
 	 * underground, as in a column, and all underground when the ray enters the chunk solid), and the chunk keeps the points
 	 * that lie in its own box [0, ChunkSize) on each axis, so each crossing has one owner. The chunk's last cell on each
-	 * axis reaches the voxels past its +X, +Y and +Z faces: the context's GetPlanetVoxelOutsideChunk, the planet
+	 * axis reaches the voxels past its +X, +Y and +Z faces: the context's GetVoxelOutsideChunk, the planet
 	 * generator's voxel there with the neighbour's edit. Material, biome and the underground and water flags come from the
 	 * crossing cell's nearest own solid and air voxels; the normal is the trilinear gradient; local up is the ray. Face
 	 * type, slope and the elevation filter go by the point's radial up and altitude; SpawnWeight is the cell's area at the
@@ -905,23 +879,6 @@ protected:
 		const FVector& ChunkWorldOrigin,
 		int32 ChunkSize,
 		float VoxelSize,
-		const TArray<FClearedScatterVolume>& ClearedVolumes,
-		const FScatterExtractionContext& Context,
-		FChunkSurfaceData& OutSurfaceData);
-
-	/**
-	 * The extractor a chunk's pass runs: the block-face scan in cubic (bCubic), the radial rays on a planet (the context's
-	 * world mode), the column scan otherwise. The async pass and CompareWithFreshExtraction both call it. Pure and
-	 * thread-safe.
-	 */
-	static void ExtractChunkSurfacePoints(
-		bool bCubic,
-		const TArray<FVoxelData>& VoxelData,
-		const FIntVector& ChunkCoord,
-		const FVector& ChunkWorldOrigin,
-		int32 ChunkSize,
-		float VoxelSize,
-		float PointSpacing,
 		const TArray<FClearedScatterVolume>& ClearedVolumes,
 		const FScatterExtractionContext& Context,
 		FChunkSurfaceData& OutSurfaceData);
