@@ -106,7 +106,7 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 		FWorldModeTerrainParams TerrainParams(Request.SeaLevel, Request.HeightScale, Request.BaseHeight);
 		FInfinitePlaneWorldMode WorldMode(TerrainParams);
 
-		GenerateChunkInfinitePlane(Request, WorldMode, OutVoxelData);
+		GenerateChunkHeightmap(Request, WorldMode, OutVoxelData);
 	}
 	else if (Request.WorldMode == EWorldMode::IslandBowl)
 	{
@@ -116,7 +116,7 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 		// The request carries the island params as FVoxelWorldModeFactory built them (absolute centre).
 		FIslandBowlWorldMode WorldMode(TerrainParams, Request.IslandParams);
 
-		GenerateChunkIslandBowl(Request, WorldMode, OutVoxelData);
+		GenerateChunkHeightmap(Request, WorldMode, OutVoxelData);
 	}
 	else if (Request.WorldMode == EWorldMode::SphericalPlanet)
 	{
@@ -142,11 +142,20 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 	return true;
 }
 
-void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
+void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 	const FVoxelNoiseGenerationRequest& Request,
-	const FInfinitePlaneWorldMode& WorldMode,
+	const IVoxelWorldMode& WorldMode,
 	TArray<FVoxelData>& OutVoxelData)
 {
+	// The one heightmap body (code review CR2, CORE-23): the plane's and the island's differ only in the height step
+	// below (the island composes its edge falloff on the base height); everything else is one text.
+	const FWorldModeTerrainParams& TerrainParams = WorldMode.GetWorldModeType() == EWorldMode::IslandBowl
+		? static_cast<const FIslandBowlWorldMode&>(WorldMode).GetTerrainParams()
+		: static_cast<const FInfinitePlaneWorldMode&>(WorldMode).GetTerrainParams();
+	const FIslandBowlParams* IslandParams = WorldMode.GetWorldModeType() == EWorldMode::IslandBowl
+		? &static_cast<const FIslandBowlWorldMode&>(WorldMode).GetIslandParams()
+		: nullptr;
+
 	const int32 ChunkSize = Request.ChunkSize;
 	// Always generate at base VoxelSize for voxel positioning
 	// LOD stride is applied during meshing, not generation
@@ -180,7 +189,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 
 	// Use configuration values if available, otherwise use defaults.
 	// (Continentalness noise params are built inside FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams
-	// — the single source of truth shared with the analytic GetTerrainHeightAt query.)
+	// — the single source of truth shared with the modes' analytic height.)
 	if (BiomeConfig)
 	{
 		TempNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset;
@@ -214,18 +223,24 @@ void FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane(
 				float NoiseValue = FInfinitePlaneWorldMode::SampleTerrainNoise2D(
 					WorldPos.X, WorldPos.Y, Request.NoiseParams);
 
-				// Continentalness height modulation — shared with the analytic GetTerrainHeightAt query
+				// Continentalness height modulation — shared with the analytic surface query (the modes' own height)
 				// so spawn / nav / POI placement matches this generated surface. The sampled
 				// continentalness is reused for the biome blend below.
 				float Continentalness = 0.0f;
 				const FWorldModeTerrainParams EffectiveParams =
 					FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
-						WorldPos.X, WorldPos.Y, WorldMode.GetTerrainParams(),
+						WorldPos.X, WorldPos.Y, TerrainParams,
 						Request.NoiseParams, &BiomeSnapshot, Continentalness);
 
-				// Get terrain height from noise (using potentially modulated params)
+				// Get terrain height from noise (using potentially modulated params); the island's edge falloff composes
+				// on it (FIslandBowlWorldMode::ComposeTerrainHeight), as its analytic height does.
 				float TerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(
 					NoiseValue, EffectiveParams);
+				if (IslandParams)
+				{
+					TerrainHeight = FIslandBowlWorldMode::ComposeTerrainHeight(
+						WorldPos.X, WorldPos.Y, TerrainHeight, *IslandParams);
+				}
 
 				// Phase 6c: blend the natural height toward any terrain conditioning zones
 				// (flatten under POIs / claims). Deterministic — the base terrain IS flat here.
@@ -423,225 +438,6 @@ float FVoxelCPUNoiseGenerator::FBM3D(const FVector& Position, const FVoxelNoiseP
 	// and do not step across the simplex lattice's boundaries. The classic table noise lives with the tests that measure
 	// what it did (Tests/VoxelClassicNoiseControl; CR1, CORE-02).
 	return FVoxelPlanetNoise::FBM3D(Position, Params);
-}
-
-void FVoxelCPUNoiseGenerator::GenerateChunkIslandBowl(
-	const FVoxelNoiseGenerationRequest& Request,
-	const FIslandBowlWorldMode& WorldMode,
-	TArray<FVoxelData>& OutVoxelData)
-{
-	const int32 ChunkSize = Request.ChunkSize;
-	// Always generate at base VoxelSize for voxel positioning
-	// LOD stride is applied during meshing, not generation
-	const float VoxelSize = Request.VoxelSize;
-	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
-	// The blend zones' dither keys (G39): the chunk's first voxel on the world's grid, plus each voxel's local index.
-	const FIntVector DitherBase = FVoxelBiomeBlendDither::GridBase(Request.ChunkCoord, ChunkSize, Request.WorldOrigin, VoxelSize);
-	const int32 DitherSeed = Request.NoiseParams.Seed;
-
-	// Get biome configuration (may be null if biomes disabled)
-	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
-
-	// Hoisted continentalness snapshot for the per-voxel height modulation below (plain data; the
-	// per-voxel ComputeEffectiveTerrainParams call takes this instead of the UObject).
-	const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(BiomeConfig);
-
-	// Set up biome noise parameters from configuration
-	FVoxelNoiseParams TempNoiseParams;
-	TempNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-	TempNoiseParams.Octaves = 2;
-	TempNoiseParams.Persistence = 0.5f;
-	TempNoiseParams.Lacunarity = 2.0f;
-	TempNoiseParams.Amplitude = 1.0f;
-
-	FVoxelNoiseParams MoistureNoiseParams;
-	MoistureNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-	MoistureNoiseParams.Octaves = 2;
-	MoistureNoiseParams.Persistence = 0.5f;
-	MoistureNoiseParams.Lacunarity = 2.0f;
-	MoistureNoiseParams.Amplitude = 1.0f;
-
-	// Use configuration values if available, otherwise use defaults. (Continentalness noise params are built
-	// inside FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams — the single source of truth shared with
-	// the analytic GetTerrainHeightAt query and applied per voxel below.)
-	if (BiomeConfig)
-	{
-		TempNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset;
-		TempNoiseParams.Frequency = BiomeConfig->TemperatureNoiseFrequency;
-		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
-		MoistureNoiseParams.Frequency = BiomeConfig->MoistureNoiseFrequency;
-	}
-	else
-	{
-		TempNoiseParams.Seed = Request.NoiseParams.Seed + 1234;
-		TempNoiseParams.Frequency = 0.00005f;
-		MoistureNoiseParams.Seed = Request.NoiseParams.Seed + 5678;
-		MoistureNoiseParams.Frequency = 0.00007f;
-	}
-
-	for (int32 Z = 0; Z < ChunkSize; ++Z)
-	{
-		for (int32 Y = 0; Y < ChunkSize; ++Y)
-		{
-			for (int32 X = 0; X < ChunkSize; ++X)
-			{
-				// Calculate world position for this voxel (using base VoxelSize)
-				FVector WorldPos = ChunkWorldPos + FVector(
-					X * VoxelSize,
-					Y * VoxelSize,
-					Z * VoxelSize
-				);
-
-				// Continentalness height modulation (internal oceans/mountains) — the SAME shared source of
-				// truth as InfinitePlane, reused for biome selection below; then the island edge falloff.
-				// The two compose (continentalness shapes terrain inside the island, falloff fades it toward
-				// EdgeHeight at the world edge). Matches the analytic FIslandBowlWorldMode::GetTerrainHeightAt.
-				float Continentalness = 0.0f;
-				const FWorldModeTerrainParams EffectiveParams = FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams(
-					WorldPos.X, WorldPos.Y, WorldMode.GetTerrainParams(), Request.NoiseParams, &BiomeSnapshot, Continentalness);
-
-				const float NoiseValue = FInfinitePlaneWorldMode::SampleTerrainNoise2D(
-					WorldPos.X, WorldPos.Y, Request.NoiseParams);
-				const float BaseTerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(NoiseValue, EffectiveParams);
-
-				float TerrainHeight = FIslandBowlWorldMode::ComposeTerrainHeight(
-					WorldPos.X, WorldPos.Y, BaseTerrainHeight, WorldMode.GetIslandParams());
-
-				// Terrain conditioning (POI / claim flatten) — blend toward zones, then derive density.
-				if (Request.ConditioningZones.Num() > 0)
-				{
-					TerrainHeight = FVoxelTerrainConditioning::ApplyToHeight(
-						WorldPos.X, WorldPos.Y, TerrainHeight, Request.ConditioningZones);
-				}
-
-				const float SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(WorldPos.Z, TerrainHeight);
-				uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
-
-				// Calculate depth below surface for material assignment
-				float DepthBelowSurface = (TerrainHeight - WorldPos.Z) / VoxelSize;
-
-				// Save pre-cave density to detect cave carving (solid → air transition)
-				const uint8 PreCaveDensity = Density;
-
-				// Determine material and biome
-				uint8 MaterialID = 0;
-				uint8 BiomeID = 0;
-
-				if (Request.bEnableBiomes && BiomeConfig && BiomeConfig->IsValid())
-				{
-					// Sample biome noise at X,Y
-					FVector BiomeSamplePos(WorldPos.X, WorldPos.Y, 0.0f);
-					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
-					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
-
-					// Get blended biome selection
-					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture, Continentalness);
-					BiomeID = Blend.GetDominantBiome();
-
-					// Cave carving: subtract density for underground cavities
-					float CaveDensity = 0.0f;
-					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
-					{
-						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
-						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater);
-						if (CaveDensity > 0.0f)
-						{
-							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
-							Density = static_cast<uint8>(FMath::Clamp(NewDensity, 0.0f, 255.0f));
-						}
-					}
-
-					// Get material considering blend weights and water level
-					if (Request.bEnableWaterLevel)
-					{
-						MaterialID = BiomeConfig->GetBlendedMaterialWithWater(
-							Blend, DepthBelowSurface, TerrainHeight, Request.WaterLevel, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
-					}
-					else
-					{
-						MaterialID = BiomeConfig->GetBlendedMaterial(Blend, DepthBelowSurface, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
-					}
-
-					// Apply height-based material overrides
-					// Height rules still apply after water (snow on peaks even if base is underwater)
-					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, WorldPos.Z, DepthBelowSurface);
-
-					// Cave wall material override (solid voxels near cave boundaries)
-					if (Request.bEnableCaves && Request.CaveConfiguration
-						&& Request.CaveConfiguration->bOverrideCaveWallMaterial
-						&& CaveDensity > 0.0f && CaveDensity < 1.0f
-						&& Density >= VOXEL_SURFACE_THRESHOLD
-						&& DepthBelowSurface >= Request.CaveConfiguration->CaveWallMaterialMinDepth)
-					{
-						MaterialID = Request.CaveConfiguration->CaveWallMaterialID;
-					}
-
-					// Apply ore vein overrides (only for solid voxels well below surface)
-					// Use depth > 10 to ensure ores aren't visible on smooth terrain surfaces
-					// (smooth mesher scans up to 8 voxels for material selection)
-					if (Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 10.0f)
-					{
-						TArray<FOreVeinConfig> ApplicableOres;
-						BiomeConfig->GetOreVeinsForBiome(BiomeID, ApplicableOres);
-
-						uint8 OreMaterial = 0;
-						if (CheckOreVeinPlacement(WorldPos, DepthBelowSurface, ApplicableOres, Request.NoiseParams.Seed, OreMaterial))
-						{
-							MaterialID = OreMaterial;
-						}
-					}
-				}
-				else if (Request.bEnableBiomes)
-				{
-					// Fallback to static registry
-					FVector BiomeSamplePos(WorldPos.X, WorldPos.Y, 0.0f);
-					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
-					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
-
-					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
-					BiomeID = Blend.GetDominantBiome();
-					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
-
-					// Cave carving for fallback path
-					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
-					{
-						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater);
-						if (CaveDensity > 0.0f)
-						{
-							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
-							Density = static_cast<uint8>(FMath::Clamp(NewDensity, 0.0f, 255.0f));
-						}
-					}
-				}
-				else
-				{
-					// Use world mode's material assignment
-					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainHeight, DepthBelowSurface * VoxelSize);
-
-					// Cave carving for non-biome path
-					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
-					{
-						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater);
-						if (CaveDensity > 0.0f)
-						{
-							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
-							Density = static_cast<uint8>(FMath::Clamp(NewDensity, 0.0f, 255.0f));
-						}
-					}
-				}
-
-				int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
-
-				const bool bCaveCarved = (PreCaveDensity >= VOXEL_SURFACE_THRESHOLD && Density < VOXEL_SURFACE_THRESHOLD);
-				const uint8 InitMetadata = bCaveCarved
-					? ((FVoxelData::VOXEL_FLAG_CAVE | FVoxelData::VOXEL_FLAG_UNDERGROUND) << 4)
-					: 0;
-				OutVoxelData[Index] = FVoxelData(MaterialID, Density, BiomeID, InitMetadata);
-			}
-		}
-	}
 }
 
 // ==================== Cave Generation Helpers ====================

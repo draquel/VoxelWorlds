@@ -2609,7 +2609,7 @@ FVoxelData FScatterExtractionContext::GetVoxelAboveChunk(int32 LocalX, int32 Loc
 	float VoxelSize, uint8 BiomeID) const
 {
 	// The heightmap generators' density (InfinitePlane and IslandBowl alike): the signed distance to the generated height,
-	// less the cave carve where the voxel is solid and under the ground, as GenerateChunkInfinitePlane / IslandBowl apply it
+	// less the cave carve where the voxel is solid and under the ground, as GenerateChunkHeightmap apply it
 	// (G28). A column's biome is the same at every depth, so the chunk's own voxel there carries the one generation used.
 	uint8 Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(
 		FInfinitePlaneWorldMode::CalculateSignedDistance(static_cast<float>(SamplePos.Z), GeneratedHeight), VoxelSize);

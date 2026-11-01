@@ -178,7 +178,7 @@ FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParamsAt
 	FWorldModeTerrainParams Effective = BaseParams;
 
 	// Continentalness modulates height independently of biome material selection (matches
-	// FVoxelCPUNoiseGenerator::GenerateChunkInfinitePlane, which gates only on bEnableContinentalness).
+	// FVoxelCPUNoiseGenerator::GenerateChunkHeightmap, which gates only on bEnableContinentalness).
 	if (BiomeSnapshot && BiomeSnapshot->bEnableContinentalness)
 	{
 		// Same continentalness noise field as generation: 2-octave Simplex, seed offset from the config.
