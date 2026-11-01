@@ -43,6 +43,7 @@
 #include "VoxelScatterRenderer.h"
 #include "VoxelTreeInjector.h"
 #include "VoxelTreeTypes.h"
+#include "VoxelTreeQuery.h"
 #include "VoxelFarOcean.h"
 #include "VoxelFarField.h"
 #include "VoxelPlanetOcean.h"
@@ -872,7 +873,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	{
 		const double LODUpdateStart = FPlatformTime::Seconds();
 		LODStrategy->Update(Context, DeltaTime);
-		Timing.LODUpdateMs = static_cast<float>((FPlatformTime::Seconds() - LODUpdateStart) * 1000.0);
+		Timing.LODUpdateMs = VoxelTickTiming::MsSince(LODUpdateStart);
 	}
 
 	// The voxel cut-over (spherical Phase 6, WM-BP10): when the window suspends, the queues let go of everything they held
@@ -931,7 +932,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	{
 		ReprioritizeQueues(Context);
 	}
-	Timing.StreamingMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
+	Timing.StreamingMs = VoxelTickTiming::MsSince(SectionStart);
 
 	// === Generation queue (async launch + completed result processing) ===
 	// Sub-timed per function so the benchmark CSV can attribute generation-phase cost.
@@ -940,16 +941,16 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	double SubStart = SectionStart;
 	ProcessGenerationQueue(TimeSlice * 0.4f);
 	double SubEnd = FPlatformTime::Seconds();
-	Timing.GenLaunchMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
+	Timing.GenLaunchMs = VoxelTickTiming::MsBetween(SubStart, SubEnd);
 	SubStart = SubEnd;
 	ProcessPendingGPUReadbacks();
 	SubEnd = FPlatformTime::Seconds();
-	Timing.GenPollMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
+	Timing.GenPollMs = VoxelTickTiming::MsBetween(SubStart, SubEnd);
 	SubStart = SubEnd;
 	ProcessCompletedAsyncGenerations(Timing);
 	SubEnd = FPlatformTime::Seconds();
-	Timing.GenApplyMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
-	Timing.GenerationMs = static_cast<float>((SubEnd - SectionStart) * 1000.0);
+	Timing.GenApplyMs = VoxelTickTiming::MsBetween(SubStart, SubEnd);
+	Timing.GenerationMs = VoxelTickTiming::MsBetween(SectionStart, SubEnd);
 
 	// === Meshing queue ===
 	// Sub-timed per function so the benchmark CSV can attribute meshing-phase cost.
@@ -957,14 +958,14 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	SubStart = SectionStart;
 	ProcessMeshingQueue(TimeSlice * 0.4f, Timing);
 	SubEnd = FPlatformTime::Seconds();
-	Timing.MeshLaunchMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
+	Timing.MeshLaunchMs = VoxelTickTiming::MsBetween(SubStart, SubEnd);
 	SubStart = SubEnd;
 	ProcessCompletedAsyncMeshes();
 	// After both drains, so a result that landed this tick is never mistaken for a stuck job.
 	CheckStuckAsyncJobs();
 	SubEnd = FPlatformTime::Seconds();
-	Timing.MeshApplyMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
-	Timing.MeshingMs = static_cast<float>((SubEnd - SectionStart) * 1000.0);
+	Timing.MeshApplyMs = VoxelTickTiming::MsBetween(SubStart, SubEnd);
+	Timing.MeshingMs = VoxelTickTiming::MsBetween(SectionStart, SubEnd);
 
 	// === Render submit (time-budgeted; sub-timed for the benchmark CSV) ===
 	SectionStart = FPlatformTime::Seconds();
@@ -993,7 +994,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		SubmitsThisTick = RenderSubmitCount;
 	}
 	SubEnd = FPlatformTime::Seconds();
-	Timing.RenderMeshMs = static_cast<float>((SubEnd - SectionStart) * 1000.0);
+	Timing.RenderMeshMs = VoxelTickTiming::MsBetween(SectionStart, SubEnd);
 	Timing.RenderSubRendererMs = static_cast<float>(SubmitRendererSecondsThisTick * 1000.0);
 	Timing.RenderSubScatterMs = static_cast<float>(SubmitScatterSecondsThisTick * 1000.0);
 	Timing.RenderSubWaterMs = static_cast<float>(SubmitWaterSecondsThisTick * 1000.0);
@@ -1003,7 +1004,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	const int32 MaxUnloadsPerFrame = Configuration ? Configuration->MaxChunksToUnloadPerFrame : 8;
 	ProcessUnloadQueue(MaxUnloadsPerFrame);
 	SubEnd = FPlatformTime::Seconds();
-	Timing.RenderUnloadMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
+	Timing.RenderUnloadMs = VoxelTickTiming::MsBetween(SubStart, SubEnd);
 
 	// === Process dirty water tiles (2D water grid) ===
 	SubStart = SubEnd;
@@ -1012,9 +1013,9 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		ProcessDirtyWaterTiles(8);
 	}
 	SubEnd = FPlatformTime::Seconds();
-	Timing.RenderWaterTileMs = static_cast<float>((SubEnd - SubStart) * 1000.0);
+	Timing.RenderWaterTileMs = VoxelTickTiming::MsBetween(SubStart, SubEnd);
 
-	Timing.RenderSubmitMs = static_cast<float>((SubEnd - SectionStart) * 1000.0);
+	Timing.RenderSubmitMs = VoxelTickTiming::MsBetween(SectionStart, SubEnd);
 
 	// === Far ocean (WM-E1) ===
 	// The open sea's underside shows only while the viewer is under the water plane.
@@ -1066,7 +1067,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 			LODEvalSchedule.OnEvaluated(Context.ViewerPosition, Queued, bCapReached);
 		}
 	}
-	Timing.LODMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
+	Timing.LODMs = VoxelTickTiming::MsSince(SectionStart);
 
 	// === Seam-ownership scheduler ===
 	// Runs after the generation/meshing/LOD sections so this-tick residency and rendered-LOD changes
@@ -1074,14 +1075,14 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// qualification found the seam pipeline's GT cost was invisible inside TotalMs.
 	SectionStart = FPlatformTime::Seconds();
 	TickSeamScheduler();
-	Timing.SeamMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
+	Timing.SeamMs = VoxelTickTiming::MsSince(SectionStart);
 
 	// === Far-chunk voxel-data compression sweep ===
 	// Runs after LOD evaluation so a chunk just queued for an LOD remesh (now dirty) is excluded.
 	// Timed into its own bench column (FarCompressMs): it used to show only as unattributed TotalMs (G6).
 	SectionStart = FPlatformTime::Seconds();
 	ProcessFarCompressionSweep(Context, Timing);
-	Timing.FarCompressMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
+	Timing.FarCompressMs = VoxelTickTiming::MsSince(SectionStart);
 
 	// === Collision manager ===
 	// Always update collision (drains async results, creates physics bodies).
@@ -1095,7 +1096,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		Timing.CollisionPrepMs = CollisionManager->LastPrepMs;
 		Timing.CollisionApplyMs = CollisionManager->LastApplyMs;
 	}
-	Timing.CollisionMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
+	Timing.CollisionMs = VoxelTickTiming::MsSince(SectionStart);
 
 	// === Scatter manager ===
 	// Always update scatter (drains async results, updates HISM instances).
@@ -1106,7 +1107,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	if (ScatterManager && Configuration && Configuration->bEnableScatter)
 	{
 		ProcessEditScatterReaders();
-		Timing.ScatterEditMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
+		Timing.ScatterEditMs = VoxelTickTiming::MsSince(SectionStart);
 		ScatterManager->Update(Context.ViewerPosition, DeltaTime);
 		const UVoxelScatterManager::FUpdateTimings& ScatterSteps = ScatterManager->GetLastUpdateTimings();
 		Timing.ScatterApplyMs = ScatterSteps.ApplyMs;
@@ -1121,16 +1122,16 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 			ScatterManager->DrawDebugVisualization(GetWorld());
 		}
 	}
-	Timing.ScatterMs = static_cast<float>((FPlatformTime::Seconds() - SectionStart) * 1000.0);
+	Timing.ScatterMs = VoxelTickTiming::MsSince(SectionStart);
 
 	// Flush all pending render operations as a single batched command
 	if (MeshRenderer)
 	{
 		const double FlushStart = FPlatformTime::Seconds();
 		MeshRenderer->FlushPendingOperations();
-		Timing.RenderFlushMs = static_cast<float>((FPlatformTime::Seconds() - FlushStart) * 1000.0);
+		Timing.RenderFlushMs = VoxelTickTiming::MsSince(FlushStart);
 	}
-	Timing.TotalMs = static_cast<float>((FPlatformTime::Seconds() - TickStartTime) * 1000.0);
+	Timing.TotalMs = VoxelTickTiming::MsSince(TickStartTime);
 	LastTimingStats = Timing;
 }
 
@@ -1347,131 +1348,7 @@ void UVoxelChunkManager::Initialize(
 	EditManager->Initialize(Configuration);
 
 	// Subscribe to edit events - mark chunks dirty when edited
-	EditManager->OnChunkEdited.AddLambda([this](const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius)
-	{
-		// The edit changed this chunk's LOGICAL voxel content, but it lives in the edit-manager
-		// layer — the descriptor array is untouched, so nothing else advances ContentVersion.
-		// Bump it before MarkChunkDirty so the seam registry restales against the NEW version and
-		// the shared voxel-snapshot cache (seam jobs + async collision cooks key edit-merged
-		// snapshots off ContentVersion) rebuilds instead of re-serving the pre-edit snapshot.
-		if (FVoxelChunkState* EditedState = ChunkStates.Find(ChunkCoord))
-		{
-			EditedState->Descriptor.BumpContentVersion();
-		}
-		else
-		{
-			// Edit landed in an UNTRACKED chunk (e.g. building up into the all-air chunk above the
-			// analytic streaming band). Force a streaming update so the edit-pinned load pass in
-			// UpdateLoadDecisions picks it up this tick instead of waiting for viewer movement.
-			bForceStreamingUpdate = true;
-		}
-
-		// Mark the edited chunk dirty: it re-meshes and its seams restale (on its way to a mesh as well, G57).
-		++MeshWorkStats.EditBroadcasts;
-		const EChunkState EditedChunkState = GetChunkState(ChunkCoord);
-		MeshWorkStats.EditedRemeshes += EditedChunkState == EChunkState::Loaded ? 1 : 0;
-		MeshWorkStats.EditedOnTheWay += (EditedChunkState == EChunkState::PendingMeshing || EditedChunkState == EChunkState::Meshing) ? 1 : 0;
-		MarkChunkDirty(ChunkCoord);
-		if (CollisionManager)
-		{
-			CollisionManager->MarkChunkDirty(ChunkCoord);
-		}
-		if (ScatterManager)
-		{
-			// Handle scatter based on edit source
-			if (Source == EEditSource::Player && EditRadius > 0.0f)
-			{
-				// Player edits: surgically remove scatter in the affected radius immediately, so it
-				// disappears the same frame as the dig/build. Pad by half a VoxelSize so scatter on block
-				// faces above/around the edit center is also cleared (block-face-snapped scatter sits at
-				// the face center, 0.5*VoxelSize from the block center).
-				//
-				// A live player edit ONLY clears — it never re-extracts, so foliage never regrows or
-				// reshuffles under the player while they edit. Correctness against the new terrain is
-				// deferred to the chunk's next fresh generation (player leaves and returns / chunk reloads),
-				// which reads edit-merged voxels at the scatter hand-off (see OnChunkMeshCompleted), so
-				// regrown foliage lands on the edited surface instead of floating over holes.
-				const float ScatterClearRadius = EditRadius + Configuration->VoxelSize * 0.6f;
-				ScatterManager->ClearScatterInRadius(EditCenter, ScatterClearRadius);
-			}
-			else if (Source != EEditSource::Player)
-			{
-				// System / Editor edits (e.g. POI terraforming) re-extract the chunk so scatter matches the
-				// new surface. RegenerateChunkScatter keeps the current instances rendered until the
-				// re-extraction smoothly replaces them per type, so it adds no flash. The chunk's re-mesh
-				// (MarkChunkDirty above) hands its edit-merged voxels to scatter.
-				//
-				// TODO(scatter-claims): a POI often wants foliage SUPPRESSED — either across its whole
-				// claimed zone or just under a static-asset (building) footprint — rather than re-extracted.
-				// Drive that from the claim covering the region once VoxelScatter consumes claims.
-				ScatterManager->RegenerateChunkScatter(ChunkCoord);
-				++EditScatterStats.Broadcasts;
-				if (CVarScatterEditReaders.GetValueOnGameThread() != 0)
-				{
-					// The chunks whose extraction reads the voxels the edit changed here (G33): the chunk below on a
-					// heightmap, the -X / -Y / -Z chunks on a planet, as far as the edit's bounds reach. Re-extracted once
-					// each in the next tick (ProcessEditScatterReaders), so an edit across many chunks folds them.
-					FIntVector EditMin, EditMax;
-					const bool bBounds = EditManager->GetBroadcastEditBounds(EditMin, EditMax);
-					TArray<FIntVector> Readers;
-					ScatterManager->GetEditReaders(ChunkCoord, bBounds ? &EditMin : nullptr, Readers);
-					EditScatterReaderChunks.Append(Readers);
-					EditScatterEditedChunks.Add(ChunkCoord);
-				}
-			}
-			// A zero-radius player edit has no sphere to clear. Undo broadcasts System (the restored voxels regenerate),
-			// and redo the operation's own source, centre and radius (G60).
-		}
-
-		// Notify water propagation system of the edit
-		if (WaterPropagation)
-		{
-			WaterPropagation->OnChunkEdited(ChunkCoord, Source, EditCenter, EditRadius);
-		}
-
-		// The face neighbours re-cook their collision: a cook reads its 26 neighbours' voxels (G32). Their meshes read none of
-		// the edited chunk's voxels (a chunk mesh is a function of its own; the boundary is in the edited chunk's seams,
-		// restaled above), so they re-mesh only under the rule before (voxel.Edit.NeighbourRemesh 1, G56), or for a system edit
-		// under voxel.Scatter.EditReaders 0, whose face neighbours re-extract their scatter through that re-mesh.
-		static const FIntVector NeighborOffsets[6] = {
-			FIntVector(-1, 0, 0), FIntVector(1, 0, 0),
-			FIntVector(0, -1, 0), FIntVector(0, 1, 0),
-			FIntVector(0, 0, -1), FIntVector(0, 0, 1)
-		};
-		const bool bNeighbourRemesh = CVarEditNeighbourRemesh.GetValueOnGameThread() != 0
-			|| (Source != EEditSource::Player && CVarScatterEditReaders.GetValueOnGameThread() == 0);
-
-		for (const FIntVector& Offset : NeighborOffsets)
-		{
-			const FIntVector NeighborCoord = ChunkCoord + Offset;
-			if (ChunkStates.Contains(NeighborCoord))
-			{
-				if (bNeighbourRemesh)
-				{
-					MeshWorkStats.NeighbourRemeshes += GetChunkState(NeighborCoord) == EChunkState::Loaded ? 1 : 0;
-					MarkChunkDirty(NeighborCoord);
-				}
-				if (CollisionManager)
-				{
-					CollisionManager->MarkChunkDirty(NeighborCoord);
-				}
-				// Player edits: scatter for neighbours is handled by ClearScatterInRadius, which affects every chunk
-				// within the edit radius. System / Editor edits: the chunks whose extraction reads the edited voxels
-				// re-extract (G33, above); voxel.Scatter.EditReaders 0 restores the rule before, these six.
-				if (ScatterManager && Source != EEditSource::Player && CVarScatterEditReaders.GetValueOnGameThread() == 0)
-				{
-					ScatterManager->RegenerateChunkScatter(NeighborCoord);
-					++EditScatterStats.LegacyFaceNeighbours;
-				}
-			}
-		}
-
-		// A collision cook reads the edge and corner neighbours' voxels too: re-cook those the edit reaches (G32).
-		if (CollisionManager)
-		{
-			CollisionManager->MarkNeighborsDirtyForEdit(ChunkCoord, EditCenter, EditRadius);
-		}
-	});
+	EditManager->OnChunkEdited.AddUObject(this, &UVoxelChunkManager::HandleChunkEdited);
 
 	UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelEditManager created and initialized"));
 
@@ -1566,6 +1443,132 @@ void UVoxelChunkManager::Initialize(
 
 	UE_LOG(LogVoxelStreaming, Log, TEXT("ChunkManager initialized with config: VoxelSize=%.1f, ChunkSize=%d"),
 		Configuration->VoxelSize, Configuration->ChunkSize);
+}
+
+void UVoxelChunkManager::HandleChunkEdited(const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius)
+{
+	// The edit changed this chunk's LOGICAL voxel content, but it lives in the edit-manager
+	// layer — the descriptor array is untouched, so nothing else advances ContentVersion.
+	// Bump it before MarkChunkDirty so the seam registry restales against the NEW version and
+	// the shared voxel-snapshot cache (seam jobs + async collision cooks key edit-merged
+	// snapshots off ContentVersion) rebuilds instead of re-serving the pre-edit snapshot.
+	if (FVoxelChunkState* EditedState = ChunkStates.Find(ChunkCoord))
+	{
+		EditedState->Descriptor.BumpContentVersion();
+	}
+	else
+	{
+		// Edit landed in an UNTRACKED chunk (e.g. building up into the all-air chunk above the
+		// analytic streaming band). Force a streaming update so the edit-pinned load pass in
+		// UpdateLoadDecisions picks it up this tick instead of waiting for viewer movement.
+		bForceStreamingUpdate = true;
+	}
+
+	// Mark the edited chunk dirty: it re-meshes and its seams restale (on its way to a mesh as well, G57).
+	++MeshWorkStats.EditBroadcasts;
+	const EChunkState EditedChunkState = GetChunkState(ChunkCoord);
+	MeshWorkStats.EditedRemeshes += EditedChunkState == EChunkState::Loaded ? 1 : 0;
+	MeshWorkStats.EditedOnTheWay += (EditedChunkState == EChunkState::PendingMeshing || EditedChunkState == EChunkState::Meshing) ? 1 : 0;
+	MarkChunkDirty(ChunkCoord);
+	if (CollisionManager)
+	{
+		CollisionManager->MarkChunkDirty(ChunkCoord);
+	}
+	if (ScatterManager)
+	{
+		// Handle scatter based on edit source
+		if (Source == EEditSource::Player && EditRadius > 0.0f)
+		{
+			// Player edits: surgically remove scatter in the affected radius immediately, so it
+			// disappears the same frame as the dig/build. Pad by half a VoxelSize so scatter on block
+			// faces above/around the edit center is also cleared (block-face-snapped scatter sits at
+			// the face center, 0.5*VoxelSize from the block center).
+			//
+			// A live player edit ONLY clears — it never re-extracts, so foliage never regrows or
+			// reshuffles under the player while they edit. Correctness against the new terrain is
+			// deferred to the chunk's next fresh generation (player leaves and returns / chunk reloads),
+			// which reads edit-merged voxels at the scatter hand-off (see OnChunkMeshCompleted), so
+			// regrown foliage lands on the edited surface instead of floating over holes.
+			const float ScatterClearRadius = EditRadius + Configuration->VoxelSize * 0.6f;
+			ScatterManager->ClearScatterInRadius(EditCenter, ScatterClearRadius);
+		}
+		else if (Source != EEditSource::Player)
+		{
+			// System / Editor edits (e.g. POI terraforming) re-extract the chunk so scatter matches the
+			// new surface. RegenerateChunkScatter keeps the current instances rendered until the
+			// re-extraction smoothly replaces them per type, so it adds no flash. The chunk's re-mesh
+			// (MarkChunkDirty above) hands its edit-merged voxels to scatter.
+			//
+			// TODO(scatter-claims): a POI often wants foliage SUPPRESSED — either across its whole
+			// claimed zone or just under a static-asset (building) footprint — rather than re-extracted.
+			// Drive that from the claim covering the region once VoxelScatter consumes claims.
+			ScatterManager->RegenerateChunkScatter(ChunkCoord);
+			++EditScatterStats.Broadcasts;
+			if (CVarScatterEditReaders.GetValueOnGameThread() != 0)
+			{
+				// The chunks whose extraction reads the voxels the edit changed here (G33): the chunk below on a
+				// heightmap, the -X / -Y / -Z chunks on a planet, as far as the edit's bounds reach. Re-extracted once
+				// each in the next tick (ProcessEditScatterReaders), so an edit across many chunks folds them.
+				FIntVector EditMin, EditMax;
+				const bool bBounds = EditManager->GetBroadcastEditBounds(EditMin, EditMax);
+				TArray<FIntVector> Readers;
+				ScatterManager->GetEditReaders(ChunkCoord, bBounds ? &EditMin : nullptr, Readers);
+				EditScatterReaderChunks.Append(Readers);
+				EditScatterEditedChunks.Add(ChunkCoord);
+			}
+		}
+		// A zero-radius player edit has no sphere to clear. Undo broadcasts System (the restored voxels regenerate),
+		// and redo the operation's own source, centre and radius (G60).
+	}
+
+	// Notify water propagation system of the edit
+	if (WaterPropagation)
+	{
+		WaterPropagation->OnChunkEdited(ChunkCoord, Source, EditCenter, EditRadius);
+	}
+
+	// The face neighbours re-cook their collision: a cook reads its 26 neighbours' voxels (G32). Their meshes read none of
+	// the edited chunk's voxels (a chunk mesh is a function of its own; the boundary is in the edited chunk's seams,
+	// restaled above), so they re-mesh only under the rule before (voxel.Edit.NeighbourRemesh 1, G56), or for a system edit
+	// under voxel.Scatter.EditReaders 0, whose face neighbours re-extract their scatter through that re-mesh.
+	static const FIntVector NeighborOffsets[6] = {
+		FIntVector(-1, 0, 0), FIntVector(1, 0, 0),
+		FIntVector(0, -1, 0), FIntVector(0, 1, 0),
+		FIntVector(0, 0, -1), FIntVector(0, 0, 1)
+	};
+	const bool bNeighbourRemesh = CVarEditNeighbourRemesh.GetValueOnGameThread() != 0
+		|| (Source != EEditSource::Player && CVarScatterEditReaders.GetValueOnGameThread() == 0);
+
+	for (const FIntVector& Offset : NeighborOffsets)
+	{
+		const FIntVector NeighborCoord = ChunkCoord + Offset;
+		if (ChunkStates.Contains(NeighborCoord))
+		{
+			if (bNeighbourRemesh)
+			{
+				MeshWorkStats.NeighbourRemeshes += GetChunkState(NeighborCoord) == EChunkState::Loaded ? 1 : 0;
+				MarkChunkDirty(NeighborCoord);
+			}
+			if (CollisionManager)
+			{
+				CollisionManager->MarkChunkDirty(NeighborCoord);
+			}
+			// Player edits: scatter for neighbours is handled by ClearScatterInRadius, which affects every chunk
+			// within the edit radius. System / Editor edits: the chunks whose extraction reads the edited voxels
+			// re-extract (G33, above); voxel.Scatter.EditReaders 0 restores the rule before, these six.
+			if (ScatterManager && Source != EEditSource::Player && CVarScatterEditReaders.GetValueOnGameThread() == 0)
+			{
+				ScatterManager->RegenerateChunkScatter(NeighborCoord);
+				++EditScatterStats.LegacyFaceNeighbours;
+			}
+		}
+	}
+
+	// A collision cook reads the edge and corner neighbours' voxels too: re-cook those the edit reaches (G32).
+	if (CollisionManager)
+	{
+		CollisionManager->MarkNeighborsDirtyForEdit(ChunkCoord, EditCenter, EditRadius);
+	}
 }
 
 // ==================== Finding the manager ====================
@@ -2335,7 +2338,7 @@ FVector UVoxelChunkManager::GetGeneratedSurfacePoint(const FVector& WorldPos) co
 		return FVector(WorldPos.X, WorldPos.Y, GetGeneratedColumnHeight(WorldPos.X, WorldPos.Y));
 	}
 	// A planet: the natural surface along the direction, with the planet conditioning zones there (SP-B10).
-	if (ConditioningZones.Num() > 0 || TerrainConditioner != nullptr)
+	if (!ConditioningZones.IsEmpty())
 	{
 		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WM);
 		const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
@@ -2872,9 +2875,7 @@ bool UVoxelChunkManager::HasVoxelTrees() const
 
 FVector UVoxelChunkManager::GlobalVoxelToWorldCentre(const FIntVector& GlobalVoxel) const
 {
-	const float VoxelSize = Configuration ? Configuration->VoxelSize : 100.0f;
-	const FVector Origin = Configuration ? Configuration->WorldOrigin : FVector::ZeroVector;
-	return Origin + (FVector(GlobalVoxel) + FVector(0.5)) * VoxelSize;
+	return FVoxelTreeQuery::GlobalVoxelToWorldCentre(Configuration, GlobalVoxel);
 }
 
 bool UVoxelChunkManager::FindVoxelTreeAt(const FVector& WorldPos, FVoxelTreeInstance& OutTree) const
@@ -2883,35 +2884,7 @@ bool UVoxelChunkManager::FindVoxelTreeAt(const FVector& WorldPos, FVoxelTreeInst
 	{
 		return false;
 	}
-	const float VoxelSize = Configuration->VoxelSize;
-	const FVector Relative = (WorldPos - Configuration->WorldOrigin) / VoxelSize;
-	const FIntVector GlobalVoxel(FMath::FloorToInt32(Relative.X), FMath::FloorToInt32(Relative.Y), FMath::FloorToInt32(Relative.Z));
-
-	TArray<FVoxelTreeInstance> Candidates;
-	FVoxelTreeInjector::FindTreesWithTrunkAt(GlobalVoxel, Configuration->ChunkSize, VoxelSize, Configuration->WorldOrigin,
-		Configuration->WorldSeed, Configuration->TreeTemplates, Configuration->GetNoiseParams(), *WorldMode, Configuration->TreeDensity,
-		Configuration->BiomeConfiguration, Configuration->bEnableWaterLevel, Configuration->WaterLevel, Candidates);
-
-	// The voxel must still be that tree's trunk block; where two trunks touch, the tree with more of its trunk left wins.
-	const FVoxelData Voxel = GetVoxelAt(GlobalVoxelToWorldCentre(GlobalVoxel));
-	int32 BestTrunk = 0;
-	TArray<FVoxelTreeVoxel> Blocks;
-	for (const FVoxelTreeInstance& Candidate : Candidates)
-	{
-		const FVoxelTreeTemplate& Template = Configuration->TreeTemplates[Candidate.TemplateIndex];
-		if (!Voxel.IsSolid() || Voxel.MaterialID != Template.TrunkMaterialID)
-		{
-			continue;
-		}
-		GetVoxelTreeBlocks(Candidate, Blocks);
-		const int32 Trunk = Blocks.FilterByPredicate([](const FVoxelTreeVoxel& B) { return B.bTrunk; }).Num();
-		if (Trunk > BestTrunk)
-		{
-			BestTrunk = Trunk;
-			OutTree = Candidate;
-		}
-	}
-	return BestTrunk > 0;
+	return FVoxelTreeQuery::FindAt(*Configuration, *WorldMode, WorldPos, [this](const FVector& P) { return GetVoxelAt(P); }, OutTree);
 }
 
 void UVoxelChunkManager::FindVoxelTreesNear(const FVector& WorldPos, float Radius, TArray<FVoxelTreeInstance>& OutTrees) const
@@ -2921,78 +2894,17 @@ void UVoxelChunkManager::FindVoxelTreesNear(const FVector& WorldPos, float Radiu
 	{
 		return;
 	}
-	const float VoxelSize = Configuration->VoxelSize;
-	const int32 ChunkSize = Configuration->ChunkSize;
-	const double ChunkWorldSize = static_cast<double>(ChunkSize) * VoxelSize;
-	const FVector Relative = WorldPos - Configuration->WorldOrigin;
-	const int32 CX0 = FMath::FloorToInt32((Relative.X - Radius) / ChunkWorldSize);
-	const int32 CX1 = FMath::FloorToInt32((Relative.X + Radius) / ChunkWorldSize);
-	const int32 CY0 = FMath::FloorToInt32((Relative.Y - Radius) / ChunkWorldSize);
-	const int32 CY1 = FMath::FloorToInt32((Relative.Y + Radius) / ChunkWorldSize);
-	TArray<TPair<double, FVoxelTreeInstance>> Found;
-	TArray<FVoxelTreeVoxel> Blocks;
-	for (int32 CX = CX0; CX <= CX1; ++CX)
-	{
-		for (int32 CY = CY0; CY <= CY1; ++CY)
-		{
-			TArray<FIntVector> Positions;
-			TArray<int32> Templates;
-			TArray<uint32> Seeds;
-			FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), ChunkSize, VoxelSize, Configuration->WorldOrigin,
-				Configuration->WorldSeed, Configuration->GetNoiseParams(), *WorldMode, Configuration->TreeDensity, Configuration->TreeTemplates,
-				Configuration->BiomeConfiguration, Configuration->bEnableWaterLevel, Configuration->WaterLevel, Positions, Templates, Seeds);
-			for (int32 i = 0; i < Positions.Num(); ++i)
-			{
-				FVoxelTreeInstance Tree;
-				Tree.BaseVoxel = Positions[i];
-				Tree.TemplateIndex = Templates[i];
-				Tree.Seed = Seeds[i];
-				const double Distance = FVector::Dist2D(GlobalVoxelToWorldCentre(Tree.BaseVoxel), WorldPos);
-				if (Distance > Radius)
-				{
-					continue;
-				}
-				GetVoxelTreeBlocks(Tree, Blocks);
-				if (Blocks.ContainsByPredicate([&Tree](const FVoxelTreeVoxel& B) { return B.bTrunk && B.GlobalVoxel.Z > Tree.BaseVoxel.Z; }))
-				{
-					Found.Emplace(Distance, Tree);
-				}
-			}
-		}
-	}
-	Found.Sort([](const TPair<double, FVoxelTreeInstance>& A, const TPair<double, FVoxelTreeInstance>& B) { return A.Key < B.Key; });
-	for (const TPair<double, FVoxelTreeInstance>& Entry : Found)
-	{
-		OutTrees.Add(Entry.Value);
-	}
+	FVoxelTreeQuery::FindNear(*Configuration, *WorldMode, WorldPos, Radius, [this](const FVector& P) { return GetVoxelAt(P); }, OutTrees);
 }
 
 void UVoxelChunkManager::GetVoxelTreeBlocks(const FVoxelTreeInstance& Tree, TArray<FVoxelTreeVoxel>& OutBlocks) const
 {
 	OutBlocks.Reset();
-	if (!Configuration || !Configuration->TreeTemplates.IsValidIndex(Tree.TemplateIndex))
+	if (!Configuration)
 	{
 		return;
 	}
-	TArray<FVoxelTreeVoxel> Stamp;
-	FVoxelTreeInjector::CollectTreeVoxels(Tree.BaseVoxel, Configuration->TreeTemplates[Tree.TemplateIndex], Tree.Seed, Stamp);
-	TSet<FIntVector> Seen;
-	// Later entries win (the trunk is stamped after the canopy and punches through it), so walk the stamp backwards.
-	for (int32 i = Stamp.Num() - 1; i >= 0; --i)
-	{
-		const FVoxelTreeVoxel& Block = Stamp[i];
-		bool bAlreadySeen = false;
-		Seen.Add(Block.GlobalVoxel, &bAlreadySeen);
-		if (bAlreadySeen)
-		{
-			continue;
-		}
-		const FVoxelData Voxel = GetVoxelAt(GlobalVoxelToWorldCentre(Block.GlobalVoxel));
-		if (Voxel.IsSolid() && Voxel.MaterialID == Block.MaterialID)
-		{
-			OutBlocks.Add(Block);
-		}
-	}
+	FVoxelTreeQuery::GetBlocks(*Configuration, Tree, [this](const FVector& P) { return GetVoxelAt(P); }, OutBlocks);
 }
 
 int32 UVoxelChunkManager::FellVoxelTree(const FVoxelTreeInstance& Tree, bool bKeepStump)
@@ -3933,7 +3845,7 @@ void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 
 void UVoxelChunkManager::GatherConditioningZonesForChunk(const FIntVector& ChunkCoord, TArray<FVoxelConditioningZone>& OutZones) const
 {
-	if ((ConditioningZones.Num() == 0 && TerrainConditioner == nullptr) || !Configuration)
+	if (ConditioningZones.IsEmpty() || !Configuration)
 	{
 		return;
 	}
@@ -3992,46 +3904,17 @@ void UVoxelChunkManager::GatherConditioningZones(const FBox& Box, TArray<FVoxelC
 
 void UVoxelChunkManager::GatherConditioningZonesOnSphere(const FVector& Direction, double AngularRadius, TArray<FVoxelConditioningZone>& OutZones) const
 {
-	if ((ConditioningZones.Num() == 0 && TerrainConditioner == nullptr) || !Configuration
+	if (ConditioningZones.IsEmpty() || !Configuration
 		|| Configuration->WorldMode != EWorldMode::SphericalPlanet)
 	{
 		return;
 	}
-	const double Radius = FVoxelWorldModeFactory::MakePlanetParams(*Configuration).PlanetRadius;
-	for (const FVoxelConditioningZone& Zone : ConditioningZones)
-	{
-		if (Zone.MeetsCap(Direction, AngularRadius, Radius))
-		{
-			OutZones.Add(Zone);
-		}
-	}
-	if (TerrainConditioner)
-	{
-		TerrainConditioner->GatherConditioningOnSphere(Direction, AngularRadius, OutZones);
-	}
+	ConditioningZones.GatherOnSphere(Direction, AngularRadius, FVoxelWorldModeFactory::MakePlanetParams(*Configuration).PlanetRadius, OutZones);
 }
 
 void UVoxelChunkManager::GatherConditioningZonesForRegion(const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones) const
 {
-	if (ConditioningZones.Num() == 0 && TerrainConditioner == nullptr)
-	{
-		return;
-	}
-
-	// Static zones whose influence overlaps the region (heightmap zones: planet zones apply only on a planet).
-	for (const FVoxelConditioningZone& Zone : ConditioningZones)
-	{
-		if (!Zone.IsRadial() && Zone.GetBounds2D().Intersect(Region))
-		{
-			OutZones.Add(Zone);
-		}
-	}
-
-	// Dynamic (game-supplied) zones for this region.
-	if (TerrainConditioner)
-	{
-		TerrainConditioner->GatherConditioning(Region, OutZones);
-	}
+	ConditioningZones.GatherForRegion(Region, OutZones);
 }
 
 void UVoxelChunkManager::GatherConditioningZonesForPoint(double WorldX, double WorldY, TArray<FVoxelConditioningZone>& OutZones) const
@@ -4054,7 +3937,7 @@ float UVoxelChunkManager::GetGeneratedColumnHeight(double WorldX, double WorldY)
 	// the biome context set at init) with the terrain conditioning zones there (POI / claim flatten) layered on exactly as
 	// generation does.
 	TArray<FVoxelConditioningZone> Zones;
-	if (ConditioningZones.Num() > 0 || TerrainConditioner != nullptr)
+	if (!ConditioningZones.IsEmpty())
 	{
 		GatherConditioningZonesForPoint(WorldX, WorldY, Zones);
 	}
@@ -4076,7 +3959,7 @@ bool UVoxelChunkManager::QuerySurfacePoint(const FVector& WorldPos, EVoxelSurfac
 
 	// The generated rung's zones, gathered for the place as GetGeneratedSurfacePoint gathers them.
 	TArray<FVoxelConditioningZone> Zones;
-	if (Layer == EVoxelSurfaceLayer::Generated && (ConditioningZones.Num() > 0 || TerrainConditioner != nullptr))
+	if (Layer == EVoxelSurfaceLayer::Generated && !ConditioningZones.IsEmpty())
 	{
 		if (WM->GetWorldModeType() == EWorldMode::SphericalPlanet)
 		{
