@@ -159,7 +159,8 @@ private:
 	}
 
 	// ============================================================================
-	// Density & Voxel Access (copied from FVoxelCPUMarchingCubesMesher)
+	// Density & Voxel Access: VoxelMeshingSampler under Dual Contouring's rule (a missing neighbour reads as Air, edges
+	// and corners at the read's depth; code review CR2, MESH-09)
 	// ============================================================================
 
 	float GetDensityAt(

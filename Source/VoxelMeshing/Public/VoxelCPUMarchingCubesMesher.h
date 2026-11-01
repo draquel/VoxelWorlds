@@ -251,28 +251,10 @@ private:
 		FVector3f& Vertex) const;
 
 	/**
-	 * Find the height at which the coarse-LOD iso-surface crosses the vertical column at (Vx,Vy).
-	 *
-	 * Samples density on the stride-CoarserStride lattice (trilinear) and returns the iso-crossing
-	 * nearest NearVz. The morph target for height-function (plane) terrain.
-	 *
-	 * @param Request The meshing request
-	 * @param Vx, Vy Column position in voxel units (fine resolution)
-	 * @param NearVz Reference height (voxel units) — the crossing nearest this is returned
-	 * @param CoarserStride The coarse neighbour's stride (E)
-	 * @param OutVz Out: the coarse iso-surface height in voxel units
-	 * @return true if a crossing was found within the search band
-	 */
-	bool ComputeCoarseSurfaceZ(
-		const FVoxelMeshingRequest& Request,
-		float Vx, float Vy, float NearVz,
-		int32 CoarserStride,
-		float& OutVz) const;
-
-	/**
-	 * ComputeCoarseSurfaceZ along any axis (spherical SP-D2): the coordinate at which the coarse-LOD iso-surface crosses
-	 * the line along Axis through V. The morph target on a planet, where the morph runs along the axis nearest the
-	 * chunk's local up.
+	 * The coordinate at which the coarse-LOD iso-surface (density on the stride-CoarserStride lattice, trilinear between
+	 * its points) crosses the line along Axis through V, the crossing nearest V: the boundary geomorph's target along the
+	 * axis nearest the chunk's local up (+Z on a heightmap world, spherical SP-D2 on a planet; one body for every up,
+	 * code review CR2, MESH-30).
 	 *
 	 * @param Request The meshing request
 	 * @param V Vertex position in voxel units (fine resolution)
@@ -309,11 +291,11 @@ private:
 		float& OutCoord) const;
 
 	/**
-	 * The LOD material scan's per-corner walk along a non-vertical local up (spherical SP-D1): from the corner, along the
-	 * digital line in Request.LocalUp's direction, to the last solid voxel before air; its material or biome and how far
-	 * along up it lies.
+	 * The LOD material scan's per-corner walk (spherical SP-D1; one walk for every up, code review CR2, MESH-30): from the
+	 * corner, along the digital line in Request.LocalUp's direction (a voxel column when up is +Z), to the last solid voxel
+	 * before air; its material or biome and how far along up it lies.
 	 *
-	 * @param Request The meshing request (LocalUp not +Z)
+	 * @param Request The meshing request
 	 * @param Corner Corner voxel index
 	 * @param bBiome Read the biome instead of the material
 	 * @param OutValue Out: the last solid voxel's material or biome
@@ -362,7 +344,8 @@ private:
 	 * The voxel-resolution crossing on a strided edge (G61's normal point, G80's vertex): of the voxel steps along the
 	 * edge whose ends differ in sign, the one whose crossing lies nearest the place InterpolateEdge gives the vertex (the
 	 * first on a tie). Walked from the edge's min end, so every cell, seam frame and ribbon sharing the edge finds the
-	 * same point. Reads only the voxels on the edge.
+	 * same point. Reads only the voxels on the edge. Marching Cubes' rule in VoxelLODCrossing (VoxelCrossingGradient.h),
+	 * beside Dual Contouring's.
 	 *
 	 * @param Request The meshing request with voxel data
 	 * @param EndA, EndB The edge's endpoints (voxels); they differ along one axis

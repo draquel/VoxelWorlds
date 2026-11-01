@@ -412,37 +412,24 @@ uint8 GetDominantMaterialLOD(const FVoxelMeshingRequest& Request,
                               int32 X, int32 Y, int32 Z,
                               int32 Stride, uint8 CubeIndex) const
 {
-    constexpr int32 MaxScanDistance = 8;
     uint8 SurfaceMaterial = 0;
-    int32 HighestSurfaceZ = INT32_MIN;
+    double Highest = TNumericLimits<double>::Lowest();
 
     // For each solid corner in the cube
     for (int32 i = 0; i < 8; i++) {
         if (CubeIndex & (1 << i)) {
-            const FIntVector& Offset = CornerOffsets[i];
-            const int32 CornerX = X + Offset.X * Stride;
-            const int32 CornerY = Y + Offset.Y * Stride;
-            const int32 CornerZ = Z + Offset.Z * Stride;
+            const FIntVector Corner = FIntVector(X, Y, Z) + CornerOffsets[i] * Stride;
 
-            uint8 LastSolidMaterial = 0;
-            int32 SurfaceZ = CornerZ;
+            // Walk up from the corner along the chunk's local up (a voxel column on a heightmap world, the digital
+            // line along up on a planet) to the last solid voxel before air: the surface, at most 8 steps away.
+            uint8 Value = 0;
+            const double Along = ScanSurfaceAlongLocalUp(Request, Corner, /*bBiome=*/false, Value);
 
-            // Scan upward from corner to find surface
-            for (int32 dz = 0; dz <= MaxScanDistance; dz++) {
-                const FVoxelData Voxel = GetVoxelAt(Request, CornerX, CornerY, CornerZ + dz);
-                if (Voxel.IsSolid()) {
-                    LastSolidMaterial = Voxel.MaterialID;
-                    SurfaceZ = CornerZ + dz;
-                } else {
-                    break;  // Hit air, surface found
-                }
-            }
-
-            // Use material from corner with highest surface Z
+            // Use the material from the corner whose surface lies highest along up
             // (prefers grass on slopes over dirt underground)
-            if (SurfaceZ > HighestSurfaceZ) {
-                HighestSurfaceZ = SurfaceZ;
-                SurfaceMaterial = LastSolidMaterial;
+            if (Along > Highest) {
+                Highest = Along;
+                SurfaceMaterial = Value;
             }
         }
     }

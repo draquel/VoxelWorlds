@@ -2,6 +2,7 @@
 
 #include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelCrossingGradient.h"
+#include "VoxelMeshingVoxelSampler.h"
 #include "VoxelDigitalLine.h"
 #include "VoxelMeshing.h"
 #include "MarchingCubesTables.h"
@@ -22,12 +23,6 @@ TAutoConsoleVariable<float> CVarMCBoundaryMorphWidth(
 	TEXT("MC LOD-seam geomorph ramp width, in coarse cells. Larger = gentler ramp, more fine detail traded."),
 	ECVF_Default);
 
-// voxel.Mesh.VoxelShadingNormals (VoxelCPUDualContourMesher.cpp): both smooth meshers' vertex normals at LOD > 0.
-extern TAutoConsoleVariable<int32> CVarVoxelShadingNormals;
-
-// voxel.Mesh.VoxelLODCrossings (VoxelCPUDualContourMesher.cpp): both smooth meshers' edge crossings at LOD > 0 (G80).
-extern TAutoConsoleVariable<int32> CVarVoxelLODCrossings;
-
 /**
  * Vertex normals of strided cells (G61, WORLD_MODES_REVIEW_PLAN.md §14.1 and §20.9; Dual Contouring's G44 in §20.8).
  *
@@ -44,71 +39,11 @@ extern TAutoConsoleVariable<int32> CVarVoxelLODCrossings;
  * vertex is now that voxel crossing (FindEdgeVoxelCrossing), a function of the edge, so regular cells, seam frames and
  * the transition ribbon still agree on every shared edge; the boundary geomorph's target follows the coarse cells' new
  * vertices (ComputeCoarseCrossingsAlongAxis).
+ *
+ * Both switches (voxel.Mesh.VoxelShadingNormals, voxel.Mesh.VoxelLODCrossings) are read through VoxelCrossingGradient's
+ * predicates, shared with Dual Contouring, and the two meshers' crossing rules live side by side in VoxelLODCrossing
+ * (VoxelCrossingGradient.h; code review CR2, MESH-10 and MESH-11).
  */
-namespace VoxelMCShading
-{
-	/** voxel.Mesh.VoxelShadingNormals for a vertex of this stride (always false at stride 1: LOD 0 is the reference). */
-	static bool UseVoxelShadingNormals(int32 Stride)
-	{
-		return Stride > 1 && CVarVoxelShadingNormals.GetValueOnAnyThread() != 0;
-	}
-
-	/**
-	 * voxel.Mesh.VoxelLODCrossings for an edge this many voxels long (always false for a one-voxel edge, whose crossing
-	 * is InterpolateEdge's: LOD 0, and a ribbon's fine side against LOD 0, stay bit for bit as they were).
-	 */
-	static bool UseVoxelLODCrossings(int32 EdgeLength)
-	{
-		return EdgeLength > 1 && CVarVoxelLODCrossings.GetValueOnAnyThread() != 0;
-	}
-}
-
-/**
- * The request's voxels when a seam job reads its participants in place (G63, FVoxelMeshingRequest::VolumeViews): the same
- * voxel the copied volume, plane, strip or corner would hold at every position GetVoxelAt reads.
- */
-namespace VoxelMCVolume
-{
-	/** The chunk's own voxel at an in-chunk position: the borrowed volume, else VoxelData. */
-	static FORCEINLINE const FVoxelData& OwnVoxel(const FVoxelMeshingRequest& Request, int32 X, int32 Y, int32 Z)
-	{
-		const int32 Index = X + Y * Request.ChunkSize + Z * Request.ChunkSize * Request.ChunkSize;
-		const FVoxelData* Own = Request.VolumeViews[13];
-		return Own ? Own[Index] : Request.VoxelData[Index];
-	}
-
-	/**
-	 * A voxel outside the chunk read from the neighbour's volume as the copied arrays held it: across one face at
-	 * min(depth, NeighborPlaneDepth - 1) into the neighbour (NeighborPlaneVoxel's clamp), across an edge the strip one voxel
-	 * deep on both pinned axes, across a corner the corner voxel. A neighbour not held reads the clamped own voxel.
-	 */
-	static FVoxelData NeighbourViewVoxel(const FVoxelMeshingRequest& Request, int32 X, int32 Y, int32 Z,
-		int32 ClampedX, int32 ClampedY, int32 ClampedZ)
-	{
-		const int32 CS = Request.ChunkSize;
-		const int32 D[3] = { X < 0 ? -1 : (X >= CS ? 1 : 0), Y < 0 ? -1 : (Y >= CS ? 1 : 0), Z < 0 ? -1 : (Z >= CS ? 1 : 0) };
-		const FVoxelData* View = Request.VolumeViews[FVoxelMeshingRequest::VolumeViewIndex(D[0], D[1], D[2])];
-		if (View == nullptr)
-		{
-			return OwnVoxel(Request, ClampedX, ClampedY, ClampedZ);
-		}
-		const int32 OutCount = (D[0] != 0 ? 1 : 0) + (D[1] != 0 ? 1 : 0) + (D[2] != 0 ? 1 : 0);
-		const int32 P[3] = { X, Y, Z };
-		int32 N[3];
-		for (int32 A = 0; A < 3; ++A)
-		{
-			if (D[A] == 0)
-			{
-				N[A] = P[A];
-				continue;
-			}
-			// Depth into the neighbour past this face (0 = the plane touching it); only a face plane reaches deeper.
-			const int32 Depth = (OutCount == 1) ? FMath::Min(D[A] > 0 ? P[A] - CS : -P[A] - 1, FMath::Max(Request.NeighborPlaneDepth, 1) - 1) : 0;
-			N[A] = D[A] > 0 ? Depth : (CS - 1 - Depth);
-		}
-		return View[N[0] + N[1] * CS + N[2] * CS * CS];
-	}
-}
 
 FVoxelCPUMarchingCubesMesher::FVoxelCPUMarchingCubesMesher()
 {
@@ -417,7 +352,7 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 	FVector3f CellVertices[12];
 	int32 VertexCorners[12][2];
 	// G80: at a stride, the vertex at the voxel crossing on its edge (the point G61's normal reads).
-	const bool bVoxelCrossings = VoxelMCShading::UseVoxelLODCrossings(Stride);
+	const bool bVoxelCrossings = VoxelCrossingGradient::UseVoxelLODCrossings(Stride);
 
 	for (int32 i = 0; i < VertexCount; i++)
 	{
@@ -460,7 +395,7 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 	// Vertex normals. G61: at stride > 1, LOD 0's normal at the voxel crossing on the vertex's edge (a function of the
 	// edge alone, so the geomorph does not change it); otherwise the stride-scale gradient at the vertex, as before. At
 	// stride 1 the fitted gradient at the vertex (G62).
-	const bool bVoxelShading = VoxelMCShading::UseVoxelShadingNormals(Stride);
+	const bool bVoxelShading = VoxelCrossingGradient::UseVoxelShadingNormals(Stride);
 	FVector3f CellNormals[12];
 	for (int32 i = 0; i < VertexCount; i++)
 	{
@@ -562,8 +497,7 @@ float FVoxelCPUMarchingCubesMesher::GetDensityAt(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z) const
 {
-	const FVoxelData Voxel = GetVoxelAt(Request, X, Y, Z);
-	return static_cast<float>(Voxel.Density) / 255.0f;
+	return VoxelMeshingSampler::DensityAt(Request, X, Y, Z, VoxelMeshingSampler::MarchingCubesRule);
 }
 
 float FVoxelCPUMarchingCubesMesher::GetDensityAtTrilinear(
@@ -617,179 +551,9 @@ FVoxelData FVoxelCPUMarchingCubesMesher::GetVoxelAt(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z) const
 {
-	const int32 ChunkSize = Request.ChunkSize;
-
-	// Check if within chunk bounds
-	if (X >= 0 && X < ChunkSize && Y >= 0 && Y < ChunkSize && Z >= 0 && Z < ChunkSize)
-	{
-		return VoxelMCVolume::OwnVoxel(Request, X, Y, Z);
-	}
-
-	// Clamp coordinates for fallback
-	const int32 ClampedX = FMath::Clamp(X, 0, ChunkSize - 1);
-	const int32 ClampedY = FMath::Clamp(Y, 0, ChunkSize - 1);
-	const int32 ClampedZ = FMath::Clamp(Z, 0, ChunkSize - 1);
-
-	// A seam job reading its participants in place (G63): the voxel its copied plane, strip or corner held.
-	if (Request.VolumeViews[13] != nullptr)
-	{
-		return VoxelMCVolume::NeighbourViewVoxel(Request, X, Y, Z, ClampedX, ClampedY, ClampedZ);
-	}
-
-	// Handle neighbor chunk lookups
-	const int32 SliceSize = ChunkSize * ChunkSize;
-
-	// Determine which axes are out of bounds and in which direction
-	const bool bXPos = (X >= ChunkSize);
-	const bool bXNeg = (X < 0);
-	const bool bYPos = (Y >= ChunkSize);
-	const bool bYNeg = (Y < 0);
-	const bool bZPos = (Z >= ChunkSize);
-	const bool bZNeg = (Z < 0);
-
-	const bool bOutX = bXPos || bXNeg;
-	const bool bOutY = bYPos || bYNeg;
-	const bool bOutZ = bZPos || bZNeg;
-	const int32 OutCount = (bOutX ? 1 : 0) + (bOutY ? 1 : 0) + (bOutZ ? 1 : 0);
-
-	// Single-axis out of bounds: use face neighbor data
-	if (OutCount == 1)
-	{
-		// Read the correct DEPTH plane into the neighbor (PlaneIdx 0 = the face slice,
-		// deeper planes from the Deep arrays). MC geometry only samples PlaneIdx 0
-		// (cubes are inward); the deeper planes are used by the boundary gradient
-		// normals (central difference reaching past the face). At LOD 0 PlaneIdx is 0.
-		if (bXPos && Request.NeighborXPos.Num() == SliceSize)
-		{
-			return Request.NeighborPlaneVoxel(Request.NeighborXPos, Request.NeighborXPosDeep, Y + Z * ChunkSize, X - ChunkSize);
-		}
-		if (bXNeg && Request.NeighborXNeg.Num() == SliceSize)
-		{
-			return Request.NeighborPlaneVoxel(Request.NeighborXNeg, Request.NeighborXNegDeep, Y + Z * ChunkSize, -X - 1);
-		}
-		if (bYPos && Request.NeighborYPos.Num() == SliceSize)
-		{
-			return Request.NeighborPlaneVoxel(Request.NeighborYPos, Request.NeighborYPosDeep, X + Z * ChunkSize, Y - ChunkSize);
-		}
-		if (bYNeg && Request.NeighborYNeg.Num() == SliceSize)
-		{
-			return Request.NeighborPlaneVoxel(Request.NeighborYNeg, Request.NeighborYNegDeep, X + Z * ChunkSize, -Y - 1);
-		}
-		if (bZPos && Request.NeighborZPos.Num() == SliceSize)
-		{
-			return Request.NeighborPlaneVoxel(Request.NeighborZPos, Request.NeighborZPosDeep, X + Y * ChunkSize, Z - ChunkSize);
-		}
-		if (bZNeg && Request.NeighborZNeg.Num() == SliceSize)
-		{
-			return Request.NeighborPlaneVoxel(Request.NeighborZNeg, Request.NeighborZNegDeep, X + Y * ChunkSize, -Z - 1);
-		}
-		// Fallback to edge voxel
-		return VoxelMCVolume::OwnVoxel(Request, ClampedX, ClampedY, ClampedZ);
-	}
-
-	// Edge case (2 axes out of bounds): use edge neighbor data
-	if (OutCount == 2)
-	{
-		// X+Y edge (Z varies)
-		if (bXPos && bYPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YPOS))
-		{
-			return Request.EdgeXPosYPos[Z];
-		}
-		if (bXPos && bYNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YNEG))
-		{
-			return Request.EdgeXPosYNeg[Z];
-		}
-		if (bXNeg && bYPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YPOS))
-		{
-			return Request.EdgeXNegYPos[Z];
-		}
-		if (bXNeg && bYNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YNEG))
-		{
-			return Request.EdgeXNegYNeg[Z];
-		}
-
-		// X+Z edge (Y varies)
-		if (bXPos && bZPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZPOS))
-		{
-			return Request.EdgeXPosZPos[Y];
-		}
-		if (bXPos && bZNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZNEG))
-		{
-			return Request.EdgeXPosZNeg[Y];
-		}
-		if (bXNeg && bZPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZPOS))
-		{
-			return Request.EdgeXNegZPos[Y];
-		}
-		if (bXNeg && bZNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZNEG))
-		{
-			return Request.EdgeXNegZNeg[Y];
-		}
-
-		// Y+Z edge (X varies)
-		if (bYPos && bZPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZPOS))
-		{
-			return Request.EdgeYPosZPos[X];
-		}
-		if (bYPos && bZNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZNEG))
-		{
-			return Request.EdgeYPosZNeg[X];
-		}
-		if (bYNeg && bZPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZPOS))
-		{
-			return Request.EdgeYNegZPos[X];
-		}
-		if (bYNeg && bZNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZNEG))
-		{
-			return Request.EdgeYNegZNeg[X];
-		}
-
-		// Fallback to edge voxel
-		return VoxelMCVolume::OwnVoxel(Request, ClampedX, ClampedY, ClampedZ);
-	}
-
-	// Corner case (3 axes out of bounds): use corner neighbor data
-	if (OutCount == 3)
-	{
-		if (bXPos && bYPos && bZPos && Request.HasCorner(FVoxelMeshingRequest::CORNER_XPOS_YPOS_ZPOS))
-		{
-			return Request.CornerXPosYPosZPos;
-		}
-		if (bXPos && bYPos && bZNeg && Request.HasCorner(FVoxelMeshingRequest::CORNER_XPOS_YPOS_ZNEG))
-		{
-			return Request.CornerXPosYPosZNeg;
-		}
-		if (bXPos && bYNeg && bZPos && Request.HasCorner(FVoxelMeshingRequest::CORNER_XPOS_YNEG_ZPOS))
-		{
-			return Request.CornerXPosYNegZPos;
-		}
-		if (bXPos && bYNeg && bZNeg && Request.HasCorner(FVoxelMeshingRequest::CORNER_XPOS_YNEG_ZNEG))
-		{
-			return Request.CornerXPosYNegZNeg;
-		}
-		if (bXNeg && bYPos && bZPos && Request.HasCorner(FVoxelMeshingRequest::CORNER_XNEG_YPOS_ZPOS))
-		{
-			return Request.CornerXNegYPosZPos;
-		}
-		if (bXNeg && bYPos && bZNeg && Request.HasCorner(FVoxelMeshingRequest::CORNER_XNEG_YPOS_ZNEG))
-		{
-			return Request.CornerXNegYPosZNeg;
-		}
-		if (bXNeg && bYNeg && bZPos && Request.HasCorner(FVoxelMeshingRequest::CORNER_XNEG_YNEG_ZPOS))
-		{
-			return Request.CornerXNegYNegZPos;
-		}
-		if (bXNeg && bYNeg && bZNeg && Request.HasCorner(FVoxelMeshingRequest::CORNER_XNEG_YNEG_ZNEG))
-		{
-			return Request.CornerXNegYNegZNeg;
-		}
-
-		// Fallback to corner voxel
-		return VoxelMCVolume::OwnVoxel(Request, ClampedX, ClampedY, ClampedZ);
-	}
-
-	// Out of bounds - treat as air
-	return FVoxelData::Air();
+	// The shared sampler under Marching Cubes' rule (VoxelMeshingVoxelSampler.h, MESH-09): a missing neighbour reads as the
+	// nearest own voxel, edges and corners one voxel deep.
+	return VoxelMeshingSampler::VoxelAt(Request, X, Y, Z, VoxelMeshingSampler::MarchingCubesRule);
 }
 
 FVector3f FVoxelCPUMarchingCubesMesher::InterpolateEdge(
@@ -810,95 +574,19 @@ FVector3f FVoxelCPUMarchingCubesMesher::InterpolateEdge(
 	return p0 + (p1 - p0) * t;
 }
 
-bool FVoxelCPUMarchingCubesMesher::ComputeCoarseSurfaceZ(
-	const FVoxelMeshingRequest& Request,
-	float Vx, float Vy, float NearVz,
-	int32 CoarserStride,
-	float& OutVz) const
-{
-	const float IsoLevel = Config.IsoLevel;
-	const int32 E = FMath::Max(1, CoarserStride);
-	const float Ef = static_cast<float>(E);
-
-	const int32 ChunkSize = Request.ChunkSize;
-
-	// Density sampled on the coarse (stride-E) lattice, trilinear between coarse grid points.
-	// This is the surface the coarser neighbour sees, evaluated at the fine (Vx,Vy) column.
-	// Face-parallel sample coords are CLAMPED to [0, ChunkSize]: neighbour data is only one
-	// plane deep, so reading more than one voxel past a chunk face returns clamped/air densities
-	// and corrupts the coarse surface (worst on steep terrain -> large spurious morph -> seam
-	// holes). At a boundary the clamp samples the shared boundary plane = exactly what the
-	// neighbour sees, so the boundary morph target equals the neighbour's coarse contour.
-	auto SampleCoarse = [&](float Zq) -> float
-	{
-		const int32 X0 = FMath::FloorToInt(Vx / Ef) * E;
-		const int32 Y0 = FMath::FloorToInt(Vy / Ef) * E;
-		const int32 Z0 = FMath::FloorToInt(Zq / Ef) * E;
-		const float Fx = (Vx - static_cast<float>(X0)) / Ef;
-		const float Fy = (Vy - static_cast<float>(Y0)) / Ef;
-		const float Fz = (Zq - static_cast<float>(Z0)) / Ef;
-
-		const int32 Xa = FMath::Clamp(X0,     0, ChunkSize);
-		const int32 Xb = FMath::Clamp(X0 + E, 0, ChunkSize);
-		const int32 Ya = FMath::Clamp(Y0,     0, ChunkSize);
-		const int32 Yb = FMath::Clamp(Y0 + E, 0, ChunkSize);
-
-		const float D000 = GetDensityAt(Request, Xa, Ya, Z0);
-		const float D100 = GetDensityAt(Request, Xb, Ya, Z0);
-		const float D010 = GetDensityAt(Request, Xa, Yb, Z0);
-		const float D110 = GetDensityAt(Request, Xb, Yb, Z0);
-		const float D001 = GetDensityAt(Request, Xa, Ya, Z0 + E);
-		const float D101 = GetDensityAt(Request, Xb, Ya, Z0 + E);
-		const float D011 = GetDensityAt(Request, Xa, Yb, Z0 + E);
-		const float D111 = GetDensityAt(Request, Xb, Yb, Z0 + E);
-
-		const float D00 = FMath::Lerp(D000, D100, Fx);
-		const float D10 = FMath::Lerp(D010, D110, Fx);
-		const float D01 = FMath::Lerp(D001, D101, Fx);
-		const float D11 = FMath::Lerp(D011, D111, Fx);
-		const float D0 = FMath::Lerp(D00, D10, Fy);
-		const float D1 = FMath::Lerp(D01, D11, Fy);
-		return FMath::Lerp(D0, D1, Fz);
-	};
-
-	// Walk coarse Z cells around NearVz; return the iso-crossing nearest NearVz (handles caves /
-	// multiple crossings by picking the closest). Search band ±SearchCells coarse cells.
-	const int32 SearchCells = 4;
-	const int32 ZBase = FMath::FloorToInt(NearVz / Ef) * E;
-	float BestDist = TNumericLimits<float>::Max();
-	bool bFound = false;
-	for (int32 k = -SearchCells; k < SearchCells; k++)
-	{
-		const float Za = static_cast<float>(ZBase + k * E);
-		const float Zb = Za + Ef;
-		const float Da = SampleCoarse(Za);
-		const float Db = SampleCoarse(Zb);
-		const float Denom = Db - Da;
-		if ((Da >= IsoLevel) != (Db >= IsoLevel))
-		{
-			const float T = (FMath::Abs(Denom) < KINDA_SMALL_NUMBER)
-				? 0.5f : FMath::Clamp((IsoLevel - Da) / Denom, 0.0f, 1.0f);
-			const float Zc = Za + T * Ef;
-			const float Dist = FMath::Abs(Zc - NearVz);
-			if (Dist < BestDist)
-			{
-				BestDist = Dist;
-				OutVz = Zc;
-				bFound = true;
-			}
-		}
-	}
-	return bFound;
-}
-
 bool FVoxelCPUMarchingCubesMesher::ComputeCoarseSurfaceAlongAxis(
 	const FVoxelMeshingRequest& Request,
 	const FVector3f& V, int32 Axis,
 	int32 CoarserStride,
 	float& OutCoord) const
 {
-	// ComputeCoarseSurfaceZ with the axes permuted: Axis takes Z's role, the other two are clamped to the chunk as X and
-	// Y are there (neighbour data is one plane deep).
+	// Density sampled on the coarse (stride-E) lattice, trilinear between coarse grid points: the surface the coarser
+	// neighbour sees, evaluated on the line along Axis through V. The two face-parallel coordinates are clamped to
+	// [0, ChunkSize]: neighbour data is one plane deep, so a read more than a voxel past a chunk face returns clamped or
+	// air densities and corrupts the coarse surface (worst on steep terrain: a large spurious morph, seam holes); at a
+	// boundary the clamp samples the shared plane, what the neighbour sees, so the morph target equals its coarse
+	// contour. Along Axis the search walks the coarse cells around V and returns the iso-crossing nearest it (caves and
+	// several crossings: the closest). One search for every up (code review CR2, MESH-30).
 	const float IsoLevel = Config.IsoLevel;
 	const int32 E = FMath::Max(1, CoarserStride);
 	const float Ef = static_cast<float>(E);
@@ -1082,63 +770,39 @@ void FVoxelCPUMarchingCubesMesher::MorphVertexToCoarse(
 		return;
 	}
 
-	// On a planet (spherical SP-D2) the morph runs along the axis nearest the chunk's local up instead of Z: the same
-	// gate and the same coarse search on that axis. Exactly +Z keeps the column code below.
-	if (Request.LocalUp != FVector::UpVector)
+	// The morph runs along the axis nearest the chunk's local up: Z on a heightmap world, the axis nearest the radial
+	// direction on a planet (spherical SP-D2). One body for every up (code review CR2, MESH-30).
+	const FVector3f V(Vx, Vy, Vz);
+	const FVector AbsUp = Request.LocalUp.GetAbs();
+	const int32 Axis = (AbsUp.X >= AbsUp.Y && AbsUp.X >= AbsUp.Z) ? 0 : (AbsUp.Y >= AbsUp.Z ? 1 : 2);
+
+	// Steepness gate: only morph where the surface is a HEIGHT FUNCTION along Axis (normal mostly along it). On steep
+	// surfaces the morph along one axis is ill-conditioned (it distorts the thin boundary ribbon and opens the seam), so
+	// those keep their un-morphed, watertight boundary. The surface normal is -gradient(density); a small |normal[Axis]|
+	// relative to |normal| means a steep surface. Sampled +-1 voxel (within the 1-plane neighbour data) and a pure
+	// function of position, so coincident vertices share the decision and stay watertight. (v1 limitation; a
+	// normal-direction morph would generalise: see GEOMORPH_IMPLEMENTATION_PLAN.md.)
+	const float Gx = GetDensityAtTrilinear(Request, Vx + 1.0f, Vy, Vz) - GetDensityAtTrilinear(Request, Vx - 1.0f, Vy, Vz);
+	const float Gy = GetDensityAtTrilinear(Request, Vx, Vy + 1.0f, Vz) - GetDensityAtTrilinear(Request, Vx, Vy - 1.0f, Vz);
+	const float Gz = GetDensityAtTrilinear(Request, Vx, Vy, Vz + 1.0f) - GetDensityAtTrilinear(Request, Vx, Vy, Vz - 1.0f);
+	const float GMag = FMath::Sqrt(Gx * Gx + Gy * Gy + Gz * Gz);
+	const float GAxis = (Axis == 0) ? Gx : (Axis == 1) ? Gy : Gz;
+	constexpr float SteepThreshold = 0.5f; // |normal[Axis]|/|normal| below this => too steep => skip
+	if (GMag < KINDA_SMALL_NUMBER || FMath::Abs(GAxis) < SteepThreshold * GMag)
 	{
-		const FVector3f V(Vx, Vy, Vz);
-		const FVector AbsUp = Request.LocalUp.GetAbs();
-		const int32 Axis = (AbsUp.X >= AbsUp.Y && AbsUp.X >= AbsUp.Z) ? 0 : (AbsUp.Y >= AbsUp.Z ? 1 : 2);
-		const float Gx = GetDensityAtTrilinear(Request, Vx + 1.0f, Vy, Vz) - GetDensityAtTrilinear(Request, Vx - 1.0f, Vy, Vz);
-		const float Gy = GetDensityAtTrilinear(Request, Vx, Vy + 1.0f, Vz) - GetDensityAtTrilinear(Request, Vx, Vy - 1.0f, Vz);
-		const float Gz = GetDensityAtTrilinear(Request, Vx, Vy, Vz + 1.0f) - GetDensityAtTrilinear(Request, Vx, Vy, Vz - 1.0f);
-		const float GMag = FMath::Sqrt(Gx * Gx + Gy * Gy + Gz * Gz);
-		const float GAxis = (Axis == 0) ? Gx : (Axis == 1) ? Gy : Gz;
-		constexpr float SteepThreshold = 0.5f;
-		if (GMag < KINDA_SMALL_NUMBER || FMath::Abs(GAxis) < SteepThreshold * GMag)
-		{
-			return;
-		}
-		float SecCoord;
-		const bool bFound = VoxelMCShading::UseVoxelLODCrossings(BestE)
-			? ComputeCoarseCrossingsAlongAxis(Request, V, Axis, BestE, SecCoord)
-			: ComputeCoarseSurfaceAlongAxis(Request, V, Axis, BestE, SecCoord);
-		if (bFound)
-		{
-			Vertex[Axis] = FMath::Lerp(V[Axis], SecCoord, BestW) * VoxelSize;
-		}
 		return;
 	}
 
-	// Steepness gate: only morph where the surface is a HEIGHT FUNCTION (normal mostly vertical).
-	// On steep / near-vertical surfaces the vertical-Z morph is ill-conditioned — it distorts the
-	// thin boundary ribbon and opens the seam — so skip them; they keep their un-morphed,
-	// watertight boundary. The surface normal is -gradient(density); a small |normal.Z| relative
-	// to |normal| means a steep surface. Sampled ±1 voxel (within the 1-plane neighbour data) and
-	// a pure function of position, so coincident vertices share the decision and stay watertight.
-	// (v1 limitation; a normal-direction morph would generalise — see GEOMORPH_IMPLEMENTATION_PLAN.md.)
-	{
-		const float Gx = GetDensityAtTrilinear(Request, Vx + 1.0f, Vy, Vz) - GetDensityAtTrilinear(Request, Vx - 1.0f, Vy, Vz);
-		const float Gy = GetDensityAtTrilinear(Request, Vx, Vy + 1.0f, Vz) - GetDensityAtTrilinear(Request, Vx, Vy - 1.0f, Vz);
-		const float Gz = GetDensityAtTrilinear(Request, Vx, Vy, Vz + 1.0f) - GetDensityAtTrilinear(Request, Vx, Vy, Vz - 1.0f);
-		const float GMag = FMath::Sqrt(Gx * Gx + Gy * Gy + Gz * Gz);
-		constexpr float SteepThreshold = 0.5f; // |normal.Z|/|normal| below this => too steep => skip
-		if (GMag < KINDA_SMALL_NUMBER || FMath::Abs(Gz) < SteepThreshold * GMag)
-		{
-			return;
-		}
-	}
-
-	// Morph the height toward the coarse surface. v1 morphs along Z (correct for
-	// height-function / INFINITE_PLANE terrain). If no coarse crossing is found nearby, leave
-	// the vertex untouched (never worse than the current wall).
-	float SecVz;
-	const bool bFound = VoxelMCShading::UseVoxelLODCrossings(BestE)
-		? ComputeCoarseCrossingsAlongAxis(Request, FVector3f(Vx, Vy, Vz), 2, BestE, SecVz)
-		: ComputeCoarseSurfaceZ(Request, Vx, Vy, Vz, BestE, SecVz);
+	// Morph toward the coarse surface along Axis (the coarse cells' crossings with voxel.Mesh.VoxelLODCrossings, G80, else
+	// the coarse lattice's trilinear surface). With no coarse crossing found nearby the vertex stays (never worse than the
+	// current wall).
+	float SecCoord;
+	const bool bFound = VoxelCrossingGradient::UseVoxelLODCrossings(BestE)
+		? ComputeCoarseCrossingsAlongAxis(Request, V, Axis, BestE, SecCoord)
+		: ComputeCoarseSurfaceAlongAxis(Request, V, Axis, BestE, SecCoord);
 	if (bFound)
 	{
-		Vertex.Z = FMath::Lerp(Vz, SecVz, BestW) * VoxelSize;
+		Vertex[Axis] = FMath::Lerp(V[Axis], SecCoord, BestW) * VoxelSize;
 	}
 }
 
@@ -1164,31 +828,9 @@ FVector3f FVoxelCPUMarchingCubesMesher::CalculateGradientNormal(
 	const FVoxelMeshingRequest& Request,
 	float X, float Y, float Z) const
 {
-	// Use central difference for gradient approximation
-	// Sample at half-voxel offsets for better accuracy
-	const float Delta = 0.5f;
-
-	// Round to integers for sampling (we can't truly interpolate here without trilinear,
-	// so we use nearest neighbor with offsets)
-	const int32 IX = FMath::FloorToInt(X);
-	const int32 IY = FMath::FloorToInt(Y);
-	const int32 IZ = FMath::FloorToInt(Z);
-
-	// Central difference gradient
-	float gx = GetDensityAt(Request, IX + 1, IY, IZ) - GetDensityAt(Request, IX - 1, IY, IZ);
-	float gy = GetDensityAt(Request, IX, IY + 1, IZ) - GetDensityAt(Request, IX, IY - 1, IZ);
-	float gz = GetDensityAt(Request, IX, IY, IZ + 1) - GetDensityAt(Request, IX, IY, IZ - 1);
-
-	// Normal points away from solid (opposite to gradient direction)
-	FVector3f Normal(-gx, -gy, -gz);
-
-	// Normalize, with fallback for degenerate cases
-	if (!Normal.Normalize())
-	{
-		return FVector3f(0.0f, 0.0f, 1.0f);
-	}
-
-	return Normal;
+	// The central difference about the voxel the point floors to, taps one voxel either side: the stride-1 case of
+	// CalculateGradientNormalLOD (code review CR2, MESH-10).
+	return CalculateGradientNormalLOD(Request, X, Y, Z, 1);
 }
 
 // ============================================================================
@@ -1245,77 +887,19 @@ bool FVoxelCPUMarchingCubesMesher::FindEdgeVoxelCrossing(
 	float DensityA, float DensityB,
 	FVector3f& OutCrossing) const
 {
-	const FIntVector Delta = EndB - EndA;
-	const int32 Axis = (Delta.X != 0) ? 0 : (Delta.Y != 0) ? 1 : 2;
-	const int32 Length = FMath::Abs(Delta[Axis]);
-	const int32 OffAxes = (Delta.X != 0 ? 1 : 0) + (Delta.Y != 0 ? 1 : 0) + (Delta.Z != 0 ? 1 : 0);
-	if (Length == 0 || OffAxes != 1)
-	{
-		return false;
-	}
-
-	// Walk from the edge's min end, so every cell sharing the edge reads it in one order.
-	const bool bAFirst = Delta[Axis] > 0;
-	const FIntVector Lo = bAFirst ? EndA : EndB;
-	const float DLo = bAFirst ? DensityA : DensityB;
-	const float DHi = bAFirst ? DensityB : DensityA;
-	const float IsoLevel = Config.IsoLevel;
-
-	// The vertex's place on the edge (voxels from Lo), as InterpolateEdge puts it.
-	const float VertexT = (FMath::Abs(DHi - DLo) < KINDA_SMALL_NUMBER)
-		? 0.5f : FMath::Clamp((IsoLevel - DLo) / (DHi - DLo), 0.0f, 1.0f);
-	const float VertexAlong = VertexT * static_cast<float>(Length);
-
-	// The voxel step whose crossing lies nearest the vertex (the first on a tie): LOD 0's vertex on that step.
-	FIntVector P = Lo;
-	float D0 = DLo;
-	float BestAlong = -1.0f;
-	float BestDist = TNumericLimits<float>::Max();
-	for (int32 Step = 0; Step < Length; ++Step)
-	{
-		FIntVector N = P;
-		++N[Axis];
-		const float D1 = (Step + 1 == Length) ? DHi : GetDensityAt(Request, N.X, N.Y, N.Z);
-		if ((D0 >= IsoLevel) != (D1 >= IsoLevel))
-		{
-			const float T = FMath::Clamp((IsoLevel - D0) / (D1 - D0), 0.0f, 1.0f);
-			const float Along = static_cast<float>(Step) + T;
-			const float Dist = FMath::Abs(Along - VertexAlong);
-			if (Dist < BestDist)
-			{
-				BestDist = Dist;
-				BestAlong = Along;
-			}
-		}
-		P = N;
-		D0 = D1;
-	}
-	if (BestAlong < 0.0f)
-	{
-		return false;
-	}
-
-	OutCrossing = FVector3f(static_cast<float>(Lo.X), static_cast<float>(Lo.Y), static_cast<float>(Lo.Z));
-	OutCrossing[Axis] += BestAlong;
-	return true;
+	return VoxelLODCrossing::FindEdgeVoxelCrossing(
+		[&](int32 VX, int32 VY, int32 VZ) { return GetDensityAt(Request, VX, VY, VZ); },
+		EndA, EndB, DensityA, DensityB, Config.IsoLevel, OutCrossing);
 }
 
 FVector3f FVoxelCPUMarchingCubesMesher::CalculateShadingNormal(
 	const FVoxelMeshingRequest& Request,
 	float X, float Y, float Z) const
 {
-	if (VoxelCrossingGradient::UseCrossingGradientNormals())
-	{
-		FVector3f Normal;
-		if (VoxelCrossingGradient::FitNormal(
-			[&](int32 VX, int32 VY, int32 VZ) { return GetDensityAt(Request, VX, VY, VZ); },
-			[&](int32 VX, int32 VY, int32 VZ) { return IsVoxelHeld(Request, VX, VY, VZ); },
-			X, Y, Z, Normal))
-		{
-			return Normal;
-		}
-	}
-	return CalculateGradientNormal(Request, X, Y, Z);
+	return VoxelCrossingGradient::ShadingNormal(
+		[&](int32 VX, int32 VY, int32 VZ) { return GetDensityAt(Request, VX, VY, VZ); },
+		[&](int32 VX, int32 VY, int32 VZ) { return IsVoxelHeld(Request, VX, VY, VZ); },
+		X, Y, Z, [&]() { return CalculateGradientNormal(Request, X, Y, Z); });
 }
 
 bool FVoxelCPUMarchingCubesMesher::IsVoxelHeld(
@@ -1373,77 +957,26 @@ uint8 FVoxelCPUMarchingCubesMesher::GetDominantMaterialLOD(
 	int32 Stride,
 	uint8 CubeIndex) const
 {
-	// For LOD > 0, find the surface material by scanning upward from solid corners.
-	// On slopes, the surface is at different Z levels across the cube, so we need
-	// to find the actual surface transition (solid→air) for each corner and use
-	// the material from just below that transition.
-	//
-	// Strategy: For each solid strided corner, scan upward to find where density
-	// drops below threshold (the surface), then use the last solid voxel's material.
-
-	constexpr int32 MaxScanDistance = 8; // Don't scan too far up
+	// The surface material of a strided cell (LOD > 0): from each solid strided corner, the last solid voxel before air
+	// along the chunk's local up (ScanSurfaceAlongLocalUp: a voxel column on a heightmap world, the digital line along up
+	// on a planet, spherical SP-D1); on a slope the corners' surfaces lie at different heights, and the highest along up
+	// wins (grass over the dirt under it). One walk for every up (code review CR2, MESH-30).
 	uint8 SurfaceMaterial = 0;
-	int32 HighestSurfaceZ = INT32_MIN;
-
-	// On a planet the scan runs along the chunk's local up (spherical SP-D1); exactly +Z keeps the column scan below.
-	if (Request.LocalUp != FVector::UpVector)
-	{
-		double Highest = TNumericLimits<double>::Lowest();
-		for (int32 i = 0; i < 8; i++)
-		{
-			if (CubeIndex & (1 << i))
-			{
-				const FIntVector Corner = FIntVector(X, Y, Z) + MarchingCubesTables::CornerOffsets[i] * Stride;
-				uint8 Value = 0;
-				const double Along = ScanSurfaceAlongLocalUp(Request, Corner, /*bBiome=*/false, Value);
-				if (Along > Highest)
-				{
-					Highest = Along;
-					SurfaceMaterial = Value;
-				}
-			}
-		}
-		return SurfaceMaterial;
-	}
-
+	double Highest = TNumericLimits<double>::Lowest();
 	for (int32 i = 0; i < 8; i++)
 	{
 		if (CubeIndex & (1 << i))
 		{
-			const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
-			const int32 CornerX = X + Offset.X * Stride;
-			const int32 CornerY = Y + Offset.Y * Stride;
-			const int32 CornerZ = Z + Offset.Z * Stride;
-
-			// Scan upward from this corner to find the surface
-			uint8 LastSolidMaterial = 0;
-			int32 SurfaceZ = CornerZ;
-
-			for (int32 dz = 0; dz <= MaxScanDistance; dz++)
+			const FIntVector Corner = FIntVector(X, Y, Z) + MarchingCubesTables::CornerOffsets[i] * Stride;
+			uint8 Value = 0;
+			const double Along = ScanSurfaceAlongLocalUp(Request, Corner, /*bBiome=*/false, Value);
+			if (Along > Highest)
 			{
-				const FVoxelData Voxel = GetVoxelAt(Request, CornerX, CornerY, CornerZ + dz);
-
-				if (Voxel.IsSolid())
-				{
-					LastSolidMaterial = Voxel.MaterialID;
-					SurfaceZ = CornerZ + dz;
-				}
-				else
-				{
-					// Found air - the surface is at the previous solid voxel
-					break;
-				}
-			}
-
-			// Use the material from the highest surface found (prefer grass over dirt)
-			if (SurfaceZ > HighestSurfaceZ)
-			{
-				HighestSurfaceZ = SurfaceZ;
-				SurfaceMaterial = LastSolidMaterial;
+				Highest = Along;
+				SurfaceMaterial = Value;
 			}
 		}
 	}
-
 	return SurfaceMaterial;
 }
 
@@ -1453,71 +986,23 @@ uint8 FVoxelCPUMarchingCubesMesher::GetDominantBiomeLOD(
 	int32 Stride,
 	uint8 CubeIndex) const
 {
-	// For LOD > 0, find the surface biome by scanning upward from solid corners.
-	// Consistent with GetDominantMaterialLOD approach.
-
-	constexpr int32 MaxScanDistance = 8;
+	// The surface biome of a strided cell, as GetDominantMaterialLOD finds its material.
 	uint8 SurfaceBiome = 0;
-	int32 HighestSurfaceZ = INT32_MIN;
-
-	// On a planet the scan runs along the chunk's local up (spherical SP-D1), as GetDominantMaterialLOD's.
-	if (Request.LocalUp != FVector::UpVector)
-	{
-		double Highest = TNumericLimits<double>::Lowest();
-		for (int32 i = 0; i < 8; i++)
-		{
-			if (CubeIndex & (1 << i))
-			{
-				const FIntVector Corner = FIntVector(X, Y, Z) + MarchingCubesTables::CornerOffsets[i] * Stride;
-				uint8 Value = 0;
-				const double Along = ScanSurfaceAlongLocalUp(Request, Corner, /*bBiome=*/true, Value);
-				if (Along > Highest)
-				{
-					Highest = Along;
-					SurfaceBiome = Value;
-				}
-			}
-		}
-		return SurfaceBiome;
-	}
-
+	double Highest = TNumericLimits<double>::Lowest();
 	for (int32 i = 0; i < 8; i++)
 	{
 		if (CubeIndex & (1 << i))
 		{
-			const FIntVector& Offset = MarchingCubesTables::CornerOffsets[i];
-			const int32 CornerX = X + Offset.X * Stride;
-			const int32 CornerY = Y + Offset.Y * Stride;
-			const int32 CornerZ = Z + Offset.Z * Stride;
-
-			// Scan upward from this corner to find the surface
-			uint8 LastSolidBiome = 0;
-			int32 SurfaceZ = CornerZ;
-
-			for (int32 dz = 0; dz <= MaxScanDistance; dz++)
+			const FIntVector Corner = FIntVector(X, Y, Z) + MarchingCubesTables::CornerOffsets[i] * Stride;
+			uint8 Value = 0;
+			const double Along = ScanSurfaceAlongLocalUp(Request, Corner, /*bBiome=*/true, Value);
+			if (Along > Highest)
 			{
-				const FVoxelData Voxel = GetVoxelAt(Request, CornerX, CornerY, CornerZ + dz);
-
-				if (Voxel.IsSolid())
-				{
-					LastSolidBiome = Voxel.BiomeID;
-					SurfaceZ = CornerZ + dz;
-				}
-				else
-				{
-					break;
-				}
-			}
-
-			// Use the biome from the highest surface found
-			if (SurfaceZ > HighestSurfaceZ)
-			{
-				HighestSurfaceZ = SurfaceZ;
-				SurfaceBiome = LastSolidBiome;
+				Highest = Along;
+				SurfaceBiome = Value;
 			}
 		}
 	}
-
 	return SurfaceBiome;
 }
 
@@ -1527,8 +1012,9 @@ double FVoxelCPUMarchingCubesMesher::ScanSurfaceAlongLocalUp(
 	bool bBiome,
 	uint8& OutValue) const
 {
-	// GetDominantMaterialLOD's column walk on the digital line along local up: the last solid voxel before air, at
-	// most MaxScanDistance steps, scored by how far along up it lies.
+	// The LOD material scan's per-corner walk: along the digital line in local up's direction (a voxel column when up is
+	// +Z: FVoxelDigitalLine::Make(+Z) steps (0, 0, 1)) to the last solid voxel before air, at most MaxScanDistance steps,
+	// scored by how far along up it lies (the Z of the last solid voxel when up is +Z).
 	constexpr int32 MaxScanDistance = 8;
 	const FVoxelDigitalLine Line = FVoxelDigitalLine::Make(Request.LocalUp);
 	OutValue = 0;
@@ -1988,7 +1474,7 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 			const FIntVector EdgeDelta = EndB - EndA;
 			const int32 EdgeLength = FMath::Abs(EdgeDelta.X) + FMath::Abs(EdgeDelta.Y) + FMath::Abs(EdgeDelta.Z);
 			FVector3f Crossing;
-			if (VoxelMCShading::UseVoxelLODCrossings(EdgeLength)
+			if (VoxelCrossingGradient::UseVoxelLODCrossings(EdgeLength)
 				&& FindEdgeVoxelCrossing(Request, EndA, EndB, DensityA, DensityB, Crossing))
 			{
 				VertexPos = Crossing * VoxelSize;
@@ -2060,7 +1546,7 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 		const int32 SampleA = VertexSamples[i][0];
 		const int32 SampleB = VertexSamples[i][1];
 		// G62: at stride 1 the fitted gradient at the vertex, as ProcessCubeLOD's.
-		const FVector3f Normal = VoxelMCShading::UseVoxelShadingNormals(NormalStride)
+		const FVector3f Normal = VoxelCrossingGradient::UseVoxelShadingNormals(NormalStride)
 			? CalculateEdgeShadingNormal(Request, SampleVoxel(SampleA), SampleVoxel(SampleB), Densities[SampleA], Densities[SampleB],
 				PosVoxel, NormalStride)
 			: (NormalStride == 1)

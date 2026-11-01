@@ -4,6 +4,7 @@
 #include "VoxelMeshing.h"
 #include "QEFSolver.h"
 #include "VoxelCrossingGradient.h"
+#include "VoxelMeshingVoxelSampler.h"
 #include "HAL/IConsoleManager.h"
 
 // Shared with the Marching Cubes mesher (VoxelCPUMarchingCubesMesher.cpp) through VoxelCrossingGradient.h (G62).
@@ -127,19 +128,9 @@ namespace VoxelDCGradient
 	template <typename TDensityFn>
 	FVector3f CrossingShadingNormal(const TDensityFn& Density, const int32 Lo[3], const int32 Hi[3], float X, float Y, float Z)
 	{
-		if (VoxelCrossingGradient::UseCrossingGradientNormals())
-		{
-			auto IsHeld = [Lo, Hi](int32 VX, int32 VY, int32 VZ)
-			{
-				return VX >= Lo[0] && VX <= Hi[0] && VY >= Lo[1] && VY <= Hi[1] && VZ >= Lo[2] && VZ <= Hi[2];
-			};
-			FVector3f Normal;
-			if (VoxelCrossingGradient::FitNormal(Density, IsHeld, X, Y, Z, Normal))
-			{
-				return Normal;
-			}
-		}
-		return ClampedGradientNormal(Density, Lo, Hi, FMath::FloorToInt(X), FMath::FloorToInt(Y), FMath::FloorToInt(Z), 1);
+		const VoxelCrossingGradient::FBoxHeld IsHeld{ { Lo[0], Lo[1], Lo[2] }, { Hi[0], Hi[1], Hi[2] } };
+		return VoxelCrossingGradient::ShadingNormal(Density, IsHeld, X, Y, Z,
+			[&]() { return ClampedGradientNormal(Density, Lo, Hi, FMath::FloorToInt(X), FMath::FloorToInt(Y), FMath::FloorToInt(Z), 1); });
 	}
 }
 
@@ -159,8 +150,8 @@ namespace VoxelDCGradient
  * apart, the same saturation put a strided edge's crossing toward the edge's middle by where the surface crosses the
  * strided grid, so LOD 1 and 2 were terraced a stride apart (ribs in the terrain's own shadows under a low sun). With
  * voxel.Mesh.VoxelLODCrossings the crossing is LOD 0's on the first voxel step along the edge that changes sign
- * (FindVoxelCrossing) and its QEF normal the fitted gradient there (G62's shading normal), so every LOD's vertices lie
- * on LOD 0's surface; LOD 2 still drops the detail its cells cannot hold.
+ * (VoxelLODCrossing::FindVoxelCrossing; Marching Cubes' rule beside it) and its QEF normal the fitted gradient there
+ * (G62's shading normal), so every LOD's vertices lie on LOD 0's surface; LOD 2 still drops the detail its cells cannot hold.
  *
  * Density and Gradient are the caller's views (the mesher's request, or a seam sampler, each with its clamp rule), so the
  * interior pass and the seam rings run one op sequence and stay bit-identical. Every voxel read lies inside the strided
@@ -170,18 +161,6 @@ namespace VoxelDCGradient
  */
 namespace VoxelDCShading
 {
-	/** voxel.Mesh.VoxelShadingNormals for a cell of this stride (always false at stride 1: LOD 0 is the reference). */
-	static bool UseVoxelShadingNormals(int32 Stride)
-	{
-		return Stride > 1 && CVarVoxelShadingNormals.GetValueOnAnyThread() != 0;
-	}
-
-	/** voxel.Mesh.VoxelLODCrossings for an edge of this stride (always false at stride 1: its crossing is LOD 0's). */
-	static bool UseVoxelLODCrossings(int32 Stride)
-	{
-		return Stride > 1 && CVarVoxelLODCrossings.GetValueOnAnyThread() != 0;
-	}
-
 	/**
 	 * Whether the QEF's planes take the fitted gradient's normal (G62's shading normal, exact for a plane) at a crossing of
 	 * this stride: at a stride with G80's voxel crossings, at stride 1 with G81's solve (which uses the normals: before it,
@@ -190,69 +169,11 @@ namespace VoxelDCShading
 	static bool UseFittedQEFNormals(int32 Stride)
 	{
 		return (Stride > 1)
-			? UseVoxelLODCrossings(Stride)
+			? VoxelCrossingGradient::UseVoxelLODCrossings(Stride)
 			: (CVarDCQEFSolve.GetValueOnAnyThread() != 0 && VoxelCrossingGradient::UseCrossingGradientNormals());
 	}
 
-	/** Where a strided edge's surface crosses at voxel resolution, and the voxel cell inside the strided cell there. */
-	struct FVoxelCrossing
-	{
-		FVector3f VoxelPosition; // voxels, the strided cell's frame
-		FIntVector VoxelCell;    // min corner of the voxel cell inside the strided cell next to the crossing
-	};
-
-	/**
-	 * The voxel-resolution crossing on a strided cell edge: the first of its Stride voxel steps whose ends differ in sign.
-	 *
-	 * @param Density (X, Y, Z) -> density, the view the edge's endpoints were read through
-	 * @param VX, VY, VZ The edge's first endpoint (voxels)
-	 * @param Axis The edge's axis
-	 * @param Stride The edge's length (voxels)
-	 * @param IsoLevel The surface threshold
-	 * @param EdgeOffset The edge's corner offset in the cell (FEdgeRef's DX, DY, DZ): 1 = the edge runs along the cell's
-	 *                   max face on that axis
-	 * @return The crossing (the edge's first step if none changes sign, which a crossing on the edge excludes)
-	 */
-	template <typename TDensityFn>
-	FVoxelCrossing FindVoxelCrossing(const TDensityFn& Density, int32 VX, int32 VY, int32 VZ, int32 Axis, int32 Stride,
-		float IsoLevel, const int32 EdgeOffset[3])
-	{
-		int32 P[3] = { VX, VY, VZ };
-		float T = 0.0f;
-		float D0 = Density(P[0], P[1], P[2]);
-		for (int32 Step = 0; Step < Stride; ++Step)
-		{
-			int32 N[3] = { P[0], P[1], P[2] };
-			++N[Axis];
-			const float D1 = Density(N[0], N[1], N[2]);
-			if ((D0 >= IsoLevel) != (D1 >= IsoLevel))
-			{
-				T = FMath::Clamp((IsoLevel - D0) / (D1 - D0), 0.0f, 1.0f);
-				break;
-			}
-			if (Step + 1 < Stride)
-			{
-				P[Axis] = N[Axis];
-				D0 = D1;
-			}
-		}
-		FVoxelCrossing Out;
-		float C[3] = { static_cast<float>(P[0]), static_cast<float>(P[1]), static_cast<float>(P[2]) };
-		C[Axis] += T;
-		Out.VoxelPosition = FVector3f(C[0], C[1], C[2]);
-		// Across the edge, the voxel cell inside the strided cell starts a voxel below the edge on each axis where the
-		// edge runs along the cell's max face.
-		int32 Cell[3] = { P[0], P[1], P[2] };
-		for (int32 A = 0; A < 3; ++A)
-		{
-			if (A != Axis)
-			{
-				Cell[A] -= EdgeOffset[A];
-			}
-		}
-		Out.VoxelCell = FIntVector(Cell[0], Cell[1], Cell[2]);
-		return Out;
-	}
+	using VoxelLODCrossing::FVoxelCrossing;
 
 	/**
 	 * LOD 0's vertex normal of the voxel cell with min corner Cell: LOD 0's gradient normals at its crossings, summed in
@@ -504,7 +425,7 @@ void FVoxelCPUDualContourMesher::DetectEdgeCrossings(
 	const float VoxelSize = Request.VoxelSize;
 	const float IsoLevel = Config.IsoLevel;
 	const int32 GridSize = ChunkSize / Stride;
-	const bool bVoxelCrossings = VoxelDCShading::UseVoxelLODCrossings(Stride);
+	const bool bVoxelCrossings = VoxelCrossingGradient::UseVoxelLODCrossings(Stride);
 	const bool bFittedQEFNormals = VoxelDCShading::UseFittedQEFNormals(Stride);
 	auto DensityFn = [&](int32 X, int32 Y, int32 Z) { return GetDensityAt(Request, X, Y, Z); };
 	static const int32 NoEdgeOffset[3] = { 0, 0, 0 };
@@ -551,7 +472,7 @@ void FVoxelCPUDualContourMesher::DetectEdgeCrossings(
 						// normal: exact for a plane, so the QEF's vertex lies on it; the central difference tilts with the
 						// voxel phase, and a strided cell spreads that tilt over a stride).
 						Crossing.Position = bVoxelCrossings
-							? VoxelDCShading::FindVoxelCrossing(DensityFn, VX, VY, VZ, Axis, Stride, IsoLevel, NoEdgeOffset).VoxelPosition * VoxelSize
+							? VoxelLODCrossing::FindVoxelCrossing(DensityFn, VX, VY, VZ, Axis, Stride, IsoLevel, NoEdgeOffset).VoxelPosition * VoxelSize
 							: P0 + (P1 - P0) * t;
 						Crossing.bValid = true;
 
@@ -601,7 +522,7 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 	// LOD 0's does (AvgNormal: the cell's own crossings, nearer the analytic normals than G44's one voxel cell); without
 	// G80 it is LOD 0's at the voxel crossing nearest the vertex (G44). LOD 0's shading normals are the fitted gradient at
 	// each crossing (G62), which G81 gives the QEF too.
-	const bool bVoxelShading = VoxelDCShading::UseVoxelShadingNormals(Stride) && !VoxelDCShading::UseVoxelLODCrossings(Stride);
+	const bool bVoxelShading = VoxelCrossingGradient::UseVoxelShadingNormals(Stride) && !VoxelCrossingGradient::UseVoxelLODCrossings(Stride);
 	const bool bCrossingShading = Stride == 1 && VoxelCrossingGradient::UseCrossingGradientNormals();
 	auto DensityFn = [&](int32 X, int32 Y, int32 Z) { return GetDensityAt(Request, X, Y, Z); };
 	auto GradientFn = [&](float X, float Y, float Z) { return CalculateShadingNormal(Request, X, Y, Z); };
@@ -658,7 +579,7 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 						if (bVoxelShading)
 						{
 							const int32 EdgeOffset[3] = { Edge.DX, Edge.DY, Edge.DZ };
-							VoxelCrossings.Add(VoxelDCShading::FindVoxelCrossing(DensityFn,
+							VoxelCrossings.Add(VoxelLODCrossing::FindVoxelCrossing(DensityFn,
 								(CX + Edge.DX) * Stride, (CY + Edge.DY) * Stride, (CZ + Edge.DZ) * Stride, Edge.Axis, Stride, IsoLevel, EdgeOffset));
 						}
 					}
@@ -956,196 +877,21 @@ int32 FVoxelCPUDualContourMesher::EmitVertex(
 }
 
 // ============================================================================
-// Density & Voxel Access (copied from FVoxelCPUMarchingCubesMesher)
+// Density & Voxel Access: the shared sampler under Dual Contouring's rule (VoxelMeshingVoxelSampler.h, MESH-09)
 // ============================================================================
 
 float FVoxelCPUDualContourMesher::GetDensityAt(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z) const
 {
-	const FVoxelData Voxel = GetVoxelAt(Request, X, Y, Z);
-	return static_cast<float>(Voxel.Density) / 255.0f;
+	return VoxelMeshingSampler::DensityAt(Request, X, Y, Z, VoxelMeshingSampler::DualContouringRule);
 }
 
 FVoxelData FVoxelCPUDualContourMesher::GetVoxelAt(
 	const FVoxelMeshingRequest& Request,
 	int32 X, int32 Y, int32 Z) const
 {
-	const int32 ChunkSize = Request.ChunkSize;
-
-	// Check if within chunk bounds
-	if (X >= 0 && X < ChunkSize && Y >= 0 && Y < ChunkSize && Z >= 0 && Z < ChunkSize)
-	{
-		return Request.GetVoxel(X, Y, Z);
-	}
-
-	// Handle neighbor chunk lookups
-	const int32 SliceSize = ChunkSize * ChunkSize;
-
-	const int32 ClampedX = FMath::Clamp(X, 0, ChunkSize - 1);
-	const int32 ClampedY = FMath::Clamp(Y, 0, ChunkSize - 1);
-	const int32 ClampedZ = FMath::Clamp(Z, 0, ChunkSize - 1);
-
-	const bool bXPos = (X >= ChunkSize);
-	const bool bXNeg = (X < 0);
-	const bool bYPos = (Y >= ChunkSize);
-	const bool bYNeg = (Y < 0);
-	const bool bZPos = (Z >= ChunkSize);
-	const bool bZNeg = (Z < 0);
-
-	const bool bOutX = bXPos || bXNeg;
-	const bool bOutY = bYPos || bYNeg;
-	const bool bOutZ = bZPos || bZNeg;
-	const int32 OutCount = (bOutX ? 1 : 0) + (bOutY ? 1 : 0) + (bOutZ ? 1 : 0);
-
-	// 0-based depth into a neighbor along each out-of-bounds axis (0 = the first plane
-	// just past the chunk face). Used to read deep edge/corner data for strided cells.
-	const int32 DepthX = bXPos ? (X - ChunkSize) : (bXNeg ? (-X - 1) : 0);
-	const int32 DepthY = bYPos ? (Y - ChunkSize) : (bYNeg ? (-Y - 1) : 0);
-	const int32 DepthZ = bZPos ? (Z - ChunkSize) : (bZNeg ? (-Z - 1) : 0);
-
-	// Single-axis out of bounds: use face neighbor data
-	if (OutCount == 1)
-	{
-		// Read the correct DEPTH plane into the neighbor (PlaneIdx 0 = the face slice,
-		// deeper planes from the Deep arrays). At stride 1 / LOD 0 PlaneIdx is 0 and
-		// this is identical to the single-plane behavior.
-		if (bXPos && Request.NeighborXPos.Num() == SliceSize)
-		{
-			return Request.NeighborPlaneVoxel(Request.NeighborXPos, Request.NeighborXPosDeep, Y + Z * ChunkSize, X - ChunkSize);
-		}
-		if (bXNeg && Request.NeighborXNeg.Num() == SliceSize)
-		{
-			return Request.NeighborPlaneVoxel(Request.NeighborXNeg, Request.NeighborXNegDeep, Y + Z * ChunkSize, -X - 1);
-		}
-		if (bYPos && Request.NeighborYPos.Num() == SliceSize)
-		{
-			return Request.NeighborPlaneVoxel(Request.NeighborYPos, Request.NeighborYPosDeep, X + Z * ChunkSize, Y - ChunkSize);
-		}
-		if (bYNeg && Request.NeighborYNeg.Num() == SliceSize)
-		{
-			return Request.NeighborPlaneVoxel(Request.NeighborYNeg, Request.NeighborYNegDeep, X + Z * ChunkSize, -Y - 1);
-		}
-		if (bZPos && Request.NeighborZPos.Num() == SliceSize)
-		{
-			return Request.NeighborPlaneVoxel(Request.NeighborZPos, Request.NeighborZPosDeep, X + Y * ChunkSize, Z - ChunkSize);
-		}
-		if (bZNeg && Request.NeighborZNeg.Num() == SliceSize)
-		{
-			return Request.NeighborPlaneVoxel(Request.NeighborZNeg, Request.NeighborZNegDeep, X + Y * ChunkSize, -Z - 1);
-		}
-		// Neighbor data unavailable — return Air so that edge crossings at chunk
-		// boundaries are detected (solid→air transition). The geometry will be
-		// refined when the neighbor loads and triggers a remesh.
-		return FVoxelData::Air();
-	}
-
-	// Edge case (2 axes out of bounds): use edge neighbor data. For strided cells the
-	// outward cell reaches diagonally into the edge neighbor, so read the deep grid at
-	// (DepthA, DepthB); at stride 1 / LOD0 both depths are 0 and this returns the base
-	// strip exactly as before. The free axis (in-range) indexes the strip.
-	if (OutCount == 2)
-	{
-		// XY edges (Z free)
-		if (bXPos && bYPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YPOS))
-		{
-			return Request.EdgeDeepVoxel(Request.EdgeXPosYPos, Request.EdgeXPosYPosDeep, ClampedZ, DepthX, DepthY);
-		}
-		if (bXPos && bYNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_YNEG))
-		{
-			return Request.EdgeDeepVoxel(Request.EdgeXPosYNeg, Request.EdgeXPosYNegDeep, ClampedZ, DepthX, DepthY);
-		}
-		if (bXNeg && bYPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YPOS))
-		{
-			return Request.EdgeDeepVoxel(Request.EdgeXNegYPos, Request.EdgeXNegYPosDeep, ClampedZ, DepthX, DepthY);
-		}
-		if (bXNeg && bYNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_YNEG))
-		{
-			return Request.EdgeDeepVoxel(Request.EdgeXNegYNeg, Request.EdgeXNegYNegDeep, ClampedZ, DepthX, DepthY);
-		}
-
-		// XZ edges (Y free)
-		if (bXPos && bZPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZPOS))
-		{
-			return Request.EdgeDeepVoxel(Request.EdgeXPosZPos, Request.EdgeXPosZPosDeep, ClampedY, DepthX, DepthZ);
-		}
-		if (bXPos && bZNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_XPOS_ZNEG))
-		{
-			return Request.EdgeDeepVoxel(Request.EdgeXPosZNeg, Request.EdgeXPosZNegDeep, ClampedY, DepthX, DepthZ);
-		}
-		if (bXNeg && bZPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZPOS))
-		{
-			return Request.EdgeDeepVoxel(Request.EdgeXNegZPos, Request.EdgeXNegZPosDeep, ClampedY, DepthX, DepthZ);
-		}
-		if (bXNeg && bZNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_XNEG_ZNEG))
-		{
-			return Request.EdgeDeepVoxel(Request.EdgeXNegZNeg, Request.EdgeXNegZNegDeep, ClampedY, DepthX, DepthZ);
-		}
-
-		// YZ edges (X free)
-		if (bYPos && bZPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZPOS))
-		{
-			return Request.EdgeDeepVoxel(Request.EdgeYPosZPos, Request.EdgeYPosZPosDeep, ClampedX, DepthY, DepthZ);
-		}
-		if (bYPos && bZNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_YPOS_ZNEG))
-		{
-			return Request.EdgeDeepVoxel(Request.EdgeYPosZNeg, Request.EdgeYPosZNegDeep, ClampedX, DepthY, DepthZ);
-		}
-		if (bYNeg && bZPos && Request.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZPOS))
-		{
-			return Request.EdgeDeepVoxel(Request.EdgeYNegZPos, Request.EdgeYNegZPosDeep, ClampedX, DepthY, DepthZ);
-		}
-		if (bYNeg && bZNeg && Request.HasEdge(FVoxelMeshingRequest::EDGE_YNEG_ZNEG))
-		{
-			return Request.EdgeDeepVoxel(Request.EdgeYNegZNeg, Request.EdgeYNegZNegDeep, ClampedX, DepthY, DepthZ);
-		}
-
-		return FVoxelData::Air();
-	}
-
-	// Corner case (3 axes out of bounds): use corner neighbor data. For strided cells the
-	// outward cell reaches along the body diagonal into the corner neighbor, so read the
-	// deep box at (DepthX, DepthY, DepthZ); at stride 1 / LOD0 all depths are 0 and this
-	// returns the single corner voxel exactly as before.
-	if (OutCount == 3)
-	{
-		if (bXPos && bYPos && bZPos && Request.HasCorner(FVoxelMeshingRequest::CORNER_XPOS_YPOS_ZPOS))
-		{
-			return Request.CornerDeepVoxel(Request.CornerXPosYPosZPos, Request.CornerXPosYPosZPosDeep, DepthX, DepthY, DepthZ);
-		}
-		if (bXPos && bYPos && bZNeg && Request.HasCorner(FVoxelMeshingRequest::CORNER_XPOS_YPOS_ZNEG))
-		{
-			return Request.CornerDeepVoxel(Request.CornerXPosYPosZNeg, Request.CornerXPosYPosZNegDeep, DepthX, DepthY, DepthZ);
-		}
-		if (bXPos && bYNeg && bZPos && Request.HasCorner(FVoxelMeshingRequest::CORNER_XPOS_YNEG_ZPOS))
-		{
-			return Request.CornerDeepVoxel(Request.CornerXPosYNegZPos, Request.CornerXPosYNegZPosDeep, DepthX, DepthY, DepthZ);
-		}
-		if (bXPos && bYNeg && bZNeg && Request.HasCorner(FVoxelMeshingRequest::CORNER_XPOS_YNEG_ZNEG))
-		{
-			return Request.CornerDeepVoxel(Request.CornerXPosYNegZNeg, Request.CornerXPosYNegZNegDeep, DepthX, DepthY, DepthZ);
-		}
-		if (bXNeg && bYPos && bZPos && Request.HasCorner(FVoxelMeshingRequest::CORNER_XNEG_YPOS_ZPOS))
-		{
-			return Request.CornerDeepVoxel(Request.CornerXNegYPosZPos, Request.CornerXNegYPosZPosDeep, DepthX, DepthY, DepthZ);
-		}
-		if (bXNeg && bYPos && bZNeg && Request.HasCorner(FVoxelMeshingRequest::CORNER_XNEG_YPOS_ZNEG))
-		{
-			return Request.CornerDeepVoxel(Request.CornerXNegYPosZNeg, Request.CornerXNegYPosZNegDeep, DepthX, DepthY, DepthZ);
-		}
-		if (bXNeg && bYNeg && bZPos && Request.HasCorner(FVoxelMeshingRequest::CORNER_XNEG_YNEG_ZPOS))
-		{
-			return Request.CornerDeepVoxel(Request.CornerXNegYNegZPos, Request.CornerXNegYNegZPosDeep, DepthX, DepthY, DepthZ);
-		}
-		if (bXNeg && bYNeg && bZNeg && Request.HasCorner(FVoxelMeshingRequest::CORNER_XNEG_YNEG_ZNEG))
-		{
-			return Request.CornerDeepVoxel(Request.CornerXNegYNegZNeg, Request.CornerXNegYNegZNegDeep, DepthX, DepthY, DepthZ);
-		}
-
-		return FVoxelData::Air();
-	}
-
-	return FVoxelData::Air();
+	return VoxelMeshingSampler::VoxelAt(Request, X, Y, Z, VoxelMeshingSampler::DualContouringRule);
 }
 
 FVector3f FVoxelCPUDualContourMesher::CalculateGradientNormal(
@@ -1198,25 +944,17 @@ FVector3f FVoxelCPUDualContourMesher::CalculateShadingNormal(
 	const FVoxelMeshingRequest& Request,
 	float X, float Y, float Z) const
 {
-	if (VoxelCrossingGradient::UseCrossingGradientNormals())
-	{
-		// The voxels this view holds: the chunk's own in the Interior domain (CalculateGradientNormalLOD's clamp box, and the
-		// seam samplers' per-side box, so ring recomputes match); one voxel past each face in the Full domain (a missing
-		// neighbour reads as Air, which the fit skips).
-		const int32 CS = Request.ChunkSize;
-		const bool bInterior = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
-		const int32 Lo = bInterior ? 0 : -1;
-		const int32 Hi = bInterior ? (CS - 1) : CS;
-		FVector3f Normal;
-		if (VoxelCrossingGradient::FitNormal(
-			[&](int32 VX, int32 VY, int32 VZ) { return GetDensityAt(Request, VX, VY, VZ); },
-			[Lo, Hi](int32 VX, int32 VY, int32 VZ) { return VX >= Lo && VX <= Hi && VY >= Lo && VY <= Hi && VZ >= Lo && VZ <= Hi; },
-			X, Y, Z, Normal))
-		{
-			return Normal;
-		}
-	}
-	return CalculateGradientNormal(Request, X, Y, Z);
+	// The voxels this view holds: the chunk's own in the Interior domain (CalculateGradientNormalLOD's clamp box, and the
+	// seam samplers' per-side box, so ring recomputes match); one voxel past each face in the Full domain (a missing
+	// neighbour reads as Air, which the fit skips).
+	const int32 CS = Request.ChunkSize;
+	const bool bInterior = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
+	const int32 Lo = bInterior ? 0 : -1;
+	const int32 Hi = bInterior ? (CS - 1) : CS;
+	const VoxelCrossingGradient::FBoxHeld IsHeld{ { Lo, Lo, Lo }, { Hi, Hi, Hi } };
+	return VoxelCrossingGradient::ShadingNormal(
+		[&](int32 VX, int32 VY, int32 VZ) { return GetDensityAt(Request, VX, VY, VZ); }, IsHeld, X, Y, Z,
+		[&]() { return CalculateGradientNormal(Request, X, Y, Z); });
 }
 
 // ============================================================================
@@ -1225,6 +963,49 @@ FVector3f FVoxelCPUDualContourMesher::CalculateShadingNormal(
 
 namespace VoxelDCFaceSeam
 {
+	/**
+	 * What the three seam samplers share (code review CR2, MESH-13): a voxel's density, and the gradient and shading normals
+	 * over the sampler's held box. TDerived gives GetVoxel (its view of the participants' voxels, Air outside it) and GetBox
+	 * (the box of voxels that view holds, frame-local). One body, so every sampler's ring recompute runs the interior pass's
+	 * op sequence.
+	 */
+	template <typename TDerived>
+	struct TSeamSamplerBase
+	{
+		float GetDensity(int32 X, int32 Y, int32 Z) const
+		{
+			return static_cast<float>(static_cast<const TDerived*>(this)->GetVoxel(X, Y, Z).Density) / 255.0f;
+		}
+
+		/**
+		 * Gradient normal with taps CLAMPED into the sampler's valid data box (frame-local), matching the Interior pass's
+		 * clamp rule: "the terrain continues" past the data edge instead of the Air cliff that checkerboarded chunk-rim
+		 * shading. Every sampler's box is a box by construction (per-axis allowed halves).
+		 */
+		FVector3f GradientNormal(float X, float Y, float Z, int32 Stride) const
+		{
+			int32 Lo[3];
+			int32 Hi[3];
+			static_cast<const TDerived*>(this)->GetBox(Lo, Hi);
+
+			const int32 IX = FMath::FloorToInt(X);
+			const int32 IY = FMath::FloorToInt(Y);
+			const int32 IZ = FMath::FloorToInt(Z);
+			return VoxelDCGradient::ClampedGradientNormal(
+				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, IX, IY, IZ, Stride);
+		}
+
+		/** The shading normal at a voxel-resolution crossing over the same box: the interior pass's CalculateShadingNormal view (G62). */
+		FVector3f ShadingNormal(float X, float Y, float Z) const
+		{
+			int32 Lo[3];
+			int32 Hi[3];
+			static_cast<const TDerived*>(this)->GetBox(Lo, Hi);
+			return VoxelDCGradient::CrossingShadingNormal(
+				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, X, Y, Z);
+		}
+	};
+
 	/**
 	 * Voxel sampler over a face-seam request. Three views:
 	 *   AOnly    — owner-local coords; Air outside A. Exactly A's Interior-pass view.
@@ -1235,7 +1016,7 @@ namespace VoxelDCFaceSeam
 	 * Ring recomputes MUST use the per-side views so their results are bit-identical to the
 	 * interior passes (same data, same Air clamp); only slab cells use the combined view.
 	 */
-	struct FSeamSampler
+	struct FSeamSampler : TSeamSamplerBase<FSeamSampler>
 	{
 		const FVoxelFaceSeamRequest& Req;
 		enum class EMode : uint8 { AOnly, BOnly, Combined };
@@ -1265,40 +1046,6 @@ namespace VoxelDCFaceSeam
 				}
 			}
 			return FVoxelData::Air();
-		}
-
-		float GetDensity(int32 X, int32 Y, int32 Z) const
-		{
-			return static_cast<float>(GetVoxel(X, Y, Z).Density) / 255.0f;
-		}
-
-		/**
-		 * Gradient normal with taps CLAMPED into the sampler's valid data box (frame-local),
-		 * matching the Interior pass's clamp rule — "the terrain continues" past the data edge
-		 * instead of the Air cliff that checkerboarded chunk-rim shading. The box derives from
-		 * the mode: own chunk only, or both chunks along the face axis for Combined.
-		 */
-		FVector3f GradientNormal(float X, float Y, float Z, int32 Stride) const
-		{
-			int32 Lo[3];
-			int32 Hi[3];
-			GetBox(Lo, Hi);
-
-			const int32 IX = FMath::FloorToInt(X);
-			const int32 IY = FMath::FloorToInt(Y);
-			const int32 IZ = FMath::FloorToInt(Z);
-			return VoxelDCGradient::ClampedGradientNormal(
-				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, IX, IY, IZ, Stride);
-		}
-
-		/** The shading normal at a voxel-resolution crossing over the same box (G62; CalculateShadingNormal's view). */
-		FVector3f ShadingNormal(float X, float Y, float Z) const
-		{
-			int32 Lo[3];
-			int32 Hi[3];
-			GetBox(Lo, Hi);
-			return VoxelDCGradient::CrossingShadingNormal(
-				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, X, Y, Z);
 		}
 
 		/** The sampler's valid data box (frame-local): own chunk only, or both chunks along the face axis for Combined. */
@@ -1362,7 +1109,7 @@ namespace VoxelDCFaceSeam
 	 * interior view (single quadrant) and a face job's pair view (two quadrants along one axis) —
 	 * which is what makes the edge seam's ring recomputes bit-identical to those jobs' outputs.
 	 */
-	struct FQuadSampler
+	struct FQuadSampler : TSeamSamplerBase<FQuadSampler>
 	{
 		const FVoxelEdgeSeamRequest& Req;
 		int32 UAxis;                  // edge-parallel axis
@@ -1370,6 +1117,12 @@ namespace VoxelDCFaceSeam
 		int32 PerpB;                  // larger perpendicular axis
 		uint8 QuadrantMask;           // visible quadrants, bit = dv + dw*2
 		FIntVector FrameOffsetVoxels; // frame-local -> owner-frame voxel offset
+
+		FQuadSampler(const FVoxelEdgeSeamRequest& InReq, int32 InUAxis, int32 InPerpA, int32 InPerpB, uint8 InQuadrantMask,
+			const FIntVector& InFrameOffsetVoxels)
+			: Req(InReq), UAxis(InUAxis), PerpA(InPerpA), PerpB(InPerpB), QuadrantMask(InQuadrantMask), FrameOffsetVoxels(InFrameOffsetVoxels)
+		{
+		}
 
 		FVoxelData GetVoxel(int32 X, int32 Y, int32 Z) const
 		{
@@ -1399,39 +1152,6 @@ namespace VoxelDCFaceSeam
 			return Data[L[0] + L[1] * CS + L[2] * CS * CS];
 		}
 
-		float GetDensity(int32 X, int32 Y, int32 Z) const
-		{
-			return static_cast<float>(GetVoxel(X, Y, Z).Density) / 255.0f;
-		}
-
-		/**
-		 * Gradient normal with taps clamped into the mask's valid box (frame-local) — the same
-		 * "terrain continues" rule as the Interior pass and FSeamSampler. Masks are always
-		 * boxes by construction (per-axis allowed halves), so the box is derivable per axis.
-		 */
-		FVector3f GradientNormal(float X, float Y, float Z, int32 Stride) const
-		{
-			int32 Lo[3];
-			int32 Hi[3];
-			GetBox(Lo, Hi);
-
-			const int32 IX = FMath::FloorToInt(X);
-			const int32 IY = FMath::FloorToInt(Y);
-			const int32 IZ = FMath::FloorToInt(Z);
-			return VoxelDCGradient::ClampedGradientNormal(
-				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, IX, IY, IZ, Stride);
-		}
-
-		/** The shading normal at a voxel-resolution crossing over the same box (G62). */
-		FVector3f ShadingNormal(float X, float Y, float Z) const
-		{
-			int32 Lo[3];
-			int32 Hi[3];
-			GetBox(Lo, Hi);
-			return VoxelDCGradient::CrossingShadingNormal(
-				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, X, Y, Z);
-		}
-
 		/** The mask's valid box (frame-local): masks are boxes by construction (per-axis allowed halves). */
 		void GetBox(int32 Lo[3], int32 Hi[3]) const
 		{
@@ -1459,11 +1179,16 @@ namespace VoxelDCFaceSeam
 	 * (1 octant), a face job's pair view (2 octants), and an edge job's quad view (4 octants,
 	 * whose parallel-axis clamp falls out of the octant masking for free).
 	 */
-	struct FOctSampler
+	struct FOctSampler : TSeamSamplerBase<FOctSampler>
 	{
 		const FVoxelCornerSeamRequest& Req;
 		uint8 OctantMask;             // visible octants, bit = dx + dy*2 + dz*4
 		FIntVector FrameOffsetVoxels; // frame-local -> owner-frame voxel offset
+
+		FOctSampler(const FVoxelCornerSeamRequest& InReq, uint8 InOctantMask, const FIntVector& InFrameOffsetVoxels)
+			: Req(InReq), OctantMask(InOctantMask), FrameOffsetVoxels(InFrameOffsetVoxels)
+		{
+		}
 
 		FVoxelData GetVoxel(int32 X, int32 Y, int32 Z) const
 		{
@@ -1485,39 +1210,6 @@ namespace VoxelDCFaceSeam
 			const int32 LY = C[1] - Dy * CS;
 			const int32 LZ = C[2] - Dz * CS;
 			return (*Req.VoxelData[Octant])[LX + LY * CS + LZ * CS * CS];
-		}
-
-		float GetDensity(int32 X, int32 Y, int32 Z) const
-		{
-			return static_cast<float>(GetVoxel(X, Y, Z).Density) / 255.0f;
-		}
-
-		/**
-		 * Gradient normal with taps clamped into the octant mask's valid box (frame-local) —
-		 * the same "terrain continues" rule as the other samplers. Octant masks are always
-		 * boxes by construction (per-axis allowed halves).
-		 */
-		FVector3f GradientNormal(float X, float Y, float Z, int32 Stride) const
-		{
-			int32 Lo[3];
-			int32 Hi[3];
-			GetBox(Lo, Hi);
-
-			const int32 IX = FMath::FloorToInt(X);
-			const int32 IY = FMath::FloorToInt(Y);
-			const int32 IZ = FMath::FloorToInt(Z);
-			return VoxelDCGradient::ClampedGradientNormal(
-				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, IX, IY, IZ, Stride);
-		}
-
-		/** The shading normal at a voxel-resolution crossing over the same box (G62). */
-		FVector3f ShadingNormal(float X, float Y, float Z) const
-		{
-			int32 Lo[3];
-			int32 Hi[3];
-			GetBox(Lo, Hi);
-			return VoxelDCGradient::CrossingShadingNormal(
-				[this](int32 TX, int32 TY, int32 TZ) { return GetDensity(TX, TY, TZ); }, Lo, Hi, X, Y, Z);
 		}
 
 		/** The octant mask's valid box (frame-local): octant masks are boxes by construction (per-axis allowed halves). */
@@ -1556,14 +1248,14 @@ namespace VoxelDCFaceSeam
 		FQEFSolver QEF;
 		FVector3f AvgNormal = FVector3f::ZeroVector;
 		// SolveCellVertices' vertex normal at a stride (G80, else G44) and at LOD 0 (G62), op for op.
-		const bool bVoxelShading = VoxelDCShading::UseVoxelShadingNormals(Stride) && !VoxelDCShading::UseVoxelLODCrossings(Stride);
+		const bool bVoxelShading = VoxelCrossingGradient::UseVoxelShadingNormals(Stride) && !VoxelCrossingGradient::UseVoxelLODCrossings(Stride);
 		const bool bCrossingShading = Stride == 1 && VoxelCrossingGradient::UseCrossingGradientNormals();
 		FVector3f ShadingSum = FVector3f::ZeroVector;
 		VoxelDCShading::FCellVoxelCrossings VoxelCrossings;
 		auto DensityFn = [&S](int32 X, int32 Y, int32 Z) { return S.GetDensity(X, Y, Z); };
 		auto GradientFn = [&S](float X, float Y, float Z) { return S.ShadingNormal(X, Y, Z); };
 		// DetectEdgeCrossings' crossing and QEF normal, op for op (G80, G81).
-		const bool bVoxelCrossings = VoxelDCShading::UseVoxelLODCrossings(Stride);
+		const bool bVoxelCrossings = VoxelCrossingGradient::UseVoxelLODCrossings(Stride);
 		const bool bFittedQEFNormals = VoxelDCShading::UseFittedQEFNormals(Stride);
 		static const int32 NoEdgeOffset[3] = { 0, 0, 0 };
 
@@ -1600,7 +1292,7 @@ namespace VoxelDCFaceSeam
 				static_cast<float>(NZ) * VoxelSize);
 
 			const FVector3f CrossPos = bVoxelCrossings
-				? VoxelDCShading::FindVoxelCrossing(DensityFn, VX, VY, VZ, Edge.Axis, Stride, IsoLevel, NoEdgeOffset).VoxelPosition * VoxelSize
+				? VoxelLODCrossing::FindVoxelCrossing(DensityFn, VX, VY, VZ, Edge.Axis, Stride, IsoLevel, NoEdgeOffset).VoxelPosition * VoxelSize
 				: P0 + (P1 - P0) * t;
 			const FVector3f CrossShading = (bCrossingShading || bFittedQEFNormals)
 				? S.ShadingNormal(CrossPos.X / VoxelSize, CrossPos.Y / VoxelSize, CrossPos.Z / VoxelSize) : FVector3f::ZeroVector;
@@ -1617,7 +1309,7 @@ namespace VoxelDCFaceSeam
 			if (bVoxelShading)
 			{
 				const int32 EdgeOffset[3] = { Edge.DX, Edge.DY, Edge.DZ };
-				VoxelCrossings.Add(VoxelDCShading::FindVoxelCrossing(DensityFn, VX, VY, VZ, Edge.Axis, Stride, IsoLevel, EdgeOffset));
+				VoxelCrossings.Add(VoxelLODCrossing::FindVoxelCrossing(DensityFn, VX, VY, VZ, Edge.Axis, Stride, IsoLevel, EdgeOffset));
 			}
 		}
 
