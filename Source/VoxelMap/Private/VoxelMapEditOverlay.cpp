@@ -508,6 +508,28 @@ FVoxelMapEditOverlay FVoxelMapEditOverlay::BuildPlanet(
 	return Out;
 }
 
+int32 FVoxelMapOverlayInputs::NumChunks() const
+{
+	return Planet.IsValid() ? Planet->Chunks.Num() : (Heightmap.IsValid() ? Heightmap->Chunks.Num() : 0);
+}
+
+FVoxelMapEditOverlay FVoxelMapEditOverlay::Build(
+	const FVoxelMapOverlayInputs& Inputs,
+	TConstArrayView<FVector> PixelDirections,
+	TConstArrayView<float> AnalyticAltitudes,
+	TFunctionRef<uint8(int32 PX, int32 PY)> AnalyticMaterial)
+{
+	if (Inputs.Planet.IsValid())
+	{
+		return BuildPlanet(*Inputs.Planet, PixelDirections, AnalyticAltitudes, AnalyticMaterial);
+	}
+	if (Inputs.Heightmap.IsValid())
+	{
+		return Build(*Inputs.Heightmap, AnalyticAltitudes, AnalyticMaterial);
+	}
+	return FVoxelMapEditOverlay();
+}
+
 FVoxelMapEditOverlay FVoxelMapEditOverlay::MergePending(const FVoxelMapEditOverlay& Built, const FVoxelMapEditOverlay* Previous)
 {
 	if (!Previous || Previous->IsEmpty() || Built.PendingColumns.Num() == 0 || Previous->Resolution != Built.Resolution

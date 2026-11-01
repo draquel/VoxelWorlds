@@ -54,6 +54,21 @@ struct VOXELMAP_API FVoxelMapOverlayBuildInput
 	TArray<FVoxelMapOverlayChunk> Chunks;
 };
 
+/** The inputs of one tile's overlay build, of either kind (code review CR2, REND-15): a heightmap tile's chunk stack or a planet tile's chunks. */
+struct VOXELMAP_API FVoxelMapOverlayInputs
+{
+	TSharedPtr<struct FVoxelMapOverlayBuildInput> Heightmap;
+	TSharedPtr<struct FVoxelMapPlanetOverlayInput> Planet;
+
+	bool IsValid() const { return Heightmap.IsValid() || Planet.IsValid(); }
+	int32 NumChunks() const;
+	void Reset()
+	{
+		Heightmap.Reset();
+		Planet.Reset();
+	}
+};
+
 /**
  * One chunk around a planet map tile, as handed to FVoxelMapEditOverlay::BuildPlanet (spherical Phase 4, WM-SY8).
  * Gathered on the game thread; plain data afterwards.
@@ -218,6 +233,22 @@ struct VOXELMAP_API FVoxelMapEditOverlay
 	 */
 	static FVoxelMapEditOverlay BuildPlanet(
 		const FVoxelMapPlanetOverlayInput& Input,
+		TConstArrayView<FVector> PixelDirections,
+		TConstArrayView<float> AnalyticAltitudes,
+		TFunctionRef<uint8(int32 PX, int32 PY)> AnalyticMaterial);
+
+	/**
+	 * Build the overlay for one tile of either kind (code review CR2, REND-15): Build over a heightmap tile's chunk stack,
+	 * BuildPlanet over a planet tile's chunks.
+	 *
+	 * @param Inputs The tile's inputs (one kind set)
+	 * @param PixelDirections Unit direction of each pixel's line (a planet; unread on a heightmap world)
+	 * @param AnalyticAltitudes Analytic surface height (world Z) or altitude per pixel (ChunkSize^2, row-major PY * ChunkSize + PX)
+	 * @param AnalyticMaterial Analytic surface material of a pixel (PX, PY)
+	 * @return The overlay; empty when no edit changed the surface or the inputs are of no kind
+	 */
+	static FVoxelMapEditOverlay Build(
+		const FVoxelMapOverlayInputs& Inputs,
 		TConstArrayView<FVector> PixelDirections,
 		TConstArrayView<float> AnalyticAltitudes,
 		TFunctionRef<uint8(int32 PX, int32 PY)> AnalyticMaterial);
