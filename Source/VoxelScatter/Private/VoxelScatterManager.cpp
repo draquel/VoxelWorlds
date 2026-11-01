@@ -14,7 +14,7 @@
 #include "VoxelTerrainConditioning.h"
 #include "VoxelCaveConfiguration.h"
 #include "VoxelCPUNoiseGenerator.h"
-#include "VoxelPlanetNoise.h"
+#include "VoxelNoise.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelBiomeRegistry.h"
 #include "VoxelScatter.h"

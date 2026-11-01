@@ -7,7 +7,7 @@
 #include "VoxelNoiseTypes.h"
 #include "VoxelSeaSurface.h"
 #include "SphericalPlanetWorldMode.h"
-#include "VoxelPlanetNoise.h"
+#include "VoxelNoise.h"
 #include "VoxelTerrainConditioning.h"
 #include "VoxelCaveConfiguration.h"
 #include "InfinitePlaneWorldMode.h"
@@ -236,9 +236,9 @@ FVoxelData FVoxelSurfaceQuery::GenerateVoxelAt(
 		{
 			const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode);
 			const FVoxelBiomeSnapshot& Snapshot = Planet.GetBiomeSnapshot();
-			const FVoxelNoiseParams TemperatureParams = FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + Snapshot.TemperatureSeedOffset,
+			const FVoxelNoiseParams TemperatureParams = FVoxelNoise::MakeFieldParams(NoiseParams.Seed + Snapshot.TemperatureSeedOffset,
 				Snapshot.TemperatureNoiseFrequency);
-			const FVoxelNoiseParams MoistureParams = FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + Snapshot.MoistureSeedOffset,
+			const FVoxelNoiseParams MoistureParams = FVoxelNoise::MakeFieldParams(NoiseParams.Seed + Snapshot.MoistureSeedOffset,
 				Snapshot.MoistureNoiseFrequency);
 			float Temperature = 0.0f;
 			float Moisture = 0.0f;
@@ -488,8 +488,8 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(
 	// Climate as generation samples it: the planet noise at the direction's point on the datum sphere (WM-BP5)
 	float Temperature, Moisture;
 	FSphericalPlanetWorldMode::SampleClimate(Direction, Params.PlanetRadius,
-		FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.TemperatureSeedOffset, BiomeSnapshot.TemperatureNoiseFrequency),
-		FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.MoistureSeedOffset, BiomeSnapshot.MoistureNoiseFrequency),
+		FVoxelNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.TemperatureSeedOffset, BiomeSnapshot.TemperatureNoiseFrequency),
+		FVoxelNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.MoistureSeedOffset, BiomeSnapshot.MoistureNoiseFrequency),
 		Temperature, Moisture);
 
 	const FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
@@ -522,8 +522,8 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(
 	// Climate and the blend as QueryPlanetSurfaceConditionsAt has them
 	float Temperature, Moisture;
 	FSphericalPlanetWorldMode::SampleClimate(Direction, Params.PlanetRadius,
-		FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.TemperatureSeedOffset, BiomeSnapshot.TemperatureNoiseFrequency),
-		FVoxelPlanetNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.MoistureSeedOffset, BiomeSnapshot.MoistureNoiseFrequency),
+		FVoxelNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.TemperatureSeedOffset, BiomeSnapshot.TemperatureNoiseFrequency),
+		FVoxelNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.MoistureSeedOffset, BiomeSnapshot.MoistureNoiseFrequency),
 		Temperature, Moisture);
 	const FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
 	Mix.BiomeID = Blend.GetDominantBiome();

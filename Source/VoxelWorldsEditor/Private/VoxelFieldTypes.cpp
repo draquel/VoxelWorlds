@@ -15,7 +15,7 @@
 #include "VoxelSurfaceQuery.h"
 #include "VoxelCaveQuery.h"
 #include "VoxelCPUNoiseGenerator.h"
-#include "VoxelPlanetNoise.h"
+#include "VoxelNoise.h"
 
 #define LOCTEXT_NAMESPACE "VoxelEditorFields"
 

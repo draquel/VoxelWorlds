@@ -60,10 +60,10 @@ public:
 	/**
 	 * Sample fBm (Fractal Brownian Motion) noise at a position: the noise every world mode's fields sample (terrain,
 	 * continentalness, climate, caves, ores, the surface queries and the map). Since the world modes review's MP4 (WM-MP6,
-	 * WM-MP7, decision D39; GenerationVersion 3) it is FVoxelPlanetNoise::FBM3D for heightmap worlds too: a hashed integer
+	 * WM-MP7, decision D39; GenerationVersion 3) it is FVoxelNoise::FBM3D for heightmap worlds too: a hashed integer
 	 * lattice with no period, split-origin sampling exact to float precision at any distance, and the continuous Simplex
 	 * kernel (G43). The GPU's heightmap branch samples the same noise at a per-chunk origin (GenerateVoxelDensity.usf,
-	 * PlanetNoise.ush), the two within float rounding of each other.
+	 * VoxelNoise.ush), the two within float rounding of each other.
 	 *
 	 * @param Position World position to sample
 	 * @param Params Noise parameters (octaves, frequency, etc.)
@@ -198,7 +198,7 @@ public:
 
 	/**
 	 * A planet's ore vein noise (spherical Phase 6, WM-BP5): the same 2-octave field at the ore's frequency and seed,
-	 * by the planet noise (FVoxelPlanetNoise) at the planet-relative position, a streak squashed along one direction per
+	 * by the planet noise (FVoxelNoise) at the planet-relative position, a streak squashed along one direction per
 	 * ore type (GetPlanetOreStreakDirection). Exact at any radius; the planet's ores move with it.
 	 *
 	 * @param PlanetRelativePos Position relative to the planet centre

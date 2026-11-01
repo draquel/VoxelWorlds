@@ -5,7 +5,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelCPUNoiseGenerator.h"
-#include "VoxelPlanetNoise.h"
+#include "VoxelNoise.h"
 #include "VoxelNoiseTypes.h"
 #include "IVoxelWorldMode.h"
 #include "InfinitePlaneWorldMode.h"
@@ -15,7 +15,7 @@
 
 // ---------------------------------------------------------------------------
 // The heightmap noise since the world modes review's MP4 (WM-MP6, WM-MP7, decision D39; GenerationVersion 3): the
-// heightmap entry point FVoxelCPUNoiseGenerator::FBM3D samples the planet's noise (FVoxelPlanetNoise): a hashed integer
+// heightmap entry point FVoxelCPUNoiseGenerator::FBM3D samples the planet's noise (FVoxelNoise): a hashed integer
 // lattice with no 256-unit period, split-origin sampling exact to float precision at any distance from the origin, and the
 // continuous Simplex kernel (G43). The classic table noise (VoxelClassicNoiseControl::ClassicFBM3D) is kept as the control.
 //
@@ -65,9 +65,9 @@ bool FVoxelHeightmapNoiseTest::RunTest(const FString& Parameters)
 		{
 			const double Z = (i & 1) ? Random.FRandRange(-12000.0, 12000.0) : 0.0;
 			const FVector P(Random.FRandRange(-1.0e6, 1.0e6), Random.FRandRange(-1.0e6, 1.0e6), Z);
-			Differ += FVoxelCPUNoiseGenerator::FBM3D(P, Params) == FVoxelPlanetNoise::FBM3D(P, Params) ? 0 : 1;
+			Differ += FVoxelCPUNoiseGenerator::FBM3D(P, Params) == FVoxelNoise::FBM3D(P, Params) ? 0 : 1;
 		}
-		TestEqual(*FString::Printf(TEXT("%s: FBM3D is FVoxelPlanetNoise::FBM3D bit for bit (%d of 2000 differ)"), TypeNames[t], Differ), Differ, 0);
+		TestEqual(*FString::Printf(TEXT("%s: FBM3D is FVoxelNoise::FBM3D bit for bit (%d of 2000 differ)"), TypeNames[t], Differ), Differ, 0);
 	}
 
 	// 2. Exact far from the origin: 2D points (the heightmap fields' (X, Y, 0)) at 1e3 to 1e9 uu against the double
@@ -85,9 +85,9 @@ bool FVoxelHeightmapNoiseTest::RunTest(const FString& Parameters)
 				const FVector Origin(FMath::Cos(Angle) * Magnitude, FMath::Sin(Angle) * Magnitude, 0.0);
 				const FVector3f Offset(Random.FRandRange(0.0f, 4800.0f), Random.FRandRange(0.0f, 4800.0f), 0.0f);
 				const FVector Point = Origin + FVector(Offset);
-				const double Reference = FVoxelPlanetNoise::ReferenceFBM3D(Point, Params);
+				const double Reference = FVoxelNoise::ReferenceFBM3D(Point, Params);
 				MaxPoint = FMath::Max(MaxPoint, FMath::Abs(FVoxelCPUNoiseGenerator::FBM3D(Point, Params) - Reference));
-				MaxOffset = FMath::Max(MaxOffset, FMath::Abs(FVoxelPlanetNoise::FBM3D(Origin, Offset, Params) - Reference));
+				MaxOffset = FMath::Max(MaxOffset, FMath::Abs(FVoxelNoise::FBM3D(Origin, Offset, Params) - Reference));
 			}
 			AddInfo(FString::Printf(TEXT("%s at %.0e uu: per point off the double reference by up to %.2e, chunk origin + offset by %.2e"), TypeNames[t], Magnitude, MaxPoint, MaxOffset));
 			TestTrue(*FString::Printf(TEXT("%s at %.0e: per point within 1e-5 (%.2e)"), TypeNames[t], Magnitude, MaxPoint), MaxPoint <= 1.0e-5);

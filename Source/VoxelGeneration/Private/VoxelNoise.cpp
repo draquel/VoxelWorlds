@@ -1,6 +1,6 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
-#include "VoxelPlanetNoise.h"
+#include "VoxelNoise.h"
 #include "HAL/IConsoleManager.h"
 
 static TAutoConsoleVariable<int32> CVarContinuousSimplex(
@@ -13,18 +13,18 @@ static TAutoConsoleVariable<int32> CVarContinuousSimplex(
 	TEXT("that current saves do not match. Read when chunks generate; CPU and GPU alike. (voxel.Planet.ContinuousSimplex before MP4.)"),
 	ECVF_Default);
 
-bool FVoxelPlanetNoise::IsContinuousSimplex()
+bool FVoxelNoise::IsContinuousSimplex()
 {
 	return CVarContinuousSimplex.GetValueOnAnyThread() != 0;
 }
 
 // Spherical Phase 6, WM-BP5 (D22); every world mode's noise since the world modes review's MP4 (D39). Every function here
-// has a twin in Shaders/Private/PlanetNoise.ush with the same float operations in the same order; change both together
+// has a twin in Shaders/Private/VoxelNoise.ush with the same float operations in the same order; change both together
 // (VoxelWorlds.Generation.GPUvsCPU*Parity).
 
-namespace VoxelPlanetNoiseDetail
+namespace VoxelNoiseDetail
 {
-	// The Simplex kernel's table and constants, shared with PlanetNoise.ush (VoxelGenerationShared.ush).
+	// The Simplex kernel's table and constants, shared with VoxelNoise.ush (VoxelGenerationShared.ush).
 #define VOXELGEN_GRAD3_ROW(X, Y, Z) { X, Y, Z }
 	constexpr int32 Grad3[12][3] = VOXELGEN_SIMPLEX_GRAD3(VOXELGEN_GRAD3_ROW);
 #undef VOXELGEN_GRAD3_ROW
@@ -123,7 +123,7 @@ namespace VoxelPlanetNoiseDetail
 	}
 }
 
-FVoxelNoiseSplit FVoxelPlanetNoise::Split(const FVector& NoisePoint, EVoxelNoiseType Type)
+FVoxelNoiseSplit FVoxelNoise::Split(const FVector& NoisePoint, EVoxelNoiseType Type)
 {
 	FVector Q = NoisePoint;
 	if (Type == EVoxelNoiseType::Simplex)
@@ -137,16 +137,16 @@ FVoxelNoiseSplit FVoxelPlanetNoise::Split(const FVector& NoisePoint, EVoxelNoise
 	const double FZ = FMath::FloorToDouble(Q.Z);
 	FVoxelNoiseSplit Out;
 	Out.Cell = FIntVector(
-		static_cast<int32>(VoxelPlanetNoiseDetail::Wrap(FX)),
-		static_cast<int32>(VoxelPlanetNoiseDetail::Wrap(FY)),
-		static_cast<int32>(VoxelPlanetNoiseDetail::Wrap(FZ)));
+		static_cast<int32>(VoxelNoiseDetail::Wrap(FX)),
+		static_cast<int32>(VoxelNoiseDetail::Wrap(FY)),
+		static_cast<int32>(VoxelNoiseDetail::Wrap(FZ)));
 	Out.Frac = FVector3f(static_cast<float>(Q.X - FX), static_cast<float>(Q.Y - FY), static_cast<float>(Q.Z - FZ));
 	return Out;
 }
 
-float FVoxelPlanetNoise::Simplex(const FVoxelNoiseSplit& Origin, const FVector3f& Offset, int32 Seed)
+float FVoxelNoise::Simplex(const FVoxelNoiseSplit& Origin, const FVector3f& Offset, int32 Seed)
 {
-	using namespace VoxelPlanetNoiseDetail;
+	using namespace VoxelNoiseDetail;
 
 	// The skewed point within the origin's cell: the origin's skewed fraction plus the skewed offset.
 	const float S = (Offset.X + Offset.Y + Offset.Z) * SkewF3;
@@ -191,9 +191,9 @@ float FVoxelPlanetNoise::Simplex(const FVoxelNoiseSplit& Origin, const FVector3f
 	return SimplexScale(bContinuous) * (N0 + N1 + N2 + N3);
 }
 
-float FVoxelPlanetNoise::Perlin(const FVoxelNoiseSplit& Origin, const FVector3f& Offset, int32 Seed)
+float FVoxelNoise::Perlin(const FVoxelNoiseSplit& Origin, const FVector3f& Offset, int32 Seed)
 {
-	using namespace VoxelPlanetNoiseDetail;
+	using namespace VoxelNoiseDetail;
 
 	const float GX = Origin.Frac.X + Offset.X;
 	const float GY = Origin.Frac.Y + Offset.Y;
@@ -222,9 +222,9 @@ float FVoxelPlanetNoise::Perlin(const FVoxelNoiseSplit& Origin, const FVector3f&
 			Lerp(Grad(H(0, 1, 1), X, Y - 1.0f, Z - 1.0f), Grad(H(1, 1, 1), X - 1.0f, Y - 1.0f, Z - 1.0f), U), V), W);
 }
 
-void FVoxelPlanetNoise::Cellular(const FVoxelNoiseSplit& Origin, const FVector3f& Offset, int32 Seed, float& OutF1, float& OutF2, float* OutCellID)
+void FVoxelNoise::Cellular(const FVoxelNoiseSplit& Origin, const FVector3f& Offset, int32 Seed, float& OutF1, float& OutF2, float* OutCellID)
 {
-	using namespace VoxelPlanetNoiseDetail;
+	using namespace VoxelNoiseDetail;
 
 	const float GX = Origin.Frac.X + Offset.X;
 	const float GY = Origin.Frac.Y + Offset.Y;
@@ -279,7 +279,7 @@ void FVoxelPlanetNoise::Cellular(const FVoxelNoiseSplit& Origin, const FVector3f
 	}
 }
 
-float FVoxelPlanetNoise::Sample(const FVoxelNoiseSplit& Origin, const FVector3f& Offset, EVoxelNoiseType Type, int32 Seed)
+float FVoxelNoise::Sample(const FVoxelNoiseSplit& Origin, const FVector3f& Offset, EVoxelNoiseType Type, int32 Seed)
 {
 	switch (Type)
 	{
@@ -303,7 +303,7 @@ float FVoxelPlanetNoise::Sample(const FVoxelNoiseSplit& Origin, const FVector3f&
 	}
 }
 
-int32 FVoxelPlanetNoise::OctaveFrequencies(const FVoxelNoiseParams& Params, float* OutFrequencies)
+int32 FVoxelNoise::OctaveFrequencies(const FVoxelNoiseParams& Params, float* OutFrequencies)
 {
 	const int32 Count = FMath::Clamp(Params.Octaves, 1, MaxOctaves);
 	float Frequency = Params.Frequency;
@@ -315,7 +315,7 @@ int32 FVoxelPlanetNoise::OctaveFrequencies(const FVoxelNoiseParams& Params, floa
 	return Count;
 }
 
-float FVoxelPlanetNoise::FBM3D(const FVector& Position, const FVoxelNoiseParams& Params)
+float FVoxelNoise::FBM3D(const FVector& Position, const FVoxelNoiseParams& Params)
 {
 	float Frequencies[MaxOctaves];
 	const int32 Count = OctaveFrequencies(Params, Frequencies);
@@ -332,7 +332,7 @@ float FVoxelPlanetNoise::FBM3D(const FVector& Position, const FVoxelNoiseParams&
 	return Total / MaxValue;
 }
 
-float FVoxelPlanetNoise::FBM3D(const FVector& Origin, const FVector3f& Offset, const FVoxelNoiseParams& Params)
+float FVoxelNoise::FBM3D(const FVector& Origin, const FVector3f& Offset, const FVoxelNoiseParams& Params)
 {
 	float Frequencies[MaxOctaves];
 	FVoxelNoiseSplit Splits[MaxOctaves];
@@ -350,7 +350,7 @@ float FVoxelPlanetNoise::FBM3D(const FVector& Origin, const FVector3f& Offset, c
 	return Total / MaxValue;
 }
 
-int32 FVoxelPlanetNoise::SplitOctaves(const FVector& Origin, const FVoxelNoiseParams& Params, FVoxelNoiseSplit* OutSplits)
+int32 FVoxelNoise::SplitOctaves(const FVector& Origin, const FVoxelNoiseParams& Params, FVoxelNoiseSplit* OutSplits)
 {
 	float Frequencies[MaxOctaves];
 	const int32 Count = OctaveFrequencies(Params, Frequencies);
@@ -361,7 +361,7 @@ int32 FVoxelPlanetNoise::SplitOctaves(const FVector& Origin, const FVoxelNoisePa
 	return Count;
 }
 
-FVoxelNoiseParams FVoxelPlanetNoise::MakeFieldParams(int32 Seed, float Frequency)
+FVoxelNoiseParams FVoxelNoise::MakeFieldParams(int32 Seed, float Frequency)
 {
 	FVoxelNoiseParams Params;
 	Params.NoiseType = EVoxelNoiseType::Simplex;
@@ -376,9 +376,9 @@ FVoxelNoiseParams FVoxelPlanetNoise::MakeFieldParams(int32 Seed, float Frequency
 
 // ==================== Double reference ====================
 
-double FVoxelPlanetNoise::ReferenceSample(const FVector& P, EVoxelNoiseType Type, int32 Seed)
+double FVoxelNoise::ReferenceSample(const FVector& P, EVoxelNoiseType Type, int32 Seed)
 {
-	using namespace VoxelPlanetNoiseDetail;
+	using namespace VoxelNoiseDetail;
 
 	if (Type == EVoxelNoiseType::Simplex || (Type != EVoxelNoiseType::Perlin && Type != EVoxelNoiseType::Cellular && Type != EVoxelNoiseType::Voronoi))
 	{
@@ -434,7 +434,7 @@ double FVoxelPlanetNoise::ReferenceSample(const FVector& P, EVoxelNoiseType Type
 	return Type == EVoxelNoiseType::Cellular ? F1 * 2.0 - 1.0 : (F2 - F1) * 2.0 - 1.0;
 }
 
-double FVoxelPlanetNoise::ReferenceFBM3D(const FVector& Position, const FVoxelNoiseParams& Params)
+double FVoxelNoise::ReferenceFBM3D(const FVector& Position, const FVoxelNoiseParams& Params)
 {
 	float Frequencies[MaxOctaves];
 	const int32 Count = OctaveFrequencies(Params, Frequencies);

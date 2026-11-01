@@ -137,7 +137,7 @@ surveys it on purpose). Changing planet generation bumps
 Planets are precise to about 1,000 km (spherical Phase 6, P6.2; `Features/WORLD_MODES.md` "The radius ceiling"), so
 never hold a value of size R in float on a planet path: altitudes and signed distances are formed in double on the CPU
 (`ShellSignedDistanceAtAltitude`) and in the chunk's frame on the GPU (`PlanetFrame.ush`); the noise of every world mode
-is `FVoxelPlanetNoise` / `PlanetNoise.ush` (hashed lattice, split-origin, the continuous Simplex kernel; heightmap worlds
+is `FVoxelNoise` / `VoxelNoise.ush` (hashed lattice, split-origin, the continuous Simplex kernel; heightmap worlds
 reach it through `FVoxelCPUNoiseGenerator::FBM3D` since the world modes review's MP4, D39, `GenerationVersion` 3, and the
 GPU's heightmap branch samples it at the chunk's origin corner; the classic table noise stays only as the tests' control,
 `VoxelClassicNoiseControl::ClassicFBM3D` in `VoxelGeneration/Tests`); primitives sit at their render region's origin (`FVoxelRenderRegions`) and store float offsets from it

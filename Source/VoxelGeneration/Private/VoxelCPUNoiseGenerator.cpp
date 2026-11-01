@@ -14,7 +14,7 @@
 #include "VoxelMaterialRegistry.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelDownLines.h"
-#include "VoxelPlanetNoise.h"
+#include "VoxelNoise.h"
 #include "Async/Async.h"
 
 FVoxelCPUNoiseGenerator::FVoxelCPUNoiseGenerator()
@@ -437,7 +437,7 @@ float FVoxelCPUNoiseGenerator::FBM3D(const FVector& Position, const FVoxelNoiseP
 	// come through here, so they have no 256-unit period, are exact to float precision at any distance from the origin
 	// and do not step across the simplex lattice's boundaries. The classic table noise lives with the tests that measure
 	// what it did (Tests/VoxelClassicNoiseControl; CR1, CORE-02).
-	return FVoxelPlanetNoise::FBM3D(Position, Params);
+	return FVoxelNoise::FBM3D(Position, Params);
 }
 
 // ==================== Cave Generation Helpers ====================
@@ -453,7 +453,7 @@ float FVoxelCPUNoiseGenerator::SampleCaveLayer(const FVector& WorldPos, const FC
 		: FVector(WorldPos.X, WorldPos.Y, WorldPos.Z * LayerConfig.VerticalScale);
 	auto SampleField = [Planet, &ScaledPos](const FVoxelNoiseParams& Params)
 	{
-		return Planet ? FVoxelPlanetNoise::FBM3D(ScaledPos, Params) : FBM3D(ScaledPos, Params);
+		return Planet ? FVoxelNoise::FBM3D(ScaledPos, Params) : FBM3D(ScaledPos, Params);
 	};
 
 	// Build noise params for first noise field
@@ -663,8 +663,8 @@ FVector FVoxelCPUNoiseGenerator::GetPlanetOreSamplePoint(const FVector& PlanetRe
 float FVoxelCPUNoiseGenerator::SamplePlanetOreVeinNoise(const FVector& PlanetRelativePos, const FOreVeinConfig& OreConfig, int32 WorldSeed)
 {
 	// The heightmap ore field (2-octave Simplex at the ore's frequency and seed) by the planet noise, relative to the centre
-	const FVoxelNoiseParams Params = FVoxelPlanetNoise::MakeFieldParams(WorldSeed + OreConfig.SeedOffset, OreConfig.Frequency);
-	return (FVoxelPlanetNoise::FBM3D(GetPlanetOreSamplePoint(PlanetRelativePos, OreConfig), Params) + 1.0f) * 0.5f;
+	const FVoxelNoiseParams Params = FVoxelNoise::MakeFieldParams(WorldSeed + OreConfig.SeedOffset, OreConfig.Frequency);
+	return (FVoxelNoise::FBM3D(GetPlanetOreSamplePoint(PlanetRelativePos, OreConfig), Params) + 1.0f) * 0.5f;
 }
 
 FIntVector FVoxelCPUNoiseGenerator::OreRarityKey(const FVector& PlanetRelativePos)
@@ -758,11 +758,11 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 
 	// Climate: the heightmap modes' 2-octave fields (seeds and frequencies), sampled by the planet noise (WM-BP5)
 	const FVoxelNoiseParams TempNoiseParams = BiomeConfig
-		? FVoxelPlanetNoise::MakeFieldParams(Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset, BiomeConfig->TemperatureNoiseFrequency)
-		: FVoxelPlanetNoise::MakeFieldParams(Request.NoiseParams.Seed + 1234, 0.00005f);
+		? FVoxelNoise::MakeFieldParams(Request.NoiseParams.Seed + BiomeConfig->TemperatureSeedOffset, BiomeConfig->TemperatureNoiseFrequency)
+		: FVoxelNoise::MakeFieldParams(Request.NoiseParams.Seed + 1234, 0.00005f);
 	const FVoxelNoiseParams MoistureNoiseParams = BiomeConfig
-		? FVoxelPlanetNoise::MakeFieldParams(Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset, BiomeConfig->MoistureNoiseFrequency)
-		: FVoxelPlanetNoise::MakeFieldParams(Request.NoiseParams.Seed + 5678, 0.00007f);
+		? FVoxelNoise::MakeFieldParams(Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset, BiomeConfig->MoistureNoiseFrequency)
+		: FVoxelNoise::MakeFieldParams(Request.NoiseParams.Seed + 5678, 0.00007f);
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{

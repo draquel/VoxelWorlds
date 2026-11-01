@@ -126,7 +126,7 @@ int3 ChunkBaseInt;            // floor of the chunk origin, in double: the ore R
 float3 ChunkBaseFrac;         // the chunk origin less ChunkBaseInt
 
 // The noise's per-chunk origins (spherical Phase 6, WM-BP5; every world mode since the world modes review's MP4, D39;
-// PlanetNoise.ush): every field's origin split per octave on the CPU, in double, 2 float4s a split ([asfloat(cell), 0]
+// VoxelNoise.ush): every field's origin split per octave on the CPU, in double, 2 float4s a split ([asfloat(cell), 0]
 // [frac, 0]). The field bases index splits. On a planet the origins belong to the chunk's anchor (its centre): the 2D
 // fields at the anchor's point on the datum sphere, each cave layer at the anchor with its altitude scaled, each ore at
 // the anchor through its streak map (a first slot holds the streak's [direction, factor]); the anchor's direction, distance
@@ -160,7 +160,7 @@ RWStructuredBuffer<uint> OutputVoxelData;
 // Per-voxel biome selection + material pipeline (references the biome globals declared above).
 #include "/Plugin/VoxelWorlds/Private/BiomeMaterial.ush"
 // The planet noise (references NoiseOrigins) and the chunk frame.
-#include "/Plugin/VoxelWorlds/Private/PlanetNoise.ush"
+#include "/Plugin/VoxelWorlds/Private/VoxelNoise.ush"
 #include "/Plugin/VoxelWorlds/Private/PlanetFrame.ush"
 // IslandBowl edge falloff (references the IslandBowl globals declared above).
 #include "/Plugin/VoxelWorlds/Private/IslandFalloff.ush"
@@ -215,7 +215,7 @@ float GpuContinentalnessCurves(float ContinentalnessNoise, inout float InOutBase
  */
 float GpuApplyContinentalness(float3 Offset2D, inout float InOutBaseHeight, inout float InOutHeightScale)
 {
-    const float ContinentalnessNoise = PlanetFBM3D(ContinentNoiseOrigin, Offset2D, VOXELGEN_NOISE_TYPE_SIMPLEX, ContinentalnessSeed, 2,
+    const float ContinentalnessNoise = NoiseFBM3D(ContinentNoiseOrigin, Offset2D, VOXELGEN_NOISE_TYPE_SIMPLEX, ContinentalnessSeed, 2,
         ContinentalnessFrequency, 1.0f, 2.0f, 0.5f);
     return GpuContinentalnessCurves(ContinentalnessNoise, InOutBaseHeight, InOutHeightScale);
 }
@@ -234,13 +234,13 @@ float HeightmapCaveLayerCarve(int ci, float3 VoxelOffset)
     const float3 Offset = float3(VoxelOffset.x, VoxelOffset.y, VoxelOffset.z * CaveLayerVerticalScale[ci]);
     const int Base = CaveNoiseOrigin[ci];
     const int Octaves = CaveLayerOctaves[ci];
-    const float Noise1 = PlanetFBM3D(Base, Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, CaveLayerSeed[ci], Octaves, CaveLayerFrequency[ci], 1.0f,
+    const float Noise1 = NoiseFBM3D(Base, Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, CaveLayerSeed[ci], Octaves, CaveLayerFrequency[ci], 1.0f,
         CaveLayerLacunarity[ci], CaveLayerPersistence[ci]);
     if (CaveLayerType[ci] == VOXELGEN_CAVE_TYPE_CHEESE)
     {
         return CheeseCarveFromNoise(Noise1, CaveLayerThreshold[ci], CaveLayerCarveFalloff[ci], CaveLayerCarveStrength[ci]);
     }
-    const float Noise2 = PlanetFBM3D(Base + clamp(Octaves, 1, 16), Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, CaveLayerSeed2[ci], Octaves,
+    const float Noise2 = NoiseFBM3D(Base + clamp(Octaves, 1, 16), Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, CaveLayerSeed2[ci], Octaves,
         CaveLayerFrequency2[ci], 1.0f, CaveLayerLacunarity[ci], CaveLayerPersistence[ci]);
     return TunnelCarveFromNoise(Noise1, Noise2, CaveLayerThreshold[ci], CaveLayerCarveFalloff[ci], CaveLayerCarveStrength[ci]);
 }
@@ -261,13 +261,13 @@ float PlanetCaveLayerCarve(int ci, PlanetVoxelFrame F)
     const float3 Offset = F.DeltaDir * (PlanetRadius + PlanetAnchorAltitude * VS) + F.Dir * (F.DeltaR * VS);
     const int Base = CaveNoiseOrigin[ci];
     const int Octaves = CaveLayerOctaves[ci];
-    const float Noise1 = PlanetFBM3D(Base, Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, CaveLayerSeed[ci], Octaves, CaveLayerFrequency[ci], 1.0f,
+    const float Noise1 = NoiseFBM3D(Base, Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, CaveLayerSeed[ci], Octaves, CaveLayerFrequency[ci], 1.0f,
         CaveLayerLacunarity[ci], CaveLayerPersistence[ci]);
     if (CaveLayerType[ci] == VOXELGEN_CAVE_TYPE_CHEESE)
     {
         return CheeseCarveFromNoise(Noise1, CaveLayerThreshold[ci], CaveLayerCarveFalloff[ci], CaveLayerCarveStrength[ci]);
     }
-    const float Noise2 = PlanetFBM3D(Base + clamp(Octaves, 1, 16), Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, CaveLayerSeed2[ci], Octaves,
+    const float Noise2 = NoiseFBM3D(Base + clamp(Octaves, 1, 16), Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, CaveLayerSeed2[ci], Octaves,
         CaveLayerFrequency2[ci], 1.0f, CaveLayerLacunarity[ci], CaveLayerPersistence[ci]);
     return TunnelCarveFromNoise(Noise1, Noise2, CaveLayerThreshold[ci], CaveLayerCarveFalloff[ci], CaveLayerCarveStrength[ci]);
 }
@@ -440,9 +440,9 @@ void MainCS(
         // Infinite Plane: 2D heightmap-based terrain. Decomposed (vs the monolithic ApplyInfinitePlaneSDF)
         // so terrain conditioning can flatten the height BEFORE the density is derived — matches the CPU
         // order: SampleTerrainNoise2D -> NoiseToTerrainHeight -> ApplyToHeight -> CalculateSignedDistance -> density.
-        // The terrain noise at the chunk's terrain origin + the voxel's offset in the plane (MP4: FVoxelPlanetNoise's
+        // The terrain noise at the chunk's terrain origin + the voxel's offset in the plane (MP4: FVoxelNoise's
         // hashed lattice, split origin and continuous Simplex kernel, as FVoxelCPUNoiseGenerator::FBM3D).
-        float TerrainNoise = PlanetFBM3D(TerrainNoiseOrigin, Offset2D,
+        float TerrainNoise = NoiseFBM3D(TerrainNoiseOrigin, Offset2D,
             NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseAmplitude, NoiseLacunarity, NoisePersistence);
         float TerrainHeight = NoiseToTerrainHeight(TerrainNoise, SeaLevel, EffectiveHeightScale, EffectiveBaseHeight);
         // IslandBowl: fade the (continentalness-modulated) height toward EdgeHeight at the world edge.
@@ -467,8 +467,8 @@ void MainCS(
         if (BiomeCount > 0)
         {
             // Temperature and moisture at (X, Y, 0): the chunk's climate origins + the voxel's offset in the plane
-            const float Temperature = PlanetFBM3D(TemperatureNoiseOrigin, Offset2D, VOXELGEN_NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0f, 2.0f, 0.5f);
-            const float Moisture = PlanetFBM3D(MoistureNoiseOrigin, Offset2D, VOXELGEN_NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0f, 2.0f, 0.5f);
+            const float Temperature = NoiseFBM3D(TemperatureNoiseOrigin, Offset2D, VOXELGEN_NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0f, 2.0f, 0.5f);
+            const float Moisture = NoiseFBM3D(MoistureNoiseOrigin, Offset2D, VOXELGEN_NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0f, 2.0f, 0.5f);
             Blend = SampleGpuBiomeBlend(Temperature, Moisture, ContinentalnessValue);
             const GpuBiome Dominant = LoadGpuBiome(Blend.Indices[0]);
             BiomeID = Dominant.BiomeID;
@@ -541,7 +541,7 @@ void MainCS(
     {
         // Default: 3D noise generation for a world mode with no branch of its own (none today): the terrain noise at the
         // chunk's terrain origin (the corner's (X, Y, 0)) + the voxel's offset with its absolute Z
-        float NoiseValue = PlanetFBM3D(TerrainNoiseOrigin,
+        float NoiseValue = NoiseFBM3D(TerrainNoiseOrigin,
             float3(VoxelOffset.x, VoxelOffset.y, ChunkWorldPosition.z + VoxelOffset.z),
             NoiseType,
             NoiseSeed,

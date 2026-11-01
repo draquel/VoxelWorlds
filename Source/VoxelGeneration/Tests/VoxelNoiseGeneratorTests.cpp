@@ -1418,7 +1418,7 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 	// Review_Planet_L's scale (spherical Phase 6, WM-BP6): R 1e8 (1,000 km), L's terrain (the demo's base wavelength and
 	// height scale 64 times larger, 6 more octaves), the sea 83,333 under the datum, the same biomes, ore and caves, off the
 	// world origin. The GPU computes its altitudes, conditioning chords, sea test and noise offsets in the chunk's frame
-	// (PlanetFrame.ush, PlanetNoise.ush) and must match the CPU's double math.
+	// (PlanetFrame.ush, VoxelNoise.ush) and must match the CPU's double math.
 	{
 		constexpr double RL = 1.0e8;
 		UVoxelWorldConfiguration* LConfig = NewObject<UVoxelWorldConfiguration>();

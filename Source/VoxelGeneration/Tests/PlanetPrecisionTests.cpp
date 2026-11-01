@@ -9,7 +9,7 @@
 #include "VoxelWorldConfiguration.h"
 #include "VoxelWorldModeFactory.h"
 #include "VoxelData.h"
-#include "VoxelPlanetNoise.h"
+#include "VoxelNoise.h"
 #include "VoxelClassicNoiseControl.h"
 #include "HAL/IConsoleManager.h"
 #include "Testing/VoxelTestScopedCVar.h"
@@ -26,7 +26,7 @@
 // corner. The reference is built from the same surface function (SampleRadialDisplacement); what it checks is how the
 // planet assembles R-sized quantities.
 //
-// WM-BP5 (Noise.SplitOrigin, Noise.PlanetHashNoPeriod): the planet noise (FVoxelPlanetNoise, D22) equals a double
+// WM-BP5 (Noise.SplitOrigin, Noise.PlanetHashNoPeriod): the planet noise (FVoxelNoise, D22) equals a double
 // reference to 1e-5 at origins up to 1e9 noise units, in its per-point form (the CPU) and its origin + offset form (the
 // GPU's algebra), and its hashed lattice repeats nowhere within 1e6 noise units, where the heightmap noise's 256-entry
 // table repeats every 256.
@@ -303,8 +303,8 @@ bool FVoxelNoiseSplitOriginTest::RunTest(const FString& Parameters)
 			{
 				const FVector Origin = RandomDirection() * Magnitude + FVector(Random.FRand(), Random.FRand(), Random.FRand()) * 3.0;
 				const FVector3f Offset(Random.FRandRange(-8.0f, 8.0f), Random.FRandRange(-8.0f, 8.0f), Random.FRandRange(-8.0f, 8.0f));
-				const float Split = FVoxelPlanetNoise::Sample(FVoxelPlanetNoise::Split(Origin, Types[t]), Offset, Types[t], 1337);
-				const double Reference = FVoxelPlanetNoise::ReferenceSample(Origin + FVector(Offset), Types[t], 1337);
+				const float Split = FVoxelNoise::Sample(FVoxelNoise::Split(Origin, Types[t]), Offset, Types[t], 1337);
+				const double Reference = FVoxelNoise::ReferenceSample(Origin + FVector(Offset), Types[t], 1337);
 				MaxError = FMath::Max(MaxError, FMath::Abs(static_cast<double>(Split) - Reference));
 			}
 			AddInfo(FString::Printf(TEXT("%s, origin at %.0e noise units: split + offset off the double reference by up to %.2e"), TypeNames[t], Magnitude, MaxError));
@@ -337,9 +337,9 @@ bool FVoxelNoiseSplitOriginTest::RunTest(const FString& Parameters)
 				const FVector Anchor = RandomDirection() * Radius;
 				const FVector3f Offset(Random.FRandRange(-2400.0f, 2400.0f), Random.FRandRange(-2400.0f, 2400.0f), Random.FRandRange(-2400.0f, 2400.0f));
 				const FVector Point = Anchor + FVector(Offset);
-				const double Reference = FVoxelPlanetNoise::ReferenceFBM3D(Point, Field.Value);
-				MaxPointError = FMath::Max(MaxPointError, FMath::Abs(FVoxelPlanetNoise::FBM3D(Point, Field.Value) - Reference));
-				MaxOffsetError = FMath::Max(MaxOffsetError, FMath::Abs(FVoxelPlanetNoise::FBM3D(Anchor, Offset, Field.Value) - Reference));
+				const double Reference = FVoxelNoise::ReferenceFBM3D(Point, Field.Value);
+				MaxPointError = FMath::Max(MaxPointError, FMath::Abs(FVoxelNoise::FBM3D(Point, Field.Value) - Reference));
+				MaxOffsetError = FMath::Max(MaxOffsetError, FMath::Abs(FVoxelNoise::FBM3D(Anchor, Offset, Field.Value) - Reference));
 			}
 			AddInfo(FString::Printf(TEXT("fBm %s at R %.1e: per point off by up to %.2e, anchor + offset by %.2e"), Field.Key, Radius, MaxPointError, MaxOffsetError));
 			TestTrue(*FString::Printf(TEXT("fBm %s at R %.1e per point: within 1e-5 (%.2e)"), Field.Key, Radius, MaxPointError), MaxPointError <= 1.0e-5);
@@ -391,8 +391,8 @@ bool FVoxelNoisePlanetHashNoPeriodTest::RunTest(const FString& Parameters)
 				for (int32 i = 0; i < 32; ++i)
 				{
 					const FVector P(Random.FRandRange(0.0, 1.0e6), Random.FRandRange(0.0, 1.0e6), Random.FRandRange(0.0, 1.0e6));
-					const float A = FVoxelPlanetNoise::Sample(FVoxelPlanetNoise::Split(P, Types[t]), FVector3f::ZeroVector, Types[t], 7);
-					const float B = FVoxelPlanetNoise::Sample(FVoxelPlanetNoise::Split(P + Axis * Shift, Types[t]), FVector3f::ZeroVector, Types[t], 7);
+					const float A = FVoxelNoise::Sample(FVoxelNoise::Split(P, Types[t]), FVector3f::ZeroVector, Types[t], 7);
+					const float B = FVoxelNoise::Sample(FVoxelNoise::Split(P + Axis * Shift, Types[t]), FVector3f::ZeroVector, Types[t], 7);
 					Mean += FMath::Abs(A - B) / 32.0;
 				}
 				if (Mean < WorstMean)
@@ -412,7 +412,7 @@ bool FVoxelNoisePlanetHashNoPeriodTest::RunTest(const FString& Parameters)
 	for (int32 i = 0; i < Count; ++i)
 	{
 		const FVector P(Random.FRandRange(-1.0e9, 1.0e9), Random.FRandRange(-1.0e9, 1.0e9), Random.FRandRange(-1.0e9, 1.0e9));
-		const double V = FVoxelPlanetNoise::Sample(FVoxelPlanetNoise::Split(P, EVoxelNoiseType::Simplex), FVector3f::ZeroVector, EVoxelNoiseType::Simplex, 3);
+		const double V = FVoxelNoise::Sample(FVoxelNoise::Split(P, EVoxelNoiseType::Simplex), FVector3f::ZeroVector, EVoxelNoiseType::Simplex, 3);
 		Sum += V;
 		SumSq += V * V;
 		MinV = FMath::Min(MinV, V);
@@ -482,7 +482,7 @@ namespace VoxelPlanetSimplexContinuity
 	{
 		double MaxStep = 0.0;       // |f(P + eN) - f(P - eN)|, double reference
 		double MaxSlopeJump = 0.0;  // |slope on the + side - slope on the - side|, double reference
-		double MaxFloatStep = 0.0;  // the step in the float split-origin form (FVoxelPlanetNoise::Simplex)
+		double MaxFloatStep = 0.0;  // the step in the float split-origin form (FVoxelNoise::Simplex)
 	};
 
 	/** The noise's behaviour across Count random boundary points of each kind. */
@@ -498,15 +498,15 @@ namespace VoxelPlanetSimplexContinuity
 			for (int32 i = 0; i < Count; ++i)
 			{
 				const FBoundaryPoint B = RandomBoundaryPoint(Random, Kind, 1000.0, bThroughOrigin);
-				auto F = [&](double T) { return FVoxelPlanetNoise::ReferenceSample(B.P + B.N * T, EVoxelNoiseType::Simplex, Seed); };
+				auto F = [&](double T) { return FVoxelNoise::ReferenceSample(B.P + B.N * T, EVoxelNoiseType::Simplex, Seed); };
 				Out.MaxStep = FMath::Max(Out.MaxStep, FMath::Abs(F(StepEps) - F(-StepEps)));
 				const double SlopePlus = (F(2.0 * SlopeEps) - F(SlopeEps)) / SlopeEps;
 				const double SlopeMinus = (F(-SlopeEps) - F(-2.0 * SlopeEps)) / SlopeEps;
 				Out.MaxSlopeJump = FMath::Max(Out.MaxSlopeJump, FMath::Abs(SlopePlus - SlopeMinus));
-				const FVoxelNoiseSplit Split = FVoxelPlanetNoise::Split(B.P, EVoxelNoiseType::Simplex);
+				const FVoxelNoiseSplit Split = FVoxelNoise::Split(B.P, EVoxelNoiseType::Simplex);
 				const FVector3f Offset = FVector3f(B.N) * FloatEps;
 				Out.MaxFloatStep = FMath::Max(Out.MaxFloatStep, static_cast<double>(FMath::Abs(
-					FVoxelPlanetNoise::Simplex(Split, Offset, Seed) - FVoxelPlanetNoise::Simplex(Split, -Offset, Seed))));
+					FVoxelNoise::Simplex(Split, Offset, Seed) - FVoxelNoise::Simplex(Split, -Offset, Seed))));
 			}
 		}
 		return Out;
@@ -569,7 +569,7 @@ bool FVoxelNoiseSimplexContinuousTest::RunTest(const FString& Parameters)
 		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Noise.ContinuousSimplex"), Kernel);
 		for (const FVector& P : Points)
 		{
-			Values[Kernel].Add(FVoxelPlanetNoise::ReferenceSample(P, EVoxelNoiseType::Simplex, 7));
+			Values[Kernel].Add(FVoxelNoise::ReferenceSample(P, EVoxelNoiseType::Simplex, 7));
 		}
 	}
 	double SumC = 0, SumN = 0, SumCC = 0, SumNN = 0, SumCN = 0, MaxAbsN = 0, MaxDiff = 0;

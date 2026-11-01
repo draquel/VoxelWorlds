@@ -92,7 +92,7 @@ Must match `EVoxelNoiseType` enum values.
 
 ### GPU Functions
 
-The classic GPU functions (`FBM3D`, its wrappers, `Cellular3D`, `Voronoi3D`) were deleted in CR1 (CORE-03); generation samples `PlanetFBM3D` (below).
+The classic GPU functions (`FBM3D`, its wrappers, `Cellular3D`, `Voronoi3D`) were deleted in CR1 (CORE-03); generation samples `NoiseFBM3D` (below).
 
 ## CPU Implementation
 
@@ -107,7 +107,7 @@ The classic GPU functions (`FBM3D`, its wrappers, `Cellular3D`, `Voronoi3D`) wer
 
 ```cpp
 // fBm with automatic noise type selection: the entry point every field samples. Since the world modes review's MP4
-// (decision D39) it is FVoxelPlanetNoise::FBM3D in every world mode (the section below).
+// (decision D39) it is FVoxelNoise::FBM3D in every world mode (the section below).
 static float FBM3D(const FVector& Position, const FVoxelNoiseParams& Params);
 
 // The classic table noise (Perlin3D, Simplex3D, Cellular3D, Voronoi3D, ClassicFBM3D) moved to the tests' VoxelClassicNoiseControl in CR1 (CORE-02).
@@ -115,8 +115,8 @@ static float FBM3D(const FVector& Position, const FVoxelNoiseParams& Params);
 
 ## GPU/CPU Consistency
 
-The GPU and the CPU sample the same noise with the same float operations in the same order (`FVoxelPlanetNoise` and
-`PlanetNoise.ush`, below). The CPU splits each sample point itself; the GPU splits a per-chunk origin and adds each
+The GPU and the CPU sample the same noise with the same float operations in the same order (`FVoxelNoise` and
+`VoxelNoise.ush`, below). The CPU splits each sample point itself; the GPU splits a per-chunk origin and adds each
 voxel's offset, so the two differ by float rounding only: the `VoxelWorlds.Generation.GPUvsCPU*Parity` tests hold every
 world mode's densities within 2 steps on 99% of the voxels and their materials, biomes and flags equal (the planet lines
 were within a few voxels since spherical Phase 6; the heightmap lines, bit-identical before MP4, are now of the same kind).
@@ -127,10 +127,10 @@ The classic shader files were deleted in CR1 (CORE-03); `VoxelNoiseCommon.ush` k
 
 The permutation noise above repeats its fine octaves every 256 noise units (the top terrain octave 61 times around
 `Review_Planet_L`'s equator, the continental frequency every ~120 km on a plane), and an absolute float position of size
-10^8 is 8 uu coarse. Every field of every world mode samples `FVoxelPlanetNoise` (`VoxelGeneration/VoxelPlanetNoise.h`;
-GPU: `Shaders/Private/PlanetNoise.ush`, the same float algebra; the name is from spherical Phase 6, when planets alone
-had it; heightmap worlds came through `FVoxelCPUNoiseGenerator::FBM3D` to it in the world modes review's MP4, decision
-D39, `GenerationVersion` 3):
+10^8 is 8 uu coarse. Every field of every world mode samples `FVoxelNoise` (`VoxelGeneration/VoxelNoise.h`;
+GPU: `Shaders/Private/VoxelNoise.ush`, the same float algebra; planets have sampled it since spherical Phase 6 and
+heightmap worlds through `FVoxelCPUNoiseGenerator::FBM3D` since the world modes review's MP4, decision D39,
+`GenerationVersion` 3; it was `FVoxelPlanetNoise` / `PlanetNoise.ush` until CR3):
 
 - **Hashed lattice:** the gradient or feature point of a lattice cell comes from an integer hash of the cell
   (`LatticeHash`, the ore `Rarity` hash's mixing), cells wrapping mod 2^32: no period
@@ -139,7 +139,7 @@ D39, `GenerationVersion` 3):
   the octave's frequency in double and split into an integer cell (`FVoxelNoiseSplit::Cell`) and a float fraction;
   simplex splits in its skewed lattice, the others in the cube lattice. The CPU splits each sample point itself
   (`FBM3D(Position, Params)`); the GPU gets one split origin per chunk and field (`NoiseOrigins`) and adds the
-  voxel's offset from the chunk's anchor (`PlanetFBM3D`): a planet's anchor is the chunk's centre on the datum sphere,
+  voxel's offset from the chunk's anchor (`NoiseFBM3D`): a planet's anchor is the chunk's centre on the datum sphere,
   a heightmap chunk's its origin corner (the 2D fields at (X, Y, 0), each cave layer at (X, Y, Z × VerticalScale), each
   ore at the corner through its streak map; `BuildNoiseOrigins` in `VoxelGPUNoiseGenerator.cpp`). Within 10^-5 of a
   double reference at origins up to 10^9 noise units (`VoxelWorlds.Noise.SplitOrigin`, `VoxelWorlds.Noise.HeightmapNoise`).
