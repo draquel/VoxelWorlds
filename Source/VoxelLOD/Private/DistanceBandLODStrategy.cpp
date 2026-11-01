@@ -139,7 +139,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	ColumnSurfaceCache.Reset();
 	if (bSurfaceSlabCulling)
 	{
-		SlabNoiseParams = WorldConfig->NoiseParams;
+		SlabNoiseParams = WorldConfig->GetNoiseParams();
 		bSlabHasWater = WorldConfig->bEnableWaterLevel;
 		SlabWaterLevel = WorldConfig->WaterLevel; // world Z, as the terrain's heights and generation's water are (G19)
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Surface slab ENABLED: every column keeps its surface ±%.1f chunks%s at every distance"),
@@ -218,7 +218,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		// The per-chunk slab (WM-BP8): the surface's altitude range over the cells a chunk's corners span, cells about a
 		// chunk across on the datum sphere.
 		bPlanetSlab = WorldConfig->bFarBandSurfaceSlabCulling;
-		SlabNoiseParams = WorldConfig->NoiseParams;
+		SlabNoiseParams = WorldConfig->GetNoiseParams();
 		PlanetSlabGrid = FVoxelCubeSphereGrid(FVoxelCubeSphereGrid::CellsPerEdgeFor(PlanetRadius, ChunkWorldSize));
 
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Shell culling enabled: Radius=%.0f, terrain %.0f to +%.0f (configured shell -%.0f to +%.0f)"),

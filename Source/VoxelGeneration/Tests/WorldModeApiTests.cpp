@@ -329,6 +329,37 @@ bool FWorldModeFingerprintTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("A different world mode does not match"), Base.Matches(Plane));
 	TestTrue(TEXT("The difference names the world mode"), Base.DescribeDifferences(Plane).StartsWith(TEXT("world mode IslandBowl vs InfinitePlane")));
 
+	// The meshing mode, the noise seed in use and the content (code review CR2, D-CR19 / D-CR20).
+	TestTrue(TEXT("Records the meshing mode"), Base.Shape.Contains(TEXT("MeshingMode=")));
+	Island->MeshingMode = Island->MeshingMode == EMeshingMode::Cubic ? EMeshingMode::DualContouring : EMeshingMode::Cubic;
+	TestFalse(TEXT("A different meshing mode does not match"), Base.Matches(FVoxelWorldModeFactory::MakeFingerprint(*Island)));
+	TestTrue(TEXT("The difference names the meshing mode"), Base.DescribeDifferences(FVoxelWorldModeFactory::MakeFingerprint(*Island)).StartsWith(TEXT("MeshingMode=")));
+	Island->MeshingMode = MakeConfig(EWorldMode::IslandBowl)->MeshingMode;
+	{
+		const int32 NoiseSeed = Island->NoiseParams.Seed;
+		const int32 WorldSeed = Island->WorldSeed;
+		Island->NoiseParams.Seed = 0;
+		Island->WorldSeed = 777;
+		TestEqual(TEXT("A noise seed of 0 is the world seed"), Island->GetNoiseParams().Seed, 777);
+		TestTrue(TEXT("The fingerprint records the seed in use"), FVoxelWorldModeFactory::MakeFingerprint(*Island).Shape.Contains(TEXT("NoiseSeed=777")));
+		Island->NoiseParams.Seed = 4325;
+		TestEqual(TEXT("A noise seed set on purpose is kept"), Island->GetNoiseParams().Seed, 4325);
+		TestTrue(TEXT("The fingerprint records the noise seed"), FVoxelWorldModeFactory::MakeFingerprint(*Island).Shape.Contains(TEXT("NoiseSeed=4325")));
+		Island->NoiseParams.Seed = NoiseSeed;
+		Island->WorldSeed = WorldSeed;
+	}
+	{
+		FVoxelWorldFingerprint WithContent = Base;
+		WithContent.Content = TEXT("POITypes=A,B,C");
+		FVoxelWorldFingerprint OtherContent = Base;
+		OtherContent.Content = TEXT("POITypes=A,C,B");
+		TestTrue(TEXT("Equal content matches"), WithContent.Matches(WithContent));
+		TestFalse(TEXT("Different content does not match"), WithContent.Matches(OtherContent));
+		TestFalse(TEXT("Content against none does not match"), WithContent.Matches(Base));
+		TestEqual(TEXT("The difference names the content term"), WithContent.DescribeDifferences(OtherContent), FString(TEXT("POITypes=A,B,C vs A,C,B")));
+		TestTrue(TEXT("ToString carries the content"), WithContent.ToString().EndsWith(TEXT(" {POITypes=A,B,C}")));
+	}
+
 	// Terrain tuning is not part of the fingerprint.
 	Island->HeightScale = 9000.0f;
 	TestTrue(TEXT("Terrain tuning does not change the fingerprint"), Base.Matches(FVoxelWorldModeFactory::MakeFingerprint(*Island)));

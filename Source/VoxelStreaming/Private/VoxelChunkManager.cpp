@@ -2222,7 +2222,7 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 
 		// Estimate the surface Z from the generator, used only to locate the column window + the
 		// near/far decision (whether the surface's chunk is loaded).
-		const float EstZ = static_cast<float>(WM->GetSurfaceOnUpLine(FVector(WorldPos.X, WorldPos.Y, 0.0), Configuration->NoiseParams).Position.Z);
+		const float EstZ = static_cast<float>(WM->GetSurfaceOnUpLine(FVector(WorldPos.X, WorldPos.Y, 0.0), Configuration->GetNoiseParams()).Position.Z);
 
 		const FVector RelEst = FVector(WorldPos.X, WorldPos.Y, EstZ) - Configuration->WorldOrigin;
 		const FIntVector EstChunk = FVoxelCoordinates::WorldToChunk(RelEst, ChunkSize, VoxelSize);
@@ -2456,10 +2456,10 @@ FVector UVoxelChunkManager::GetGeneratedSurfacePoint(const FVector& WorldPos) co
 		GatherConditioningZonesOnSphere(Direction, 0.0, Zones);
 		if (Zones.Num() > 0)
 		{
-			return Params.PlanetCenter + Direction * (Params.PlanetRadius + Planet.GetConditionedTerrainAltitude(Direction, Configuration->NoiseParams, Zones));
+			return Params.PlanetCenter + Direction * (Params.PlanetRadius + Planet.GetConditionedTerrainAltitude(Direction, Configuration->GetNoiseParams(), Zones));
 		}
 	}
-	return WM->GetSurfacePoint(WorldPos, Configuration->NoiseParams).Position;
+	return WM->GetSurfacePoint(WorldPos, Configuration->GetNoiseParams()).Position;
 }
 
 // ==================== Debug ====================
@@ -3080,7 +3080,7 @@ void UVoxelChunkManager::ApplyDescentPrefetch(FLODQueryContext& Context, float D
 	if (bPlanet)
 	{
 		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WorldMode);
-		SurfaceHeight = Configuration->WorldRadius + static_cast<double>(Planet.GetTerrainAltitude(Up, Configuration->NoiseParams));
+		SurfaceHeight = Configuration->WorldRadius + static_cast<double>(Planet.GetTerrainAltitude(Up, Configuration->GetNoiseParams()));
 		if (Configuration->bEnableWaterLevel)
 		{
 			SurfaceHeight = FMath::Max(SurfaceHeight, static_cast<double>(Configuration->WaterRadius));
@@ -3364,7 +3364,7 @@ void UVoxelChunkManager::BuildChunkGenerationRequest(const FIntVector& ChunkCoor
 	OutRequest.LODLevel = (Configuration->IsLODEnabled()) ? LODLevel : 0;
 	OutRequest.ChunkSize = Configuration->ChunkSize;
 	OutRequest.VoxelSize = Configuration->VoxelSize;
-	OutRequest.NoiseParams = Configuration->NoiseParams;
+	OutRequest.NoiseParams = Configuration->GetNoiseParams();
 	// World mode, origin, terrain params and the island / planet params, from the one builder (WM-A1).
 	FVoxelWorldModeFactory::FillGenerationRequest(*Configuration, OutRequest);
 
@@ -3425,7 +3425,7 @@ FVoxelTerrainSurfacePoint UVoxelChunkManager::GetSurfacePointAt(const FVector& W
 		Point.Position = WorldPos;
 		return Point;
 	}
-	return WorldMode->GetSurfacePoint(WorldPos, Configuration->NoiseParams);
+	return WorldMode->GetSurfacePoint(WorldPos, Configuration->GetNoiseParams());
 }
 
 bool UVoxelChunkManager::IsBlockSurface() const
@@ -3472,7 +3472,7 @@ bool UVoxelChunkManager::FindVoxelTreeAt(const FVector& WorldPos, FVoxelTreeInst
 
 	TArray<FVoxelTreeInstance> Candidates;
 	FVoxelTreeInjector::FindTreesWithTrunkAt(GlobalVoxel, Configuration->ChunkSize, VoxelSize, Configuration->WorldOrigin,
-		Configuration->WorldSeed, Configuration->TreeTemplates, Configuration->NoiseParams, *WorldMode, Configuration->TreeDensity,
+		Configuration->WorldSeed, Configuration->TreeTemplates, Configuration->GetNoiseParams(), *WorldMode, Configuration->TreeDensity,
 		Configuration->BiomeConfiguration, Configuration->bEnableWaterLevel, Configuration->WaterLevel, Candidates);
 
 	// The voxel must still be that tree's trunk block; where two trunks touch, the tree with more of its trunk left wins.
@@ -3522,7 +3522,7 @@ void UVoxelChunkManager::FindVoxelTreesNear(const FVector& WorldPos, float Radiu
 			TArray<int32> Templates;
 			TArray<uint32> Seeds;
 			FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), ChunkSize, VoxelSize, Configuration->WorldOrigin,
-				Configuration->WorldSeed, Configuration->NoiseParams, *WorldMode, Configuration->TreeDensity, Configuration->TreeTemplates,
+				Configuration->WorldSeed, Configuration->GetNoiseParams(), *WorldMode, Configuration->TreeDensity, Configuration->TreeTemplates,
 				Configuration->BiomeConfiguration, Configuration->bEnableWaterLevel, Configuration->WaterLevel, Positions, Templates, Seeds);
 			for (int32 i = 0; i < Positions.Num(); ++i)
 			{
@@ -3872,7 +3872,7 @@ uint8 UVoxelChunkManager::ResolveFarSeabedMaterial(const FIslandBowlParams& Isla
 		{
 			uint8 Biome = 0;
 			FVoxelSurfaceQuery::QuerySurfaceConditions(P.X, P.Y, Height, Configuration->VoxelSize, Snapshot,
-				Configuration->NoiseParams.Seed, Configuration->bEnableWaterLevel, Configuration->WaterLevel, Material, Biome);
+				Configuration->GetNoiseParams().Seed, Configuration->bEnableWaterLevel, Configuration->WaterLevel, Material, Biome);
 		}
 		else if (WorldMode)
 		{
@@ -4554,7 +4554,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 		const FSphericalPlanetWorldMode* Planet = WorldMode.IsValid() && WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet
 			? static_cast<const FSphericalPlanetWorldMode*>(WorldMode.Get()) : nullptr;
 		FarFieldGroundRadius = Settings.Radius + (Planet && !Direction.IsNearlyZero()
-			? static_cast<double>(Planet->GetTerrainAltitude(Direction, Configuration->NoiseParams)) : 0.0);
+			? static_cast<double>(Planet->GetTerrainAltitude(Direction, Configuration->GetNoiseParams())) : 0.0);
 		FarFieldGroundViewer = ViewerPosition;
 	}
 	View.GroundRadius = FarFieldGroundRadius;
@@ -4925,7 +4925,7 @@ float UVoxelChunkManager::GetGeneratedColumnHeight(double WorldX, double WorldY)
 	{
 		GatherConditioningZonesForPoint(WorldX, WorldY, Zones);
 	}
-	return static_cast<float>(FVoxelSurfaceQuery::GetGeneratedSurface(*WM, FVector(WorldX, WorldY, 0.0), Configuration->NoiseParams,
+	return static_cast<float>(FVoxelSurfaceQuery::GetGeneratedSurface(*WM, FVector(WorldX, WorldY, 0.0), Configuration->GetNoiseParams(),
 		Zones.Num() > 0 ? &Zones : nullptr).Position.Z);
 }
 
@@ -4956,7 +4956,7 @@ bool UVoxelChunkManager::QuerySurfacePoint(const FVector& WorldPos, EVoxelSurfac
 		}
 	}
 	const FVoxelBiomeSnapshot Snapshot = FVoxelBiomeSnapshot::FromConfig(Configuration->BiomeConfiguration);
-	OutSample = FVoxelSurfaceQuery::SampleSurfacePoint(*WM, WorldPos, Configuration->VoxelSize, Configuration->NoiseParams, Snapshot,
+	OutSample = FVoxelSurfaceQuery::SampleSurfacePoint(*WM, WorldPos, Configuration->VoxelSize, Configuration->GetNoiseParams(), Snapshot,
 		GetSeaSurface(), Zones.Num() > 0 ? &Zones : nullptr);
 	if (Layer == EVoxelSurfaceLayer::Generated && IsBlockSurface())
 	{
@@ -5027,7 +5027,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 		CapturedTreeDensity = Configuration->TreeDensity;
 		CapturedWorldSeed = Configuration->WorldSeed;
 		CapturedWorldOrigin = Configuration->WorldOrigin;
-		CapturedNoiseParams = Configuration->NoiseParams;
+		CapturedNoiseParams = Configuration->GetNoiseParams();
 		WorldModePtr = WorldMode.Get(); // Raw ptr, same lifetime as NoiseGenerator
 		CapturedBiomeConfig = Configuration->BiomeConfiguration;
 		CapturedEnableWaterLevel = Configuration->bEnableWaterLevel;
@@ -5278,7 +5278,7 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 	const float CapturedTreeDensity = Configuration->TreeDensity;
 	const int32 CapturedWorldSeed = Configuration->WorldSeed;
 	const FVector CapturedWorldOrigin = Configuration->WorldOrigin;
-	const FVoxelNoiseParams CapturedNoiseParams = Configuration->NoiseParams;
+	const FVoxelNoiseParams CapturedNoiseParams = Configuration->GetNoiseParams();
 	IVoxelWorldMode* WorldModePtr = WorldMode.Get(); // Raw ptr, same lifetime as NoiseGenerator
 	UVoxelBiomeConfiguration* CapturedBiomeConfig = Configuration->BiomeConfiguration;
 	const bool CapturedEnableWaterLevel = Configuration->bEnableWaterLevel;

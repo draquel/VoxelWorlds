@@ -31,7 +31,7 @@ FVoxelFieldSampleContext FVoxelFieldSampleContext::FromConfiguration(const UVoxe
 		return Ctx;
 	}
 
-	Ctx.NoiseParams = Config->NoiseParams;
+	Ctx.NoiseParams = Config->GetNoiseParams();
 	Ctx.VoxelSize = Config->VoxelSize;
 	Ctx.WorldOrigin = Config->WorldOrigin;
 	Ctx.bEnableBiomes = Config->bEnableBiomes;

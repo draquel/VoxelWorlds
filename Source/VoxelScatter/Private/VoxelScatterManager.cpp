@@ -3097,7 +3097,7 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 	Context.WorldMode = WorldMode;
 	if (Configuration)
 	{
-		Context.NoiseParams = Configuration->NoiseParams;
+		Context.NoiseParams = Configuration->GetNoiseParams();
 		Context.Sea = FVoxelSeaSurface::FromConfig(*Configuration); // bEnabled follows bEnableWaterLevel
 		// The voxels a chunk's extraction reads past its own data are carved as generation carves them (G28, G72).
 		Context.CaveConfiguration = Configuration->bEnableCaves ? Configuration->CaveConfiguration.Get() : nullptr;

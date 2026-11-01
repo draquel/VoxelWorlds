@@ -280,6 +280,24 @@ public:
 	FVoxelNoiseParams NoiseParams;
 
 	/**
+	 * The noise parameters generation and every query use: NoiseParams, its Seed replaced by WorldSeed when it is 0 (the
+	 * field's documented meaning, "0 = use world seed"; code review CR2, D-CR19: one seed). Every reader of a
+	 * configuration's noise goes through this (the chunk manager, the LOD slab, the far field, scatter, the map, PCG, the
+	 * POIs); a configuration that sets a noise seed of its own keeps it, and the fingerprint records the seed in use.
+	 * @return The effective noise parameters
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|Noise")
+	FVoxelNoiseParams GetNoiseParams() const
+	{
+		FVoxelNoiseParams Params = NoiseParams;
+		if (Params.Seed == 0)
+		{
+			Params.Seed = WorldSeed;
+		}
+		return Params;
+	}
+
+	/**
 	 * Use GPU compute shaders for terrain generation (true) or CPU fallback (false), in every world mode: spherical
 	 * planets generate on the GPU since spherical Phase 2 (ShouldUseGPUGeneration; SPHERICAL_PLANET_REQUIREMENTS.md
 	 * SP-B4).
