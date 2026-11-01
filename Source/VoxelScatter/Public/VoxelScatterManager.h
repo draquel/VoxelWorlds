@@ -235,7 +235,7 @@ public:
 	 * Get read-only access to the scatter data cache.
 	 * Used by the renderer to iterate all cached scatter data during rebuilds.
 	 */
-	const TMap<FIntVector, FChunkScatterData>& GetScatterDataCache() const { return ScatterDataCache; }
+	const TMap<FIntVector, FChunkScatterData>& GetSpawnCache() const { return SpawnCache; }
 
 	/**
 	 * Chunks handed off with every scatter type out of range and so not extracted yet (world modes review G79): the
@@ -442,10 +442,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
 	int32 GetPendingGenerationCount() const { return PendingGenerationQueue.Num() + AsyncScatterInProgress.Num(); }
 
-	// ==================== Mesh Data Callback ====================
+	// ==================== The hand-off ====================
 
 	/**
-	 * Called when a chunk's mesh is ready (the chunk manager's hand-off, before the mesh goes to the renderer).
+	 * The chunk manager hands a chunk's voxels to scatter (at a mesh submit, before the mesh goes to the renderer, or
+	 * on request; OnChunkMeshDataReady until CR3, SCAT-26: it takes no mesh).
 	 * Queues surface extraction and scatter generation from the chunk's voxels, which are full resolution whatever the
 	 * mesh's LOD, so a chunk's scatter does not depend on the LOD it was meshed at. The mesh itself is not read: it has
 	 * no vertex in the cells along the chunk's max faces, which belong to its seams (world modes review G27).
@@ -455,7 +456,7 @@ public:
 	 * @param ChunkSize Number of voxels per edge
 	 * @param VoxelSize World-space size of each voxel
 	 */
-	void OnChunkMeshDataReady(const FIntVector& ChunkCoord, const TArray<FVoxelData>& VoxelData, int32 ChunkSize, float VoxelSize);
+	void HandOffChunkVoxels(const FIntVector& ChunkCoord, const TArray<FVoxelData>& VoxelData, int32 ChunkSize, float VoxelSize);
 
 	/**
 	 * Called when a chunk is unloaded.
@@ -611,7 +612,7 @@ public:
 
 	/**
 	 * How to hand a chunk off again (the chunk manager's HandOffChunkScatter: its edit-merged voxels through
-	 * OnChunkMeshDataReady), for a chunk whose hand-off found every type out of range (world modes review G79). A chunk
+	 * HandOffChunkVoxels), for a chunk whose hand-off found every type out of range (world modes review G79). A chunk
 	 * is handed off only when it submits a mesh, and while walking every chunk arrives at the window's front beyond every
 	 * spawn distance, so without this its scatter waited for its next mesh, the LOD refine near the viewer, and popped
 	 * there. The distance pass calls it on the game thread for the chunks awaiting their first extraction that have come
@@ -774,10 +775,10 @@ protected:
 	// ==================== Data Caches ====================
 
 	/** Per-chunk surface data cache */
-	TMap<FIntVector, FChunkSurfaceData> SurfaceDataCache;
+	TMap<FIntVector, FChunkSurfaceData> SurfaceCache;
 
 	/** Per-chunk scatter data cache */
-	TMap<FIntVector, FChunkScatterData> ScatterDataCache;
+	TMap<FIntVector, FChunkScatterData> SpawnCache;
 
 	/** Per-chunk list of cleared volumes from player edits */
 	TMap<FIntVector, TArray<FClearedScatterVolume>> ClearedVolumesPerChunk;
@@ -829,7 +830,7 @@ protected:
 	 * The voxel over the top layer is the chunk above's: the context's GetVoxelOutsideChunk (solid: the top voxel is
 	 * no surface and the column below it is covered, world modes review G26; at any depth, caves included, G28).
 	 */
-	static void ExtractSurfacePointsFromVoxelData(
+	static void ExtractSurfacePointsByColumn(
 		const TArray<FVoxelData>& VoxelData,
 		const FIntVector& ChunkCoord,
 		const FVector& ChunkWorldOrigin,
@@ -842,7 +843,7 @@ protected:
 
 
 	/**
-	 * ExtractSurfacePointsFromVoxelData on a planet (spherical SP-G1; world modes review G31): the column scan's columns
+	 * ExtractSurfacePointsByColumn on a planet (spherical SP-G1; world modes review G31): the column scan's columns
 	 * are the planet's radial lines, one through the centre of each cell of the cube-sphere grid at the point spacing
 	 * (FVoxelCubeSphereGrid, Stride voxels per cell on the datum sphere), the same lattice for every chunk. Down each ray
 	 * through the chunk the density is the trilinear interpolation of the voxels (sampled in the cells whose corners change
@@ -856,7 +857,7 @@ protected:
 	 * point over the column scan's per point, so the weighted density per area is the column scan's. The async pipeline
 	 * calls it for planet chunks.
 	 */
-	static void ExtractSurfacePointsAlongUp(
+	static void ExtractSurfacePointsByRay(
 		const TArray<FVoxelData>& VoxelData,
 		const FIntVector& ChunkCoord,
 		const FVector& ChunkWorldOrigin,
@@ -871,9 +872,9 @@ protected:
 	 * Extract surface points using block-face snapping (cubic terrain).
 	 * Positions snap to block face centers instead of interpolated positions.
 	 * One point per exposed top face, normal is always up, no interpolation.
-	 * The block over the top layer is decided as in ExtractSurfacePointsFromVoxelData (G26).
+	 * The block over the top layer is decided as in ExtractSurfacePointsByColumn (G26).
 	 */
-	static void ExtractSurfacePointsCubic(
+	static void ExtractSurfacePointsByBlockTop(
 		const TArray<FVoxelData>& VoxelData,
 		const FIntVector& ChunkCoord,
 		const FVector& ChunkWorldOrigin,

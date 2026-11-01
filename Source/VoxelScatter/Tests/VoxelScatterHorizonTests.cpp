@@ -120,7 +120,7 @@ namespace VoxelScatterHorizonTestUtils
 					++RequestsForUnloaded;
 					return false;
 				}
-				Manager->OnChunkMeshDataReady(Coord, MakeChunk(Coord), ChunkSize, VoxelSize);
+				Manager->HandOffChunkVoxels(Coord, MakeChunk(Coord), ChunkSize, VoxelSize);
 				return true;
 			});
 		}
@@ -131,7 +131,7 @@ namespace VoxelScatterHorizonTestUtils
 		void Load(const FIntVector& Coord)
 		{
 			Loaded.Add(Coord);
-			Manager->OnChunkMeshDataReady(Coord, MakeChunk(Coord), ChunkSize, VoxelSize);
+			Manager->HandOffChunkVoxels(Coord, MakeChunk(Coord), ChunkSize, VoxelSize);
 		}
 
 		void Unload(const FIntVector& Coord)

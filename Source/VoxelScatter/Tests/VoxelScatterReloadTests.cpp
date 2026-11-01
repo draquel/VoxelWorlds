@@ -26,7 +26,7 @@
 // not cached again, so the distance spawn and the audits skipped it, and anything that re-renders a chunk from the cache
 // (a cleared radius, an exclusion volume, a harvest) put two instances on every point.
 //
-// Through the scatter manager's own pipeline (OnChunkMeshDataReady -> async extraction -> Update), on a tilted heightmap
+// Through the scatter manager's own pipeline (HandOffChunkVoxels -> async extraction -> Update), on a tilted heightmap
 // plane of grass and dirt and the test definitions (grass, rocks, trees with a SpawnDistance) given an engine mesh so
 // the renderer holds real instances:
 // - SameAsFresh: four chunks; one unloads and reloads three times. After each unload neither cache nor the renderer holds
@@ -136,7 +136,7 @@ namespace VoxelScatterReloadTestUtils
 		void Update() { Manager->Update(Viewer, 0.05f); }
 
 		/** Submit a chunk as if its mesh just arrived (the viewer's distance decides which definitions run). */
-		void Submit(const FIntVector& Coord) { Manager->OnChunkMeshDataReady(Coord, MakeChunk(Coord), ChunkSize, VoxelSize); }
+		void Submit(const FIntVector& Coord) { Manager->HandOffChunkVoxels(Coord, MakeChunk(Coord), ChunkSize, VoxelSize); }
 
 		/** Move the viewer, and pump until the extractions are done and the distance spawn and the renderer's adds have had a second. */
 		void Settle(const FVector& InViewer)

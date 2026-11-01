@@ -20,7 +20,7 @@
 // ---------------------------------------------------------------------------
 // Spherical Phase 4: scatter along local up (WORLD_MODES_REVIEW_PLAN.md §18, WM-SY6; SP-G1). Real planet chunks from
 // the CPU generator (a 250,000 uu planet like Review_Planet, voxel 75, chunk 32), extracted by
-// UVoxelScatterManager::ExtractSurfacePointsAlongUp at the poles, 45 degrees, the equator and a cube corner.
+// UVoxelScatterManager::ExtractSurfacePointsByRay at the poles, 45 degrees, the equator and a cube corner.
 //
 // - AlongLocalUp: the open points lie on the analytic surface along their direction; local up is radial; slope and
 //   face type are measured against it; an instance not aligned to the normal stands on local up.

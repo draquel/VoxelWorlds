@@ -143,7 +143,7 @@ namespace VoxelScatterHorizonStreamingTestUtils
 			}
 		}
 		// A chunk keeps its surface and scatter cache until it unloads (7,200 here); past the release distance it holds no spawn point
-		for (const auto& Pair : Scatter->GetScatterDataCache())
+		for (const auto& Pair : Scatter->GetSpawnCache())
 		{
 			++R.CachedChunks;
 			R.SpawnedBeyondRelease += (Pair.Value.SpawnPoints.Num() > 0 && DistanceOf(Pair.Key) > Release) ? 1 : 0;

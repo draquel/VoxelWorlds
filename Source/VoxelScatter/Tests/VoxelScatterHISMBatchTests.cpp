@@ -127,7 +127,7 @@ namespace VoxelScatterHISMBatchTestUtils
 
 		void Update() { Manager->Update(Viewer, 0.05f); }
 
-		void Submit(const FIntVector& Coord) { Manager->OnChunkMeshDataReady(Coord, MakeChunk(Coord), ChunkSize, VoxelSize); }
+		void Submit(const FIntVector& Coord) { Manager->HandOffChunkVoxels(Coord, MakeChunk(Coord), ChunkSize, VoxelSize); }
 
 		/** Move the viewer, pump until the extractions are done and the distance spawn and the renderer have run, then land held writes. */
 		void Settle(const FVector& InViewer)

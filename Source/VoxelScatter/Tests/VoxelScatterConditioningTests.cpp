@@ -31,7 +31,7 @@
 // - FilledPad: a cave pocket at the top of the chunk under the raised pad (its roof the chunk above): its floor and the
 //   chunk's top face are underground. Against the natural height that chunk was a surface chunk, so its floor and the
 //   sheet of points on its top face (inside the rock) were open surface.
-// - ManagerWiring: through the scatter manager's own pipeline (OnChunkMeshDataReady -> the extraction context built
+// - ManagerWiring: through the scatter manager's own pipeline (HandOffChunkVoxels -> the extraction context built
 //   with the conditioning gatherer), a cut chunk keeps its ground as surface; with no gatherer it is buried.
 // ---------------------------------------------------------------------------
 
@@ -162,7 +162,7 @@ namespace VoxelScatterConditioningTestUtils
 		/** Submit a chunk as if its mesh just arrived and pump until its surface data is cached. */
 		const FChunkSurfaceData* Run(const FIntVector& Coord, const TArray<FVoxelData>& Voxels)
 		{
-			Manager->OnChunkMeshDataReady(Coord, Voxels, ChunkSize, VoxelSize);
+			Manager->HandOffChunkVoxels(Coord, Voxels, ChunkSize, VoxelSize);
 			const double Deadline = FPlatformTime::Seconds() + 15.0;
 			while (FPlatformTime::Seconds() < Deadline)
 			{

@@ -107,7 +107,7 @@ namespace
 		}));
 
 	/**
-	 * A planet chunk's density for ExtractSurfacePointsAlongUp's radial rays (world modes review G31), on the voxel lattice
+	 * A planet chunk's density for ExtractSurfacePointsByRay's radial rays (world modes review G31), on the voxel lattice
 	 * 0..ChunkSize on each axis: its own voxels, and past its +X, +Y and +Z faces (index ChunkSize) the voxel the planet
 	 * generator makes there with the neighbour's edit (FScatterExtractionContext::GetVoxelOutsideChunk), computed the
 	 * first time a ray needs it. Cell (I, J, K) spans voxels I..I+1 on each axis; the chunk owns cells 0..ChunkSize-1, so
@@ -301,8 +301,8 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 	WorldSeed = Config->WorldSeed;
 
 	// Clear any existing data
-	SurfaceDataCache.Empty();
-	ScatterDataCache.Empty();
+	SurfaceCache.Empty();
+	SpawnCache.Empty();
 	ScatterDefinitions.Empty();
 
 	// Load scatter definitions from configuration asset if available
@@ -482,8 +482,8 @@ void UVoxelScatterManager::Shutdown()
 	DeferredSupplementalPasses.Empty();
 
 	// Clear all cached data
-	SurfaceDataCache.Empty();
-	ScatterDataCache.Empty();
+	SurfaceCache.Empty();
+	SpawnCache.Empty();
 	CompletedScatterTypes.Empty();
 	ScatterDefinitions.Empty();
 	ChunksAwaitingFirstExtraction.Empty();
@@ -600,12 +600,12 @@ const FScatterDefinition* UVoxelScatterManager::GetScatterDefinition(int32 Scatt
 
 const FChunkScatterData* UVoxelScatterManager::GetChunkScatterData(const FIntVector& ChunkCoord) const
 {
-	return ScatterDataCache.Find(ChunkCoord);
+	return SpawnCache.Find(ChunkCoord);
 }
 
 const FChunkSurfaceData* UVoxelScatterManager::GetChunkSurfaceData(const FIntVector& ChunkCoord) const
 {
-	return SurfaceDataCache.Find(ChunkCoord);
+	return SurfaceCache.Find(ChunkCoord);
 }
 
 const UVoxelScatterRenderer* UVoxelScatterManager::GetScatterRenderer() const
@@ -615,13 +615,13 @@ const UVoxelScatterRenderer* UVoxelScatterManager::GetScatterRenderer() const
 
 bool UVoxelScatterManager::HasScatterData(const FIntVector& ChunkCoord) const
 {
-	const FChunkScatterData* Data = ScatterDataCache.Find(ChunkCoord);
+	const FChunkScatterData* Data = SpawnCache.Find(ChunkCoord);
 	return Data && Data->bIsValid;
 }
 
 // ==================== Mesh Data Callback ====================
 
-void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, const TArray<FVoxelData>& VoxelData,
+void UVoxelScatterManager::HandOffChunkVoxels(const FIntVector& ChunkCoord, const TArray<FVoxelData>& VoxelData,
 	int32 ChunkSize, float VoxelSize)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_OnChunkMeshDataReady);
@@ -688,8 +688,8 @@ void UVoxelScatterManager::OnChunkMeshDataReady(const FIntVector& ChunkCoord, co
 	{
 		// Every type out of range and nothing cached: the chunk arrived at the window's front (G79). The distance pass hands
 		// it off again once it comes within the scatter horizon, so its scatter does not wait for its next mesh.
-		if (CVarVoxelScatterFirstExtractionAtHorizon.GetValueOnGameThread() != 0 && !SurfaceDataCache.Contains(ChunkCoord)
-			&& !ScatterDataCache.Contains(ChunkCoord) && !AsyncScatterInProgress.Contains(ChunkCoord) && !PendingQueueSet.Contains(ChunkCoord)
+		if (CVarVoxelScatterFirstExtractionAtHorizon.GetValueOnGameThread() != 0 && !SurfaceCache.Contains(ChunkCoord)
+			&& !SpawnCache.Contains(ChunkCoord) && !AsyncScatterInProgress.Contains(ChunkCoord) && !PendingQueueSet.Contains(ChunkCoord)
 			&& ChunkDistance > GetScatterHorizon())
 		{
 			ChunksAwaitingFirstExtraction.Add(ChunkCoord);
@@ -831,10 +831,10 @@ void UVoxelScatterManager::RegenerateChunkScatter(const FIntVector& ChunkCoord)
 	// RemoveChunkScatter (used on unload), which blinks the chunk's scatter out until async
 	// re-extraction repopulates it. Stale in-flight results are dropped by the completion paths'
 	// AsyncScatterInProgress / cache checks (both cleared above).
-	SurfaceDataCache.Remove(ChunkCoord);
-	ScatterDataCache.Remove(ChunkCoord);
+	SurfaceCache.Remove(ChunkCoord);
+	SpawnCache.Remove(ChunkCoord);
 
-	// Regeneration requires new mesh data - the caller should provide it via OnChunkMeshDataReady
+	// Regeneration requires new mesh data - the caller should provide it via HandOffChunkVoxels
 	UE_LOG(LogVoxelScatter, Verbose, TEXT("Regenerate scatter requested for chunk (%d,%d,%d) - awaiting new mesh data"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z);
 }
@@ -859,7 +859,7 @@ void UVoxelScatterManager::ClearScatterInRadius(const FVector& WorldPosition, fl
 		// Scrub cached surface points inside the radius so distance streaming
 		// can't resurrect scatter here from pre-edit surface data (placement
 		// never consults cleared volumes; the cache must not contain them)
-		if (FChunkSurfaceData* SurfaceData = SurfaceDataCache.Find(ChunkCoord))
+		if (FChunkSurfaceData* SurfaceData = SurfaceCache.Find(ChunkCoord))
 		{
 			SurfaceData->SurfacePoints.RemoveAll([&WorldPosition, RadiusSq](const FVoxelSurfacePoint& Point)
 			{
@@ -869,7 +869,7 @@ void UVoxelScatterManager::ClearScatterInRadius(const FVector& WorldPosition, fl
 
 		// Remove spawn points that fall within the radius
 		TSet<int32> AffectedTypes;
-		FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
+		FChunkScatterData* ScatterData = SpawnCache.Find(ChunkCoord);
 		if (ScatterData && ScatterData->bIsValid)
 		{
 			for (int32 i = ScatterData->SpawnPoints.Num() - 1; i >= 0; --i)
@@ -1083,7 +1083,7 @@ void UVoxelScatterManager::ClearSpawnPointsInExclusionVolume(const FScatterExclu
 
 	ForEachChunkInBounds(Volume.GetWorldBounds(), [&](const FIntVector& ChunkCoord)
 	{
-		FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
+		FChunkScatterData* ScatterData = SpawnCache.Find(ChunkCoord);
 		if (!ScatterData || !ScatterData->bIsValid)
 		{
 			return;
@@ -1126,7 +1126,7 @@ void UVoxelScatterManager::QueueExclusionRegrowForBounds(const FBox& Bounds)
 		// Only chunks with cached surface data can regrow in place. Anything else
 		// (unloaded, awaiting re-mesh) regenerates naturally on its next fresh pass,
 		// which consults the current volume set anyway.
-		if (SurfaceDataCache.Contains(ChunkCoord))
+		if (SurfaceCache.Contains(ChunkCoord))
 		{
 			PendingExclusionRegrow.Add(ChunkCoord);
 		}
@@ -1211,7 +1211,7 @@ void UVoxelScatterManager::ProcessPendingExclusionRegrow()
 			continue;
 		}
 
-		const FChunkSurfaceData* Surface = SurfaceDataCache.Find(ChunkCoord);
+		const FChunkSurfaceData* Surface = SurfaceCache.Find(ChunkCoord);
 		if (!Surface || !Surface->bIsValid || Surface->SurfacePoints.Num() == 0)
 		{
 			// Surface cache gone (chunk unloaded or a regenerate dropped it) — the next fresh
@@ -1233,7 +1233,7 @@ void UVoxelScatterManager::ProcessPendingExclusionRegrow()
 		// ProcessCompletedAsyncScatter (full replace via the smooth UpdateChunkInstances path)
 		// instead of appending. Rendered instances stay up until the result swaps them per type.
 		CompletedScatterTypes.Remove(ChunkCoord);
-		ScatterDataCache.Remove(ChunkCoord);
+		SpawnCache.Remove(ChunkCoord);
 		AsyncScatterInProgress.Add(ChunkCoord);
 
 		FChunkSurfaceData SurfaceCopy = *Surface;
@@ -1326,7 +1326,7 @@ void UVoxelScatterManager::DrawDebugVisualization(UWorld* World) const
 	}
 
 	// Draw spawn points for each chunk
-	for (const auto& Pair : ScatterDataCache)
+	for (const auto& Pair : SpawnCache)
 	{
 		const FChunkScatterData& Data = Pair.Value;
 		if (!Data.bIsValid)
@@ -1362,15 +1362,15 @@ int64 UVoxelScatterManager::GetTotalMemoryUsage() const
 	int64 Total = sizeof(UVoxelScatterManager);
 
 	// Surface data cache
-	Total += SurfaceDataCache.GetAllocatedSize();
-	for (const auto& Pair : SurfaceDataCache)
+	Total += SurfaceCache.GetAllocatedSize();
+	for (const auto& Pair : SurfaceCache)
 	{
 		Total += Pair.Value.GetAllocatedSize();
 	}
 
 	// Scatter data cache
-	Total += ScatterDataCache.GetAllocatedSize();
-	for (const auto& Pair : ScatterDataCache)
+	Total += SpawnCache.GetAllocatedSize();
+	for (const auto& Pair : SpawnCache)
 	{
 		Total += Pair.Value.GetAllocatedSize();
 	}
@@ -1410,17 +1410,17 @@ int64 UVoxelScatterManager::GetTotalMemoryUsage() const
 FScatterStatistics UVoxelScatterManager::GetStatistics() const
 {
 	FScatterStatistics Stats;
-	Stats.ChunksWithScatter = ScatterDataCache.Num();
+	Stats.ChunksWithScatter = SpawnCache.Num();
 	Stats.TotalHISMInstances = (ScatterRenderer && ScatterRenderer->IsInitialized()) ? ScatterRenderer->GetTotalInstanceCount() : 0;
 	Stats.TotalSurfacePoints = TotalSurfacePointsExtracted;
 	Stats.TotalSpawnPoints = TotalSpawnPointsGenerated;
 
 	// Calculate memory usage
-	for (const auto& Pair : SurfaceDataCache)
+	for (const auto& Pair : SurfaceCache)
 	{
 		Stats.SurfaceDataMemory += Pair.Value.GetAllocatedSize();
 	}
-	for (const auto& Pair : ScatterDataCache)
+	for (const auto& Pair : SpawnCache)
 	{
 		Stats.ScatterDataMemory += Pair.Value.GetAllocatedSize();
 	}
@@ -1493,8 +1493,8 @@ void UVoxelScatterManager::RemoveChunkScatter(const FIntVector& ChunkCoord)
 	// Both caches, always (world modes review G30): with the two removals joined by a short-circuit ||, a chunk with
 	// surface data kept its spawn points cached after unloading, and its next extraction was taken for a supplemental
 	// pass (spawn points appended to the stale ones, the surface data not cached again).
-	const bool bHadSurface = SurfaceDataCache.Remove(ChunkCoord) > 0;
-	const bool bHadScatter = ScatterDataCache.Remove(ChunkCoord) > 0;
+	const bool bHadSurface = SurfaceCache.Remove(ChunkCoord) > 0;
+	const bool bHadScatter = SpawnCache.Remove(ChunkCoord) > 0;
 	if (bHadSurface || bHadScatter)
 	{
 		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Scatter data removed"),
@@ -1672,7 +1672,7 @@ void UVoxelScatterManager::ProcessDeferredFirstExtractions()
 		{
 			break;
 		}
-		// The hand-off runs OnChunkMeshDataReady, which queues the extraction and takes the chunk out of the set; a chunk
+		// The hand-off runs HandOffChunkVoxels, which queues the extraction and takes the chunk out of the set; a chunk
 		// without voxel data any more is dropped.
 		ChunksAwaitingFirstExtraction.Remove(Candidate.ChunkCoord);
 		++TotalDeferredFirstExtractions;
@@ -1700,7 +1700,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 	// have nothing cached yet)
 	ProcessDeferredFirstExtractions();
 
-	if (SurfaceDataCache.Num() == 0)
+	if (SurfaceCache.Num() == 0)
 	{
 		return;
 	}
@@ -1742,7 +1742,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 	// --- Out-of-range cleanup pass ---
 	// For types beyond SpawnDistance * (1 + hysteresis):
 	// 1. Clear from CompletedScatterTypes (allows regeneration on return)
-	// 2. Remove spawn points from ScatterDataCache (prevents data bloat)
+	// 2. Remove spawn points from SpawnCache (prevents data bloat)
 	// 3. Release instances in renderer (zero-scaled, returned to pool — no flicker)
 
 	for (auto& CompletedPair : CompletedScatterTypes)
@@ -1785,7 +1785,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 		}
 
 		// Remove spawn points for these types from the scatter data cache
-		FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
+		FChunkScatterData* ScatterData = SpawnCache.Find(ChunkCoord);
 		if (ScatterData && ScatterData->bIsValid)
 		{
 			TSet<int32> TypeIDSet(TypesToRemove);
@@ -1813,7 +1813,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 	};
 	TArray<FSpawnCandidate> Candidates;
 
-	for (const auto& Pair : SurfaceDataCache)
+	for (const auto& Pair : SurfaceCache)
 	{
 		const FIntVector& ChunkCoord = Pair.Key;
 		const FChunkSurfaceData& SurfaceData = Pair.Value;
@@ -1896,7 +1896,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 			break;
 		}
 
-		const FChunkSurfaceData* SurfaceData = SurfaceDataCache.Find(Candidate.ChunkCoord);
+		const FChunkSurfaceData* SurfaceData = SurfaceCache.Find(Candidate.ChunkCoord);
 		if (!SurfaceData)
 		{
 			continue;
@@ -1978,7 +1978,7 @@ void UVoxelScatterManager::ProcessCompletedDistanceStream()
 		}
 
 		// Discard if chunk was unloaded while async was in-flight
-		if (!SurfaceDataCache.Contains(Result.ChunkCoord))
+		if (!SurfaceCache.Contains(Result.ChunkCoord))
 		{
 			continue;
 		}
@@ -1996,14 +1996,14 @@ void UVoxelScatterManager::ProcessCompletedDistanceStream()
 		}
 
 		// Append to scatter data cache
-		FChunkScatterData* ExistingScatter = ScatterDataCache.Find(Result.ChunkCoord);
+		FChunkScatterData* ExistingScatter = SpawnCache.Find(Result.ChunkCoord);
 		if (ExistingScatter && ExistingScatter->bIsValid)
 		{
 			ExistingScatter->SpawnPoints.Append(Result.ScatterData.SpawnPoints);
 		}
 		else
 		{
-			ScatterDataCache.Add(Result.ChunkCoord, MoveTemp(Result.ScatterData));
+			SpawnCache.Add(Result.ChunkCoord, MoveTemp(Result.ScatterData));
 		}
 
 		TotalSpawnPointsGenerated += SpawnCount;
@@ -2162,7 +2162,7 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 			// No surface. A chunk without a scatter cache renders nothing of its own, except after RegenerateChunkScatter,
 			// which keeps its instances until the re-extraction replaces them: an edit that left the chunk no surface
 			// replaces them with none (world modes review G54). A supplemental pass (a cache exists) keeps what it has.
-			if (!ScatterDataCache.Contains(Result.ChunkCoord) && ScatterRenderer && ScatterRenderer->IsInitialized())
+			if (!SpawnCache.Contains(Result.ChunkCoord) && ScatterRenderer && ScatterRenderer->IsInitialized())
 			{
 				ScatterRenderer->RemoveChunkInstances(Result.ChunkCoord);
 			}
@@ -2181,7 +2181,7 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 		Completed.Append(Result.GeneratedTypeIDs);
 
 		// Append or create scatter/surface data
-		FChunkScatterData* ExistingScatter = ScatterDataCache.Find(Result.ChunkCoord);
+		FChunkScatterData* ExistingScatter = SpawnCache.Find(Result.ChunkCoord);
 		const bool bSupplementalPass = (ExistingScatter && ExistingScatter->bIsValid);
 		if (bSupplementalPass)
 		{
@@ -2197,8 +2197,8 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 		else
 		{
 			// First pass: cache new data
-			SurfaceDataCache.Add(Result.ChunkCoord, MoveTemp(Result.SurfaceData));
-			ScatterDataCache.Add(Result.ChunkCoord, MoveTemp(Result.ScatterData));
+			SurfaceCache.Add(Result.ChunkCoord, MoveTemp(Result.SurfaceData));
+			SpawnCache.Add(Result.ChunkCoord, MoveTemp(Result.ScatterData));
 		}
 
 		TotalSurfacePointsExtracted += SurfacePointCount;
@@ -2219,7 +2219,7 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 			}
 			else
 			{
-				ScatterRenderer->UpdateChunkInstances(Result.ChunkCoord, ScatterDataCache[Result.ChunkCoord]);
+				ScatterRenderer->UpdateChunkInstances(Result.ChunkCoord, SpawnCache[Result.ChunkCoord]);
 			}
 		}
 
@@ -2249,7 +2249,7 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 	}
 }
 
-void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
+void UVoxelScatterManager::ExtractSurfacePointsByColumn(
 	const TArray<FVoxelData>& VoxelData,
 	const FIntVector& ChunkCoord,
 	const FVector& ChunkWorldOrigin,
@@ -2541,22 +2541,22 @@ void UVoxelScatterManager::ExtractChunkSurfacePoints(
 {
 	if (bCubic)
 	{
-		ExtractSurfacePointsCubic(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, ClearedVolumes, Context, OutSurfaceData);
+		ExtractSurfacePointsByBlockTop(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, ClearedVolumes, Context, OutSurfaceData);
 	}
 	else if (Context.WorldMode && Context.WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet)
 	{
 		// A planet scans along local up (spherical SP-G1).
-		ExtractSurfacePointsAlongUp(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, ClearedVolumes, Context,
+		ExtractSurfacePointsByRay(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, ClearedVolumes, Context,
 			OutSurfaceData);
 	}
 	else
 	{
-		ExtractSurfacePointsFromVoxelData(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, ClearedVolumes,
+		ExtractSurfacePointsByColumn(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, ClearedVolumes,
 			Context, OutSurfaceData);
 	}
 }
 
-void UVoxelScatterManager::ExtractSurfacePointsAlongUp(
+void UVoxelScatterManager::ExtractSurfacePointsByRay(
 	const TArray<FVoxelData>& VoxelData,
 	const FIntVector& ChunkCoord,
 	const FVector& ChunkWorldOrigin,
@@ -2837,7 +2837,7 @@ void UVoxelScatterManager::ExtractSurfacePointsAlongUp(
 	OutSurfaceData.SurfaceAreaEstimate = static_cast<float>(Area * CellSize * CellSize);
 }
 
-void UVoxelScatterManager::ExtractSurfacePointsCubic(
+void UVoxelScatterManager::ExtractSurfacePointsByBlockTop(
 	const TArray<FVoxelData>& VoxelData,
 	const FIntVector& ChunkCoord,
 	const FVector& ChunkWorldOrigin,
@@ -2861,7 +2861,7 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 	OutSurfaceData.SurfacePoints.Reserve(ChunkSize * ChunkSize);
 
 	// A chunk whose top sits more than this far below the analytic terrain surface is buried
-	// (its surface points are covered by terrain above). See ExtractSurfacePointsFromVoxelData.
+	// (its surface points are covered by terrain above). See ExtractSurfacePointsByColumn.
 	const float CoverThreshold = VoxelSize * 1.5f;
 	const float ChunkTopWorldZ = ChunkWorldOrigin.Z + ChunkSize * VoxelSize;
 
@@ -2871,7 +2871,7 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 		{
 			// Topmost transition in the column = open-sky surface; anything below it is
 			// covered by solid above (cave floor / under an overhang) → underground. Closes
-			// the same covered-floor gap as the smooth extractor (see ExtractSurfacePointsFromVoxelData).
+			// the same covered-floor gap as the smooth extractor (see ExtractSurfacePointsByColumn).
 			bool bFoundColumnTop = false;
 
 			// Generated terrain height at this column (conditioning zones included, G23) for the cross-chunk
@@ -2913,7 +2913,7 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 				else if (bHaveColumnHeight)
 				{
 					// The block over the top layer is the chunk above's, sampled at this column's corner (G26, G28, see
-					// ExtractSurfacePointsFromVoxelData): solid where the ground continues above, caves included, decided at
+					// ExtractSurfacePointsByColumn): solid where the ground continues above, caves included, decided at
 					// any depth.
 					const float SampleHeight = Context.GetGeneratedTerrainHeight(ChunkWorldOrigin.X + X * VoxelSize, ChunkWorldOrigin.Y + Y * VoxelSize);
 					if (Context.GetVoxelOutsideChunk(FIntVector(X, Y, ChunkSize), ChunkWorldOrigin + FVector(X * VoxelSize, Y * VoxelSize, ChunkSize * VoxelSize),
@@ -2980,7 +2980,7 @@ void UVoxelScatterManager::ExtractSurfacePointsCubic(
 FString UVoxelScatterManager::ComputeScatterDigest(TArray<FString>* OutChunkLines) const
 {
 	TArray<FIntVector> Chunks;
-	ScatterDataCache.GetKeys(Chunks);
+	SpawnCache.GetKeys(Chunks);
 	Chunks.Sort([](const FIntVector& A, const FIntVector& B)
 	{
 		return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z);
@@ -2989,7 +2989,7 @@ FString UVoxelScatterManager::ComputeScatterDigest(TArray<FString>* OutChunkLine
 	int32 Points = 0;
 	for (const FIntVector& Chunk : Chunks)
 	{
-		const TArray<FScatterSpawnPoint>& SpawnPoints = ScatterDataCache.FindChecked(Chunk).SpawnPoints;
+		const TArray<FScatterSpawnPoint>& SpawnPoints = SpawnCache.FindChecked(Chunk).SpawnPoints;
 		uint32 ChunkCrc = 0u;
 		for (const FScatterSpawnPoint& Point : SpawnPoints)
 		{
@@ -3026,9 +3026,9 @@ FString UVoxelScatterManager::ComputeCacheResidency(TArray<FString>* OutMismatch
 	const bool bRenderer = ScatterRenderer && ScatterRenderer->IsInitialized();
 	int32 ScatterOnly = 0, Mismatch = 0, DuplicateChunks = 0;
 	int64 SpawnPoints = 0, Instances = 0, Duplicates = 0;
-	for (const TPair<FIntVector, FChunkScatterData>& Pair : ScatterDataCache)
+	for (const TPair<FIntVector, FChunkScatterData>& Pair : SpawnCache)
 	{
-		ScatterOnly += SurfaceDataCache.Contains(Pair.Key) ? 0 : 1;
+		ScatterOnly += SurfaceCache.Contains(Pair.Key) ? 0 : 1;
 		const int32 ChunkInstances = bRenderer ? ScatterRenderer->GetChunkInstanceCount(Pair.Key) : 0;
 		SpawnPoints += Pair.Value.SpawnPoints.Num();
 		Instances += ChunkInstances;
@@ -3072,11 +3072,11 @@ FString UVoxelScatterManager::ComputeCacheResidency(TArray<FString>* OutMismatch
 				}
 			}
 			OutMismatchLines->Add(FString::Printf(TEXT("%d,%d,%d,%d,%d,%s,%s"), Pair.Key.X, Pair.Key.Y, Pair.Key.Z, Pair.Value.SpawnPoints.Num(),
-				ChunkInstances, SurfaceDataCache.Contains(Pair.Key) ? TEXT("surface") : TEXT("noSurface"), *Types.TrimStart()));
+				ChunkInstances, SurfaceCache.Contains(Pair.Key) ? TEXT("surface") : TEXT("noSurface"), *Types.TrimStart()));
 		}
 	}
 	return FString::Printf(TEXT("scatterChunks=%d surfaceChunks=%d scatterOnly=%d spawnPoints=%lld instances=%lld instanceMismatch=%d duplicates=%lld (%d chunks)"),
-		ScatterDataCache.Num(), SurfaceDataCache.Num(), ScatterOnly, SpawnPoints, Instances, Mismatch, Duplicates, DuplicateChunks);
+		SpawnCache.Num(), SurfaceCache.Num(), ScatterOnly, SpawnPoints, Instances, Mismatch, Duplicates, DuplicateChunks);
 }
 
 FVector UVoxelScatterManager::GetChunkWorldOrigin(const FIntVector& ChunkCoord) const
@@ -3248,7 +3248,7 @@ UVoxelScatterManager::FFreshExtractionStats UVoxelScatterManager::CompareWithFre
 	const double ChunkWorldSize = Configuration->GetChunkWorldSize();
 
 	TArray<FIntVector> Chunks;
-	SurfaceDataCache.GetKeys(Chunks);
+	SurfaceCache.GetKeys(Chunks);
 	Chunks.Sort([](const FIntVector& A, const FIntVector& B)
 	{
 		return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z);
@@ -3312,7 +3312,7 @@ UVoxelScatterManager::FFreshExtractionStats UVoxelScatterManager::CompareWithFre
 		for (const FJob& Job : Jobs)
 		{
 			++Stats.Compared;
-			const FChunkSurfaceData& Cached = SurfaceDataCache.FindChecked(Job.Coord);
+			const FChunkSurfaceData& Cached = SurfaceCache.FindChecked(Job.Coord);
 			// The fresh pass as the pipeline would cache it: no points when it found none (the cache then keeps no entry).
 			const bool bFreshValid = Job.Fresh.bIsValid && Job.Fresh.SurfacePoints.Num() > 0;
 			TMap<FString, int32> Count;

@@ -303,7 +303,7 @@ namespace VoxelScatterTopFaceTestUtils
 		/** Submit a chunk as if its mesh just arrived and pump until its extraction is done; null when it found no point. */
 		const FChunkSurfaceData* Run(const FIntVector& Coord, const TArray<FVoxelData>& Voxels)
 		{
-			Manager->OnChunkMeshDataReady(Coord, Voxels, ChunkSize, VoxelSize);
+			Manager->HandOffChunkVoxels(Coord, Voxels, ChunkSize, VoxelSize);
 			const double Deadline = FPlatformTime::Seconds() + 15.0;
 			while (FPlatformTime::Seconds() < Deadline)
 			{

@@ -29,7 +29,7 @@
 
 // ---------------------------------------------------------------------------
 // World modes review G29 and G31 (WORLD_MODES_REVIEW_PLAN.md §14.1, §19.6, §19.9): where a planet's surface crosses a chunk
-// face. UVoxelScatterManager::ExtractSurfacePointsAlongUp samples the planet's radial lines through the cube-sphere grid's
+// face. UVoxelScatterManager::ExtractSurfacePointsByRay samples the planet's radial lines through the cube-sphere grid's
 // cells (one family for every chunk) and each chunk keeps the crossings in its own box; its last cell on each axis reads
 // the voxels past its +X, +Y and +Z faces as the planet generator makes them, with the neighbours' edits. Before G31 each
 // chunk stepped digital lines along local up at its own centre, which did not continue into a neighbour's: strips along
@@ -578,7 +578,7 @@ namespace VoxelScatterLineTopTestUtils
 		{
 			const FVector Viewer = ChunkOrigin(Config, Coord) + FVector(0.5 * ChunkWorld);
 			Manager->Update(Viewer, 0.0f);
-			Manager->OnChunkMeshDataReady(Coord, Voxels, ChunkSize, VoxelSize);
+			Manager->HandOffChunkVoxels(Coord, Voxels, ChunkSize, VoxelSize);
 			const double Deadline = FPlatformTime::Seconds() + 15.0;
 			while (FPlatformTime::Seconds() < Deadline)
 			{

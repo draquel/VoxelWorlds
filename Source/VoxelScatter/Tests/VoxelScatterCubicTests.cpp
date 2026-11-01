@@ -104,7 +104,7 @@ bool FVoxelScatterCubicCPUExtractionTest::RunTest(const FString& Parameters)
 	VoxelScatterTesting::AddCubicDefinitions(*Manager);
 
 	const FIntVector Coord(0, 0, 0);
-	Manager->OnChunkMeshDataReady(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+	Manager->HandOffChunkVoxels(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
 
 	const double Deadline = FPlatformTime::Seconds() + 15.0;
 	while (FPlatformTime::Seconds() < Deadline && Manager->GetChunkSurfaceData(Coord) == nullptr)
