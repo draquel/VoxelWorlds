@@ -123,13 +123,6 @@ double FVoxelStreamingBenchmark::GetPathLength() const
 	}
 }
 
-FVector FVoxelStreamingBenchmark::LatLonToDirection(double LatitudeDeg, double LongitudeDeg)
-{
-	const double La = FMath::DegreesToRadians(LatitudeDeg);
-	const double Lo = FMath::DegreesToRadians(LongitudeDeg);
-	return FVector(FMath::Cos(La) * FMath::Cos(Lo), FMath::Cos(La) * FMath::Sin(Lo), FMath::Sin(La));
-}
-
 void FVoxelStreamingBenchmark::MakeClimb(FVoxelBenchConfig& InOutConfig, const FVector& Center, const FVector& Ground, float StartAltitude,
 	const FVector2D& LatLonForReport)
 {
@@ -168,7 +161,7 @@ void FVoxelStreamingBenchmark::MakeDescentAlong(FVoxelBenchConfig& InOutConfig, 
 void FVoxelStreamingBenchmark::MakeGreatCircle(FVoxelBenchConfig& InOutConfig, const FVector& Center, double Radius, double LatitudeDeg,
 	double LongitudeDeg, double HeadingDeg, float Altitude)
 {
-	const FVector Start = LatLonToDirection(LatitudeDeg, LongitudeDeg);
+	const FVector Start = FVoxelCubeSphere::LatLonToDirection(LatitudeDeg, LongitudeDeg);
 	FVector East, North;
 	FVoxelCubeSphere::GetTangentFrame(Start, East, North);
 	const double H = FMath::DegreesToRadians(HeadingDeg);

@@ -22,6 +22,7 @@
 #include "VoxelData.h"
 #include "Chaos/TriangleMeshImplicitObject.h"
 #include "VoxelStreamingBenchmark.h"
+#include "VoxelCubeSphere.h"
 #include "HAL/IConsoleManager.h"
 #include "VoxelChunkShell.h"
 #include "VoxelNeighborSliceExtraction.h"
@@ -757,7 +758,7 @@ bool FVoxelBenchPlanetClimbRouteTest::RunTest(const FString& Parameters)
 		double WorstUp = 0.0, WorstAltitude = 0.0;
 		for (const FVector2D& Site : Sites)
 		{
-			const FVector Direction = FVoxelStreamingBenchmark::LatLonToDirection(Site.X, Site.Y);
+			const FVector Direction = FVoxelCubeSphere::LatLonToDirection(Site.X, Site.Y);
 			const FVector Ground = Center + Direction * (Radius + 600.0);
 			FVoxelBenchConfig Config;
 			FVoxelStreamingBenchmark::MakeClimb(Config, Center, Ground, 500.0f, Site);

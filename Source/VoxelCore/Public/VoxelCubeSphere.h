@@ -71,6 +71,34 @@ struct VOXELCORE_API FVoxelCubeSphere
 	 * @param OutNorth Unit north
 	 */
 	static void GetTangentFrame(const FVector& Up, FVector& OutEast, FVector& OutNorth);
+
+	/**
+	 * The unit direction of a latitude and longitude in degrees: +Z north, longitude from +X toward +Y (the planet's
+	 * frame everywhere: vox.TPLatLon, the bench's gc= and climb=, poi.Find; code review CR2, FW-19).
+	 * @param LatitudeDeg Latitude (degrees, +90 at the +Z pole)
+	 * @param LongitudeDeg Longitude (degrees, 0 along +X, 90 along +Y)
+	 * @return Unit direction
+	 */
+	static FVector LatLonToDirection(double LatitudeDeg, double LongitudeDeg)
+	{
+		const double Lat = FMath::DegreesToRadians(LatitudeDeg);
+		const double Lon = FMath::DegreesToRadians(LongitudeDeg);
+		return FVector(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+	}
+
+	/**
+	 * The latitude and longitude (degrees) of a direction from the centre, LatLonToDirection's inverse (the direction need
+	 * not be unit).
+	 * @param Direction Direction from the centre
+	 * @param OutLatitudeDeg Latitude (degrees)
+	 * @param OutLongitudeDeg Longitude (degrees, -180 to 180)
+	 */
+	static void DirectionToLatLon(const FVector& Direction, double& OutLatitudeDeg, double& OutLongitudeDeg)
+	{
+		const FVector D = Direction.GetSafeNormal();
+		OutLatitudeDeg = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(D.Z, -1.0, 1.0)));
+		OutLongitudeDeg = FMath::RadiansToDegrees(FMath::Atan2(D.Y, D.X));
+	}
 };
 
 /**
