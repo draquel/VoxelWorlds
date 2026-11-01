@@ -126,6 +126,23 @@ struct FVoxelChunkDrawInfo
 	bool DrawsCurrentOnly() const { return CurrentTriangles > 0 && bVisible && !bCrossfading && !bAppearing; }
 };
 
+/** A vertex's two packed tangents as the tangent SRV holds them (the scene proxy's mesh buffers) */
+struct FVoxelPackedTangentPair
+{
+	FPackedNormal TangentX;
+	FPackedNormal TangentZ;
+};
+
+/** The debug names of a mesh's five buffers (FVoxelSceneProxy::CreateMeshBuffers_RenderThread) */
+struct FVoxelMeshBufferNames
+{
+	const TCHAR* Vertex;
+	const TCHAR* Color;
+	const TCHAR* Tangent;
+	const TCHAR* TexCoord;
+	const TCHAR* Index;
+};
+
 /**
  * Scene proxy for voxel world rendering.
  *
@@ -407,6 +424,14 @@ public:
 	FString GetFadeDebugString_RenderThread(int32 MaxEntries, const FIntVector* FocusChunk) const;
 
 private:
+	/**
+	 * Create a mesh's vertex, colour, tangent, texcoord and index buffers and their SRVs into NewRenderData (render thread):
+	 * the chunk batches', the seams' and the water tiles' one body (code review CR4, REND-09).
+	 */
+	void CreateMeshBuffers_RenderThread(FRHICommandListBase& RHICmdList, const FVoxelMeshBufferNames& Names,
+		const TArray<FVoxelLocalVertex>& ConvertedVertices, const TArray<FColor>& ColorData, const TArray<FVoxelPackedTangentPair>& TangentData,
+		const TArray<FVector4f>& TexCoordData, const TArray<uint32>& Indices, FVoxelChunkRenderData& NewRenderData);
+
 	// ==================== Terrain Chunk Data ====================
 
 	/** Per-chunk render data (converted to FLocalVertexFactory format) */
