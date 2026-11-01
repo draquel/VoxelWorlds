@@ -15,7 +15,7 @@
 // The Interior domain must mesh ONLY cells with zero neighbor dependence
 // ([0, GridSize-1) per axis): no quad may reference a -1/GridSize-1
 // boundary-layer cell, and when the surface never approaches the chunk
-// boundary the interior mesh must be bit-identical to the legacy Full mesh.
+// boundary the interior mesh must be bit-identical to the WholeChunk mesh.
 // Pure CPU tests (no RHI) — run headless.
 // ---------------------------------------------------------------------------
 
@@ -107,7 +107,7 @@ bool FDCInteriorDomainCenteredTest::RunTest(const FString& Parameters)
 	{
 		FChunkMeshData Full, Interior;
 		TestTrue(TEXT("Full mesh generated"),
-			Mesh(MakeRequest(LOD, EVoxelMeshCellDomain::Full, &CenteredSphere), Full));
+			Mesh(MakeRequest(LOD, EVoxelMeshCellDomain::WholeChunk, &CenteredSphere), Full));
 		TestTrue(TEXT("Interior mesh generated"),
 			Mesh(MakeRequest(LOD, EVoxelMeshCellDomain::Interior, &CenteredSphere), Interior));
 
@@ -135,7 +135,7 @@ bool FDCInteriorDomainBoundaryTest::RunTest(const FString& Parameters)
 
 	FChunkMeshData Full, Interior;
 	TestTrue(TEXT("Full mesh generated"),
-		Mesh(MakeRequest(LOD, EVoxelMeshCellDomain::Full, &FlatGround), Full));
+		Mesh(MakeRequest(LOD, EVoxelMeshCellDomain::WholeChunk, &FlatGround), Full));
 	TestTrue(TEXT("Interior mesh generated"),
 		Mesh(MakeRequest(LOD, EVoxelMeshCellDomain::Interior, &FlatGround), Interior));
 

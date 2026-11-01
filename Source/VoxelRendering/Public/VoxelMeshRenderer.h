@@ -7,7 +7,7 @@
 #include "VoxelVertex.h"
 #include "VoxelRenderRegions.h"
 
-class UVoxelWorldComponent;
+class UVoxelRegionComponent;
 class UMaterialInterface;
 class UVoxelMaterialAtlas;
 class UWorld;
@@ -24,7 +24,7 @@ class UVoxelWorldConfiguration;
  * - Custom 28-byte vertex format
  * - LOD morphing support
  * - Per-chunk frustum culling
- * - Render regions on planets (spherical Phase 6, WM-BP7, D23): one UVoxelWorldComponent per region of
+ * - Render regions on planets (spherical Phase 6, WM-BP7, D23): one UVoxelRegionComponent per region of
  *   voxel.Render.RegionChunks^3 chunks, located at the region's origin, so vertices are stored in float relative to it
  *   and keep their precision at any distance from the world origin (FVoxelRenderRegions). Chunks, seams (by their
  *   owner) and water tiles go to their region's component; settings go to every component and are replayed on a new
@@ -33,14 +33,14 @@ class UVoxelWorldConfiguration;
  * Thread Safety: All public methods must be called from game thread
  *
  * @see IVoxelMeshRenderer
- * @see UVoxelWorldComponent
+ * @see UVoxelRegionComponent
  * @see Documentation/RENDERING_SYSTEM.md
  */
-class VOXELRENDERING_API FVoxelCustomVFRenderer : public IVoxelMeshRenderer
+class VOXELRENDERING_API FVoxelMeshRenderer : public IVoxelMeshRenderer
 {
 public:
-	FVoxelCustomVFRenderer();
-	virtual ~FVoxelCustomVFRenderer();
+	FVoxelMeshRenderer();
+	virtual ~FVoxelMeshRenderer();
 
 	// ==================== IVoxelMeshRenderer Interface ====================
 
@@ -122,7 +122,7 @@ public:
 	 * (0, 0, 0), kept for the renderer's lifetime; the others come and go with their regions, GetRegionComponents).
 	 * May return nullptr if not initialized.
 	 */
-	UVoxelWorldComponent* GetWorldComponent() const { return WorldComponent; }
+	UVoxelRegionComponent* GetOriginRegionComponent() const { return OriginRegionComponent; }
 
 	/** The render regions this renderer splits the world into (one at the origin on heightmap worlds). */
 	const FVoxelRenderRegions& GetRenderRegions() const { return Regions; }
@@ -132,7 +132,7 @@ public:
 	 *
 	 * @param OutComponents Region coordinate and component pairs
 	 */
-	void GetRegionComponents(TArray<TPair<FIntVector, UVoxelWorldComponent*>>& OutComponents) const;
+	void GetRegionComponents(TArray<TPair<FIntVector, UVoxelRegionComponent*>>& OutComponents) const;
 
 private:
 	// ==================== Internal Helpers ====================
@@ -163,13 +163,13 @@ private:
 	// ==================== Render Regions (WM-BP7) ====================
 
 	/** The component of a chunk's (or seam owner's) region, or null when that region has none. */
-	UVoxelWorldComponent* FindRegionComponent(const FIntVector& ChunkCoord) const;
+	UVoxelRegionComponent* FindRegionComponent(const FIntVector& ChunkCoord) const;
 
 	/** The component of a chunk's region, created (configured with every setting so far) when it has none. */
-	UVoxelWorldComponent* GetOrCreateRegionComponent(const FIntVector& ChunkCoord);
+	UVoxelRegionComponent* GetOrCreateRegionComponent(const FIntVector& ChunkCoord);
 
 	/** A configured, registered component at a region's origin. */
-	UVoxelWorldComponent* CreateRegionComponent(const FIntVector& Region);
+	UVoxelRegionComponent* CreateRegionComponent(const FIntVector& Region);
 
 	/** Retire the components of regions that hold nothing any more (never the primary one). */
 	void RetireEmptyRegions();
@@ -188,14 +188,14 @@ private:
 	/** World configuration */
 	TWeakObjectPtr<const UVoxelWorldConfiguration> CachedConfig;
 
-	/** The primary world component (owned by the container actor; GetWorldComponent) */
-	TObjectPtr<UVoxelWorldComponent> WorldComponent;
+	/** The primary world component (owned by the container actor; GetOriginRegionComponent) */
+	TObjectPtr<UVoxelRegionComponent> OriginRegionComponent;
 
 	/** The render regions (FVoxelRenderRegions::FromConfig) */
 	FVoxelRenderRegions Regions;
 
 	/** Every live world component by region coordinate, the primary one included (owned by the container actor) */
-	TMap<FIntVector, TObjectPtr<UVoxelWorldComponent>> RegionComponents;
+	TMap<FIntVector, TObjectPtr<UVoxelRegionComponent>> RegionComponents;
 
 	/** Settings replayed on a new region component */
 	TWeakObjectPtr<UVoxelMaterialAtlas> CurrentAtlas;

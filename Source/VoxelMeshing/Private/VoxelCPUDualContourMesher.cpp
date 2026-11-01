@@ -916,7 +916,7 @@ FVector3f FVoxelCPUDualContourMesher::CalculateGradientNormalLOD(
 	// the boundary, shading each chunk's rim ring differently — a per-chunk checkerboard at
 	// world scale. Clamping keeps the zero-neighbour-dependence property (pure function of own
 	// content); the seam samplers apply the same rule so ring recomputes still match bit-exactly.
-	// Full-domain (legacy) behaviour is unchanged.
+	// WholeChunk-domain behaviour is unchanged.
 	if (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior)
 	{
 		const int32 Max = Request.ChunkSize - 1;
@@ -945,7 +945,7 @@ FVector3f FVoxelCPUDualContourMesher::CalculateShadingNormal(
 	float X, float Y, float Z) const
 {
 	// The voxels this view holds: the chunk's own in the Interior domain (CalculateGradientNormalLOD's clamp box, and the
-	// seam samplers' per-side box, so ring recomputes match); one voxel past each face in the Full domain (a missing
+	// seam samplers' per-side box, so ring recomputes match); one voxel past each face in the WholeChunk domain (a missing
 	// neighbour reads as Air, which the fit skips).
 	const int32 CS = Request.ChunkSize;
 	const bool bInterior = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);

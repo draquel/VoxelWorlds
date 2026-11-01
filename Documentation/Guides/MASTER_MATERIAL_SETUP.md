@@ -19,7 +19,7 @@ The material mode is automatically determined by `UVoxelWorldConfiguration::Mesh
 - `EMeshingMode::MarchingCubes` / `EMeshingMode::DualContouring` → Triplanar sampling with Texture2DArrays
 - `EMeshingMode::Cubic` → UV-based sampling with PackedAtlas + MaterialLUT
 
-This is synced in `FVoxelCustomVFRenderer::Initialize()` which sets `bUseSmoothMeshing` on the WorldComponent based on the configuration.
+This is synced in `FVoxelMeshRenderer::Initialize()` which sets `bUseSmoothMeshing` on the OriginRegionComponent based on the configuration.
 
 ## Prerequisites
 
@@ -595,12 +595,12 @@ Create in: `Content/VoxelWorlds/Materials/MI_VoxelDefault`
 
 ---
 
-## Step 4: Update VoxelWorldComponent
+## Step 4: Update VoxelRegionComponent
 
 The component should use M_VoxelMaster as the base material and create a Dynamic Material Instance from it.
 
 ### Code Changes
-See `VoxelWorldComponent.cpp` - CreateVoxelMaterialInstance() should:
+See `VoxelRegionComponent.cpp` - CreateVoxelMaterialInstance() should:
 1. Load M_VoxelMaster (or accept it as a parameter)
 2. Create Dynamic Material Instance
 3. Call UpdateMaterialAtlasParameters() to bind texture arrays
@@ -660,4 +660,4 @@ See `VoxelWorldComponent.cpp` - CreateVoxelMaterialInstance() should:
 ### Wrong terrain mode displayed
 - Verify MeshingMode is set correctly in UVoxelWorldConfiguration
 - Check logs for "MeshingMode=Smooth/Cubic, bUseSmoothMeshing=true/false"
-- The mode is synced in FVoxelCustomVFRenderer::Initialize()
+- The mode is synced in FVoxelMeshRenderer::Initialize()

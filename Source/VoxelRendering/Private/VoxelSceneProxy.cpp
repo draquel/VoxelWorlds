@@ -1,7 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelSceneProxy.h"
-#include "VoxelWorldComponent.h"
+#include "VoxelRegionComponent.h"
 #include "VoxelRendering.h"
 #include "VoxelLocalVertexFactory.h"
 #include "MaterialDomain.h"
@@ -66,7 +66,7 @@ namespace
 	 * A chunk with this fade state and retained Previous mesh crossfades: both meshes draw, under complementary dither
 	 * masks. Any other combination draws the current mesh alone (an appearance fades it in from nothing).
 	 */
-	bool IsChunkCrossfadeDrawable(const FVoxelChunkFadeState* FadeState, const FVoxelChunkPreviousMesh* PreviousMesh)
+	bool IsChunkFadeDrawable(const FVoxelChunkFadeState* FadeState, const FVoxelChunkPreviousMesh* PreviousMesh)
 	{
 		return FadeState && PreviousMesh
 			&& FadeState->FadeInProxy && FadeState->FadeOutProxy
@@ -175,7 +175,7 @@ void InitVoxelLocalVertexFactory(
 
 // ==================== FVoxelSceneProxy ====================
 
-FVoxelSceneProxy::FVoxelSceneProxy(UVoxelWorldComponent* InComponent, UMaterialInterface* InMaterial)
+FVoxelSceneProxy::FVoxelSceneProxy(UVoxelRegionComponent* InComponent, UMaterialInterface* InMaterial)
 	: FPrimitiveSceneProxy(InComponent)
 	, Material(InMaterial)
 	, FeatureLevel(InComponent->GetWorld()->GetFeatureLevel())
@@ -502,7 +502,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 					PreviousMesh = ChunkPreviousMeshes.Find(ChunkCoord);
 				}
 			}
-			const bool bFading = IsChunkCrossfadeDrawable(FadeState, PreviousMesh);
+			const bool bFading = IsChunkFadeDrawable(FadeState, PreviousMesh);
 			const bool bAppearing = !bFading && FadeState && FadeState->bAppear && FadeState->FadeInProxy;
 
 			// voxel.MeshFade.Stats with a focus chunk: what the main view draws of it (G74)
@@ -1220,7 +1220,7 @@ void FVoxelSceneProxy::ReleaseFadeHolds_RenderThread(const TArray<FIntVector4>& 
 
 	for (const FIntVector4& Key : Keys)
 	{
-		// W = -1: chunk interior; 0..6: seam bucket slot (FVoxelCrossfadeScheduler layout).
+		// W = -1: chunk interior; 0..6: seam bucket slot (FVoxelFadeScheduler layout).
 		FVoxelChunkFadeState* FadeState = (Key.W < 0)
 			? ChunkFadeStates.Find(FIntVector(Key.X, Key.Y, Key.Z))
 			: SeamFadeStates.Find(FVoxelSeamMeshKey{ FIntVector(Key.X, Key.Y, Key.Z), static_cast<uint8>(Key.W) });
@@ -2224,7 +2224,7 @@ bool FVoxelSceneProxy::GetChunkDrawInfo_RenderThread(const FIntVector& ChunkCoor
 		OutInfo.bAppear = FadeState->bAppear;
 	}
 	// As GetDynamicMeshElements decides it (outside wireframe)
-	OutInfo.bCrossfading = IsChunkCrossfadeDrawable(FadeState, PreviousMesh);
+	OutInfo.bCrossfading = IsChunkFadeDrawable(FadeState, PreviousMesh);
 	OutInfo.bAppearing = !OutInfo.bCrossfading && FadeState && FadeState->bAppear && FadeState->FadeInProxy;
 	return OutInfo.CurrentTriangles > 0;
 }

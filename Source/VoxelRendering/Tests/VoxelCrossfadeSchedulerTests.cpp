@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
-#include "VoxelCrossfadeScheduler.h"
+#include "VoxelFadeScheduler.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -14,7 +14,7 @@
 
 namespace VoxelCrossfadeTestUtils
 {
-	static float AlphaOf(const FVoxelCrossfadeScheduler::FAdvanceResult& R, const FIntVector4& Key, float Missing = -1.0f)
+	static float AlphaOf(const FVoxelFadeScheduler::FAdvanceResult& R, const FIntVector4& Key, float Missing = -1.0f)
 	{
 		for (const TPair<FIntVector4, float>& Pair : R.Alphas)
 		{
@@ -34,14 +34,14 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCrossfadeSwapStartsFadeTest,
 bool FVoxelCrossfadeSwapStartsFadeTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelCrossfadeTestUtils;
-	FVoxelCrossfadeScheduler S;
-	const FIntVector4 Chunk = FVoxelCrossfadeScheduler::ChunkKey(FIntVector(3, -2, 1));
-	const FIntVector4 Seam = FVoxelCrossfadeScheduler::SeamKey(FIntVector(3, -2, 1), 0);
+	FVoxelFadeScheduler S;
+	const FIntVector4 Chunk = FVoxelFadeScheduler::ChunkKey(FIntVector(3, -2, 1));
+	const FIntVector4 Seam = FVoxelFadeScheduler::SeamKey(FIntVector(3, -2, 1), 0);
 	TestTrue(TEXT("chunk and seam keys differ"), Chunk != Seam);
-	TestTrue(TEXT("seam key recognised"), FVoxelCrossfadeScheduler::IsSeamKey(Seam) && !FVoxelCrossfadeScheduler::IsSeamKey(Chunk));
+	TestTrue(TEXT("seam key recognised"), FVoxelFadeScheduler::IsSeamKey(Seam) && !FVoxelFadeScheduler::IsSeamKey(Chunk));
 
 	TestTrue(TEXT("fade starts"), S.Start(Chunk, /*now*/ 10.0, /*hold*/ false));
-	FVoxelCrossfadeScheduler::FAdvanceResult R;
+	FVoxelFadeScheduler::FAdvanceResult R;
 	S.Advance(10.0, 0.4f, 0.0, R);
 	TestEqual(TEXT("alpha 0 at the start"), AlphaOf(R, Chunk), 0.0f, 1e-5f);
 	S.Advance(10.1, 0.4f, 0.0, R);
@@ -59,17 +59,17 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCrossfadeHoldFreezesAlphaTest,
 bool FVoxelCrossfadeHoldFreezesAlphaTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelCrossfadeTestUtils;
-	FVoxelCrossfadeScheduler S;
-	const FIntVector4 Chunk = FVoxelCrossfadeScheduler::ChunkKey(FIntVector(0, 0, 0));
-	const FIntVector4 SeamA = FVoxelCrossfadeScheduler::SeamKey(FIntVector(0, 0, 0), 0);
-	const FIntVector4 SeamB = FVoxelCrossfadeScheduler::SeamKey(FIntVector(-1, 0, 0), 0);
+	FVoxelFadeScheduler S;
+	const FIntVector4 Chunk = FVoxelFadeScheduler::ChunkKey(FIntVector(0, 0, 0));
+	const FIntVector4 SeamA = FVoxelFadeScheduler::SeamKey(FIntVector(0, 0, 0), 0);
+	const FIntVector4 SeamB = FVoxelFadeScheduler::SeamKey(FIntVector(-1, 0, 0), 0);
 
 	// The interior is held first; its seams land (also held) a few frames later.
 	S.Start(Chunk, /*now*/ 0.0, /*hold*/ true);
 	S.Start(SeamA, /*now*/ 0.03, /*hold*/ true);
 	S.Start(SeamB, /*now*/ 0.05, /*hold*/ true);
 
-	FVoxelCrossfadeScheduler::FAdvanceResult R;
+	FVoxelFadeScheduler::FAdvanceResult R;
 	S.Advance(/*now*/ 0.5, 0.4f, /*failsafe*/ 5.0, R);
 	TestEqual(TEXT("held interior stays at alpha 0"), AlphaOf(R, Chunk), 0.0f);
 	TestEqual(TEXT("held seam stays at alpha 0"), AlphaOf(R, SeamA), 0.0f);
@@ -99,11 +99,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCrossfadeHoldTimesOutTest,
 bool FVoxelCrossfadeHoldTimesOutTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelCrossfadeTestUtils;
-	FVoxelCrossfadeScheduler S;
-	const FIntVector4 Chunk = FVoxelCrossfadeScheduler::ChunkKey(FIntVector(1, 2, 3));
+	FVoxelFadeScheduler S;
+	const FIntVector4 Chunk = FVoxelFadeScheduler::ChunkKey(FIntVector(1, 2, 3));
 	S.Start(Chunk, /*now*/ 0.0, /*hold*/ true);
 
-	FVoxelCrossfadeScheduler::FAdvanceResult R;
+	FVoxelFadeScheduler::FAdvanceResult R;
 	S.Advance(/*now*/ 0.9, 0.4f, /*failsafe*/ 1.0, R);
 	TestEqual(TEXT("held below the failsafe"), AlphaOf(R, Chunk), 0.0f);
 	TestEqual(TEXT("no timeout yet"), R.TimedOutHolds.Num(), 0);
@@ -117,7 +117,7 @@ bool FVoxelCrossfadeHoldTimesOutTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("then fades normally"), AlphaOf(R, Chunk), 0.5f, 1e-4f);
 
 	// No failsafe (<= 0): a hold lasts until released.
-	const FIntVector4 Other = FVoxelCrossfadeScheduler::ChunkKey(FIntVector(9, 9, 9));
+	const FIntVector4 Other = FVoxelFadeScheduler::ChunkKey(FIntVector(9, 9, 9));
 	S.Start(Other, 0.0, true);
 	S.Advance(/*now*/ 100.0, 0.4f, /*failsafe*/ 0.0, R);
 	TestTrue(TEXT("without a failsafe the hold persists"), S.IsHeld(Other));
@@ -131,17 +131,17 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCrossfadeResubmitRestartsTest,
 bool FVoxelCrossfadeResubmitRestartsTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelCrossfadeTestUtils;
-	FVoxelCrossfadeScheduler S;
-	const FIntVector4 Seam = FVoxelCrossfadeScheduler::SeamKey(FIntVector(4, 4, 0), 0);
+	FVoxelFadeScheduler S;
+	const FIntVector4 Seam = FVoxelFadeScheduler::SeamKey(FIntVector(4, 4, 0), 0);
 
 	S.Start(Seam, /*now*/ 0.0, /*hold*/ false);
-	FVoxelCrossfadeScheduler::FAdvanceResult R;
+	FVoxelFadeScheduler::FAdvanceResult R;
 	S.Advance(/*now*/ 0.2, 0.4f, 0.0, R);
 	TestEqual(TEXT("mid-fade"), AlphaOf(R, Seam), 0.5f, 1e-4f);
 	// The seam pipeline defers a resubmit by this much (a restart drops the mesh being faded out of).
 	TestEqual(TEXT("remaining time of a running fade"), S.GetRemainingSeconds(Seam, 0.2, 0.4f), 0.2f, 1e-4f);
 	TestEqual(TEXT("no fade: nothing to wait for"),
-		S.GetRemainingSeconds(FVoxelCrossfadeScheduler::SeamKey(FIntVector(9, 9, 9), 0), 0.2, 0.4f), 0.0f);
+		S.GetRemainingSeconds(FVoxelFadeScheduler::SeamKey(FIntVector(9, 9, 9), 0), 0.2, 0.4f), 0.0f);
 
 	// A new mesh arrives mid-fade: the fade restarts from 0 for the new mesh.
 	TestTrue(TEXT("restart accepted"), S.Start(Seam, /*now*/ 0.2, /*hold*/ false));
@@ -169,19 +169,19 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCrossfadeAppearGateTest,
 bool FVoxelCrossfadeAppearGateTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelCrossfadeTestUtils;
-	FVoxelCrossfadeScheduler S;
+	FVoxelFadeScheduler S;
 	TestEqual(TEXT("default gate is the LOD 0 band edge"), S.GetAppearMinDistance(), 7000.0);
 
 	// Inside the gate a new chunk appears at once: nothing near the player turns see-through.
-	const FIntVector4 Near = FVoxelCrossfadeScheduler::ChunkKey(FIntVector(1, 0, 0));
+	const FIntVector4 Near = FVoxelFadeScheduler::ChunkKey(FIntVector(1, 0, 0));
 	TestFalse(TEXT("refused just inside the gate"), S.StartAppear(Near, /*now*/ 0.0, /*hold*/ false, /*distance*/ 6999.0));
 	TestFalse(TEXT("refused appearance is not tracked"), S.Contains(Near));
 
 	// At the gate and beyond it fades in from nothing on the usual clock.
-	const FIntVector4 Far = FVoxelCrossfadeScheduler::ChunkKey(FIntVector(9, 0, 0));
+	const FIntVector4 Far = FVoxelFadeScheduler::ChunkKey(FIntVector(9, 0, 0));
 	TestTrue(TEXT("accepted at the gate"), S.StartAppear(Far, /*now*/ 0.0, /*hold*/ false, /*distance*/ 7000.0));
 	TestTrue(TEXT("appearing"), S.IsAppearing(Far));
-	FVoxelCrossfadeScheduler::FAdvanceResult R;
+	FVoxelFadeScheduler::FAdvanceResult R;
 	S.Advance(/*now*/ 0.0, 0.4f, 0.0, R);
 	TestEqual(TEXT("starts invisible"), AlphaOf(R, Far), 0.0f, 1e-5f);
 	S.Advance(/*now*/ 0.2, 0.4f, 0.0, R);
@@ -193,12 +193,12 @@ bool FVoxelCrossfadeAppearGateTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("no longer appearing"), S.IsAppearing(Far));
 
 	// Seam buckets use the same gate (the caller measures to the owner chunk's cell).
-	const FIntVector4 Seam = FVoxelCrossfadeScheduler::SeamKey(FIntVector(9, 0, 0), 0);
+	const FIntVector4 Seam = FVoxelFadeScheduler::SeamKey(FIntVector(9, 0, 0), 0);
 	TestFalse(TEXT("near seam bucket refused"), S.StartAppear(Seam, 1.0, false, 100.0));
 	TestTrue(TEXT("far seam bucket accepted"), S.StartAppear(Seam, 1.0, false, 50000.0));
 
 	// A held appearance stays invisible until released (the optional hold for ready seams).
-	const FIntVector4 Held = FVoxelCrossfadeScheduler::ChunkKey(FIntVector(12, 0, 0));
+	const FIntVector4 Held = FVoxelFadeScheduler::ChunkKey(FIntVector(12, 0, 0));
 	TestTrue(TEXT("held appearance accepted"), S.StartAppear(Held, /*now*/ 2.0, /*hold*/ true, 9000.0));
 	S.Advance(/*now*/ 2.5, 0.4f, 5.0, R);
 	TestEqual(TEXT("held appearance stays invisible"), AlphaOf(R, Held), 0.0f);
@@ -214,11 +214,11 @@ bool FVoxelCrossfadeAppearGateTest::RunTest(const FString& Parameters)
 
 	// The gate can be moved or switched off; the concurrent cap applies to appearances too.
 	S.SetAppearMinDistance(-1.0);
-	TestFalse(TEXT("negative distance disables appearances"), S.StartAppear(FVoxelCrossfadeScheduler::ChunkKey(FIntVector(20, 0, 0)), 3.0, false, 1.0e9));
+	TestFalse(TEXT("negative distance disables appearances"), S.StartAppear(FVoxelFadeScheduler::ChunkKey(FIntVector(20, 0, 0)), 3.0, false, 1.0e9));
 	S.SetAppearMinDistance(0.0);
-	TestTrue(TEXT("zero distance fades everything in"), S.StartAppear(FVoxelCrossfadeScheduler::ChunkKey(FIntVector(21, 0, 0)), 3.0, false, 0.0));
+	TestTrue(TEXT("zero distance fades everything in"), S.StartAppear(FVoxelFadeScheduler::ChunkKey(FIntVector(21, 0, 0)), 3.0, false, 0.0));
 	S.SetMaxConcurrent(S.Num());
-	TestFalse(TEXT("over the cap: appears at once"), S.StartAppear(FVoxelCrossfadeScheduler::ChunkKey(FIntVector(22, 0, 0)), 3.0, false, 1.0e6));
+	TestFalse(TEXT("over the cap: appears at once"), S.StartAppear(FVoxelFadeScheduler::ChunkKey(FIntVector(22, 0, 0)), 3.0, false, 1.0e6));
 	return true;
 }
 
@@ -228,11 +228,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCrossfadeCapFallsBackTest,
 
 bool FVoxelCrossfadeCapFallsBackTest::RunTest(const FString& Parameters)
 {
-	FVoxelCrossfadeScheduler S;
+	FVoxelFadeScheduler S;
 	S.SetMaxConcurrent(2);
-	const FIntVector4 A = FVoxelCrossfadeScheduler::ChunkKey(FIntVector(0, 0, 0));
-	const FIntVector4 B = FVoxelCrossfadeScheduler::ChunkKey(FIntVector(1, 0, 0));
-	const FIntVector4 C = FVoxelCrossfadeScheduler::ChunkKey(FIntVector(2, 0, 0));
+	const FIntVector4 A = FVoxelFadeScheduler::ChunkKey(FIntVector(0, 0, 0));
+	const FIntVector4 B = FVoxelFadeScheduler::ChunkKey(FIntVector(1, 0, 0));
+	const FIntVector4 C = FVoxelFadeScheduler::ChunkKey(FIntVector(2, 0, 0));
 
 	TestTrue(TEXT("first fade"), S.Start(A, 0.0, false));
 	TestTrue(TEXT("second fade"), S.Start(B, 0.0, false));
@@ -240,7 +240,7 @@ bool FVoxelCrossfadeCapFallsBackTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("refused fade not tracked"), S.Contains(C));
 	TestTrue(TEXT("restarting a running fade is not a new fade"), S.Start(A, 0.1, false));
 
-	FVoxelCrossfadeScheduler::FAdvanceResult R;
+	FVoxelFadeScheduler::FAdvanceResult R;
 	S.Advance(/*now*/ 1.0, 0.4f, 0.0, R);
 	TestEqual(TEXT("both complete"), R.Completed.Num(), 2);
 	TestTrue(TEXT("capacity freed"), S.Start(C, 1.0, false));

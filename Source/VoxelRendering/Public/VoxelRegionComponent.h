@@ -6,8 +6,8 @@
 #include "Components/PrimitiveComponent.h"
 #include "ChunkRenderData.h"
 #include "VoxelVertex.h"
-#include "VoxelCrossfadeScheduler.h"
-#include "VoxelWorldComponent.generated.h"
+#include "VoxelFadeScheduler.h"
+#include "VoxelRegionComponent.generated.h"
 
 class FVoxelSceneProxy;
 struct FVoxelChunkDrawInfo;
@@ -24,17 +24,17 @@ class UVoxelMaterialAtlas;
  * Thread Safety: All public methods must be called from game thread
  *
  * @see FVoxelSceneProxy
- * @see FVoxelCustomVFRenderer
+ * @see FVoxelMeshRenderer
  * @see Documentation/RENDERING_SYSTEM.md
  */
 UCLASS(ClassGroup = (Voxel), meta = (BlueprintSpawnableComponent))
-class VOXELRENDERING_API UVoxelWorldComponent : public UPrimitiveComponent
+class VOXELRENDERING_API UVoxelRegionComponent : public UPrimitiveComponent
 {
 	GENERATED_BODY()
 
 public:
-	UVoxelWorldComponent(const FObjectInitializer& ObjectInitializer);
-	virtual ~UVoxelWorldComponent();
+	UVoxelRegionComponent(const FObjectInitializer& ObjectInitializer);
+	virtual ~UVoxelRegionComponent();
 
 	// ==================== UPrimitiveComponent Interface ====================
 
@@ -224,7 +224,7 @@ public:
 	void SetSeamFadeHold(const FIntVector& OwnerChunkCoord, bool bHold);
 
 	/** True if seam bucket swaps crossfade right now (the chunk crossfade prerequisites). */
-	bool CanCrossfadeSeams() const;
+	bool CanSwapFadeSeams() const;
 
 	// ==================== First-Appearance Fades (R24 P3) ====================
 
@@ -602,7 +602,7 @@ private:
 
 	/**
 	 * Active crossfades — chunk interiors and seam buckets — keyed like FadeScheduler
-	 * (FVoxelCrossfadeScheduler::ChunkKey / SeamKey). Transitioning geometry only: a few dozen.
+	 * (FVoxelFadeScheduler::ChunkKey / SeamKey). Transitioning geometry only: a few dozen.
 	 */
 	TMap<FIntVector4, FActiveChunkFade> ActiveFades;
 
@@ -618,7 +618,7 @@ private:
 	bool bHasFadeViewer = false;
 
 	/** Fade timing (start, hold, release, alpha) for every entry in ActiveFades. */
-	FVoxelCrossfadeScheduler FadeScheduler;
+	FVoxelFadeScheduler FadeScheduler;
 
 	/** Hold requests (R24): a fade that starts for one of these starts held at alpha 0. */
 	TSet<FIntVector> ChunkFadeHolds;
@@ -630,7 +630,7 @@ private:
 	TArray<FIntVector4> PendingHoldReleases;
 
 	/** True if crossfading is possible right now (cvar on, fade material set, proxy alive) */
-	bool CanCrossfade() const;
+	bool CanSwapFade() const;
 
 	/**
 	 * Start (or restart) a crossfade for a chunk interior or seam bucket whose mesh is about to be
@@ -676,7 +676,7 @@ private:
 	void EnqueueClearFadeState(const FIntVector4& Key);
 
 	/** Per-tick fade driver: advances FadeAlpha on the MIDs, batches alphas to the proxy, completes finished fades. */
-	void AdvanceCrossfades();
+	void AdvanceFades();
 
 	/** Get a pooled fade MID (creating if needed), atlas parameters freshly copied, FadeInvert/FadeAlpha initialized. */
 	UMaterialInstanceDynamic* AcquireFadeMID(bool bInvert);

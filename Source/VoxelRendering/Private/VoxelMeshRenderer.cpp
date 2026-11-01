@@ -1,8 +1,8 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
-#include "VoxelCustomVFRenderer.h"
+#include "VoxelMeshRenderer.h"
 #include "VoxelRendering.h"
-#include "VoxelWorldComponent.h"
+#include "VoxelRegionComponent.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelMaterialAtlas.h"
 #include "VoxelVertex.h"
@@ -13,13 +13,13 @@
 #include "RHICommandList.h"
 #include "RenderingThread.h"
 
-// ==================== FVoxelCustomVFRenderer ====================
+// ==================== FVoxelMeshRenderer ====================
 
-FVoxelCustomVFRenderer::FVoxelCustomVFRenderer()
+FVoxelMeshRenderer::FVoxelMeshRenderer()
 {
 }
 
-FVoxelCustomVFRenderer::~FVoxelCustomVFRenderer()
+FVoxelMeshRenderer::~FVoxelMeshRenderer()
 {
 	if (bIsInitialized)
 	{
@@ -29,7 +29,7 @@ FVoxelCustomVFRenderer::~FVoxelCustomVFRenderer()
 
 // ==================== Lifecycle ====================
 
-void FVoxelCustomVFRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig)
+void FVoxelMeshRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig)
 {
 	check(IsInGameThread());
 	check(World);
@@ -37,7 +37,7 @@ void FVoxelCustomVFRenderer::Initialize(UWorld* World, const UVoxelWorldConfigur
 
 	if (bIsInitialized)
 	{
-		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelCustomVFRenderer::Initialize called when already initialized"));
+		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelMeshRenderer::Initialize called when already initialized"));
 		return;
 	}
 
@@ -57,7 +57,7 @@ void FVoxelCustomVFRenderer::Initialize(UWorld* World, const UVoxelWorldConfigur
 	AActor* Actor = World->SpawnActor<AActor>(AActor::StaticClass(), SpawnParams);
 	if (!Actor)
 	{
-		UE_LOG(LogVoxelRendering, Error, TEXT("FVoxelCustomVFRenderer: Failed to spawn container actor"));
+		UE_LOG(LogVoxelRendering, Error, TEXT("FVoxelMeshRenderer: Failed to spawn container actor"));
 		return;
 	}
 
@@ -69,26 +69,26 @@ void FVoxelCustomVFRenderer::Initialize(UWorld* World, const UVoxelWorldConfigur
 
 	// The primary world component: the only one on a heightmap world (at the world origin), region (0, 0, 0) on a planet.
 	// It lives as long as the renderer; region components come and go with their content.
-	WorldComponent = CreateRegionComponent(FIntVector::ZeroValue);
-	if (!WorldComponent)
+	OriginRegionComponent = CreateRegionComponent(FIntVector::ZeroValue);
+	if (!OriginRegionComponent)
 	{
-		UE_LOG(LogVoxelRendering, Error, TEXT("FVoxelCustomVFRenderer: Failed to create world component"));
+		UE_LOG(LogVoxelRendering, Error, TEXT("FVoxelMeshRenderer: Failed to create world component"));
 		Actor->Destroy();
 		ContainerActor.Reset();
 		return;
 	}
 
 	const bool bIsSmooth = (WorldConfig->MeshingMode != EMeshingMode::Cubic);
-	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelCustomVFRenderer: MeshingMode=%s, bUseSmoothMeshing=%s, render regions %s"),
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelMeshRenderer: MeshingMode=%s, bUseSmoothMeshing=%s, render regions %s"),
 		bIsSmooth ? TEXT("Triplanar") : TEXT("Cubic"),
 		bIsSmooth ? TEXT("true") : TEXT("false"),
 		Regions.IsSplit() ? *FString::Printf(TEXT("of %d^3 chunks"), Regions.RegionChunks) : TEXT("off (one primitive at the origin)"));
 
 	bIsInitialized = true;
-	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelCustomVFRenderer initialized"));
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelMeshRenderer initialized"));
 }
 
-UVoxelWorldComponent* FVoxelCustomVFRenderer::CreateRegionComponent(const FIntVector& Region)
+UVoxelRegionComponent* FVoxelMeshRenderer::CreateRegionComponent(const FIntVector& Region)
 {
 	check(IsInGameThread());
 	AActor* Actor = ContainerActor.Get();
@@ -98,7 +98,7 @@ UVoxelWorldComponent* FVoxelCustomVFRenderer::CreateRegionComponent(const FIntVe
 		return nullptr;
 	}
 
-	UVoxelWorldComponent* Component = NewObject<UVoxelWorldComponent>(Actor, NAME_None, RF_Transient);
+	UVoxelRegionComponent* Component = NewObject<UVoxelRegionComponent>(Actor, NAME_None, RF_Transient);
 	if (!Component)
 	{
 		return nullptr;
@@ -142,7 +142,7 @@ UVoxelWorldComponent* FVoxelCustomVFRenderer::CreateRegionComponent(const FIntVe
 				Component->RuntimeVirtualTextures.Add(RVT);
 			}
 		}
-		UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelCustomVFRenderer: Assigned %d Runtime Virtual Texture(s) to region %s"),
+		UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelMeshRenderer: Assigned %d Runtime Virtual Texture(s) to region %s"),
 			Component->RuntimeVirtualTextures.Num(), *Region.ToString());
 	}
 
@@ -172,23 +172,23 @@ UVoxelWorldComponent* FVoxelCustomVFRenderer::CreateRegionComponent(const FIntVe
 	return Component;
 }
 
-UVoxelWorldComponent* FVoxelCustomVFRenderer::FindRegionComponent(const FIntVector& ChunkCoord) const
+UVoxelRegionComponent* FVoxelMeshRenderer::FindRegionComponent(const FIntVector& ChunkCoord) const
 {
-	const TObjectPtr<UVoxelWorldComponent>* Found = RegionComponents.Find(Regions.GetRegion(ChunkCoord));
+	const TObjectPtr<UVoxelRegionComponent>* Found = RegionComponents.Find(Regions.GetRegion(ChunkCoord));
 	return Found ? Found->Get() : nullptr;
 }
 
-UVoxelWorldComponent* FVoxelCustomVFRenderer::GetOrCreateRegionComponent(const FIntVector& ChunkCoord)
+UVoxelRegionComponent* FVoxelMeshRenderer::GetOrCreateRegionComponent(const FIntVector& ChunkCoord)
 {
 	const FIntVector Region = Regions.GetRegion(ChunkCoord);
-	if (const TObjectPtr<UVoxelWorldComponent>* Found = RegionComponents.Find(Region))
+	if (const TObjectPtr<UVoxelRegionComponent>* Found = RegionComponents.Find(Region))
 	{
 		return Found->Get();
 	}
 	return CreateRegionComponent(Region);
 }
 
-void FVoxelCustomVFRenderer::RetireEmptyRegions()
+void FVoxelMeshRenderer::RetireEmptyRegions()
 {
 	if (!Regions.IsSplit())
 	{
@@ -196,8 +196,8 @@ void FVoxelCustomVFRenderer::RetireEmptyRegions()
 	}
 	for (auto It = RegionComponents.CreateIterator(); It; ++It)
 	{
-		UVoxelWorldComponent* Component = It.Value();
-		if (Component == WorldComponent)
+		UVoxelRegionComponent* Component = It.Value();
+		if (Component == OriginRegionComponent)
 		{
 			continue;
 		}
@@ -212,16 +212,16 @@ void FVoxelCustomVFRenderer::RetireEmptyRegions()
 	}
 }
 
-void FVoxelCustomVFRenderer::GetRegionComponents(TArray<TPair<FIntVector, UVoxelWorldComponent*>>& OutComponents) const
+void FVoxelMeshRenderer::GetRegionComponents(TArray<TPair<FIntVector, UVoxelRegionComponent*>>& OutComponents) const
 {
 	OutComponents.Reset(RegionComponents.Num());
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
 		OutComponents.Emplace(Pair.Key, Pair.Value.Get());
 	}
 }
 
-void FVoxelCustomVFRenderer::Shutdown()
+void FVoxelMeshRenderer::Shutdown()
 {
 	check(IsInGameThread());
 
@@ -235,7 +235,7 @@ void FVoxelCustomVFRenderer::Shutdown()
 	ClearAllWaterTiles();
 
 	// Destroy the components (the primary one is among them)
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
 		if (Pair.Value)
 		{
@@ -243,7 +243,7 @@ void FVoxelCustomVFRenderer::Shutdown()
 		}
 	}
 	RegionComponents.Empty();
-	WorldComponent = nullptr;
+	OriginRegionComponent = nullptr;
 
 	// Destroy container actor
 	if (ContainerActor.IsValid())
@@ -265,17 +265,17 @@ void FVoxelCustomVFRenderer::Shutdown()
 	TotalGPUMemory = 0;
 
 	bIsInitialized = false;
-	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelCustomVFRenderer shutdown"));
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelMeshRenderer shutdown"));
 }
 
-bool FVoxelCustomVFRenderer::IsInitialized() const
+bool FVoxelMeshRenderer::IsInitialized() const
 {
-	return bIsInitialized && WorldComponent != nullptr;
+	return bIsInitialized && OriginRegionComponent != nullptr;
 }
 
 // ==================== Mesh Updates ====================
 
-void FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU(
+void FVoxelMeshRenderer::UpdateChunkMeshFromCPU(
 	const FIntVector& ChunkCoord,
 	int32 LODLevel,
 	const FChunkMeshData& MeshData)
@@ -289,7 +289,7 @@ void FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU(
 	SubmitChunkMeshInternal(ChunkCoord, LODLevel, MeshData, TArray<uint32>(MeshData.Indices));
 }
 
-void FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU(
+void FVoxelMeshRenderer::UpdateChunkMeshFromCPU(
 	const FIntVector& ChunkCoord,
 	int32 LODLevel,
 	FChunkMeshData&& MeshData)
@@ -304,7 +304,7 @@ void FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU(
 	SubmitChunkMeshInternal(ChunkCoord, LODLevel, MeshData, MoveTemp(MeshData.Indices));
 }
 
-void FVoxelCustomVFRenderer::SubmitChunkMeshInternal(
+void FVoxelMeshRenderer::SubmitChunkMeshInternal(
 	const FIntVector& ChunkCoord,
 	int32 LODLevel,
 	const FChunkMeshData& MeshData,
@@ -314,7 +314,7 @@ void FVoxelCustomVFRenderer::SubmitChunkMeshInternal(
 
 	if (!IsInitialized())
 	{
-		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU called before initialization"));
+		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelMeshRenderer::UpdateChunkMeshFromCPU called before initialization"));
 		return;
 	}
 
@@ -350,7 +350,7 @@ void FVoxelCustomVFRenderer::SubmitChunkMeshInternal(
 	// 1. Creating intermediate GPU buffers
 	// 2. Bouncing back to game thread
 	// 3. GPU readback stalls in scene proxy
-	if (UVoxelWorldComponent* Component = GetOrCreateRegionComponent(ChunkCoord))
+	if (UVoxelRegionComponent* Component = GetOrCreateRegionComponent(ChunkCoord))
 	{
 		Component->UpdateChunkBuffersFromCPUData(
 			ChunkCoord,
@@ -361,11 +361,11 @@ void FVoxelCustomVFRenderer::SubmitChunkMeshInternal(
 		);
 	}
 
-	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelCustomVFRenderer: Updated chunk %s (DIRECT CPU path) - %d verts, %d tris"),
+	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelMeshRenderer: Updated chunk %s (DIRECT CPU path) - %d verts, %d tris"),
 		*ChunkCoord.ToString(), Stats.VertexCount, Stats.TriangleCount);
 }
 
-void FVoxelCustomVFRenderer::RemoveChunk(const FIntVector& ChunkCoord)
+void FVoxelMeshRenderer::RemoveChunk(const FIntVector& ChunkCoord)
 {
 	check(IsInGameThread());
 
@@ -380,13 +380,13 @@ void FVoxelCustomVFRenderer::RemoveChunk(const FIntVector& ChunkCoord)
 	}
 
 	// Forward to the chunk's region component
-	if (UVoxelWorldComponent* Component = FindRegionComponent(ChunkCoord))
+	if (UVoxelRegionComponent* Component = FindRegionComponent(ChunkCoord))
 	{
 		Component->RemoveChunk(ChunkCoord);
 	}
 }
 
-void FVoxelCustomVFRenderer::ClearAllChunks()
+void FVoxelMeshRenderer::ClearAllChunks()
 {
 	check(IsInGameThread());
 
@@ -395,7 +395,7 @@ void FVoxelCustomVFRenderer::ClearAllChunks()
 	TotalTriangleCount = 0;
 	TotalGPUMemory = 0;
 
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
 		if (Pair.Value)
 		{
@@ -406,13 +406,13 @@ void FVoxelCustomVFRenderer::ClearAllChunks()
 
 // ==================== Material Management ====================
 
-void FVoxelCustomVFRenderer::SetMaterial(UMaterialInterface* Material)
+void FVoxelMeshRenderer::SetMaterial(UMaterialInterface* Material)
 {
 	check(IsInGameThread());
 
 	CurrentMaterial = Material;
 
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
 		if (Pair.Value)
 		{
@@ -421,23 +421,23 @@ void FVoxelCustomVFRenderer::SetMaterial(UMaterialInterface* Material)
 	}
 }
 
-UMaterialInterface* FVoxelCustomVFRenderer::GetMaterial() const
+UMaterialInterface* FVoxelMeshRenderer::GetMaterial() const
 {
 	return CurrentMaterial.Get();
 }
 
-UMaterialInterface* FVoxelCustomVFRenderer::GetSurfaceMaterial() const
+UMaterialInterface* FVoxelMeshRenderer::GetSurfaceMaterial() const
 {
 	// The world component draws with its atlas instance once SetMaterialAtlas made one.
-	UMaterialInterface* Drawn = WorldComponent ? WorldComponent->GetMaterial(0) : nullptr;
+	UMaterialInterface* Drawn = OriginRegionComponent ? OriginRegionComponent->GetMaterial(0) : nullptr;
 	return Drawn ? Drawn : CurrentMaterial.Get();
 }
 
-void FVoxelCustomVFRenderer::UpdateMaterialParameters()
+void FVoxelMeshRenderer::UpdateMaterialParameters()
 {
 	// Material parameters update automatically through UMaterialInstanceDynamic
 	// Force a render state update to pick up any changes
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
 		if (Pair.Value)
 		{
@@ -446,19 +446,19 @@ void FVoxelCustomVFRenderer::UpdateMaterialParameters()
 	}
 }
 
-void FVoxelCustomVFRenderer::SetMaterialAtlas(UVoxelMaterialAtlas* Atlas)
+void FVoxelMeshRenderer::SetMaterialAtlas(UVoxelMaterialAtlas* Atlas)
 {
 	check(IsInGameThread());
 
-	UE_LOG(LogVoxelRendering, Log, TEXT("SetMaterialAtlas called - WorldComponent: %s, CurrentMaterial: %s, Atlas: %s"),
-		WorldComponent ? TEXT("Valid") : TEXT("NULL"),
+	UE_LOG(LogVoxelRendering, Log, TEXT("SetMaterialAtlas called - OriginRegionComponent: %s, CurrentMaterial: %s, Atlas: %s"),
+		OriginRegionComponent ? TEXT("Valid") : TEXT("NULL"),
 		CurrentMaterial.IsValid() ? *CurrentMaterial->GetName() : TEXT("NULL"),
 		Atlas ? *Atlas->GetName() : TEXT("NULL"));
 
 	CurrentAtlas = Atlas;
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
-		UVoxelWorldComponent* Component = Pair.Value;
+		UVoxelRegionComponent* Component = Pair.Value;
 		if (!Component)
 		{
 			continue;
@@ -488,24 +488,24 @@ void FVoxelCustomVFRenderer::SetMaterialAtlas(UVoxelMaterialAtlas* Atlas)
 	}
 }
 
-UVoxelMaterialAtlas* FVoxelCustomVFRenderer::GetMaterialAtlas() const
+UVoxelMaterialAtlas* FVoxelMeshRenderer::GetMaterialAtlas() const
 {
-	if (WorldComponent)
+	if (OriginRegionComponent)
 	{
-		return WorldComponent->GetMaterialAtlas();
+		return OriginRegionComponent->GetMaterialAtlas();
 	}
 	return nullptr;
 }
 
 // ==================== Water Tile Support ====================
 
-void FVoxelCustomVFRenderer::SetWaterMaterial(UMaterialInterface* Material)
+void FVoxelMeshRenderer::SetWaterMaterial(UMaterialInterface* Material)
 {
 	check(IsInGameThread());
 
 	CurrentWaterMaterial = Material;
 
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
 		if (Pair.Value)
 		{
@@ -514,7 +514,7 @@ void FVoxelCustomVFRenderer::SetWaterMaterial(UMaterialInterface* Material)
 	}
 }
 
-void FVoxelCustomVFRenderer::UpdateWaterTileMesh(
+void FVoxelMeshRenderer::UpdateWaterTileMesh(
 	const FIntVector2& TileCoord,
 	const FChunkMeshData& WaterMeshData)
 {
@@ -522,7 +522,7 @@ void FVoxelCustomVFRenderer::UpdateWaterTileMesh(
 
 	if (!IsInitialized())
 	{
-		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelCustomVFRenderer::UpdateWaterTileMesh called before initialization"));
+		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelMeshRenderer::UpdateWaterTileMesh called before initialization"));
 		return;
 	}
 
@@ -545,30 +545,30 @@ void FVoxelCustomVFRenderer::UpdateWaterTileMesh(
 	const FVector TileWorldPos = WorldOrigin + FVector(TileCoord.X * ChunkWorldSize, TileCoord.Y * ChunkWorldSize, 0.0);
 
 	// Forward to the tile's region component (the region of its column's z-0 chunk)
-	if (UVoxelWorldComponent* Component = GetOrCreateRegionComponent(WaterTileChunk(TileCoord)))
+	if (UVoxelRegionComponent* Component = GetOrCreateRegionComponent(WaterTileChunk(TileCoord)))
 	{
 		Component->UpdateWaterTileFromCPUData(TileCoord, MoveTemp(Vertices), MoveTemp(Indices), TileWorldPos);
 	}
 
-	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelCustomVFRenderer: Updated water tile (%d,%d) - %d verts"),
+	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelMeshRenderer: Updated water tile (%d,%d) - %d verts"),
 		TileCoord.X, TileCoord.Y, WaterMeshData.Positions.Num());
 }
 
-void FVoxelCustomVFRenderer::RemoveWaterTile(const FIntVector2& TileCoord)
+void FVoxelMeshRenderer::RemoveWaterTile(const FIntVector2& TileCoord)
 {
 	check(IsInGameThread());
 
-	if (UVoxelWorldComponent* Component = FindRegionComponent(WaterTileChunk(TileCoord)))
+	if (UVoxelRegionComponent* Component = FindRegionComponent(WaterTileChunk(TileCoord)))
 	{
 		Component->RemoveWaterTile(TileCoord);
 	}
 }
 
-void FVoxelCustomVFRenderer::ClearAllWaterTiles()
+void FVoxelMeshRenderer::ClearAllWaterTiles()
 {
 	check(IsInGameThread());
 
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
 		if (Pair.Value)
 		{
@@ -579,7 +579,7 @@ void FVoxelCustomVFRenderer::ClearAllWaterTiles()
 
 // ==================== Seam Meshes (seam-ownership P1) ====================
 
-void FVoxelCustomVFRenderer::UpdateSeamMeshFromCPU(
+void FVoxelMeshRenderer::UpdateSeamMeshFromCPU(
 	const FIntVector& OwnerChunkCoord,
 	uint8 Axis,
 	int32 LODLevel,
@@ -590,7 +590,7 @@ void FVoxelCustomVFRenderer::UpdateSeamMeshFromCPU(
 
 	if (!IsInitialized())
 	{
-		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelCustomVFRenderer::UpdateSeamMeshFromCPU called before initialization"));
+		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelMeshRenderer::UpdateSeamMeshFromCPU called before initialization"));
 		return;
 	}
 
@@ -598,7 +598,7 @@ void FVoxelCustomVFRenderer::UpdateSeamMeshFromCPU(
 	{
 		// Seam dissolved (no surface crosses the face anymore) — drop the bucket (fading it out
 		// with the surface it belonged to when the caller asked for a crossfade).
-		if (UVoxelWorldComponent* Component = FindRegionComponent(OwnerChunkCoord))
+		if (UVoxelRegionComponent* Component = FindRegionComponent(OwnerChunkCoord))
 		{
 			Component->RemoveSeamMesh(OwnerChunkCoord, Axis, /*bFadeOut*/ bCrossfade);
 		}
@@ -615,63 +615,63 @@ void FVoxelCustomVFRenderer::UpdateSeamMeshFromCPU(
 	const FVector OwnerWorldPos = WorldOrigin + FVector(OwnerChunkCoord) * ChunkWorldSize;
 
 	// A seam lives with its owner chunk's region
-	if (UVoxelWorldComponent* Component = GetOrCreateRegionComponent(OwnerChunkCoord))
+	if (UVoxelRegionComponent* Component = GetOrCreateRegionComponent(OwnerChunkCoord))
 	{
 		Component->UpdateSeamMeshFromCPUData(
 			OwnerChunkCoord, Axis, LODLevel,
 			MoveTemp(Vertices), MoveTemp(MeshData.Indices), OwnerWorldPos, bCrossfade);
 	}
 
-	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelCustomVFRenderer: Updated seam mesh %s axis=%d - %d verts"),
+	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelMeshRenderer: Updated seam mesh %s axis=%d - %d verts"),
 		*OwnerChunkCoord.ToString(), Axis, MeshData.Positions.Num());
 }
 
-void FVoxelCustomVFRenderer::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis)
+void FVoxelMeshRenderer::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis)
 {
 	check(IsInGameThread());
 
-	if (UVoxelWorldComponent* Component = FindRegionComponent(OwnerChunkCoord))
+	if (UVoxelRegionComponent* Component = FindRegionComponent(OwnerChunkCoord))
 	{
 		Component->RemoveSeamMesh(OwnerChunkCoord, Axis);
 	}
 }
 
-void FVoxelCustomVFRenderer::SetChunkFadeHold(const FIntVector& ChunkCoord, bool bHold)
+void FVoxelMeshRenderer::SetChunkFadeHold(const FIntVector& ChunkCoord, bool bHold)
 {
 	check(IsInGameThread());
 
 	// A hold is set before the chunk's mesh arrives: the region's component may not exist yet.
-	if (UVoxelWorldComponent* Component = bHold ? GetOrCreateRegionComponent(ChunkCoord) : FindRegionComponent(ChunkCoord))
+	if (UVoxelRegionComponent* Component = bHold ? GetOrCreateRegionComponent(ChunkCoord) : FindRegionComponent(ChunkCoord))
 	{
 		Component->SetChunkFadeHold(ChunkCoord, bHold);
 	}
 }
 
-void FVoxelCustomVFRenderer::SetSeamFadeHold(const FIntVector& OwnerChunkCoord, bool bHold)
+void FVoxelMeshRenderer::SetSeamFadeHold(const FIntVector& OwnerChunkCoord, bool bHold)
 {
 	check(IsInGameThread());
 
-	if (UVoxelWorldComponent* Component = bHold ? GetOrCreateRegionComponent(OwnerChunkCoord) : FindRegionComponent(OwnerChunkCoord))
+	if (UVoxelRegionComponent* Component = bHold ? GetOrCreateRegionComponent(OwnerChunkCoord) : FindRegionComponent(OwnerChunkCoord))
 	{
 		Component->SetSeamFadeHold(OwnerChunkCoord, bHold);
 	}
 }
 
-float FVoxelCustomVFRenderer::GetSeamFadeRemainingSeconds(const FIntVector& OwnerChunkCoord) const
+float FVoxelMeshRenderer::GetSeamFadeRemainingSeconds(const FIntVector& OwnerChunkCoord) const
 {
 	check(IsInGameThread());
 
-	const UVoxelWorldComponent* Component = FindRegionComponent(OwnerChunkCoord);
+	const UVoxelRegionComponent* Component = FindRegionComponent(OwnerChunkCoord);
 	return Component ? Component->GetSeamFadeRemainingSeconds(OwnerChunkCoord) : 0.0f;
 }
 
-void FVoxelCustomVFRenderer::SetViewerPosition(const FVector& ViewerPosition)
+void FVoxelMeshRenderer::SetViewerPosition(const FVector& ViewerPosition)
 {
 	check(IsInGameThread());
 
 	CurrentViewerPosition = ViewerPosition;
 	bHasViewerPosition = true;
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
 		if (Pair.Value)
 		{
@@ -680,21 +680,21 @@ void FVoxelCustomVFRenderer::SetViewerPosition(const FVector& ViewerPosition)
 	}
 }
 
-bool FVoxelCustomVFRenderer::WillFadeInChunk(const FIntVector& ChunkCoord) const
+bool FVoxelMeshRenderer::WillFadeInChunk(const FIntVector& ChunkCoord) const
 {
 	check(IsInGameThread());
 
 	// The answer belongs to the component the chunk's mesh will go to (its fade scheduler and cap). A region with no
 	// component yet gets one now: the mesh follows this question at once.
-	UVoxelWorldComponent* Component = const_cast<FVoxelCustomVFRenderer*>(this)->GetOrCreateRegionComponent(ChunkCoord);
+	UVoxelRegionComponent* Component = const_cast<FVoxelMeshRenderer*>(this)->GetOrCreateRegionComponent(ChunkCoord);
 	return Component && Component->WillFadeInChunk(ChunkCoord);
 }
 
-void FVoxelCustomVFRenderer::ClearAllSeamMeshes()
+void FVoxelMeshRenderer::ClearAllSeamMeshes()
 {
 	check(IsInGameThread());
 
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
 		if (Pair.Value)
 		{
@@ -703,11 +703,11 @@ void FVoxelCustomVFRenderer::ClearAllSeamMeshes()
 	}
 }
 
-void FVoxelCustomVFRenderer::GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const
+void FVoxelMeshRenderer::GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const
 {
 	OutOwners.Reset();
 	TArray<FIntVector> RegionOwners;
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
 		if (Pair.Value)
 		{
@@ -717,12 +717,12 @@ void FVoxelCustomVFRenderer::GetSeamMeshOwners(TArray<FIntVector>& OutOwners) co
 	}
 }
 
-bool FVoxelCustomVFRenderer::ConsumeLostRenderData(TArray<FIntVector>& OutChunks)
+bool FVoxelMeshRenderer::ConsumeLostRenderData(TArray<FIntVector>& OutChunks)
 {
 	OutChunks.Reset();
 	bool bLost = false;
 	TArray<FIntVector> RegionChunks;
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
 		if (Pair.Value && Pair.Value->ConsumeLostRenderData(RegionChunks))
 		{
@@ -733,12 +733,12 @@ bool FVoxelCustomVFRenderer::ConsumeLostRenderData(TArray<FIntVector>& OutChunks
 	return bLost;
 }
 
-bool FVoxelCustomVFRenderer::GetWaterTileDrawInfo(const FIntVector2& TileCoord, FString& Out) const
+bool FVoxelMeshRenderer::GetWaterTileDrawInfo(const FIntVector2& TileCoord, FString& Out) const
 {
 	check(IsInGameThread());
 	const FIntVector Chunk = WaterTileChunk(TileCoord);
 	const FIntVector Region = Regions.GetRegion(Chunk);
-	UVoxelWorldComponent* Component = FindRegionComponent(Chunk);
+	UVoxelRegionComponent* Component = FindRegionComponent(Chunk);
 	if (!Component)
 	{
 		Out = FString::Printf(TEXT("region %s: NO component"), *Region.ToString());
@@ -752,12 +752,12 @@ bool FVoxelCustomVFRenderer::GetWaterTileDrawInfo(const FIntVector2& TileCoord, 
 
 // ==================== Batched Operations ====================
 
-void FVoxelCustomVFRenderer::FlushPendingOperations()
+void FVoxelMeshRenderer::FlushPendingOperations()
 {
 	check(IsInGameThread());
 
 	// Delegate to the world components, each batching its pending adds/removes into a single render command
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
 		if (Pair.Value)
 		{
@@ -771,17 +771,17 @@ void FVoxelCustomVFRenderer::FlushPendingOperations()
 
 // ==================== Queries ====================
 
-bool FVoxelCustomVFRenderer::IsChunkLoaded(const FIntVector& ChunkCoord) const
+bool FVoxelMeshRenderer::IsChunkLoaded(const FIntVector& ChunkCoord) const
 {
 	return ChunkStatsMap.Contains(ChunkCoord);
 }
 
-int32 FVoxelCustomVFRenderer::GetLoadedChunkCount() const
+int32 FVoxelMeshRenderer::GetLoadedChunkCount() const
 {
 	return ChunkStatsMap.Num();
 }
 
-void FVoxelCustomVFRenderer::GetLoadedChunks(TArray<FIntVector>& OutChunks) const
+void FVoxelMeshRenderer::GetLoadedChunks(TArray<FIntVector>& OutChunks) const
 {
 	OutChunks.Reset(ChunkStatsMap.Num());
 	for (const auto& Pair : ChunkStatsMap)
@@ -790,24 +790,24 @@ void FVoxelCustomVFRenderer::GetLoadedChunks(TArray<FIntVector>& OutChunks) cons
 	}
 }
 
-int64 FVoxelCustomVFRenderer::GetGPUMemoryUsage() const
+int64 FVoxelMeshRenderer::GetGPUMemoryUsage() const
 {
 	return TotalGPUMemory;
 }
 
-int64 FVoxelCustomVFRenderer::GetTotalVertexCount() const
+int64 FVoxelMeshRenderer::GetTotalVertexCount() const
 {
 	return TotalVertexCount;
 }
 
-int64 FVoxelCustomVFRenderer::GetTotalTriangleCount() const
+int64 FVoxelMeshRenderer::GetTotalTriangleCount() const
 {
 	return TotalTriangleCount;
 }
 
 // ==================== Bounds ====================
 
-bool FVoxelCustomVFRenderer::GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const
+bool FVoxelMeshRenderer::GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const
 {
 	const FChunkStats* Stats = ChunkStatsMap.Find(ChunkCoord);
 	if (Stats)
@@ -818,7 +818,7 @@ bool FVoxelCustomVFRenderer::GetChunkBounds(const FIntVector& ChunkCoord, FBox& 
 	return false;
 }
 
-FBox FVoxelCustomVFRenderer::GetTotalBounds() const
+FBox FVoxelMeshRenderer::GetTotalBounds() const
 {
 	FBox TotalBounds(ForceInit);
 
@@ -835,14 +835,14 @@ FBox FVoxelCustomVFRenderer::GetTotalBounds() const
 
 // ==================== Debugging ====================
 
-FString FVoxelCustomVFRenderer::GetDebugStats() const
+FString FVoxelMeshRenderer::GetDebugStats() const
 {
 	int64 InteriorStarts = 0, InteriorRestarts = 0, SeamStarts = 0, SeamRestarts = 0;
 	int64 InteriorAppears = 0, SeamAppears = 0;
 	int32 ActiveFades = 0;
-	for (const TPair<FIntVector, TObjectPtr<UVoxelWorldComponent>>& Pair : RegionComponents)
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
-		const UVoxelWorldComponent* Component = Pair.Value;
+		const UVoxelRegionComponent* Component = Pair.Value;
 		if (!Component)
 		{
 			continue;
@@ -881,20 +881,20 @@ FString FVoxelCustomVFRenderer::GetDebugStats() const
 	);
 }
 
-void FVoxelCustomVFRenderer::DrawDebugVisualization(const FLODQueryContext& Context) const
+void FVoxelMeshRenderer::DrawDebugVisualization(const FLODQueryContext& Context) const
 {
 	// Optional debug visualization - draw chunk bounds, LOD levels, etc.
 	// Implementation can use DrawDebugBox, DrawDebugString, etc.
 }
 
-FString FVoxelCustomVFRenderer::GetRendererTypeName() const
+FString FVoxelMeshRenderer::GetRendererTypeName() const
 {
 	return TEXT("CustomVF");
 }
 
 // ==================== Internal Helpers ====================
 
-void FVoxelCustomVFRenderer::ConvertToVoxelVertices(
+void FVoxelMeshRenderer::ConvertToVoxelVertices(
 	const FChunkMeshData& MeshData,
 	TArray<FVoxelVertex>& OutVertices,
 	FBox& OutLocalBounds)
@@ -949,7 +949,7 @@ void FVoxelCustomVFRenderer::ConvertToVoxelVertices(
 	}
 }
 
-FBox FVoxelCustomVFRenderer::CalculateChunkBounds(const FIntVector& ChunkCoord) const
+FBox FVoxelMeshRenderer::CalculateChunkBounds(const FIntVector& ChunkCoord) const
 {
 	const FVector WorldOrigin = CachedConfig.IsValid() ? CachedConfig->WorldOrigin : FVector::ZeroVector;
 	const FVector ChunkMin = WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;

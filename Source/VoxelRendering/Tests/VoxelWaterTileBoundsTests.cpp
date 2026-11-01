@@ -3,13 +3,13 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "UObject/Package.h"
-#include "VoxelWorldComponent.h"
+#include "VoxelRegionComponent.h"
 #include "VoxelVertex.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
 // ---------------------------------------------------------------------------
-// G77 (WORLD_MODES_REVIEW_PLAN.md §23.14): a UVoxelWorldComponent's bounds cover its water tiles. Since MP2 a renderer
+// G77 (WORLD_MODES_REVIEW_PLAN.md §23.14): a UVoxelRegionComponent's bounds cover its water tiles. Since MP2 a renderer
 // holds one component per 16^3-chunk region, and a water tile goes to the region of its column's Z-0 chunk; over a
 // lake that layer is air with no mesh, so a region whose chunks hold no mesh bounded only a chunk-sized box at its
 // location and the engine culled its tiles (the lake drawn without water in a block of chunk columns at a region's
@@ -28,7 +28,7 @@ namespace VoxelWaterTileBoundsTestUtils
 	}
 
 	/** A tile's quad, tile-local as FVoxelWaterMesher makes it (the proxy shifts it by the tile's world position). */
-	void SubmitTile(UVoxelWorldComponent& Component, const FIntVector2& Tile)
+	void SubmitTile(UVoxelRegionComponent& Component, const FIntVector2& Tile)
 	{
 		TArray<FVoxelVertex> Vertices;
 		Vertices.SetNum(4);
@@ -55,7 +55,7 @@ bool FVoxelWaterTileBoundsTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelWaterTileBoundsTestUtils;
 
-	UVoxelWorldComponent* Component = NewObject<UVoxelWorldComponent>(GetTransientPackage());
+	UVoxelRegionComponent* Component = NewObject<UVoxelRegionComponent>(GetTransientPackage());
 	Component->SetChunkWorldSize(static_cast<float>(ChunkWorld));
 	Component->SetWorldOrigin(WorldOrigin);
 

@@ -392,7 +392,7 @@ static void InitFrameRequest(FVoxelMeshingRequest& R, const FIntVector& Coord, i
 	}
 	R.TransitionFaces = 0;
 	R.EdgeCornerFlags = 0;
-	R.MeshCellDomain = EVoxelMeshCellDomain::Full;
+	R.MeshCellDomain = EVoxelMeshCellDomain::WholeChunk;
 }
 
 /** Read the neighbour at (DX, DY, DZ) in place from its snapshot (G63): the voxels FillFacePlanes, FillEdgeStrip and FillCorner copy. */

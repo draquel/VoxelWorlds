@@ -9,7 +9,7 @@
 #include "VoxelLocalVertexFactory.h"
 #include "VoxelBatchCounters.h"
 
-class UVoxelWorldComponent;
+class UVoxelRegionComponent;
 
 /**
  * Retained pre-swap mesh for a chunk that is mid-crossfade.
@@ -59,7 +59,7 @@ struct FVoxelChunkPreviousMesh
 
 /**
  * Render-side crossfade state for one chunk, attached by the game-thread fade driver
- * (UVoxelWorldComponent). The material proxies belong to pooled MIDs of the masked fade
+ * (UVoxelRegionComponent). The material proxies belong to pooled MIDs of the masked fade
  * material; the MIDs carry the animated FadeAlpha/FadeInvert parameters, so the proxies
  * stay valid pointers for the whole fade.
  *
@@ -137,7 +137,7 @@ struct FVoxelChunkDrawInfo
  *
  * Thread Safety: All public methods are for render thread only
  *
- * @see UVoxelWorldComponent
+ * @see UVoxelRegionComponent
  * @see Documentation/RENDERING_SYSTEM.md
  */
 class VOXELRENDERING_API FVoxelSceneProxy : public FPrimitiveSceneProxy
@@ -149,7 +149,7 @@ public:
 	 * @param InComponent Owner component
 	 * @param InMaterial Material to use for rendering
 	 */
-	FVoxelSceneProxy(UVoxelWorldComponent* InComponent, UMaterialInterface* InMaterial);
+	FVoxelSceneProxy(UVoxelRegionComponent* InComponent, UMaterialInterface* InMaterial);
 
 	virtual ~FVoxelSceneProxy();
 
@@ -219,7 +219,7 @@ public:
 
 	// ==================== Mesh-Swap Crossfade (Render Thread) ====================
 	// See Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md §5. The game-thread driver
-	// is UVoxelWorldComponent (cvars voxel.MeshFade / voxel.MeshFade.Duration).
+	// is UVoxelRegionComponent (cvars voxel.MeshFade / voxel.MeshFade.Duration).
 
 	/**
 	 * Set the masked fade material used by crossfade batches (for relevance only —
@@ -242,7 +242,7 @@ public:
 
 	/**
 	 * Clear the held flag of chunk and seam fades that were just released (their alphas start
-	 * rising with the next alpha batch). Keys use FVoxelCrossfadeScheduler's layout (W = -1 for a
+	 * rising with the next alpha batch). Keys use FVoxelFadeScheduler's layout (W = -1 for a
 	 * chunk interior, 0..6 for a seam bucket slot).
 	 * Must be called on render thread.
 	 */
@@ -355,7 +355,7 @@ public:
 	void SetSeamFadeState_RenderThread(const FIntVector& OwnerChunkCoord, uint8 Axis,
 		const FMaterialRenderProxy* InFadeInProxy, const FMaterialRenderProxy* InFadeOutProxy, bool bHeld = false, bool bAppear = false);
 
-	/** Per-tick seam fade alphas (bookkeeping copies; keys are FVoxelCrossfadeScheduler seam keys). Render thread. */
+	/** Per-tick seam fade alphas (bookkeeping copies; keys are FVoxelFadeScheduler seam keys). Render thread. */
 	void UpdateSeamFadeAlphasBatch_RenderThread(const TArray<TPair<FIntVector4, float>>& Alphas);
 
 	/** End a seam bucket's fade: release its Previous set and detach fade state. Render thread. */
@@ -565,7 +565,7 @@ private:
 		return FVector3f(WorldPosition - RenderOrigin);
 	}
 
-	/** Face types against a planet's radial up (UVoxelWorldComponent::SetRadialFaceUp), copied at creation; the centre
+	/** Face types against a planet's radial up (UVoxelRegionComponent::SetRadialFaceUp), copied at creation; the centre
 	 *  relative to RenderOrigin, as the vertices are */
 	bool bRadialFaceUp = false;
 	FVector3f FaceUpCenter = FVector3f::ZeroVector;

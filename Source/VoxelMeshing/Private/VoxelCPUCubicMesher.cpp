@@ -211,7 +211,7 @@ FVoxelCPUCubicMesher::FCubicPass FVoxelCPUCubicMesher::MakeChunkPass(const FVoxe
 	Pass.Own = Request.VoxelData.GetData();
 	// The Interior domain is a pure function of the chunk's own voxels: it never reads neighbour data,
 	// even if the request carries some, so it never needs re-meshing when a neighbour arrives.
-	Pass.Slices = (Request.MeshCellDomain == EVoxelMeshCellDomain::Full) ? &Request : nullptr;
+	Pass.Slices = (Request.MeshCellDomain == EVoxelMeshCellDomain::WholeChunk) ? &Request : nullptr;
 	Pass.ChunkSize = Request.ChunkSize;
 	Pass.VoxelSize = Request.VoxelSize;
 	return Pass;

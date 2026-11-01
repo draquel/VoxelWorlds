@@ -18,7 +18,7 @@ The material system has been fully implemented with:
 
 ## UVoxelMaterialAtlas (Data Asset)
 
-The primary interface for material configuration. Create this asset in the Content Browser and assign it to your VoxelWorldComponent.
+The primary interface for material configuration. Create this asset in the Content Browser and assign it to your VoxelRegionComponent.
 
 ### FVoxelMaterialTextureConfig
 
@@ -164,7 +164,7 @@ half of 512 x 512 x 4 bytes a slice on disk (the source, delta-coded and Kraken-
   `NeedsTextureArrayRebuild()`). Editing the atlas's configs or `TextureArraySize`, or reimporting a source texture,
   makes them stale; renaming a material does not. An atlas with no source texture and no array (a packed atlas for
   cubic terrain only) is never stale.
-- **Binding.** `UVoxelWorldComponent::UpdateMaterialAtlasParameters`
+- **Binding.** `UVoxelRegionComponent::UpdateMaterialAtlasParameters`
   call `EnsureTextureArrays()` and bind the arrays. In the editor, missing or stale arrays are rebuilt there first, with
   a warning naming the atlas (save the atlas and its arrays to keep them; a packaged game uses the saved ones); up to
   date ones are only bound, so an editor session's first PIE builds nothing (0.28 s on `PlanetTest`; a rebuild of the
@@ -343,7 +343,7 @@ float2 GetAtlasUV(uint MaterialID, uint Face, float2 LocalUV)
 
 The face type (top, side, bottom) that runs is the custom vertex factory's: `FVoxelSceneProxy::ConvertVertex` classifies
 every vertex's normal against 0.7, along world +Z on heightmap worlds. On a planet the custom VF renderer turns on
-`UVoxelWorldComponent::SetRadialFaceUp`, and the normal is measured against the vertex's radial up instead
+`UVoxelRegionComponent::SetRadialFaceUp`, and the normal is measured against the vertex's radial up instead
 (`Rendering.Planet.FaceTypeByLocalUp`). `VoxelMaterialCommon.ush` gets an up-aware `GetVoxelFaceTypeUp` for shaders
 that need one (no shader includes it today). Smooth materials are triplanar on world axes, which works in any
 orientation, and read the face type only in the cubic atlas path, which planets do not use (SD3).
@@ -533,7 +533,7 @@ Now each projection samples with `SampleGrad` and the UV derivatives of the tran
 array's own sampler (`AlbedoArraySampler` etc., anisotropic: the arrays are `TEXTUREGROUP_World` with `TF_Default`).
 The switch is the scalar `GradientSampling` of `MPC_VoxelMaterial` (`/VoxelWorlds/Materials/`), read inside both
 functions; `voxel.Material.GradientSampling` (1 by default, 0 = mip 0 as before) sets it in every game and PIE world
-(a console variable sink, and each `UVoxelWorldComponent` applies it when its scene proxy is created). On `PlanetTest`
+(a console variable sink, and each `UVoxelRegionComponent` applies it when its scene proxy is created). On `PlanetTest`
 at four fixed views, a quarter-pixel camera turn changes the ground's pixels by 43.8-45.0 luma (of 255) at mip 0 and
 0.6-1.6 with gradients; the ground's high-frequency energy under TSR falls from 55-59 to 3.5-7.3; GPU time per frame
 is not higher (P50 5.11-5.22 ms against 4.94-5.07, three bench runs each).
@@ -753,10 +753,10 @@ public:
 
 The material system uses Dynamic Material Instances to bind texture arrays at runtime.
 
-### UVoxelWorldComponent::UpdateMaterialAtlasParameters
+### UVoxelRegionComponent::UpdateMaterialAtlasParameters
 
 ```cpp
-void UVoxelWorldComponent::UpdateMaterialAtlasParameters(UMaterialInstanceDynamic* DynamicMaterial)
+void UVoxelRegionComponent::UpdateMaterialAtlasParameters(UMaterialInstanceDynamic* DynamicMaterial)
 {
     if (!MaterialAtlas)
     {
@@ -843,12 +843,12 @@ The material system uses a unified master material that automatically switches b
 
 ### Automatic Mode Selection
 
-The material mode is synced automatically in `FVoxelCustomVFRenderer::Initialize()`:
+The material mode is synced automatically in `FVoxelMeshRenderer::Initialize()`:
 
 ```cpp
 // Sync material mode with configuration's meshing mode
 const bool bIsSmooth = (WorldConfig->MeshingMode != EMeshingMode::Cubic);
-WorldComponent->SetUseSmoothMeshing(bIsSmooth);
+OriginRegionComponent->SetUseSmoothMeshing(bIsSmooth);
 ```
 
 This sets the `bSmoothTerrain` material parameter which controls the Lerp nodes in M_VoxelMaster.
@@ -978,8 +978,8 @@ The material system is fully implemented with:
 **C++ Code:**
 - `VoxelCore/Public/VoxelMaterialAtlas.h` - Data asset header
 - `VoxelCore/Private/VoxelMaterialAtlas.cpp` - BuildTextureArrays(), BuildMaterialLUT()
-- `VoxelRendering/Private/VoxelWorldComponent.cpp` - UpdateMaterialAtlasParameters()
-- `VoxelRendering/Private/VoxelCustomVFRenderer.cpp` - Automatic mode sync
+- `VoxelRendering/Private/VoxelRegionComponent.cpp` - UpdateMaterialAtlasParameters()
+- `VoxelRendering/Private/VoxelMeshRenderer.cpp` - Automatic mode sync
 
 **Shaders:**
 - `Shaders/Private/VoxelTriplanarCommon.ush` - Triplanar utility functions

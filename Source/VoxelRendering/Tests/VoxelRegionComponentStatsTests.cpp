@@ -3,22 +3,22 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "UObject/Package.h"
-#include "VoxelWorldComponent.h"
+#include "VoxelRegionComponent.h"
 #include "VoxelVertex.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
 // ---------------------------------------------------------------------------
-// UVoxelWorldComponent's vertex, triangle and GPU memory statistics report the meshes it holds now
+// UVoxelRegionComponent's vertex, triangle and GPU memory statistics report the meshes it holds now
 // (WORLD_MODES_REVIEW_PLAN.md G1, WM-H2). They used to add every upload and never subtract, so a session
 // that re-meshed and unloaded chunks reported many times what the renderer held. Runs headless: the
 // component is never registered, so meshes stay in its pending batch and no render command is sent.
 // ---------------------------------------------------------------------------
 
-namespace VoxelWorldComponentStatsTestUtils
+namespace VoxelRegionComponentStatsTestUtils
 {
 	/** Submit a CPU mesh with the given vertex and index counts (geometry content is irrelevant here). */
-	void Submit(UVoxelWorldComponent& Component, const FIntVector& Chunk, int32 NumVertices, int32 NumIndices)
+	void Submit(UVoxelRegionComponent& Component, const FIntVector& Chunk, int32 NumVertices, int32 NumIndices)
 	{
 		TArray<FVoxelVertex> Vertices;
 		Vertices.SetNum(NumVertices);
@@ -34,15 +34,15 @@ namespace VoxelWorldComponentStatsTestUtils
 	}
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWorldComponentStatsCurrentTest,
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelRegionComponentStatsCurrentTest,
 	"VoxelWorlds.Rendering.WorldComponent.StatsReportCurrentMeshes",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FVoxelWorldComponentStatsCurrentTest::RunTest(const FString& Parameters)
+bool FVoxelRegionComponentStatsCurrentTest::RunTest(const FString& Parameters)
 {
-	using namespace VoxelWorldComponentStatsTestUtils;
+	using namespace VoxelRegionComponentStatsTestUtils;
 
-	UVoxelWorldComponent* Component = NewObject<UVoxelWorldComponent>(GetTransientPackage());
+	UVoxelRegionComponent* Component = NewObject<UVoxelRegionComponent>(GetTransientPackage());
 	const FIntVector A(0, 0, 0);
 	const FIntVector B(1, 0, 0);
 
