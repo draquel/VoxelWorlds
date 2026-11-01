@@ -189,10 +189,11 @@ struct VOXELSTREAMING_API FVoxelFarFieldSettings
 	int32 SkirtLevels = 3;
 
 	/**
-	 * Patches whose cap is wider than this (radians) take no conditioning zones: a POI pad is a few chunks across, so at
-	 * their resolution it does not show, and a cap of a face would ask the POI system for every POI on it.
+	 * Patches wider than this take no conditioning zones: a POI pad is a few chunks across, so at their resolution it does
+	 * not show, and a cap of a face would ask the POI system for every POI on it. On a planet a cap's angular radius
+	 * (radians); on a heightmap world a footprint's edge (uu).
 	 */
-	double ZoneGatherMaxAngle = 0.0;
+	double ZoneGatherMax = 0.0;
 
 	/**
 	 * The finest level for a planet: the deepest at which a patch is still at least a chunk across along a face's centre
@@ -209,7 +210,7 @@ struct VOXELSTREAMING_API FVoxelFarFieldSettings
 	/**
 	 * A heightmap world (InfinitePlane, IslandBowl): one quadtree over the XY plane whose roots are tiles of RootChunks
 	 * chunks aligned to the chunk grid, the surface the generated height (Z), local up +Z, the sea the WaterLevel plane.
-	 * Center, Radius, SeaRadius and ZoneGatherMaxAngle are unused.
+	 * Center, Radius and SeaRadius are unused. Read through FVoxelFarFieldFrame: the far field itself never branches on it.
 	 */
 	bool bHeightmap = false;
 
@@ -227,9 +228,6 @@ struct VOXELSTREAMING_API FVoxelFarFieldSettings
 
 	/** Heightmap worlds: the sea's world Z (WaterLevel), where the water tiles lie */
 	double SeaZ = 0.0;
-
-	/** Heightmap worlds: patches wider than this (uu) take no conditioning zones (as ZoneGatherMaxAngle) */
-	double ZoneGatherMaxSize = 0.0;
 
 	/** Heightmap worlds: a root tile's edge (RootChunks x ChunkWorldSize). */
 	double GetRootTileSize() const { return static_cast<double>(FMath::Max(RootChunks, 1)) * ChunkWorldSize; }
@@ -262,6 +260,210 @@ struct VOXELSTREAMING_API FVoxelFarFieldSettings
 		const double Root = bHeightmap ? GetRootTileSize() : UE_DOUBLE_HALF_PI * Radius;
 		return Root / static_cast<double>(1ll << FMath::Clamp(Level, 0, 40));
 	}
+};
+
+/**
+ * A point of the far field's surface domain (code review CR2, STREAM-18): on a planet a unit direction from the centre, on a
+ * heightmap world a world (X, Y) with local up +Z. Direction is local up in both (the radial direction; +Z on a heightmap
+ * world), so a vertex's up, tangent and face type read it alike.
+ */
+struct FVoxelFarFieldSample
+{
+	/** Local up at the sample (the radial direction; +Z on a heightmap world) */
+	FVector Direction = FVector::UpVector;
+
+	/** Heightmap worlds: the sample's world (X, Y) */
+	FVector2D XY = FVector2D::ZeroVector;
+
+	static FVoxelFarFieldSample OfDirection(const FVector& InDirection)
+	{
+		FVoxelFarFieldSample Sample;
+		Sample.Direction = InDirection;
+		return Sample;
+	}
+
+	static FVoxelFarFieldSample OfXY(const FVector2D& InXY)
+	{
+		FVoxelFarFieldSample Sample;
+		Sample.XY = InXY;
+		return Sample;
+	}
+};
+
+/** A region of the surface domain: a cap (centre direction and angular radius) on a planet, a world XY box on a heightmap world. */
+struct FVoxelFarFieldRegion
+{
+	/** A cap (else a box) */
+	bool bCap = false;
+	FVector Direction = FVector::UpVector;
+	double AngularRadius = 0.0;
+	FBox2D Box = FBox2D(ForceInit);
+
+	bool IsValid() const { return bCap || Box.bIsValid; }
+};
+
+/** A patch's extent on the surface domain: its cap on a planet, its footprint box (world XY) on a heightmap world. */
+struct FVoxelFarFieldFootprint
+{
+	/** The patch's cap on the sphere: its centre direction and the largest angle from it to a corner */
+	FVector CapDirection = FVector::UpVector;
+	double CapAngle = 0.0;
+
+	/** Heightmap worlds: the patch's footprint (world XY) */
+	FBox2D Box = FBox2D(ForceInit);
+};
+
+/**
+ * The far field's surface frame (code review CR2, STREAM-18): everything that depends on the kind of surface the far
+ * field draws, a planet's sphere or a heightmap world's plane, behind one set of questions, so the far field itself never
+ * tests the world mode. Samples (a point of the domain from a patch key and fractions, or from a world point), the world
+ * point of a sample at an altitude and the drawn point's error against the surface, the sea's points and UVs, a patch's
+ * footprint and its distances along the ground and to the camera, the zone regions, culling, the root keys and the key
+ * holding a sample. Every expression is the one its mode had: the two forms are kept side by side in each method, so the
+ * far field's geometry is bit-identical to the branches it replaces. Built from the settings; a value type.
+ */
+struct VOXELSTREAMING_API FVoxelFarFieldFrame
+{
+	FVoxelFarFieldFrame() = default;
+	explicit FVoxelFarFieldFrame(const FVoxelFarFieldSettings& InSettings) : Settings(InSettings) {}
+
+	const FVoxelFarFieldSettings& GetSettings() const { return Settings; }
+
+	/** A heightmap world's frame (the plane); false on a planet (the sphere). */
+	bool IsHeightmap() const { return Settings.bHeightmap; }
+
+	// ---- Samples ----
+
+	/** The sample at a fraction of a patch ((0, 0) its lowest corner, (1, 1) the highest; fractions outside [0, 1] continue past it). */
+	FVoxelFarFieldSample SampleOf(const FVoxelFarFieldPatchKey& Key, double FU, double FV) const;
+
+	/**
+	 * The sample a world point lies over: its direction from the centre (normalized unless bNormalize is false: a lookup
+	 * normalizes once itself), or its (X, Y).
+	 */
+	FVoxelFarFieldSample SampleAt(const FVector& WorldPoint, bool bNormalize = true) const;
+
+	/** The sample with its direction normalized (a lookup's); a heightmap sample as it is. */
+	FVoxelFarFieldSample Normalized(const FVoxelFarFieldSample& Sample) const;
+
+	/**
+	 * The world point of a sample at an altitude over the datum (a heightmap world's altitude is its world Z), Sink under it:
+	 * centre + direction x (radius + altitude - sink), or (X, Y, altitude - sink).
+	 */
+	FVector PointAt(const FVoxelFarFieldSample& Sample, double Altitude, double Sink = 0.0) const;
+
+	/** How far a drawn point lies from the drawn surface (altitude - sink) along local up, unsigned. */
+	double ErrorAt(const FVector& DrawnPoint, double Altitude, double Sink) const;
+
+	/**
+	 * A patch's origin: on the datum sphere under the patch's centre (its vertices are offsets of its own size), on a
+	 * heightmap world the surface at the patch's centre.
+	 */
+	FVector OriginOf(const FVoxelFarFieldPatchKey& Key, const struct FVoxelFarFieldSurface& Surface, const TArray<FVoxelConditioningZone>& Zones) const;
+
+	/** The face tangent a patch's vertices take their tangent from (the cube face's T; forward on a heightmap world). */
+	FVector GetFaceTangent(const FVoxelFarFieldPatchKey& Key) const;
+
+	// ---- The sea ----
+
+	/** Whether the far field draws a sea (bSea, and on a planet a sea radius). */
+	bool HasSea() const;
+
+	/** The sea's altitude over the datum (SeaRadius - Radius; SeaZ on a heightmap world). */
+	double GetSeaAltitude() const;
+
+	/** The sea's point at a sample: centre + direction x SeaRadius, or (X, Y, SeaZ). */
+	FVector SeaPointAt(const FVoxelFarFieldSample& Sample) const;
+
+	/** How far a sea quad's drawn middle sags under the sea's sphere (0 on a plane). */
+	double SeaSagAt(const FVector& DrawnMiddle) const;
+
+	/** The sea's UV0 over a patch: voxels of arc along the face as the ocean shell's, or world X and Y over the voxel size as the tiles'. */
+	struct FSeaUV
+	{
+		bool bHeightmap = false;
+		double VoxelDiv = 1.0;
+		FVector2D UVMin = FVector2D::ZeroVector;
+		double UVSize = 0.0;
+		double Scale = 0.0;
+		FVector2D Offset = FVector2D::ZeroVector;
+
+		/** The UV0 of the grid vertex (I, J) of a Q-quad patch at a sample. */
+		FVector2f At(const FVoxelFarFieldSample& Sample, int32 I, int32 J, int32 Q) const;
+	};
+	FSeaUV MakeSeaUV(const FVoxelFarFieldPatchKey& Key) const;
+
+	/** Whether a camera is under the sea (inside the sea sphere; under SeaZ). */
+	bool IsUnderSea(const FVector& Camera) const;
+
+	// ---- Footprints and regions ----
+
+	/** A patch's footprint: its cap (the centre direction and the largest angle to a corner) or its box. */
+	FVoxelFarFieldFootprint MakeFootprint(const FVoxelFarFieldPatchKey& Key) const;
+
+	/** The region a footprint covers (for the zone gatherer). */
+	FVoxelFarFieldRegion RegionOf(const FVoxelFarFieldFootprint& Footprint) const;
+
+	/** The region a conditioning zone reaches (its inner radius plus its falloff): invalid when the zone's kind is not this frame's. */
+	FVoxelFarFieldRegion RegionOfZone(const FVoxelConditioningZone& Zone) const;
+
+	/** Whether a footprint meets a region. */
+	bool Intersects(const FVoxelFarFieldFootprint& Footprint, const FVoxelFarFieldRegion& Region) const;
+
+	/** Whether a patch is narrow enough to take conditioning zones (ZoneGatherMax). */
+	bool TakesZones(const FVoxelFarFieldFootprint& Footprint) const;
+
+	/** Heightmap worlds: the chunk column (chunk X, Y) under a footprint's centre. False on a planet. */
+	bool GetColumn(const FVoxelFarFieldFootprint& Footprint, FIntPoint& OutColumn) const;
+
+	// ---- Distances ----
+
+	/** The viewer's ground point as the distances along the ground measure from it. */
+	struct FGround
+	{
+		FVector Direction = FVector::UpVector;
+		double Radius = 0.0;
+		FVector2D XY = FVector2D::ZeroVector;
+	};
+
+	/** The ground point under a viewer: its direction (up when at the centre) and the ground radius, or its (X, Y). */
+	FGround GroundOf(const FVector& Viewer, double GroundRadius) const;
+
+	/** The nearest and farthest distance along the ground from a ground point to a footprint (0 inside it). */
+	double GroundDistanceMin(const FGround& Ground, const FVoxelFarFieldFootprint& Footprint) const;
+	double GroundDistanceMax(const FGround& Ground, const FVoxelFarFieldFootprint& Footprint) const;
+
+	/** The camera's distance to the nearest point of a footprint's datum (0 inside it), the build order's. */
+	double CameraDistanceMin(const FVector& Camera, const FVoxelFarFieldFootprint& Footprint) const;
+
+	/**
+	 * Whether nothing of a patch can be seen from a camera: wholly under the horizon (the lowest terrain the occluder, the
+	 * patch's highest top kept in view past it), or on a plane past the far distance and, on a bounded world, wholly outside
+	 * its box.
+	 *
+	 * @param Camera The camera
+	 * @param Footprint The patch's footprint
+	 * @param MaxAltitude The highest the patch draws (its own when built, the world's otherwise)
+	 */
+	bool IsCulled(const FVector& Camera, const FVoxelFarFieldFootprint& Footprint, float MaxAltitude) const;
+
+	// ---- Keys ----
+
+	/**
+	 * The root patches wanted for a camera: a planet's six faces; a heightmap world's root tiles overlapping the square of
+	 * FarDistance about the camera (and a bounded world's box), nearest rows first and at most 64 a side.
+	 * @return False when the frame has no roots (a root tile of no size)
+	 */
+	bool GetRootKeys(const FVector& Camera, TArray<FVoxelFarFieldPatchKey>& OutKeys) const;
+
+	/** The root patch holding a sample (its face; its root tile). False when the frame has no roots. */
+	bool RootKeyOf(const FVoxelFarFieldSample& Sample, FVoxelFarFieldPatchKey& OutKey) const;
+
+	/** The child of a patch holding a sample. */
+	FVoxelFarFieldPatchKey ChildKeyOf(const FVoxelFarFieldPatchKey& Key, const FVoxelFarFieldSample& Sample) const;
+
+private:
+	FVoxelFarFieldSettings Settings;
 };
 
 /**
@@ -314,75 +516,53 @@ struct VOXELSTREAMING_API FVoxelFarFieldSurface
 	const FSphericalPlanetWorldMode& GetPlanet() const;
 
 	/**
-	 * Heightmap worlds: the generated surface height at a world (X, Y), zones applied, the block top in a cubic world.
+	 * The terrain's altitude over the datum at a sample, zones applied: along a direction the radial displacement
+	 * (GetConditionedTerrainAltitude); at a world (X, Y) the generated height (its world Z), the block top in a cubic world.
+	 * The one sample triple of both kinds of surface (code review CR2, STREAM-18).
 	 *
-	 * @param WorldX World X
-	 * @param WorldY World Y
-	 * @param Zones Heightmap conditioning zones there (may be empty)
-	 * @return World Z of the surface
-	 */
-	float SampleHeight(double WorldX, double WorldY, const TArray<FVoxelConditioningZone>& Zones) const;
-
-	/**
-	 * Heightmap worlds: the surface material and biome where the terrain is at Height (depth 0), as generation writes them.
-	 *
-	 * @param WorldX World X
-	 * @param WorldY World Y
-	 * @param Height The surface height there (SampleHeight)
-	 * @param OutMaterial Surface material ID
-	 * @param OutBiome Dominant biome ID
-	 */
-	void SampleConditionsXY(double WorldX, double WorldY, float Height, uint8& OutMaterial, uint8& OutBiome) const;
-
-	/**
-	 * Heightmap worlds: the surface material mix where the terrain is at Height (G45; FVoxelSurfaceQuery::
-	 * QuerySurfaceMaterialMix). Without biomes: generation's material by depth, alone.
-	 *
-	 * @param WorldX World X
-	 * @param WorldY World Y
-	 * @param Height The surface height there
-	 * @return The mix
-	 */
-	FVoxelSurfaceMaterialMix SampleMaterialMixXY(double WorldX, double WorldY, float Height) const;
-
-	/**
-	 * The terrain's altitude over the datum along a direction, zones applied (GetConditionedTerrainAltitude).
-	 *
-	 * @param Direction Unit direction from the centre
-	 * @param Zones Planet conditioning zones there (may be empty)
-	 * @param OutContinentalness Optional: the continentalness sampled (the material's biome blend reuses it)
+	 * @param Sample The sample
+	 * @param Zones Conditioning zones there (may be empty)
+	 * @param OutContinentalness Optional: the continentalness sampled on a planet (the material's biome blend reuses it); 0 on a heightmap world
 	 * @return Altitude (uu)
 	 */
-	float SampleAltitude(const FVector& Direction, const TArray<FVoxelConditioningZone>& Zones, float* OutContinentalness = nullptr) const;
+	float SampleAltitude(const FVoxelFarFieldSample& Sample, const TArray<FVoxelConditioningZone>& Zones, float* OutContinentalness = nullptr) const;
 
 	/**
-	 * The surface material and biome where the terrain is at Altitude along Direction (depth 0), as generation writes them.
+	 * The surface material and biome where the terrain is at Altitude at a sample (depth 0), as generation writes them.
 	 *
-	 * @param Direction Unit direction from the centre
+	 * @param Sample The sample
 	 * @param Altitude The terrain's altitude there (SampleAltitude)
 	 * @param Continentalness SampleAltitude's continentalness
 	 * @param OutMaterial Surface material ID
 	 * @param OutBiome Dominant biome ID
 	 */
-	void SampleConditions(const FVector& Direction, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome) const;
+	void SampleConditions(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome) const;
 
 	/**
-	 * The surface material mix where the terrain is at Altitude along Direction (G45): its two leading materials and the
-	 * second's share (FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt), what the voxels' per-voxel picks cover there on
-	 * average. Without biomes: generation's material by depth, alone.
+	 * The surface material mix where the terrain is at Altitude at a sample (G45): its two leading materials and the
+	 * second's share (FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt / QuerySurfaceMaterialMix), what the voxels'
+	 * per-voxel picks cover there on average. Without biomes: generation's material by depth, alone.
 	 *
-	 * @param Direction Unit direction from the centre
+	 * @param Sample The sample
 	 * @param Altitude The terrain's altitude there (SampleAltitude)
 	 * @param Continentalness SampleAltitude's continentalness
 	 * @return The mix
 	 */
-	FVoxelSurfaceMaterialMix SampleMaterialMix(const FVector& Direction, float Altitude, float Continentalness) const;
+	FVoxelSurfaceMaterialMix SampleMaterialMix(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness) const;
 
-	/** voxel.World.FarFieldMaterialBlend: whether patches blend each quad's two leading materials (G45) or draw one. */
+	/** Whether far-field quads blend their corners' two leading materials (voxel.World.FarFieldMaterialBlend, G45). */
 	static bool IsMaterialBlendEnabled();
+
+private:
+	// The two kinds' halves of the triple above.
+	float SampleHeight(double WorldX, double WorldY, const TArray<FVoxelConditioningZone>& Zones) const;
+	void SampleConditionsXY(double WorldX, double WorldY, float Height, uint8& OutMaterial, uint8& OutBiome) const;
+	FVoxelSurfaceMaterialMix SampleMaterialMixXY(double WorldX, double WorldY, float Height) const;
+	float SampleAltitude(const FVector& Direction, const TArray<FVoxelConditioningZone>& Zones, float* OutContinentalness) const;
+	void SampleConditions(const FVector& Direction, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome) const;
+	FVoxelSurfaceMaterialMix SampleMaterialMix(const FVector& Direction, float Altitude, float Continentalness) const;
 };
 
-/** One mesh section of a patch, ready for a procedural mesh section (positions relative to the patch's origin). */
 struct VOXELSTREAMING_API FVoxelFarFieldSection
 {
 	TArray<FVector3f> Positions;
@@ -608,17 +788,10 @@ struct VOXELSTREAMING_API FVoxelFarFieldChanges
 class VOXELSTREAMING_API FVoxelPlanetFarField
 {
 public:
-	/** A patch as the selection sees it. */
-	struct FPatchState
+	/** A patch as the selection sees it: its footprint (FVoxelFarFieldFootprint: the cap or the box) and its state. */
+	struct FPatchState : public FVoxelFarFieldFootprint
 	{
 		FVoxelFarFieldPatchKey Key;
-
-		/** The patch's cap on the sphere: its centre direction and the largest angle from it to a corner */
-		FVector CapDirection = FVector::UpVector;
-		double CapAngle = 0.0;
-
-		/** Heightmap worlds: the patch's footprint (world XY) */
-		FBox2D Box = FBox2D(ForceInit);
 
 		/** Built once (the metadata below is valid) */
 		bool bBuilt = false;
@@ -702,6 +875,9 @@ public:
 
 	const FVoxelFarFieldSettings& GetSettings() const { return Settings; }
 
+	/** The surface frame the settings describe (the sphere or the plane; FVoxelFarFieldFrame). */
+	const FVoxelFarFieldFrame& GetFrame() const { return Frame; }
+
 	/** Run builds inline in Update instead of on the thread pool (tests). */
 	void SetSynchronousBuilds(bool bInSynchronous) { bSynchronousBuilds = bInSynchronous; }
 
@@ -709,39 +885,21 @@ public:
 	void SetMaxBuildsInFlight(int32 InMax) { MaxBuildsInFlight = FMath::Max(1, InMax); }
 
 	/**
-	 * Where a build's conditioning zones come from (UVoxelChunkManager::GatherConditioningZonesOnSphere), called on the
-	 * game thread when a build launches for a patch no wider than ZoneGatherMaxAngle.
+	 * Where a build's conditioning zones come from (UVoxelChunkManager::GatherConditioningZonesOnSphere for a cap, its box
+	 * gather for a box), called on the game thread when a build launches for a patch narrow enough to take zones
+	 * (ZoneGatherMax) with the region its footprint covers.
 	 */
-	void SetZoneGatherer(TFunction<void(const FVector& Direction, double AngularRadius, TArray<FVoxelConditioningZone>& OutZones)> InGatherer)
+	void SetZoneGatherer(TFunction<void(const FVoxelFarFieldRegion& Region, TArray<FVoxelConditioningZone>& OutZones)> InGatherer)
 	{
 		ZoneGatherer = MoveTemp(InGatherer);
 	}
 
 	/**
-	 * Heightmap worlds: where a build's conditioning zones come from (UVoxelChunkManager::GatherConditioningZones), called
-	 * on the game thread when a build launches for a patch no wider than ZoneGatherMaxSize.
+	 * Rebuild every built patch narrow enough to take zones that a conditioning zone reaches (it was added or removed). The
+	 * old meshes keep drawing until the new ones arrive. A zone of the other kind of surface (a radial zone on a heightmap
+	 * world) reaches nothing.
 	 */
-	void SetZoneGatherer2D(TFunction<void(const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones)> InGatherer)
-	{
-		ZoneGatherer2D = MoveTemp(InGatherer);
-	}
-
-	/**
-	 * Rebuild every built patch narrow enough to take zones that meets a cap (a conditioning zone was added or removed
-	 * there). The old meshes keep drawing until the new ones arrive.
-	 *
-	 * @param Direction Cap centre
-	 * @param AngularRadius Cap radius (radians)
-	 */
-	void InvalidateCap(const FVector& Direction, double AngularRadius);
-
-	/**
-	 * Heightmap worlds: rebuild every built patch narrow enough to take zones that meets a region (a conditioning zone was
-	 * added or removed there).
-	 *
-	 * @param Region World XY box
-	 */
-	void InvalidateBox(const FBox2D& Region);
+	void InvalidateZone(const FVoxelConditioningZone& Zone);
 
 	/**
 	 * Heightmap worlds: whether the voxel water tile of a chunk column (chunk X, Y) is drawn. A band patch (one chunk column)
@@ -770,26 +928,26 @@ public:
 	void ForEachPatch(TFunctionRef<void(const FPatchState&)> Visit) const;
 
 	/**
-	 * The drawn patch whose area holds a direction (the deepest drawn one on the way down its face's tree), or null.
+	 * The drawn patch whose area holds a sample (the deepest drawn one on the way down its root's tree), or null.
 	 *
-	 * @param Direction Unit direction from the centre
+	 * @param Sample A direction from the centre (normalized here), or a world (X, Y)
 	 * @param bTerrainOnly Only a patch drawing its terrain
 	 * @return The patch, or null
 	 */
-	const FPatchState* FindDrawnPatch(const FVector& Direction, bool bTerrainOnly = true) const;
+	const FPatchState* FindDrawnPatch(const FVoxelFarFieldSample& Sample, bool bTerrainOnly = true) const;
 
 	/**
-	 * Heightmap worlds: the drawn patch whose footprint holds a world point's (X, Y) (the deepest drawn one on the way down
-	 * its root tile's tree), or null.
+	 * The drawn patch whose area holds a world point: the deepest drawn one under its direction from the centre, or on a
+	 * heightmap world over its (X, Y) (any point on the vertical through the place).
 	 *
-	 * @param WorldPoint Any point on the vertical through the place
+	 * @param WorldPoint The point
 	 * @param bTerrainOnly Only a patch drawing its terrain
 	 * @return The patch, or null
 	 */
 	const FPatchState* FindDrawnPatchAt(const FVector& WorldPoint, bool bTerrainOnly = true) const;
 
-	/** Heightmap worlds: the root tiles the last update visited (keys). */
-	const TSet<uint64>& GetHeightmapRoots() const { return HeightmapRoots; }
+	/** The roots the last update visited (packed keys): a planet's six faces, a heightmap world's root tiles within reach. */
+	const TSet<uint64>& GetRoots() const { return Roots; }
 
 	/** Drop a built patch's CPU meshes once the owner has uploaded them (the metadata stays). */
 	void ReleaseMesh(uint64 PackedKey);
@@ -859,21 +1017,11 @@ public:
 	int64 GetMeshMemoryBytes() const { return MeshMemoryBytes; }
 
 	/**
-	 * The cap a patch covers: its centre direction and the largest angle from it to its corners (the patch is bounded by
-	 * great-circle arcs, so a corner is its farthest point).
-	 *
-	 * @param Key The patch
-	 * @param OutDirection Centre direction
-	 * @param OutAngle Angular radius (radians)
-	 */
-	static void GetPatchCap(const FVoxelFarFieldPatchKey& Key, FVector& OutDirection, double& OutAngle);
-
-	/**
 	 * Build a patch (pure; any thread).
 	 *
 	 * @param Settings The far field's settings
 	 * @param Surface The analytic surface
-	 * @param Zones Planet conditioning zones over the patch (may be empty)
+	 * @param Zones Conditioning zones over the patch (may be empty)
 	 * @param Key The patch
 	 * @param Out Receives the meshes and metadata
 	 */
@@ -953,15 +1101,12 @@ private:
 	/** Set what a patch draws (built). */
 	void SetDrawn(FPatchState& Patch);
 
-	/** Ground distance range from the viewer's ground point (along the ground; on a heightmap world the XY distance to the footprint). */
+	/** Ground distance range from the viewer's ground point along the ground (the frame's). */
 	double GetGroundDistanceMin(const FPatchState& Patch) const;
 	double GetGroundDistanceMax(const FPatchState& Patch) const;
 
-	/** Heightmap worlds: the XY distance from the camera to the patch's footprint (0 inside it). */
-	double GetCameraDistanceMin(const FPatchState& Patch) const;
-
-	/** Heightmap worlds: visit the root tiles within reach of the camera (and over the bounds), dropping the rest. */
-	void UpdateHeightmapRoots(FVoxelFarFieldChanges& OutChanges);
+	/** Visit the roots the frame wants for the camera (a planet's six faces; a heightmap world's tiles within reach), dropping the rest. */
+	void UpdateRoots(FVoxelFarFieldChanges& OutChanges);
 
 	/** Whether a patch lies within the band region (with hysteresis while it is split). */
 	bool IsInBand(const FPatchState& Patch) const;
@@ -984,14 +1129,14 @@ private:
 	void ApplyBuild(FPatchState& Patch, const TSharedPtr<FVoxelFarFieldPatchMesh>& Mesh, FVoxelFarFieldChanges& OutChanges);
 
 	FVoxelFarFieldSettings Settings;
+	FVoxelFarFieldFrame Frame;
 	TSharedPtr<const FVoxelFarFieldSurface> Surface;
 	TSharedPtr<FBuildSink, ESPMode::ThreadSafe> Sink;
-	TFunction<void(const FVector&, double, TArray<FVoxelConditioningZone>&)> ZoneGatherer;
-	TFunction<void(const FBox2D&, TArray<FVoxelConditioningZone>&)> ZoneGatherer2D;
+	TFunction<void(const FVoxelFarFieldRegion&, TArray<FVoxelConditioningZone>&)> ZoneGatherer;
 	TFunction<bool(const FIntPoint&)> WaterTileQuery;
 
-	/** Heightmap worlds: the root tiles of the last update (packed keys) */
-	TSet<uint64> HeightmapRoots;
+	/** The roots of the last update (packed keys) */
+	TSet<uint64> Roots;
 
 	/** Every patch in the trees, by packed key (stable addresses: children are added during the recursion) */
 	TMap<uint64, TUniquePtr<FPatchState>> Patches;
@@ -999,7 +1144,8 @@ private:
 	/** This update's view and chunk test (valid during Update) */
 	FVoxelFarFieldView View;
 	const TFunctionRef<bool(const FIntVector&)>* ChunkDrawn = nullptr;
-	FVector GroundDirection = FVector::UpVector;
+	/** The viewer's ground point in the frame (valid during Update) */
+	FVoxelFarFieldFrame::FGround Ground;
 
 	TArray<FBuildRequest> Requests;
 	TSet<uint64> BuiltThisUpdate;

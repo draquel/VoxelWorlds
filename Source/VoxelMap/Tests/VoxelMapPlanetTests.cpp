@@ -884,7 +884,7 @@ bool FVoxelMapPlanetZoomAtScaleTest::RunTest(const FString& Parameters)
 						const FIntPoint Cell(X, Y);
 						const FVector Direction = Albedo->Grid.CellCentreDirection(Cell);
 						float Continentalness = 0.0f;
-						const float Altitude = Surface->SampleAltitude(Direction, NoZones, &Continentalness);
+						const float Altitude = Surface->SampleAltitude(FVoxelFarFieldSample::OfDirection(Direction), NoZones, &Continentalness);
 						const FColor Got = Albedo->At(Cell);
 						if (Altitude < SeaAltitude)
 						{
@@ -895,7 +895,7 @@ bool FVoxelMapPlanetZoomAtScaleTest::RunTest(const FString& Parameters)
 						{
 							++Land;
 							uint8 Material = 0, Biome = 0;
-							Surface->SampleConditions(Direction, Altitude, Continentalness, Material, Biome);
+							Surface->SampleConditions(FVoxelFarFieldSample::OfDirection(Direction), Altitude, Continentalness, Material, Biome);
 							BadLand += IsScaledColor(Got, FVoxelMaterialRegistry::GetMaterialColor(Material), 0.75f * 0.55f, 1.0f * 1.25f) ? 0 : 1;
 						}
 					}

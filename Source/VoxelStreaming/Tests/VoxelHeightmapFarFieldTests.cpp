@@ -20,6 +20,7 @@
 #include "VoxelWorldModeFactory.h"
 #include "IVoxelWorldMode.h"
 #include "DistanceBandLODStrategy.h"
+#include "VoxelFarFieldTestRig.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -55,33 +56,8 @@ namespace VoxelHeightmapFarFieldTestUtils
 	constexpr double ViewDistance = 12000.0;
 	constexpr double UnloadDistance = 14400.0;
 
-	/**
-	 * Sets a console variable for a scope at the priority it already holds: a set below that priority is ignored (a test
-	 * that set it by console earlier in a suite run), and a set above it would outrank the other tests' code-priority sets.
-	 */
-	struct FScopedCVar
-	{
-		IConsoleVariable* Var = nullptr;
-		FString Previous;
-		EConsoleVariableFlags Priority = ECVF_SetByCode;
-		FScopedCVar(const TCHAR* Name, const TCHAR* Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(Name);
-			if (Var)
-			{
-				Previous = Var->GetString();
-				Priority = static_cast<EConsoleVariableFlags>(FMath::Max(static_cast<uint32>(Var->GetFlags() & ECVF_SetByMask), static_cast<uint32>(ECVF_SetByCode)));
-				Var->Set(Value, Priority);
-			}
-		}
-		~FScopedCVar()
-		{
-			if (Var)
-			{
-				Var->Set(*Previous, Priority);
-			}
-		}
-	};
+	using VoxelFarFieldTestRig::FScopedCVar;
+	using VoxelFarFieldTestRig::FNullMeshRenderer;
 
 	/** The small plane's configuration (terrain +-800, chunks of 32 voxels of 50 uu, a sea at -200). Rooted. */
 	UVoxelWorldConfiguration* MakePlaneConfig(EMeshingMode Meshing = EMeshingMode::DualContouring)
@@ -140,86 +116,29 @@ namespace VoxelHeightmapFarFieldTestUtils
 		Settings.bSea = bSea;
 		Settings.SeaZ = Config.WaterLevel;
 		Settings.BandLevel = FVoxelFarFieldSettings::ComputeHeightmapBandLevel(RootChunks);
-		Settings.ZoneGatherMaxSize = 64.0 * Settings.ChunkWorldSize + 1.0;
+		Settings.ZoneGatherMax = 64.0 * Settings.ChunkWorldSize + 1.0;
 		return Settings;
 	}
 
-	/** A far field over a heightmap configuration with synchronous builds. */
-	struct FRig
+	/** The one rig (VoxelFarFieldTestRig::FRig) over a heightmap configuration, with the plane's geometry helpers. */
+	struct FRig : public VoxelFarFieldTestRig::FRig
 	{
-		UVoxelWorldConfiguration* Config = nullptr;
-		TSharedPtr<IVoxelWorldMode> Mode;
-		TSharedPtr<const FVoxelFarFieldSurface> Surface;
-		FVoxelFarFieldSettings Settings;
-		FVoxelPlanetFarField FarField;
-		const TArray<FVoxelConditioningZone> NoZones;
-
 		FRig(UVoxelWorldConfiguration* InConfig, int32 RootChunks, double FarDistance, bool bSea)
+			: VoxelFarFieldTestRig::FRig(InConfig,
+				[RootChunks, FarDistance, bSea](const UVoxelWorldConfiguration& InConfig, const IVoxelWorldMode& InMode, const FVoxelFarFieldSurface&)
+				{
+					return MakeSettings(InConfig, InMode, RootChunks, FarDistance, bSea);
+				}, VoxelHeightmapFarFieldTestUtils::ViewDistance, VoxelHeightmapFarFieldTestUtils::UnloadDistance)
 		{
-			Config = InConfig;
-			Mode = FVoxelWorldModeFactory::Create(*Config);
-			Surface = FVoxelFarFieldSurface::Make(*Config, Mode);
-			Settings = MakeSettings(*Config, *Mode, RootChunks, FarDistance, bSea);
-			FarField.Initialize(Settings, Surface);
-			FarField.SetSynchronousBuilds(true);
-			FarField.SetMaxBuildsInFlight(256);
 		}
 
-		~FRig()
-		{
-			FarField.Reset();
-			Config->RemoveFromRoot();
-		}
-
-		double Height(double X, double Y) const { return Surface->SampleHeight(X, Y, NoZones); }
-		FVector SurfacePoint(const FVector2D& XY) const { return FVector(XY.X, XY.Y, Height(XY.X, XY.Y)); }
-
-		FIntVector ChunkOf(const FVector& Point) const
-		{
-			const FVector Local = (Point - Settings.GridOrigin) / Settings.ChunkWorldSize;
-			return FIntVector(FMath::FloorToInt32(Local.X), FMath::FloorToInt32(Local.Y), FMath::FloorToInt32(Local.Z));
-		}
+		using VoxelFarFieldTestRig::FRig::SurfacePoint;
+		double Height(double X, double Y) const { return Altitude(FVoxelFarFieldSample::OfXY(FVector2D(X, Y))); }
+		FVector SurfacePoint(const FVector2D& XY) const { return SurfacePoint(FVoxelFarFieldSample::OfXY(XY)); }
 
 		FVector2D ColumnCentre(const FIntVector& Coord) const
 		{
 			return FVector2D(Settings.GridOrigin.X + (Coord.X + 0.5) * Settings.ChunkWorldSize, Settings.GridOrigin.Y + (Coord.Y + 0.5) * Settings.ChunkWorldSize);
-		}
-
-		FVoxelFarFieldView MakeView(const FVector& Viewer) const
-		{
-			FVoxelFarFieldView View;
-			View.Camera = Viewer;
-			View.Viewer = Viewer;
-			View.PixelsPerRadian = 300.0;
-			View.MaxScreenError = 4.0;
-			View.GroundRadius = 0.0;
-			View.BandRadius = UnloadDistance + 0.5 * UE_DOUBLE_SQRT_3 * Settings.ChunkWorldSize;
-			View.PrebuildRadius = 0.75 * ViewDistance;
-			View.Time = 0.0;
-			View.HideDelay = 0.0;
-			View.ChunkStateVersion = -1;
-			return View;
-		}
-
-		/** Update until nothing is left to build and an update changes nothing. Returns the updates it took (-1: never settled). */
-		int32 Converge(const FVoxelFarFieldView& View, TFunctionRef<bool(const FIntVector&)> IsDrawn, int32 MaxUpdates = 300)
-		{
-			FVoxelFarFieldChanges Changes;
-			for (int32 Update = 1; Update <= MaxUpdates; ++Update)
-			{
-				FarField.Update(View, IsDrawn, Changes);
-				if (FarField.GetBuildsPending() == 0 && Changes.Built.Num() == 0 && Changes.Removed.Num() == 0 && Changes.Visibility.Num() == 0)
-				{
-					return Update;
-				}
-			}
-			return -1;
-		}
-
-		/** A loaded voxel window: a chunk is drawn when its column's centre lies within Radius of the viewer's XY. */
-		bool InWindow(const FVoxelFarFieldView& View, const FIntVector& Coord, double Radius) const
-		{
-			return FVector2D::Distance(ColumnCentre(Coord), FVector2D(View.Viewer.X, View.Viewer.Y)) <= Radius;
 		}
 
 		/** The XY distance from a point to a patch's footprint (0 inside). */
@@ -318,7 +237,7 @@ bool FFarFieldPlaneQuadtreeTest::RunTest(const FString& Parameters)
 		const int32 Y0 = FMath::FloorToInt32((Site.Y - FarDistance) / RootTile), Y1 = FMath::FloorToInt32((Site.Y + FarDistance) / RootTile);
 		const int32 ExpectedRoots = (X1 - X0 + 1) * (Y1 - Y0 + 1);
 		int32 RootsBuilt = 0;
-		for (const uint64 Key : Rig.FarField.GetHeightmapRoots())
+		for (const uint64 Key : Rig.FarField.GetRoots())
 		{
 			const FVoxelPlanetFarField::FPatchState* Root = Rig.FarField.FindPatch(Key);
 			RootsBuilt += Root && Root->bResident ? 1 : 0;
@@ -398,10 +317,10 @@ bool FFarFieldPlaneQuadtreeTest::RunTest(const FString& Parameters)
 		}
 
 		AddInfo(FString::Printf(TEXT("%s: %d roots (%d expected, %d built), %d patches (%d culled), %d drawn (levels %d-%d, %d in the band), settled in %d updates (%.2f s, %lld built, %.2f ms each); worst %.2f px (bound %.1f), %d over; %d edge samples, worst gap %.1f uu, %d cracks past the skirt (worst %.2f uu), level difference up to %d"),
-			*Name, Rig.FarField.GetHeightmapRoots().Num(), ExpectedRoots, RootsBuilt, Rig.FarField.GetPatchCount(), Culled, Drawn, MinLevel, MaxLevel, InBand, Updates, Seconds,
+			*Name, Rig.FarField.GetRoots().Num(), ExpectedRoots, RootsBuilt, Rig.FarField.GetPatchCount(), Culled, Drawn, MinLevel, MaxLevel, InBand, Updates, Seconds,
 			Rig.FarField.GetTotalBuilt(), Rig.FarField.GetTotalBuilt() > 0 ? Rig.FarField.GetTotalBuildMs() / Rig.FarField.GetTotalBuilt() : 0.0,
 			WorstPixels, View.MaxScreenError, OverBound, EdgeSamples, WorstGap, Cracks, WorstUncovered, MaxLevelDifference));
-		TestEqual(*FString::Printf(TEXT("%s: the roots are the tiles within the far distance"), *Name), Rig.FarField.GetHeightmapRoots().Num(), ExpectedRoots);
+		TestEqual(*FString::Printf(TEXT("%s: the roots are the tiles within the far distance"), *Name), Rig.FarField.GetRoots().Num(), ExpectedRoots);
 		TestEqual(*FString::Printf(TEXT("%s: every root is built"), *Name), RootsBuilt, ExpectedRoots);
 		TestTrue(*FString::Printf(TEXT("%s: patches drawn"), *Name), Drawn > 6);
 		TestTrue(*FString::Printf(TEXT("%s: the band level was reached near the viewer"), *Name), MaxLevel == Rig.Settings.BandLevel);
@@ -819,12 +738,12 @@ bool FFarFieldPlaneMaterialMixTest::RunTest(const FString& Parameters)
 
 	auto Mix = [&Rig](const FVector2D& XY)
 	{
-		return Rig.Surface->SampleMaterialMixXY(XY.X, XY.Y, static_cast<float>(Rig.Height(XY.X, XY.Y)));
+		return Rig.Surface->SampleMaterialMix(FVoxelFarFieldSample::OfXY(XY), static_cast<float>(Rig.Height(XY.X, XY.Y)), 0.0f);
 	};
 	auto Pick = [&Rig](const FVector2D& XY)
 	{
 		uint8 Material = 0, Biome = 0;
-		Rig.Surface->SampleConditionsXY(XY.X, XY.Y, static_cast<float>(Rig.Height(XY.X, XY.Y)), Material, Biome);
+		Rig.Surface->SampleConditions(FVoxelFarFieldSample::OfXY(XY), static_cast<float>(Rig.Height(XY.X, XY.Y)), 0.0f, Material, Biome);
 		return Material;
 	};
 
@@ -945,8 +864,8 @@ bool FFarFieldIslandBoundsTest::RunTest(const FString& Parameters)
 			OutsideCircleDrawn += Bounds.ContainsXY(Centre.X, Centre.Y) ? 0 : 1;
 		});
 		AddInfo(FString::Printf(TEXT("Island, no far distance: %d roots (%d expected over the %.0f x %.0f box), %d patches (%d outside the box), %d drawn, %d drawn wholly past the circle in the box's corners (%d with the sea), %d drawn centred outside the circle"),
-			Rig.FarField.GetHeightmapRoots().Num(), ExpectedRoots, Box.GetSize().X, Box.GetSize().Y, Rig.FarField.GetPatchCount(), OutsideBox, Drawn, CornerDrawn, CornerSea, OutsideCircleDrawn));
-		TestEqual(TEXT("Island: the roots are the tiles over the bounds box"), Rig.FarField.GetHeightmapRoots().Num(), ExpectedRoots);
+			Rig.FarField.GetRoots().Num(), ExpectedRoots, Box.GetSize().X, Box.GetSize().Y, Rig.FarField.GetPatchCount(), OutsideBox, Drawn, CornerDrawn, CornerSea, OutsideCircleDrawn));
+		TestEqual(TEXT("Island: the roots are the tiles over the bounds box"), Rig.FarField.GetRoots().Num(), ExpectedRoots);
 		TestEqual(TEXT("Island: no patch outside the bounds box"), OutsideBox, 0);
 		TestTrue(TEXT("Island: the box's corners past the circle are drawn"), CornerDrawn > 0);
 		TestEqual(TEXT("Island: ... with the sea (the far ocean's open sea starts at the box)"), CornerSea, CornerDrawn);
@@ -972,14 +891,14 @@ bool FFarFieldIslandBoundsTest::RunTest(const FString& Parameters)
 			Beyond += Distance > 10000.0 ? 1 : 0;
 		});
 		AddInfo(FString::Printf(TEXT("Island, far distance 10,000: %d roots, %d drawn, the farthest %.0f from the camera, %d beyond the far distance"),
-			Rig.FarField.GetHeightmapRoots().Num(), Drawn, Farthest, Beyond));
+			Rig.FarField.GetRoots().Num(), Drawn, Farthest, Beyond));
 		TestTrue(TEXT("Island, far distance 10,000: patches drawn"), Drawn > 0);
 		TestEqual(TEXT("Island, far distance 10,000: none drawn past it"), Beyond, 0);
 
 		const FVector FarViewer(100000.0, 100000.0, 300.0);
 		const FVoxelFarFieldView FarView = Rig.MakeView(FarViewer);
 		TestTrue(TEXT("Island, camera 100 km out: settles"), Rig.Converge(FarView, [](const FIntVector&) { return false; }) > 0);
-		TestEqual(TEXT("Island, camera 100 km out: no root"), Rig.FarField.GetHeightmapRoots().Num(), 0);
+		TestEqual(TEXT("Island, camera 100 km out: no root"), Rig.FarField.GetRoots().Num(), 0);
 		TestEqual(TEXT("Island, camera 100 km out: nothing drawn"), Rig.FarField.GetDrawnPatchCount(), 0);
 		TestEqual(TEXT("Island, camera 100 km out: no patch left"), Rig.FarField.GetPatchCount(), 0);
 	}
@@ -1166,7 +1085,7 @@ bool FFarFieldPlaneChunkManagerTest::RunTest(const FString& Parameters)
 					*W.Manager->GetStreamingViewerPosition().ToCompactString(), *Sample, *Nearest));
 			}
 			TestTrue(TEXT("Plane: patches built"), Built > 6);
-			TestTrue(TEXT("Plane: a few rows of roots, not a grid of them"), FarField->GetHeightmapRoots().Num() <= 144);
+			TestTrue(TEXT("Plane: a few rows of roots, not a grid of them"), FarField->GetRoots().Num() <= 144);
 			// The memory is a budget question for the live checks (this plane's 8 m relief at a 25 m wavelength out to 20 km
 			// splits far more patches than real content; the cost is recorded above).
 			TestEqual(TEXT("Plane: a component per built patch"), Missing, 0);

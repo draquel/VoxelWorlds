@@ -19,8 +19,7 @@
 #include "VoxelWorldModeFactory.h"
 #include "SphericalPlanetWorldMode.h"
 #include "DistanceBandLODStrategy.h"
-#include "IVoxelMeshRenderer.h"
-#include "ChunkRenderData.h"
+#include "VoxelFarFieldTestRig.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -106,90 +105,46 @@ namespace VoxelPlanetFarFieldTestUtils
 		return Config;
 	}
 
-	/** A far field on a planet case, with synchronous builds and the selection's view for a viewer. */
-	struct FRig
+	/** The far field's settings for a planet case (the chunk manager's, UVoxelChunkManager::RebuildFarField). */
+	FVoxelFarFieldSettings MakeSettings(const UVoxelWorldConfiguration& Config, const FVoxelFarFieldSurface& Surface, int32 PatchQuads, bool bSea)
 	{
-		UVoxelWorldConfiguration* Config = nullptr;
-		TSharedPtr<IVoxelWorldMode> Mode;
-		TSharedPtr<const FVoxelFarFieldSurface> Surface;
 		FVoxelFarFieldSettings Settings;
-		FVoxelPlanetFarField FarField;
-		const TArray<FVoxelConditioningZone> NoZones;
+		const FSphericalPlanetWorldMode& Planet = Surface.GetPlanet();
+		Settings.Center = Planet.GetPlanetParams().PlanetCenter;
+		Settings.Radius = Planet.GetPlanetParams().PlanetRadius;
+		Settings.GridOrigin = Config.WorldOrigin;
+		Settings.ChunkWorldSize = Config.GetChunkWorldSize();
+		Settings.VoxelSize = Config.VoxelSize;
+		Settings.PatchQuads = PatchQuads;
+		Settings.Sink = Config.VoxelSize;
+		float MinAltitude = 0.0f, MaxAltitude = 0.0f;
+		FSphericalPlanetWorldMode::GetDisplacementBounds(Planet.GetTerrainParams(), &Planet.GetBiomeSnapshot(), MinAltitude, MaxAltitude);
+		Settings.MinAltitude = MinAltitude;
+		Settings.MaxAltitude = MaxAltitude;
+		Settings.bSea = bSea;
+		Settings.SeaRadius = Config.WaterRadius;
+		Settings.SeaMargin = 2.0 * Config.VoxelSize;
+		Settings.BandLevel = FVoxelFarFieldSettings::ComputeBandLevel(Settings.Radius, Settings.ChunkWorldSize);
+		Settings.ZoneGatherMax = 32.0 * Settings.ChunkWorldSize / Settings.Radius;
+		return Settings;
+	}
 
+	/** The one rig (VoxelFarFieldTestRig::FRig) on a planet case, with the sphere's geometry helpers. */
+	struct FRig : public VoxelFarFieldTestRig::FRig
+	{
 		FRig(const FPlanetCase& Case, int32 PatchQuads, bool bSea)
-		{
-			Config = MakeConfig(Case);
-			Mode = FVoxelWorldModeFactory::Create(*Config);
-			Surface = FVoxelFarFieldSurface::Make(*Config, Mode);
-			const FSphericalPlanetWorldMode& Planet = Surface->GetPlanet();
-			Settings.Center = Planet.GetPlanetParams().PlanetCenter;
-			Settings.Radius = Planet.GetPlanetParams().PlanetRadius;
-			Settings.GridOrigin = Config->WorldOrigin;
-			Settings.ChunkWorldSize = Config->GetChunkWorldSize();
-			Settings.VoxelSize = Config->VoxelSize;
-			Settings.PatchQuads = PatchQuads;
-			Settings.Sink = Config->VoxelSize;
-			float MinAltitude = 0.0f, MaxAltitude = 0.0f;
-			FSphericalPlanetWorldMode::GetDisplacementBounds(Planet.GetTerrainParams(), &Planet.GetBiomeSnapshot(), MinAltitude, MaxAltitude);
-			Settings.MinAltitude = MinAltitude;
-			Settings.MaxAltitude = MaxAltitude;
-			Settings.bSea = bSea;
-			Settings.SeaRadius = Config->WaterRadius;
-			Settings.SeaMargin = 2.0 * Config->VoxelSize;
-			Settings.BandLevel = FVoxelFarFieldSettings::ComputeBandLevel(Settings.Radius, Settings.ChunkWorldSize);
-			Settings.ZoneGatherMaxAngle = 32.0 * Settings.ChunkWorldSize / Settings.Radius;
-			FarField.Initialize(Settings, Surface);
-			FarField.SetSynchronousBuilds(true);
-			FarField.SetMaxBuildsInFlight(256);
-		}
-
-		~FRig()
-		{
-			FarField.Reset();
-			Config->RemoveFromRoot();
-		}
-
-		double Altitude(const FVector& Direction) const { return Surface->SampleAltitude(Direction, NoZones); }
-		FVector SurfacePoint(const FVector& Direction) const { return Settings.Center + Direction * (Settings.Radius + Altitude(Direction)); }
-
-		FIntVector ChunkOf(const FVector& Point) const
-		{
-			const FVector Local = (Point - Settings.GridOrigin) / Settings.ChunkWorldSize;
-			return FIntVector(FMath::FloorToInt32(Local.X), FMath::FloorToInt32(Local.Y), FMath::FloorToInt32(Local.Z));
-		}
-
-		FVector ChunkCentre(const FIntVector& Coord) const { return Settings.GridOrigin + (FVector(Coord) + FVector(0.5)) * Settings.ChunkWorldSize; }
-
-		FVoxelFarFieldView MakeView(const FVector& Viewer) const
-		{
-			FVoxelFarFieldView View;
-			View.Camera = Viewer;
-			View.Viewer = Viewer;
-			View.PixelsPerRadian = 300.0;
-			View.MaxScreenError = 4.0;
-			View.GroundRadius = Settings.Radius + Altitude((Viewer - Settings.Center).GetSafeNormal());
-			View.BandRadius = UnloadDistance + 0.5 * UE_DOUBLE_SQRT_3 * Settings.ChunkWorldSize;
-			View.PrebuildRadius = 0.75 * ViewDistance;
-			View.Time = 0.0;
-			View.HideDelay = 0.0;
-			View.ChunkStateVersion = -1;
-			return View;
-		}
-
-		/** Update until nothing is left to build and an update changes nothing. Returns the updates it took (-1: never settled). */
-		int32 Converge(const FVoxelFarFieldView& View, TFunctionRef<bool(const FIntVector&)> IsDrawn, int32 MaxUpdates = 300)
-		{
-			FVoxelFarFieldChanges Changes;
-			for (int32 Update = 1; Update <= MaxUpdates; ++Update)
-			{
-				FarField.Update(View, IsDrawn, Changes);
-				if (FarField.GetBuildsPending() == 0 && Changes.Built.Num() == 0 && Changes.Removed.Num() == 0 && Changes.Visibility.Num() == 0)
+			: VoxelFarFieldTestRig::FRig(MakeConfig(Case),
+				[PatchQuads, bSea](const UVoxelWorldConfiguration& InConfig, const IVoxelWorldMode&, const FVoxelFarFieldSurface& InSurface)
 				{
-					return Update;
-				}
-			}
-			return -1;
+					return MakeSettings(InConfig, InSurface, PatchQuads, bSea);
+				}, VoxelPlanetFarFieldTestUtils::ViewDistance, VoxelPlanetFarFieldTestUtils::UnloadDistance)
+		{
 		}
+
+		using VoxelFarFieldTestRig::FRig::Altitude;
+		using VoxelFarFieldTestRig::FRig::SurfacePoint;
+		double Altitude(const FVector& Direction) const { return Altitude(FVoxelFarFieldSample::OfDirection(Direction)); }
+		FVector SurfacePoint(const FVector& Direction) const { return SurfacePoint(FVoxelFarFieldSample::OfDirection(Direction)); }
 
 		/** Directions out to three view distances around a view's ground point not drawn by a chunk or a patch. */
 		int32 CountGaps(const FVoxelFarFieldView& View, TFunctionRef<bool(const FIntVector&)> IsDrawn) const
@@ -207,7 +162,7 @@ namespace VoxelPlanetFarFieldTestUtils
 					const double Angle = Distance / View.GroundRadius;
 					const FVector Tangent = East * FMath::Cos(Theta) + North * FMath::Sin(Theta);
 					const FVector Direction = (GroundDirection * FMath::Cos(Angle) + Tangent * FMath::Sin(Angle)).GetSafeNormal();
-					if (!IsDrawn(ChunkOf(SurfacePoint(Direction))) && !FarField.FindDrawnPatch(Direction))
+					if (!IsDrawn(ChunkOf(SurfacePoint(Direction))) && !FarField.FindDrawnPatch(FVoxelFarFieldSample::OfDirection(Direction)))
 					{
 						++Gaps;
 					}
@@ -220,12 +175,6 @@ namespace VoxelPlanetFarFieldTestUtils
 		double GroundDistance(const FVoxelFarFieldView& View, const FVector& Point) const
 		{
 			return FDistanceBandLODStrategy::GetPlanetGroundDistance(Settings.Center, View.GroundRadius, View.Viewer, Point);
-		}
-
-		/** A loaded voxel window: a chunk is drawn when its centre lies within Radius along the ground (the strategy's load rule). */
-		bool InWindow(const FVoxelFarFieldView& View, const FIntVector& Coord, double Radius) const
-		{
-			return GroundDistance(View, ChunkCentre(Coord)) <= Radius;
 		}
 
 		/** A drawn point of a patch's edge: its edge polyline (chords between its vertices) at a fraction along the edge. */
@@ -292,60 +241,8 @@ namespace VoxelPlanetFarFieldTestUtils
 		}
 	}
 
-	/** A console variable set for a scope (restored after). */
-	struct FScopedCVar
-	{
-		IConsoleVariable* Var = nullptr;
-		FString Previous;
-		FScopedCVar(const TCHAR* Name, const TCHAR* Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(Name);
-			if (Var)
-			{
-				Previous = Var->GetString();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-		~FScopedCVar()
-		{
-			if (Var)
-			{
-				Var->Set(*Previous, ECVF_SetByConsole);
-			}
-		}
-	};
-
-	/** A renderer that draws nothing (the chunk manager needs one to initialise). */
-	class FNullMeshRenderer : public IVoxelMeshRenderer
-	{
-	public:
-		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
-		virtual void Shutdown() override { bInitialized = false; }
-		virtual bool IsInitialized() const override { return bInitialized; }
-		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override {}
-		virtual void RemoveChunk(const FIntVector& ChunkCoord) override {}
-		virtual void ClearAllChunks() override {}
-		virtual void SetMaterial(UMaterialInterface* Material) override {}
-		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
-		virtual void UpdateMaterialParameters() override {}
-		virtual void UpdateSeamMeshFromCPU(const FIntVector& OwnerChunkCoord, uint8 SeamSlot, int32 LODLevel, FChunkMeshData&& MeshData, bool bCrossfade) override {}
-		virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 SeamSlot) override {}
-		virtual void ClearAllSeamMeshes() override {}
-		virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override {}
-		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return false; }
-		virtual int32 GetLoadedChunkCount() const override { return 0; }
-		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override {}
-		virtual int64 GetGPUMemoryUsage() const override { return 0; }
-		virtual int64 GetTotalVertexCount() const override { return 0; }
-		virtual int64 GetTotalTriangleCount() const override { return 0; }
-		virtual bool GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const override { return false; }
-		virtual FBox GetTotalBounds() const override { return FBox(ForceInit); }
-		virtual FString GetDebugStats() const override { return FString(); }
-		virtual FString GetRendererTypeName() const override { return TEXT("Null (test)"); }
-
-	private:
-		bool bInitialized = false;
-	};
+	using VoxelFarFieldTestRig::FScopedCVar;
+	using VoxelFarFieldTestRig::FNullMeshRenderer;
 }
 
 /**
@@ -421,7 +318,7 @@ bool FFarFieldPlanetQuadtreeTest::RunTest(const FString& Parameters)
 						double FU, FV, OU, OV;
 						EdgeFractions(Edge, Along, 1.0e-4, FU, FV, OU, OV);
 						const FVector Direction = A->Key.GetDirection(FU, FV);
-						const FVoxelPlanetFarField::FPatchState* B = Rig.FarField.FindDrawnPatch(A->Key.GetDirection(OU, OV));
+						const FVoxelPlanetFarField::FPatchState* B = Rig.FarField.FindDrawnPatch(FVoxelFarFieldSample::OfDirection(A->Key.GetDirection(OU, OV)));
 						if (!B || B == A)
 						{
 							continue;
@@ -528,7 +425,7 @@ bool FFarFieldPlanetHoleTest::RunTest(const FString& Parameters)
 							++ByVoxels;
 							continue;
 						}
-						Gaps += Rig.FarField.FindDrawnPatch(Direction) ? 0 : 1;
+						Gaps += Rig.FarField.FindDrawnPatch(FVoxelFarFieldSample::OfDirection(Direction)) ? 0 : 1;
 					}
 				}
 				AddInfo(FString::Printf(TEXT("%s, %s, %s: %d terrain patches drawn, %d band patches hidden by the window, %d wholly inside it; %d directions, %d drawn by voxels, %d gaps"),
@@ -599,7 +496,7 @@ bool FFarFieldPlanetHoleTest::RunTest(const FString& Parameters)
 						continue;
 					}
 					++Missing;
-					MissingDrawn += Rig.FarField.FindDrawnPatch(Direction) ? 1 : 0;
+					MissingDrawn += Rig.FarField.FindDrawnPatch(FVoxelFarFieldSample::OfDirection(Direction)) ? 1 : 0;
 				}
 			}
 			AddInfo(FString::Printf(TEXT("%s, %s: with chunks missing near the viewer, %d of %d directions over them drawn by patches"),
@@ -850,7 +747,7 @@ bool FFarFieldPlanetUnseenFaceTest::RunTest(const FString& Parameters)
 			if (Frame == 1)
 			{
 				FirstGaps = Gaps;
-				const FVoxelPlanetFarField::FPatchState* Drawn = Rig.FarField.FindDrawnPatch(Far);
+				const FVoxelPlanetFarField::FPatchState* Drawn = Rig.FarField.FindDrawnPatch(FVoxelFarFieldSample::OfDirection(Far));
 				AddInfo(FString::Printf(TEXT("%s: a teleport 90 degrees east onto face %d: %d gaps in the first update, %d patches drawn, under the viewer %s"),
 					Rule, FarFace, Gaps, Rig.FarField.GetDrawnPatchCount(), Drawn ? *Drawn->Key.ToString() : TEXT("nothing")));
 			}
@@ -1267,7 +1164,7 @@ bool FFarFieldPlanetCameraAfterCutTest::RunTest(const FString& Parameters)
 						const double Angle = Distance / Radius;
 						const FVector Tangent = East * FMath::Cos(Theta) + North * FMath::Sin(Theta);
 						const FVector Direction = (Up * FMath::Cos(Angle) + Tangent * FMath::Sin(Angle)).GetSafeNormal();
-						const FVoxelPlanetFarField::FPatchState* Patch = FarField->FindDrawnPatch(Direction);
+						const FVoxelPlanetFarField::FPatchState* Patch = FarField->FindDrawnPatch(FVoxelFarFieldSample::OfDirection(Direction));
 						const UProceduralMeshComponent* Component = Patch ? Manager->GetFarFieldComponent(Patch->Key.Pack()) : nullptr;
 						++OutSamples;
 						Gaps += (!Component || Component->GetNumSections() == 0 || !Component->IsMeshSectionVisible(0)) ? 1 : 0;
@@ -1312,7 +1209,7 @@ bool FFarFieldPlanetCameraAfterCutTest::RunTest(const FString& Parameters)
 			int32 Samples = 0;
 			const int32 FirstGaps = CountGaps(FarUp, Samples);
 			const int64 CutUpdates = Manager->GetFarFieldStats().CameraUpdates - UpdatesBefore;
-			const FVoxelPlanetFarField::FPatchState* Drawn = FarField->FindDrawnPatch(FarUp);
+			const FVoxelPlanetFarField::FPatchState* Drawn = FarField->FindDrawnPatch(FVoxelFarFieldSample::OfDirection(FarUp));
 			Frame();
 			int32 SecondSamples = 0;
 			const int32 SecondGaps = CountGaps(FarUp, SecondSamples);
