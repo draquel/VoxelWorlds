@@ -118,7 +118,8 @@ Each cell owns three edges emanating from its minimum corner in the +X, +Y, and 
 (`SignedDistanceToDensity`), so taps `Stride` voxels apart read 0 or 255 on every axis the surface crosses between them: at
 LOD 2 each gradient component is a sign and the normal snaps toward one of the 26 cube directions. The QEF keeps these
 normals (no vertex moves), but the **vertex normal** of a strided cell is LOD 0's: the cell finds where the surface crosses
-each of its strided edges at voxel resolution (`VoxelDCShading::FindVoxelCrossing`), and its normal is LOD 0's vertex
+each of its strided edges at voxel resolution (`VoxelLODCrossing::FindVoxelCrossing`, beside Marching Cubes' rule in
+`VoxelCrossingGradient.h`), and its normal is LOD 0's vertex
 normal of the voxel cell inside it next to the crossing nearest the vertex (`VoxelCellNormal`: the stride-1 gradient
 normals at that voxel cell's crossings, averaged). The interior pass and the seam template (`ComputeCellVertex`) run the
 same op sequence, so ring recomputes stay bit-identical. `voxel.Mesh.VoxelShadingNormals 0` restores the stride-scale

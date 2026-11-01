@@ -232,7 +232,7 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	/**
 	 * Local up at the chunk (spherical Phase 4, SP-D1, SP-D2): +Z in heightmap modes, the chunk centre's radial direction
 	 * on a planet (UVoxelChunkManager fills it). The marching-cubes LOD material scan and the boundary geomorph run
-	 * along it; exactly +Z keeps their original column arithmetic.
+	 * along it (one body for every up; +Z gives the column arithmetic they had).
 	 */
 	FVector LocalUp = FVector::UpVector;
 

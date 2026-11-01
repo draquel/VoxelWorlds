@@ -104,7 +104,8 @@ hole metric (below).
 - `voxel.MCBoundaryMorph` CVar (default 1; mirrors `voxel.DCBoundaryWeld`) + `voxel.MCBoundaryMorphWidth`
   (default 2.0).
 - `MorphVertexToCoarse` (per-vertex core) + `ApplyBoundaryMorph` (fine-MC path, `ProcessCubeLOD`) +
-  `ComputeCoarseSurfaceZ` helper.
+  `ComputeCoarseSurfaceZ` helper (since code review CR2 the one `ComputeCoarseSurfaceAlongAxis`, along the axis
+  nearest the chunk's local up, +Z on a heightmap world).
 - Headless **T13** step-magnitude metric (`MarchingCubesLODBoundaryTests.cpp`, NonLinearZ LOD1|LOD2):
   morph reduces the seam step **19.3 → 1.9 units (~90%)** with **0 holes**; full suite **T1–T13 green**.
 
