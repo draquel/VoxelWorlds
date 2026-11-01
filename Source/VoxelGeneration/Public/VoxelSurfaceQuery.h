@@ -156,6 +156,40 @@ public:
 		const FVoxelSeaSurface& Sea);
 
 	/**
+	 * The surface material the map draws at a surface point (code review CR2, REND-15), as the generators write it at
+	 * the surface voxel: the biome pipeline when the world's biomes are on with a valid snapshot (QuerySurfaceConditions
+	 * on a heightmap world, QueryPlanetSurfaceConditions on a planet), the static registry's blend over the generators'
+	 * fallback climate fields when they are on without one, the world mode's material by depth otherwise.
+	 *
+	 * @param WorldMode World mode
+	 * @param Position The surface point: (X, Y, height) on a heightmap world, centre + direction x (radius + altitude) on a planet
+	 * @param Direction The planet's direction from the centre (unused on a heightmap world)
+	 * @param SurfaceAltitude The surface's height (world Z) on a heightmap world, its altitude over the datum on a planet
+	 * @param VoxelSize Voxel size
+	 * @param NoiseParams Terrain noise
+	 * @param BiomeSnapshot The biome snapshot (bIsValid picks the pipeline)
+	 * @param bUseBiomes Whether the world's biomes are on
+	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig)
+	 * @param Zones The planet conditioning zones there for the biome pipeline, or null
+	 * @param FallbackTempNoise The fallback climate's temperature field (the generators' hardcoded one)
+	 * @param FallbackMoistureNoise The fallback climate's moisture field
+	 * @return Surface material ID
+	 */
+	static uint8 QueryMapSurfaceMaterial(
+		const IVoxelWorldMode& WorldMode,
+		const FVector& Position,
+		const FVector& Direction,
+		float SurfaceAltitude,
+		float VoxelSize,
+		const FVoxelNoiseParams& NoiseParams,
+		const FVoxelBiomeSnapshot& BiomeSnapshot,
+		bool bUseBiomes,
+		const FVoxelSeaSurface& Sea,
+		const TArray<struct FVoxelConditioningZone>* Zones,
+		const FVoxelNoiseParams& FallbackTempNoise,
+		const FVoxelNoiseParams& FallbackMoistureNoise);
+
+	/**
 	 * The voxel generation makes at a world position, by density alone (material 0, no flags): the signed distance to the
 	 * generated surface on the position's up-line (GetGeneratedSurface: a heightmap's height, a planet's shell), less the
 	 * cave carve where it is solid under the ground (FVoxelCPUNoiseGenerator::CalculateCaveDensity at its depth, for the

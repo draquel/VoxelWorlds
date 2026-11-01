@@ -6,6 +6,7 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "VoxelMapTypes.h"
 #include "VoxelMapEditOverlay.h"
+#include "VoxelMapTileFrame.h"
 #include "VoxelMapTileQueue.h"
 #include "VoxelMapTileStore.h"
 #include "VoxelCoreTypes.h"
@@ -336,16 +337,19 @@ public:
 	 * @return True once the map has resolved a planet world
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
-	bool IsPlanetMap() const { return PlanetGrid.IsValid(); }
+	bool IsPlanetMap() const { return TileFrame.bPlanet; }
 
 	/** The planet's tile grid (invalid in heightmap worlds and before the map has resolved its world). */
-	const FVoxelCubeSphereGrid& GetPlanetTileGrid() const { return PlanetGrid; }
+	const FVoxelCubeSphereGrid& GetPlanetTileGrid() const { return TileFrame.Grid; }
 
 	/** The planet's centre (zero in heightmap worlds). */
-	FVector GetPlanetCenter() const { return CachedPlanetCenter; }
+	FVector GetPlanetCenter() const { return TileFrame.Center; }
 
 	/** The planet's datum radius (zero in heightmap worlds). */
-	double GetPlanetRadius() const { return CachedPlanetRadius; }
+	double GetPlanetRadius() const { return TileFrame.Radius; }
+
+	/** The map's tile frame (the planet's atlas or the heightmap's chunk-column grid; FVoxelMapTileFrame), valid once the world is resolved. */
+	const FVoxelMapTileFrame& GetTileFrame() const { return TileFrame; }
 
 	/**
 	 * The tile and pixel a direction from the planet centre falls in.
@@ -437,8 +441,8 @@ private:
 	/** Game thread: a planet tile's edited chunks and the loaded chunks around them, for FVoxelMapEditOverlay::BuildPlanet. */
 	TSharedPtr<FVoxelMapPlanetOverlayInput> GatherPlanetOverlayInput(FIntPoint TileCoord) const;
 
-	/** GenerateTileAsync on a planet: the same inputs, queue and completion, the pixels along their directions. */
-	void GeneratePlanetTileAsync(FIntPoint TileCoord, uint32 Generation);
+	/** Game thread: the overlay build's inputs for a tile of this map's kind (GatherOverlayInput / GatherPlanetOverlayInput). */
+	FVoxelMapOverlayInputs GatherOverlayInputs(FIntPoint TileCoord) const;
 
 	/**
 	 * Game thread: store a finished drawing (either world kind), unless it went stale or the subsystem is shutting down;
@@ -484,10 +488,6 @@ private:
 	TObjectPtr<UVoxelBiomeConfiguration> CachedBiomeConfig;
 	bool bBiomesEnabled = false;
 
-	// Water level (cached from VoxelWorldConfiguration)
-	bool bWaterEnabled = false;
-	float CachedWaterLevel = 0.0f;
-
 	/**
 	 * Map color per MaterialID (256 entries), resolved once in ResolveChunkManager: the material
 	 * atlas' baked average-albedo colors where available, the material registry's palette otherwise.
@@ -496,12 +496,11 @@ private:
 	TArray<FColor> CachedMaterialPalette;
 
 	/**
-	 * Terrain height bounds from the world mode (IVoxelWorldMode::GetTerrainHeightBounds) — the
-	 * elevation-tint and water-depth gradients are scaled to this range instead of hardcoded
-	 * constants, so shading adapts to the world configuration.
+	 * The map's tile frame (code review CR2, REND-15): the kind of world, its tile grid (a planet's atlas or the chunk
+	 * columns), the sea and the terrain's extent for the elevation and depth shading; everything the one tile drawer
+	 * reads about the world. Built in ResolveChunkManager; the tile tasks copy it.
 	 */
-	float CachedTerrainMinHeight = 0.0f;
-	float CachedTerrainMaxHeight = 0.0f;
+	FVoxelMapTileFrame TileFrame;
 
 	// Tile storage: images under the budgets (WM-E2), and the exploration set (never evicted; saved)
 	FVoxelMapTileStore TileStore;
@@ -531,8 +530,8 @@ private:
 	/** Per-tile edit overlay. Immutable once stored: tile tasks share them by pointer. */
 	TMap<uint64, TSharedPtr<const FVoxelMapEditOverlay>> EditOverlays;
 
-	/** Chunk Zs with edits, per tile, kept in step with the edit manager through OnChunkEdited. */
-	TMap<uint64, TArray<int32>> TileEditedChunkZ;
+	/** Chunks with edits, per tile (a chunk belongs to every tile it spans), kept in step with the edit manager through OnChunkEdited. */
+	TMap<uint64, TArray<FIntVector>> TileEditedChunks;
 
 	/** Tiles edited since the last refresh (coalescing buffer; water propagation edits every frame). */
 	TSet<uint64> OverlayDirtyTiles;
@@ -551,29 +550,12 @@ private:
 
 	// --- Planets (WM-SY8) ---
 
-	/** The tile grid of a planet world; invalid in heightmap worlds. */
-	FVoxelCubeSphereGrid PlanetGrid;
-
-	/** The planet's centre and datum radius. */
-	FVector CachedPlanetCenter = FVector::ZeroVector;
-	double CachedPlanetRadius = 0.0;
-
-	/** The world's sea (FVoxelSeaSurface::FromConfig): the planet's water sphere. */
-	FVoxelSeaSurface CachedSea;
-
-	/** The terrain's altitude extent (IVoxelWorldMode::GetAltitudeBounds): the planet's elevation and depth shading. */
-	float CachedAltitudeMin = 0.0f;
-	float CachedAltitudeMax = 0.0f;
-
 	/** The globe albedo (GetGlobeAlbedo), whether its build is in flight, and the albedo cells holding an explored tile. */
 	TSharedPtr<const FVoxelMapGlobeAlbedo> GlobeAlbedo;
 	bool bGlobeAlbedoBuilding = false;
 	TSet<uint64> GlobeExploredCells;
 	int32 GlobeExploredFromCount = -1;
 	double GlobeExploredRefreshedSeconds = 0.0;
-
-	/** Edited chunks per planet tile (a chunk belongs to every tile its corners span), in step with OnChunkEdited. */
-	TMap<uint64, TArray<FIntVector>> PlanetTileEditedChunks;
 
 	/** GFrameCounter of the last overlay gather: LaunchWaitingTiles starts at most one rebuild per frame. */
 	uint64 LastOverlayGatherFrame = MAX_uint64;

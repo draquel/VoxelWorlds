@@ -12,6 +12,7 @@
 #include "VoxelCaveConfiguration.h"
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelBiomeRegistry.h"
+#include "VoxelBiomeBlendDither.h"
 
 namespace
 {
@@ -108,6 +109,71 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QuerySurfaceMaterialMixAt(
 	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode);
 	const FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(Surface.Position, Planet.GetPlanetParams().PlanetCenter);
 	return QueryPlanetSurfaceMaterialMixAt(Planet, Direction, Surface.Altitude, Continentalness, NoiseParams, BiomeSnapshot, Sea);
+}
+
+uint8 FVoxelSurfaceQuery::QueryMapSurfaceMaterial(
+	const IVoxelWorldMode& WorldMode,
+	const FVector& Position,
+	const FVector& Direction,
+	float SurfaceAltitude,
+	float VoxelSize,
+	const FVoxelNoiseParams& NoiseParams,
+	const FVoxelBiomeSnapshot& BiomeSnapshot,
+	bool bUseBiomes,
+	const FVoxelSeaSurface& Sea,
+	const TArray<FVoxelConditioningZone>* Zones,
+	const FVoxelNoiseParams& FallbackTempNoise,
+	const FVoxelNoiseParams& FallbackMoistureNoise)
+{
+	const bool bPlanet = WorldMode.GetWorldModeType() == EWorldMode::SphericalPlanet;
+	uint8 MaterialID = 0;
+	if (bUseBiomes && BiomeSnapshot.bIsValid)
+	{
+		// The SAME shared pipeline as chunk generation, tree placement and PCG (temperature / moisture / continentalness
+		// noise -> tiered biome blend -> blended material -> priority-sorted height rules).
+		uint8 BiomeID = 0;
+		if (bPlanet)
+		{
+			QueryPlanetSurfaceConditions(static_cast<const FSphericalPlanetWorldMode&>(WorldMode), Position, VoxelSize, NoiseParams, BiomeSnapshot, Sea,
+				MaterialID, BiomeID, Zones);
+		}
+		else
+		{
+			QuerySurfaceConditions(
+				static_cast<float>(Position.X), static_cast<float>(Position.Y), SurfaceAltitude, VoxelSize,
+				BiomeSnapshot, NoiseParams.Seed, Sea.bEnabled, static_cast<float>(Sea.PlaneZ),
+				MaterialID, BiomeID);
+		}
+	}
+	else if (bUseBiomes)
+	{
+		// No valid biome config: static registry fallback (matches the CPU generators' hardcoded climate fields).
+		float Temperature = 0.0f;
+		float Moisture = 0.0f;
+		if (bPlanet)
+		{
+			// The planet generator's climate: the planet noise on the datum sphere (WM-BP5)
+			FSphericalPlanetWorldMode::SampleClimate(Direction, static_cast<const FSphericalPlanetWorldMode&>(WorldMode).GetPlanetParams().PlanetRadius,
+				FallbackTempNoise, FallbackMoistureNoise, Temperature, Moisture);
+		}
+		else
+		{
+			const FVector BiomeSamplePos(Position.X, Position.Y, 0.0f);
+			Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackTempNoise);
+			Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, FallbackMoistureNoise);
+		}
+		const FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
+		MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, 0.0f,
+			FVoxelBlendDitherKey(FVoxelBiomeBlendDither::KeyAt(Position, VoxelSize), NoiseParams.Seed));
+	}
+	else
+	{
+		// Legacy: the world mode's hardcoded material by depth (the surface's at depth 0).
+		MaterialID = WorldMode.GetMaterialAtDepth(Position,
+			bPlanet ? static_cast<float>(static_cast<const FSphericalPlanetWorldMode&>(WorldMode).GetPlanetParams().PlanetRadius + SurfaceAltitude) : SurfaceAltitude,
+			0.0f);
+	}
+	return MaterialID;
 }
 
 FVoxelData FVoxelSurfaceQuery::GenerateVoxelAt(
