@@ -246,7 +246,8 @@ the tile store and its budgets, the queue and the save blobs therefore work unch
   `FVCGlobeProjection`): an orthographic view around a direction, north up, opening on the player, dragged to turn it and
   zoomed with the wheel (32 tiles from the centre at zoom 1, so zoomed in it is a local map). Both sample the tile images
   through `FVCPlanetMapSampler` (a 16-texel control-point grid; cells across a face edge or the rim per texel). Markers
-  carry a 3D position (`FVCMapMarker::WorldLocation`, `UVCMapMarkerRegistry::OnGatherMarkersNear`); POIs reach planets in
+  carry a 3D position (`FVCMapMarker::WorldLocation`, gathered through the one `UVCMapMarkerRegistry::OnGatherMarkers`
+  by centre and distance since code review CR2); POIs reach planets in
   Phase 5, so no provider binds them yet.
 - **Saves**: the same blobs with atlas keys and version-2 overlays; `PlanetGenerationVersion` (3 since D13, 5
   since spherical Phase 6's P6.2) refuses older planet saves.
