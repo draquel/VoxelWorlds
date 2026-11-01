@@ -502,7 +502,7 @@ still plays two roles, the planet's centre (generation, gravity, the surface coo
 ### Spawn Position
 
 `UVoxelChunkManager::GetSpawnPosition()` (SP-B11) puts `PlanetSpawnAltitude` over the terrain along the configured
-direction (`GetSurfacePointAt`). The character spawns by direction (SP-F4): `FVCVoxelNavigationHelper::FindSpawnablePosition`
+direction (`GetSurfacePointAt`). The character spawns by direction (SP-F4): `FVCTerrainQueryHelper::FindSpawnablePosition`
 takes the terrain along the direction from the centre to the requested position, or, when that is under the sea, the
 nearest land on rings of directions one chunk of arc apart (`PlanetTest`'s PlayerStart is over the north pole, which is
 sea on `Review_Planet`: the pawn lands 3 rings away). The configuration's own helper has no world mode, so it gives the
@@ -564,7 +564,7 @@ A planet streams by chunk (`FDistanceBandLODStrategy::IsInPlanetWindow`, spheric
   the window. Its materials blend across its quads as the voxels' dithered biome picks do (G45: a gradient where the
   voxel terrain's blend zones are, no staircase of quads at the horizon or from orbit)
 - Spawning and landing at scale (WM-BP10, WM-BP11): the spawn searches the whole planet for land when there is none near
-  its start (`FVCVoxelNavigationHelper::FindPlanetSpawnPointAtScale`: the 1,000 km test planet's pole is open sea for
+  its start (`FVCTerrainQueryHelper::FindPlanetSpawnPointAtScale`: the 1,000 km test planet's pole is open sea for
   4.7 km of arc, past the old 50,000 uu search), and spawns at the sea's surface, swimming, on a planet with no land; the
   debug settle (`vox.TPLatLon`, `vox.Orbit 0`) with no land within its search settles onto the sea's surface
 - Radius: see "The radius ceiling" above
