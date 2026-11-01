@@ -236,7 +236,7 @@ the plane. The 2D water tiles below are XY grids at `WaterLevel`, so they are of
 **One sea for gameplay (SP-E1, spherical Phase 3).** Everything that asks "how deep under the water is this" goes
 through the same type: `FVoxelSeaSurface::GetDepth(Position)`, the signed depth below the plane (`PlaneZ − Z`) or the
 sphere (`Radius − |P − C|`), positive under the sea. The chunk manager hands it out (`GetSeaSurface`, BlueprintPure
-`GetSeaDepthAt`): swimming and breath (`FVCVoxelNavigationHelper`), the underwater post-process's darkening, the spawn
+`GetSeaDepthAt`): swimming and breath (`FVCTerrainQueryHelper`), the underwater post-process's darkening, the spawn
 search, the navigation water check (`FVoxelSurfaceNavParams::IsUnderwater`), the NPC spawner and scatter's underwater
 class. In heightmap worlds the sea is the `WaterLevel` plane in world Z (`FromConfig`), wherever `WorldOrigin` puts the
 chunk grid: the terrain's heights are world Z, generation floods air at or below `WaterLevel`, and the tiles draw there.
