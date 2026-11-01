@@ -278,9 +278,6 @@ public:
 	static void MakeDescentAlong(FVoxelBenchConfig& InOutConfig, const FVector& Up, const FVector& Ground, float StartAltitude,
 		const FVector2D& SiteForReport);
 
-	/** Unit direction for a latitude and longitude (degrees; +Z north, longitude from +X toward +Y), as gc= and climb= read them. */
-	static FVector LatLonToDirection(double LatitudeDeg, double LongitudeDeg);
-
 private:
 	/** Apply FollowTerrainAltitude to a path position. */
 	FVector ApplyAltitude(const FVector& Pos) const;

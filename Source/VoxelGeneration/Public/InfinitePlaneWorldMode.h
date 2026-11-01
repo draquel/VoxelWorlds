@@ -126,6 +126,16 @@ public:
 		BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(InBiomeConfig);
 	}
 
+	/**
+	 * The biome snapshot by value (SetBiomeContext snapshots a configuration): a synthetic continentalness, as the POI
+	 * placement tests give a plane (code review CR2, POI-15).
+	 * @param InSnapshot The snapshot to copy
+	 */
+	void SetBiomeSnapshot(const FVoxelBiomeSnapshot& InSnapshot)
+	{
+		BiomeSnapshot = InSnapshot;
+	}
+
 	/** This mode's vertical-cull bounds (GetWorldBounds' MinZ / MaxZ): the static using this mode's params + biome snapshot. */
 	void GetTerrainHeightBounds(float& OutMin, float& OutMax) const
 	{

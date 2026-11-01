@@ -6,6 +6,7 @@
 #include "VoxelBoundedDrain.h"
 #include "VoxelSeamTransitionHolds.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelCubeSphere.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelCaveConfiguration.h"
 #include "Algo/BinarySearch.h"
@@ -9033,7 +9034,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 				{
 					const double Lat = FCString::Atod(*Parts[0]);
 					const double Lon = FCString::Atod(*Parts[1]);
-					const FVector Direction = FVoxelStreamingBenchmark::LatLonToDirection(Lat, Lon);
+					const FVector Direction = FVoxelCubeSphere::LatLonToDirection(Lat, Lon);
 					const FVector Ground = CM->GetGeneratedSurfacePoint(Cfg->WorldOrigin + Direction * Cfg->WorldRadius);
 					FVoxelStreamingBenchmark::MakeClimb(Config, Cfg->WorldOrigin, Ground, Parts.Num() > 2 ? FCString::Atof(*Parts[2]) : 500.0f,
 						FVector2D(Lat, Lon));
@@ -9064,7 +9065,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 				{
 					const double Lat = FCString::Atod(*Parts[0]);
 					const double Lon = FCString::Atod(*Parts[1]);
-					const FVector Direction = FVoxelStreamingBenchmark::LatLonToDirection(Lat, Lon);
+					const FVector Direction = FVoxelCubeSphere::LatLonToDirection(Lat, Lon);
 					const FVector Ground = CM->GetGeneratedSurfacePoint(Cfg->WorldOrigin + Direction * Cfg->WorldRadius);
 					FVoxelStreamingBenchmark::MakeDescent(Config, Cfg->WorldOrigin, Ground, FCString::Atof(*Parts[2]), FVector2D(Lat, Lon));
 					bHasClimb = true;

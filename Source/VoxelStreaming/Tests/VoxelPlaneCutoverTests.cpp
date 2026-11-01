@@ -11,6 +11,7 @@
 #include "VoxelChunkManager.h"
 #include "VoxelPlanetFarField.h"
 #include "VoxelStreamingBenchmark.h"
+#include "VoxelCubeSphere.h"
 #include "VoxelWorldConfiguration.h"
 #include "DistanceBandLODStrategy.h"
 
@@ -347,7 +348,7 @@ bool FVoxelBenchPlaneClimbRouteTest::RunTest(const FString& Parameters)
 	// The planet's climb keeps its latitude and longitude.
 	FVoxelBenchConfig Planet;
 	const FVector Center(1000.0, -2000.0, 500.0);
-	const FVector Direction = FVoxelStreamingBenchmark::LatLonToDirection(45.0, 20.0);
+	const FVector Direction = FVoxelCubeSphere::LatLonToDirection(45.0, 20.0);
 	FVoxelStreamingBenchmark::MakeClimb(Planet, Center, Center + Direction * 250600.0, 500.0f, FVector2D(45.0, 20.0));
 	TestTrue(TEXT("A planet's climb reports a latitude and longitude"), !Planet.bClimbSiteXY && Planet.ClimbLatLonAltitude.Equals(FVector(45.0, 20.0, 500.0))
 		&& Planet.Direction.Equals(Direction, 1.0e-9));
