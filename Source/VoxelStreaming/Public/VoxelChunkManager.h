@@ -20,6 +20,7 @@
 #include "VoxelSeamTransitionHolds.h"
 #include "VoxelLODEvalSchedule.h"
 #include "VoxelWorldComponentOwners.h"
+#include "VoxelWaterTiles.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelSurfaceQuery.h"
 #include "VoxelTreeInjector.h"
@@ -1860,6 +1861,9 @@ protected:
 	 */
 	void ProcessDirtyWaterTiles(int32 MaxTilesPerFrame);
 
+	/** The water tiles' chunk grid and sea plane, from the configuration (needs one). */
+	FVoxelWaterTileGrid GetWaterTileGrid() const;
+
 	// ==================== Queue Management ====================
 
 	/**
@@ -2765,25 +2769,8 @@ private:
 
 	// ==================== 2D Water Tile State ====================
 
-	/** Tracks water state for a single XY chunk column (2D tile). */
-	struct FWaterTileState
-	{
-		/** Per-Z-level partial column masks contributed by loaded 3D chunks.
-		 *  Key = chunk Z coordinate, Value = ChunkSize² bool mask. */
-		TMap<int32, TArray<bool>> PartialMasks;
-
-		/** Whether the combined mask needs regeneration. */
-		bool bDirty = true;
-	};
-
-	/** 2D water tile tracking: XY chunk column → water state */
-	TMap<FIntVector2, FWaterTileState> WaterTiles;
-
-	/** Queue of water tiles needing mesh regeneration */
-	TArray<FIntVector2> DirtyWaterTileQueue;
-
-	/** Set for O(1) duplicate detection in DirtyWaterTileQueue */
-	TSet<FIntVector2> DirtyWaterTileSet;
+	/** 2D water tile tracking: XY chunk column → water state (FVoxelWaterTiles) */
+	FVoxelWaterTiles WaterTiles;
 
 	// ==================== Adaptive Throttling State ====================
 
