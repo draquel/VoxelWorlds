@@ -6,7 +6,7 @@
 #include "VoxelWorldConfiguration.h"
 #include "VoxelMaterialAtlas.h"
 #include "DistanceBandLODStrategy.h"
-#include "VoxelCustomVFRenderer.h"
+#include "VoxelMeshRenderer.h"
 #include "Engine/World.h"
 
 AVoxelWorldActor::AVoxelWorldActor()
@@ -138,7 +138,7 @@ void AVoxelWorldActor::InitializeVoxelWorld()
 	LODStrategy = DistanceBandStrategy;
 
 	// Create the mesh renderer
-	FVoxelCustomVFRenderer* CustomVFRenderer = new FVoxelCustomVFRenderer();
+	FVoxelMeshRenderer* CustomVFRenderer = new FVoxelMeshRenderer();
 
 	// Set material BEFORE Initialize - REQUIRED for Custom VF renderer
 	// The scene proxy is created during Initialize, so material must be set first

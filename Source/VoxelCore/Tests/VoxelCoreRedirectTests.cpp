@@ -34,6 +34,8 @@ bool FVoxelWorldsCoreRedirectsTest::RunTest(const FString& Parameters)
 			TEXT("/Script/VoxelStreaming.VoxelChunkManager.GetSpawnPosition") },
 		{ ECoreRedirectFlags::Type_Function, TEXT("/Script/VoxelStreaming.VoxelWorldActor.GetPlanetSpawnPosition"),
 			TEXT("/Script/VoxelStreaming.VoxelWorldActor.GetSpawnPosition") },
+		{ ECoreRedirectFlags::Type_Class, TEXT("/Script/VoxelRendering.VoxelWorldComponent"),
+			TEXT("/Script/VoxelRendering.VoxelRegionComponent") },
 	};
 	for (const FCase& Case : Cases)
 	{

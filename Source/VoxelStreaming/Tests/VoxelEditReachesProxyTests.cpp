@@ -9,9 +9,9 @@
 #include "Materials/MaterialInterface.h"
 #include "Testing/VoxelTestChunkWorld.h"
 #include "VoxelChunkManager.h"
-#include "VoxelCustomVFRenderer.h"
+#include "VoxelMeshRenderer.h"
 #include "VoxelSceneProxy.h"
-#include "VoxelWorldComponent.h"
+#include "VoxelRegionComponent.h"
 #include "VoxelWorldConfiguration.h"
 #include "DistanceBandLODStrategy.h"
 #include "VoxelEditManager.h"
@@ -34,7 +34,7 @@
 namespace VoxelEditReachesProxyTest
 {
 	/** The real renderer, keeping a hash of the latest mesh it was given for each chunk (positions and indices). */
-	class FHashingCustomVFRenderer : public FVoxelCustomVFRenderer
+	class FHashingMeshRenderer : public FVoxelMeshRenderer
 	{
 	public:
 		TMap<FIntVector, uint64> MeshHashes;
@@ -42,13 +42,13 @@ namespace VoxelEditReachesProxyTest
 		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override
 		{
 			Record(ChunkCoord, MeshData);
-			FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU(ChunkCoord, LODLevel, MeshData);
+			FVoxelMeshRenderer::UpdateChunkMeshFromCPU(ChunkCoord, LODLevel, MeshData);
 		}
 
 		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, FChunkMeshData&& MeshData) override
 		{
 			Record(ChunkCoord, MeshData);
-			FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU(ChunkCoord, LODLevel, MoveTemp(MeshData));
+			FVoxelMeshRenderer::UpdateChunkMeshFromCPU(ChunkCoord, LODLevel, MoveTemp(MeshData));
 		}
 
 	private:
@@ -90,14 +90,14 @@ namespace VoxelEditReachesProxyTest
 	}
 
 	/** One frame: the chunk manager, the world's clock and the renderer's components (they only tick while a fade runs). */
-	void TickFrame(VoxelTesting::FTestChunkWorld& W, FHashingCustomVFRenderer& Renderer)
+	void TickFrame(VoxelTesting::FTestChunkWorld& W, FHashingMeshRenderer& Renderer)
 	{
 		constexpr float Dt = 1.0f / 60.0f;
 		W.Manager->TickComponent(Dt, LEVELTICK_All, nullptr);
 		W.World->RealTimeSeconds += Dt;
-		TArray<TPair<FIntVector, UVoxelWorldComponent*>> Components;
+		TArray<TPair<FIntVector, UVoxelRegionComponent*>> Components;
 		Renderer.GetRegionComponents(Components);
-		for (const TPair<FIntVector, UVoxelWorldComponent*>& Pair : Components)
+		for (const TPair<FIntVector, UVoxelRegionComponent*>& Pair : Components)
 		{
 			if (Pair.Value)
 			{
@@ -108,7 +108,7 @@ namespace VoxelEditReachesProxyTest
 	}
 
 	/** Tick until the pipeline has been idle for 90 frames and no fade runs; false if not within TimeoutSeconds. */
-	bool Settle(VoxelTesting::FTestChunkWorld& W, FHashingCustomVFRenderer& Renderer, TFunctionRef<void()> PerFrame, double TimeoutSeconds = 120.0)
+	bool Settle(VoxelTesting::FTestChunkWorld& W, FHashingMeshRenderer& Renderer, TFunctionRef<void()> PerFrame, double TimeoutSeconds = 120.0)
 	{
 		const FVoxelSeamRegistry* Seams = W.Manager->GetSeamRegistry();
 		int32 IdleFrames = 0;
@@ -121,7 +121,7 @@ namespace VoxelEditReachesProxyTest
 				&& W.Manager->GetAsyncGenerationInProgressCount() == 0 && W.Manager->GetAsyncMeshingInProgressCount() == 0
 				&& W.Manager->GetPendingMeshUploadCount() == 0 && W.Manager->GetSeamJobsInFlightCount() == 0
 				&& (!Seams || Seams->GetStats().JobQueueDepth == 0)
-				&& (!Renderer.GetWorldComponent() || Renderer.GetWorldComponent()->GetActiveFadeCount() == 0);
+				&& (!Renderer.GetOriginRegionComponent() || Renderer.GetOriginRegionComponent()->GetActiveFadeCount() == 0);
 			IdleFrames = bIdle ? IdleFrames + 1 : 0;
 			FPlatformProcess::Sleep(0.002f);
 		}
@@ -156,14 +156,14 @@ namespace VoxelEditReachesProxyTest
 		W.Create(Mode == EMeshingMode::Cubic ? TEXT("EditReachesProxyCubic") : TEXT("EditReachesProxySmooth"));
 		W.ConfigureSmallPlane();
 		W.Config->MeshingMode = Mode;
-		FHashingCustomVFRenderer Renderer;
+		FHashingMeshRenderer Renderer;
 		Renderer.SetMaterial(Master);
 		W.Owner = W.World->SpawnActor<AActor>();
 		W.Manager = NewObject<UVoxelChunkManager>(W.Owner);
 		W.Manager->RegisterComponent();
 		Renderer.Initialize(W.World, W.Config);
 		W.Manager->Initialize(W.Config, new FDistanceBandLODStrategy(), &Renderer);
-		UVoxelWorldComponent* Component = Renderer.GetWorldComponent();
+		UVoxelRegionComponent* Component = Renderer.GetOriginRegionComponent();
 
 		// A site at the middle of a chunk's footprint where the surface lies at least 6 voxels from the chunk's top and
 		// bottom, so a dig of 3 voxels stays inside the chunk's interior mesh

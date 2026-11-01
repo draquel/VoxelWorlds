@@ -8,7 +8,7 @@
  * Game-thread timing for mesh-swap crossfades (VoxelRendering).
  *
  * Owns only the clock side of a fade: when each one started, whether it is held, and what alpha
- * it is at. UVoxelWorldComponent wraps it with the fade MIDs and the proxy commands. Chunk
+ * it is at. UVoxelRegionComponent wraps it with the fade MIDs and the proxy commands. Chunk
  * interiors and seam buckets share one scheduler, keyed by FIntVector4 (chunk XYZ + a kind
  * slot: ChunkKind for an interior, 0..6 for a seam bucket slot), so a release can start any mix of
  * them on the same tick and they stay alpha-synchronised, which the complementary dither needs.
@@ -23,10 +23,10 @@
  *
  * Pure C++ (no UObject, no RHI); game-thread only.
  *
- * @see UVoxelWorldComponent::AdvanceCrossfades
+ * @see UVoxelRegionComponent::AdvanceFades
  * @see Documentation/VOXEL_QA_FOLLOWUPS_PLAN.md (R24)
  */
-class VOXELRENDERING_API FVoxelCrossfadeScheduler
+class VOXELRENDERING_API FVoxelFadeScheduler
 {
 public:
 	/** Kind slot (W) of an interior fade key; seam bucket keys use the bucket slot 0..6. */

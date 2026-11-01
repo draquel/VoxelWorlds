@@ -8,9 +8,9 @@
 #include "Testing/VoxelTestScopedCVar.h"
 #include "RHI.h"             // GUsingNullRHI: no scene proxy under -nullrhi, the test skips there
 #include "Materials/MaterialInterface.h"
-#include "VoxelCustomVFRenderer.h"
+#include "VoxelMeshRenderer.h"
 #include "VoxelSceneProxy.h"
-#include "VoxelWorldComponent.h"
+#include "VoxelRegionComponent.h"
 #include "VoxelWorldConfiguration.h"
 #include "ChunkRenderData.h"
 
@@ -79,10 +79,10 @@ bool FVoxelCrossfadeSwapReachesProxyTest::RunTest(const FString& Parameters)
 	FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
 	WorldContext.SetCurrentWorld(World);
 	{
-		FVoxelCustomVFRenderer Renderer;
+		FVoxelMeshRenderer Renderer;
 		Renderer.SetMaterial(Master);
 		Renderer.Initialize(World, Config);
-		UVoxelWorldComponent* Component = Renderer.GetWorldComponent();
+		UVoxelRegionComponent* Component = Renderer.GetOriginRegionComponent();
 		if (!TestNotNull(TEXT("The renderer has a world component"), Component))
 		{
 			Renderer.Shutdown();

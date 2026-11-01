@@ -62,8 +62,8 @@ VoxelMeshing
 
 VoxelRendering
     └── IVoxelMeshRenderer (interface)
-        └── FVoxelCustomVFRenderer
-            └── UVoxelWorldComponent
+        └── FVoxelMeshRenderer
+            └── UVoxelRegionComponent
                 └── FVoxelSceneProxy (second render pass)
 ```
 
@@ -411,16 +411,16 @@ virtual void ClearAllWaterTiles() { }
 
 Default implementations are no-ops, allowing renderers to opt-in to water support.
 
-### GPU Renderer (FVoxelCustomVFRenderer)
+### GPU Renderer (FVoxelMeshRenderer)
 
-**Files**: `VoxelCustomVFRenderer.h/.cpp`, `VoxelWorldComponent.h/.cpp`, `VoxelSceneProxy.h/.cpp`
+**Files**: `VoxelMeshRenderer.h/.cpp`, `VoxelRegionComponent.h/.cpp`, `VoxelSceneProxy.h/.cpp`
 
 Three-layer architecture matching the terrain chunk pipeline:
 
 ```
-FVoxelCustomVFRenderer   (game thread API)
+FVoxelMeshRenderer   (game thread API)
     ↓ SetWaterMaterial / UpdateWaterTileMesh / RemoveWaterTile / ClearAllWaterTiles
-UVoxelWorldComponent     (game → render thread bridge via ENQUEUE_RENDER_COMMAND)
+UVoxelRegionComponent     (game → render thread bridge via ENQUEUE_RENDER_COMMAND)
     ↓
 FVoxelSceneProxy         (render thread — GPU buffers, draw calls)
     ↓ GetDynamicMeshElements — second pass with water material
@@ -430,7 +430,7 @@ With render regions (`RENDERING_SYSTEM.md`, "Render regions") a tile goes to the
 column's Z-0 chunk, which over a lake is air with no mesh: the proxy draws its water tiles with no chunk mesh (its
 `GetDynamicMeshElements` once returned at the top without one, so a region holding only water tiles drew nothing: the
 lake bed without water in a block of chunk columns at a region's corner, world modes review G77, fixed 2026-10-26),
-and the component's bounds include the tile's box (`UVoxelWorldComponent::WaterTileWorldBounds`, `CalcBounds`) and
+and the component's bounds include the tile's box (`UVoxelRegionComponent::WaterTileWorldBounds`, `CalcBounds`) and
 reach the render scene on the next tick (`RequestRenderBoundsRefresh`).
 `voxel.Water.TileAudit [maxList] [chunkX chunkY]` checks
 the tiles against the generated surface (every voxel column more than a voxel under the water plane should be wet) and

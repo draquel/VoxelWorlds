@@ -15,7 +15,7 @@ All LOD strategies implement the `IVoxelLODStrategy` interface. This allows swap
 See: `Documentation/LOD_SYSTEM.md`
 
 ### 2. Rendering
-One renderer behind the `IVoxelMeshRenderer` interface: `FVoxelCustomVFRenderer`, a `UVoxelWorldComponent`
+One renderer behind the `IVoxelMeshRenderer` interface: `FVoxelMeshRenderer`, a `UVoxelRegionComponent`
 per render region whose `FVoxelSceneProxy` draws the chunk, seam and water meshes through UE's
 `FLocalVertexFactory`. (The `ProceduralMeshComponent` fallback was deleted in code review CR1, D-CR7; the
 streaming tests use a recording stub.)
@@ -392,7 +392,7 @@ See: `Documentation/PERFORMANCE_TARGETS.md`
 
 ### Implementations
 - `Source/VoxelLOD/Private/DistanceBandLODStrategy.cpp` - Default LOD
-- `Source/VoxelRendering/Private/VoxelCustomVFRenderer.cpp` - GPU renderer
+- `Source/VoxelRendering/Private/VoxelMeshRenderer.cpp` - GPU renderer
 - `Source/VoxelStreaming/Private/VoxelChunkManager.cpp` - Chunk streaming
 
 ### Meshing

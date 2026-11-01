@@ -21,8 +21,8 @@
 
 ## Overview
 
-The rendering system has one implementation of the `IVoxelMeshRenderer` interface, `FVoxelCustomVFRenderer`: a
-`UVoxelWorldComponent` per render region, whose `FVoxelSceneProxy` uploads each chunk, seam and water mesh into
+The rendering system has one implementation of the `IVoxelMeshRenderer` interface, `FVoxelMeshRenderer`: a
+`UVoxelRegionComponent` per render region, whose `FVoxelSceneProxy` uploads each chunk, seam and water mesh into
 UE's `FLocalVertexFactory` and crossfades mesh swaps. The `ProceduralMeshComponent` fallback renderer the design
 started with was deleted in code review CR1 (D-CR7): no asset or script ever selected it, and it had not implemented
 the seam, fade, lost-data or water-draw members since seam ownership. The streaming tests record into a stub.
@@ -39,8 +39,8 @@ the seam, fade, lost-data or water-draw members since seam ownership. The stream
 ```
 IVoxelMeshRenderer (Interface)
     │
-    └── FVoxelCustomVFRenderer
-        ├── UVoxelWorldComponent (one per render region, WM-BP7)
+    └── FVoxelMeshRenderer
+        ├── UVoxelRegionComponent (one per render region, WM-BP7)
         ├── FVoxelSceneProxy (Scene integration)
         └── FLocalVertexFactory per chunk, seam and water-tile mesh
 ```
@@ -102,20 +102,20 @@ AVoxelWorldActor
     │
     └── IVoxelMeshRenderer (interface)
         │
-        └── FVoxelCustomVFRenderer
-            └── UVoxelWorldComponent (per render region)
+        └── FVoxelMeshRenderer
+            └── UVoxelRegionComponent (per render region)
                 └── FVoxelSceneProxy
                     └── FLocalVertexFactory (per mesh)
 ```
 
 ### Key Components
 
-**FVoxelCustomVFRenderer** (`VoxelRendering/Private/VoxelCustomVFRenderer.cpp`)
+**FVoxelMeshRenderer** (`VoxelRendering/Private/VoxelMeshRenderer.cpp`)
 - Implements `IVoxelMeshRenderer` interface
-- Creates and manages `UVoxelWorldComponent` internally
+- Creates and manages `UVoxelRegionComponent` internally
 - Forwards chunk updates and LOD configuration to the component
 
-**UVoxelWorldComponent** (`VoxelRendering/Public/VoxelWorldComponent.h`)
+**UVoxelRegionComponent** (`VoxelRendering/Public/VoxelRegionComponent.h`)
 - `UPrimitiveComponent` that bridges game thread and render thread
 - Creates `FVoxelSceneProxy` for actual rendering
 - Manages Material Parameter Collection for LOD morphing
@@ -124,10 +124,10 @@ AVoxelWorldActor
 **Render regions** (`FVoxelRenderRegions`, `VoxelCore/Public/VoxelRenderRegions.h`; spherical Phase 6, WM-BP7, D23)
 - The terrain renders in regions of `voxel.Render.RegionChunks`^3 chunks in every world mode (16 by default, 76,800 uu; 0
   turns them off; planets since WM-BP7, heightmap worlds since world modes review WM-MP5, D40, since a plane 100 km from
-  its origin loses float precision as a big planet does): `FVoxelCustomVFRenderer` keeps one `UVoxelWorldComponent` per region at the region's origin (its min
+  its origin loses float precision as a big planet does): `FVoxelMeshRenderer` keeps one `UVoxelRegionComponent` per region at the region's origin (its min
   corner, in double) and routes each chunk, seam, water tile and fade to it, creating it on demand with the material,
   RVTs, atlas, LOD collection, distances and viewer replayed, and retiring it when it holds nothing
-  (`UVoxelWorldComponent::HasRenderContent`). The primary component is region (0, 0, 0) and stays. A region holding
+  (`UVoxelRegionComponent::HasRenderContent`). The primary component is region (0, 0, 0) and stays. A region holding
   only water tiles draws them (world modes review G77, fixed 2026-10-26, §23.14): a water tile goes to the region of
   its column's Z-0 chunk, which over a lake is air with no mesh, and such a component drew nothing, since the proxy's
   `GetDynamicMeshElements` returned at once with no chunk mesh (a lake drawn without water in a block of chunk columns
@@ -324,7 +324,7 @@ ChunkManager
     ↓
 FChunkMeshData (the mesher's output)
     ↓
-FVoxelCustomVFRenderer::UpdateChunkMeshFromCPU()
+FVoxelMeshRenderer::UpdateChunkMeshFromCPU()
     ↓
 Upload on the render thread (UpdateChunkFromCPUData_RenderThread)
     ↓
@@ -573,7 +573,7 @@ private:
  */
 class FVoxelSceneProxy : public FPrimitiveSceneProxy {
 public:
-    FVoxelSceneProxy(UVoxelWorldComponent* InComponent)
+    FVoxelSceneProxy(UVoxelRegionComponent* InComponent)
         : FPrimitiveSceneProxy(InComponent)
         , VertexFactory(GetScene().GetFeatureLevel())
     {
@@ -664,15 +664,15 @@ private:
  * 
  * Optimized for runtime performance with zero CPU overhead.
  */
-class FVoxelCustomVFRenderer : public IVoxelMeshRenderer {
+class FVoxelMeshRenderer : public IVoxelMeshRenderer {
 public:
     virtual void Initialize(UWorld* World, const FVoxelWorldConfiguration& Config) override {
         // Create scene component
-        WorldComponent = NewObject<UVoxelWorldComponent>(World);
-        WorldComponent->RegisterComponent();
+        OriginRegionComponent = NewObject<UVoxelRegionComponent>(World);
+        OriginRegionComponent->RegisterComponent();
         
         // Create scene proxy
-        SceneProxy = MakeShared<FVoxelSceneProxy>(WorldComponent);
+        SceneProxy = MakeShared<FVoxelSceneProxy>(OriginRegionComponent);
         
         // Set material
         SetMaterial(Config.VoxelMaterial);
@@ -719,7 +719,7 @@ private:
     TSharedPtr<FVoxelSceneProxy> SceneProxy;
     
     /** World component (game thread) */
-    UVoxelWorldComponent* WorldComponent;
+    UVoxelRegionComponent* OriginRegionComponent;
     
     /** Per-chunk GPU buffers */
     TMap<FIntVector, FVoxelChunkGPUBuffers> ChunkBuffers;
@@ -870,10 +870,10 @@ virtual void ClearAllWaterTiles() { }
 The GPU renderer renders water tiles as a **second pass** in `GetDynamicMeshElements`, after the terrain chunk loop:
 
 ```
-FVoxelCustomVFRenderer::UpdateWaterTileMesh()
+FVoxelMeshRenderer::UpdateWaterTileMesh()
     ↓ ConvertToVoxelVertices (FChunkMeshData → FVoxelVertex[])
     ↓
-UVoxelWorldComponent::UpdateWaterTileFromCPUData()
+UVoxelRegionComponent::UpdateWaterTileFromCPUData()
     ↓ ENQUEUE_RENDER_COMMAND
     ↓
 FVoxelSceneProxy::UpdateWaterTileFromCPUData_RenderThread()
@@ -1058,8 +1058,8 @@ class FVoxelVertexFactory : public FVertexFactory {
 ### Step 4: Implement Custom VF Renderer
 
 ```cpp
-// Source/VoxelRendering/Private/VoxelCustomVFRenderer.cpp
-class FVoxelCustomVFRenderer : public IVoxelMeshRenderer {
+// Source/VoxelRendering/Private/VoxelMeshRenderer.cpp
+class FVoxelMeshRenderer : public IVoxelMeshRenderer {
     // ... (implementation as shown above)
 };
 ```

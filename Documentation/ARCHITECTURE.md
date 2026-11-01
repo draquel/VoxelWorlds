@@ -85,7 +85,7 @@ VoxelWorld (Root Container)
 ├── RenderingSystem
 │   ├── IVoxelMeshRenderer Interface
 │   │   └── VoxelCustomVFRenderer
-│   │       ├── UVoxelWorldComponent (one per render region)
+│   │       ├── UVoxelRegionComponent (one per render region)
 │   │       ├── FVoxelSceneProxy (FLocalVertexFactory per mesh)
 │   │       ├── Mesh-swap crossfades
 │   │       └── Water Tile Rendering (second pass)
@@ -331,7 +331,7 @@ class IVoxelMeshRenderer {
 };
 ```
 
-`FVoxelCustomVFRenderer` is the one implementation: a `UVoxelWorldComponent` per render region, its
+`FVoxelMeshRenderer` is the one implementation: a `UVoxelRegionComponent` per render region, its
 `FVoxelSceneProxy` uploading each chunk, seam and water mesh into UE's `FLocalVertexFactory`, LOD flips
 and corrections crossfading between the old and new mesh. (The ProceduralMeshComponent fallback was
 deleted in code review CR1, D-CR7.)
@@ -357,7 +357,7 @@ Output: FChunkMeshData, uploaded by the renderer
 
 **Phase 3: Rendering**
 ```
-FVoxelCustomVFRenderer: the mesh uploaded into per-mesh FLocalVertexFactory buffers
+FVoxelMeshRenderer: the mesh uploaded into per-mesh FLocalVertexFactory buffers
 ```
 
 ### 4. World Modes
@@ -397,7 +397,7 @@ See: [WATER_SYSTEM.md](WATER_SYSTEM.md) for complete details.
 
 **2D Water Tiles** (`FIntVector2`-keyed) aggregate water from multiple Z-level chunks per XY column. `FVoxelWaterMesher` builds column masks, dilates by 3 cells for shoreline overlap, and greedy-merges into minimal quads.
 
-**Rendering**: `FVoxelCustomVFRenderer` draws water tiles in a second render pass with the separate water material, through the `IVoxelMeshRenderer` water tile API.
+**Rendering**: `FVoxelMeshRenderer` draws water tiles in a second render pass with the separate water material, through the `IVoxelMeshRenderer` water tile API.
 
 ### 7. Biome System
 

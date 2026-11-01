@@ -6,8 +6,8 @@
 #include "Engine/World.h"
 #include "Materials/Material.h"
 #include "VoxelRenderRegions.h"
-#include "VoxelCustomVFRenderer.h"
-#include "VoxelWorldComponent.h"
+#include "VoxelMeshRenderer.h"
+#include "VoxelRegionComponent.h"
 #include "VoxelWorldConfiguration.h"
 #include "ChunkRenderData.h"
 
@@ -124,7 +124,7 @@ bool FVoxelRenderRegionPrecisionTest::RunTest(const FString& Parameters)
 	FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
 	WorldContext.SetCurrentWorld(World);
 	{
-		FVoxelCustomVFRenderer Renderer;
+		FVoxelMeshRenderer Renderer;
 		Renderer.SetMaterial(UMaterial::GetDefaultMaterial(MD_Surface));
 		Renderer.Initialize(World, Config);
 		const FIntVector Pole = ChunkAt(*Config, Config->WorldOrigin + FVector(0, 0, 1) * Config->WorldRadius);
@@ -138,12 +138,12 @@ bool FVoxelRenderRegionPrecisionTest::RunTest(const FString& Parameters)
 		Renderer.UpdateSeamMeshFromCPU(Equator, 0, 0, MoveTemp(Seam));
 		Renderer.FlushPendingOperations();
 
-		TArray<TPair<FIntVector, UVoxelWorldComponent*>> Components;
+		TArray<TPair<FIntVector, UVoxelRegionComponent*>> Components;
 		Renderer.GetRegionComponents(Components);
 		TSet<FIntVector> ExpectedRegions = { FIntVector::ZeroValue, Regions.GetRegion(Pole), Regions.GetRegion(PoleNeighbour), Regions.GetRegion(Equator) };
 		TestEqual(TEXT("A component per region with content, plus the primary one"), Components.Num(), ExpectedRegions.Num());
 		int32 Misplaced = 0;
-		for (const TPair<FIntVector, UVoxelWorldComponent*>& Pair : Components)
+		for (const TPair<FIntVector, UVoxelRegionComponent*>& Pair : Components)
 		{
 			Misplaced += (Pair.Value && Pair.Value->GetComponentLocation().Equals(Regions.GetRegionOrigin(Pair.Key), 1.0e-6)) ? 0 : 1;
 		}
@@ -162,7 +162,7 @@ bool FVoxelRenderRegionPrecisionTest::RunTest(const FString& Parameters)
 		Renderer.FlushPendingOperations();
 		Renderer.GetRegionComponents(Components);
 		TestTrue(TEXT("Empty regions retire, the primary component stays"), Components.Num() == 1 && Components[0].Key == FIntVector::ZeroValue
-			&& Components[0].Value == Renderer.GetWorldComponent());
+			&& Components[0].Value == Renderer.GetOriginRegionComponent());
 		Renderer.Shutdown();
 	}
 
@@ -199,7 +199,7 @@ bool FVoxelRenderRegionPrecisionTest::RunTest(const FString& Parameters)
 			TestTrue(*FString::Printf(TEXT("plane, %s: within 0.1 uu of the double reference (%.4f)"), Site.Key, MaxRegionError), MaxRegionError <= 0.1);
 		}
 
-		FVoxelCustomVFRenderer Renderer;
+		FVoxelMeshRenderer Renderer;
 		Renderer.SetMaterial(UMaterial::GetDefaultMaterial(MD_Surface));
 		Renderer.Initialize(World, Plane);
 		const FIntVector Near(40, -20, 1);
@@ -207,12 +207,12 @@ bool FVoxelRenderRegionPrecisionTest::RunTest(const FString& Parameters)
 		Renderer.UpdateChunkMeshFromCPU(Near, 0, MakeMesh());
 		Renderer.UpdateChunkMeshFromCPU(Far, 0, MakeMesh());
 		Renderer.FlushPendingOperations();
-		TArray<TPair<FIntVector, UVoxelWorldComponent*>> Components;
+		TArray<TPair<FIntVector, UVoxelRegionComponent*>> Components;
 		Renderer.GetRegionComponents(Components);
 		TSet<FIntVector> PlaneExpected = { FIntVector::ZeroValue, PlaneRegions.GetRegion(Near), PlaneRegions.GetRegion(Far) };
 		TestEqual(TEXT("Heightmap: a component per region with content, plus the primary one"), Components.Num(), PlaneExpected.Num());
 		int32 Misplaced = 0;
-		for (const TPair<FIntVector, UVoxelWorldComponent*>& Pair : Components)
+		for (const TPair<FIntVector, UVoxelRegionComponent*>& Pair : Components)
 		{
 			Misplaced += (Pair.Value && Pair.Value->GetComponentLocation().Equals(PlaneRegions.GetRegionOrigin(Pair.Key), 1.0e-6)) ? 0 : 1;
 		}

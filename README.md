@@ -22,7 +22,7 @@ water, ore, scatter).
 - **Streaming** — distance-based chunk load/unload with async mesh generation, stale-cull, thrash
   instrumentation, async Chaos collision cooking, and far-chunk voxel-data compression (keyed on
   distance, so it also covers LOD-off and cubic worlds).
-- **Rendering** — one renderer built on UE's `FLocalVertexFactory` (`FVoxelCustomVFRenderer`: a world
+- **Rendering** — one renderer built on UE's `FLocalVertexFactory` (`FVoxelMeshRenderer`: a world
   component per render region, its scene proxy drawing chunk, seam and water meshes).
 - **Procedural generation** — CPU/GPU noise library, multiple world modes (infinite plane, spherical
   planet, island/bowl), biomes, caves, ore veins, water, and a foliage/scatter system with voxel
@@ -102,8 +102,8 @@ seam-closure and streaming tests, and GPU/CPU parity tests that exercise the rea
 - `FVoxelCPUMarchingCubesMesher` — Marching Cubes meshing
 - `FVoxelCPUDualContourMesher` — Dual Contouring meshing
 - `FVoxelWaterMesher` — water surface meshing
-- `FVoxelCustomVFRenderer` — the renderer (UE `FLocalVertexFactory`)
-- `FVoxelSceneProxy` / `UVoxelWorldComponent` — scene proxy + primitive component bridge
+- `FVoxelMeshRenderer` — the renderer (UE `FLocalVertexFactory`)
+- `FVoxelSceneProxy` / `UVoxelRegionComponent` — scene proxy + primitive component bridge
 - `FVoxelMaterialRegistry` / `UVoxelMaterialAtlas` — material definitions and texture atlas
 - `FVoxelBiomeRegistry` — biome definitions registry
 - `UVoxelEditManager` — edit layer storage and undo/redo

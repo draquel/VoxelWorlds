@@ -18,7 +18,7 @@
  * waits for or re-meshes on a neighbour. The faces on a boundary plane belong to that chunk pair's
  * face seam job (GenerateFaceSeamMeshCPU), which culls them against both chunks' voxels. No cubic
  * face lies only on a chunk edge or corner, so edge and corner seams carry no geometry.
- * The Full domain (whole chunk, boundary faces culled against the request's face-neighbour slices)
+ * The WholeChunk domain (whole chunk, boundary faces culled against the request's face-neighbour slices)
  * serves collision and tests.
  *
  * Vertex AO (colour channel B) samples outside the chunk as air in the Interior domain, and outside
@@ -93,7 +93,7 @@ private:
 	/**
 	 * The voxels one meshing pass reads, in the frame of the chunk whose mesh it emits (for a face
 	 * seam, the owner's). Own is that chunk. A face seam adds the neighbour B = Own + unit(OtherAxis),
-	 * whose voxels sit at [ChunkSize, 2 * ChunkSize) along OtherAxis. Whole-chunk (Full domain)
+	 * whose voxels sit at [ChunkSize, 2 * ChunkSize) along OtherAxis. Whole-chunk (WholeChunk domain)
 	 * meshing reads one plane of each face neighbour from the request's slices instead. Anything
 	 * else reads as air.
 	 */
@@ -115,7 +115,7 @@ private:
 
 	/**
 	 * Read a face neighbour's voxel from the request's slices (one plane per face; anything further,
-	 * or diagonal, is air). Used by the Full domain.
+	 * or diagonal, is air). Used by the WholeChunk domain.
 	 */
 	static FVoxelData GetSliceVoxel(const FVoxelMeshingRequest& Request, int32 X, int32 Y, int32 Z);
 

@@ -546,9 +546,9 @@ bool FCubicMeshingInteriorDomainTest::RunTest(const FString& Parameters)
 	const int32 N = 8;
 
 	// A solid chunk has only boundary faces: its interior mesh is empty.
-	FChunkMeshData Full = MeshChunk(Mesher, CreateFullChunkRequest(N).VoxelData, N, EVoxelMeshCellDomain::Full);
+	FChunkMeshData Full = MeshChunk(Mesher, CreateFullChunkRequest(N).VoxelData, N, EVoxelMeshCellDomain::WholeChunk);
 	FChunkMeshData Interior = MeshChunk(Mesher, CreateFullChunkRequest(N).VoxelData, N, EVoxelMeshCellDomain::Interior);
-	TestTrue(TEXT("Solid chunk, Full domain: boundary walls"), Full.Positions.Num() > 0);
+	TestTrue(TEXT("Solid chunk, WholeChunk domain: boundary walls"), Full.Positions.Num() > 0);
 	TestEqual(TEXT("Solid chunk, Interior domain: nothing"), Interior.Positions.Num(), 0);
 
 	// Interior = Full minus the faces on the chunk's boundary planes, and it never reads neighbour slices.
@@ -560,7 +560,7 @@ bool FCubicMeshingInteriorDomainTest::RunTest(const FString& Parameters)
 
 		const TArray<FVoxelData> Voxels = ChunkOf(FIntVector(0, 0, 0), N, 2 * N);
 		TMap<FUnitFace, int32> FullFaces, InteriorFaces;
-		TestTrue(TEXT("Full quads on grid"), CollectUnitFaces(MeshChunk(Mesher, Voxels, N, EVoxelMeshCellDomain::Full), 100.0f, FIntVector::ZeroValue, FullFaces));
+		TestTrue(TEXT("Full quads on grid"), CollectUnitFaces(MeshChunk(Mesher, Voxels, N, EVoxelMeshCellDomain::WholeChunk), 100.0f, FIntVector::ZeroValue, FullFaces));
 		TestTrue(TEXT("Interior quads on grid"), CollectUnitFaces(MeshChunk(Mesher, Voxels, N, EVoxelMeshCellDomain::Interior), 100.0f, FIntVector::ZeroValue, InteriorFaces));
 
 		int32 Expected = 0, Missing = 0, Extra = 0;
@@ -647,7 +647,7 @@ bool FCubicMeshingSeamClosureTest::RunTest(const FString& Parameters)
 
 		// Reference: the whole 2x2x2 region meshed as one chunk; keep the faces strictly inside it.
 		TMap<FUnitFace, int32> Reference;
-		TestTrue(TEXT("Reference quads on grid"), CollectUnitFaces(MeshChunk(Mesher, Region, R, EVoxelMeshCellDomain::Full), VoxelSize, FIntVector::ZeroValue, Reference));
+		TestTrue(TEXT("Reference quads on grid"), CollectUnitFaces(MeshChunk(Mesher, Region, R, EVoxelMeshCellDomain::WholeChunk), VoxelSize, FIntVector::ZeroValue, Reference));
 		TSet<FUnitFace> Inside;
 		int32 OnChunkPlanes = 0;
 		for (const TPair<FUnitFace, int32>& F : Reference)

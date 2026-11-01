@@ -16,13 +16,13 @@ class UVoxelMaterialAtlas;
  * Voxel Mesh Renderer Interface.
  *
  * What the chunk manager asks of the renderer: chunk, seam and water-tile meshes in and out, the
- * materials, the mesh-swap crossfades, bounds and statistics. FVoxelCustomVFRenderer is the one
+ * materials, the mesh-swap crossfades, bounds and statistics. FVoxelMeshRenderer is the one
  * implementation (the ProceduralMeshComponent fallback was deleted in code review CR1, D-CR7); the
  * streaming tests use a recording stub.
  *
  * Thread Safety: All methods must be called from game thread only.
  *
- * @see FVoxelCustomVFRenderer
+ * @see FVoxelMeshRenderer
  * @see Documentation/RENDERING_SYSTEM.md
  */
 class VOXELRENDERING_API IVoxelMeshRenderer

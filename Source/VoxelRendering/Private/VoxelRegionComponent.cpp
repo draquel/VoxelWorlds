@@ -1,6 +1,6 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
-#include "VoxelWorldComponent.h"
+#include "VoxelRegionComponent.h"
 #include "VoxelSceneProxy.h"
 #include "VoxelRendering.h"
 #include "VoxelMaterialAtlas.h"
@@ -33,7 +33,7 @@ static TAutoConsoleVariable<int32> CVarVoxelMeshFade(
 	TEXT("  0 = instant swap (legacy pop, for A/B comparison)\n")
 	TEXT("  1 = dithered crossfade (default)\n")
 	TEXT("Requires a Masked fade material: auto-derived '<Master>_Fade' asset next to the terrain\n")
-	TEXT("master material, or assigned via UVoxelWorldComponent::SetFadeMaterial."),
+	TEXT("master material, or assigned via UVoxelRegionComponent::SetFadeMaterial."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarVoxelMeshFadeDuration(
@@ -172,9 +172,9 @@ namespace
 	FAutoConsoleVariableSink VoxelMaterialCVarSink(FConsoleCommandDelegate::CreateStatic(&OnVoxelMaterialCVarsChanged));
 }
 
-// ==================== UVoxelWorldComponent ====================
+// ==================== UVoxelRegionComponent ====================
 
-UVoxelWorldComponent::UVoxelWorldComponent(const FObjectInitializer& ObjectInitializer)
+UVoxelRegionComponent::UVoxelRegionComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	// Component settings. Tick exists only to advance mesh-swap crossfades and stays
@@ -199,13 +199,13 @@ UVoxelWorldComponent::UVoxelWorldComponent(const FObjectInitializer& ObjectIniti
 	CachedTotalBounds = FBox(ForceInit);
 }
 
-UVoxelWorldComponent::~UVoxelWorldComponent()
+UVoxelRegionComponent::~UVoxelRegionComponent()
 {
 }
 
 // ==================== UPrimitiveComponent Interface ====================
 
-FPrimitiveSceneProxy* UVoxelWorldComponent::CreateSceneProxy()
+FPrimitiveSceneProxy* UVoxelRegionComponent::CreateSceneProxy()
 {
 	if (GetWorld() == nullptr)
 	{
@@ -229,14 +229,14 @@ FPrimitiveSceneProxy* UVoxelWorldComponent::CreateSceneProxy()
 		// WARNING: Default material does not compile with FVoxelVertexFactory!
 		// Users must create and assign a custom material for the voxel world.
 		UE_LOG(LogVoxelRendering, Warning,
-			TEXT("UVoxelWorldComponent: No VoxelMaterial set! Create a simple opaque material and assign it. ")
+			TEXT("UVoxelRegionComponent: No VoxelMaterial set! Create a simple opaque material and assign it. ")
 			TEXT("Default materials do not work with the custom vertex factory."));
 
 		// Still use default as a fallback, but rendering will likely fail
 		MaterialToUse = UMaterial::GetDefaultMaterial(MD_Surface);
 	}
 
-	UE_LOG(LogVoxelRendering, Log, TEXT("UVoxelWorldComponent: Creating scene proxy with material: %s"),
+	UE_LOG(LogVoxelRendering, Log, TEXT("UVoxelRegionComponent: Creating scene proxy with material: %s"),
 		MaterialToUse ? *MaterialToUse->GetName() : TEXT("nullptr"));
 
 	FVoxelSceneProxy* NewProxy = new FVoxelSceneProxy(this, MaterialToUse);
@@ -278,11 +278,11 @@ FPrimitiveSceneProxy* UVoxelWorldComponent::CreateSceneProxy()
 	return NewProxy;
 }
 
-void UVoxelWorldComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+void UVoxelRegionComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	AdvanceCrossfades();
+	AdvanceFades();
 
 	// Chunks stream in and out every frame: refresh the bounds and hand them to the render scene at most once per
 	// tick, and only when they actually moved (UpdateBounds alone does not reach the scene).
@@ -299,7 +299,7 @@ void UVoxelWorldComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 	}
 }
 
-FBoxSphereBounds UVoxelWorldComponent::CalcBounds(const FTransform& LocalToWorld) const
+FBoxSphereBounds UVoxelRegionComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
 	// The whole terrain is ONE primitive, so the engine frustum- and occlusion-culls it as one box (individual chunks
 	// are culled again in GetDynamicMeshElements). This used to be a fixed +-5 km box around the origin: once the
@@ -345,12 +345,12 @@ FBoxSphereBounds UVoxelWorldComponent::CalcBounds(const FTransform& LocalToWorld
 	return FBoxSphereBounds(Total.ExpandBy(ChunkWorldSize));
 }
 
-UMaterialInterface* UVoxelWorldComponent::GetMaterial(int32 ElementIndex) const
+UMaterialInterface* UVoxelRegionComponent::GetMaterial(int32 ElementIndex) const
 {
 	return VoxelMaterial;
 }
 
-void UVoxelWorldComponent::SetMaterial(int32 ElementIndex, UMaterialInterface* Material)
+void UVoxelRegionComponent::SetMaterial(int32 ElementIndex, UMaterialInterface* Material)
 {
 	if (ElementIndex != 0)
 	{
@@ -387,7 +387,7 @@ void UVoxelWorldComponent::SetMaterial(int32 ElementIndex, UMaterialInterface* M
 
 // ==================== Chunk Management ====================
 
-void UVoxelWorldComponent::UpdateChunkBuffersFromCPUData(
+void UVoxelRegionComponent::UpdateChunkBuffersFromCPUData(
 	const FIntVector& ChunkCoord,
 	TArray<FVoxelVertex>&& Vertices,
 	TArray<uint32>&& Indices,
@@ -426,7 +426,7 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromCPUData(
 	// Mesh replacement -> crossfade, first mesh -> appearance fade. The flag rides the pending add
 	// into the batched swap; the fade-state attach lands BEFORE the flush, so a held fade's flag is
 	// in place when the swap retires the old mesh.
-	const FIntVector4 FadeKey = FVoxelCrossfadeScheduler::ChunkKey(ChunkCoord);
+	const FIntVector4 FadeKey = FVoxelFadeScheduler::ChunkKey(ChunkCoord);
 	const bool bCrossfade = StartChunkMeshFade(FadeKey, bChunkExisted);
 
 	// Queue for batched submission instead of immediate render command
@@ -450,7 +450,7 @@ void UVoxelWorldComponent::UpdateChunkBuffersFromCPUData(
 	RequestRenderBoundsRefresh();
 }
 
-void UVoxelWorldComponent::RemoveChunk(const FIntVector& ChunkCoord)
+void UVoxelRegionComponent::RemoveChunk(const FIntVector& ChunkCoord)
 {
 	check(IsInGameThread());
 
@@ -469,7 +469,7 @@ void UVoxelWorldComponent::RemoveChunk(const FIntVector& ChunkCoord)
 	// A removed chunk cannot keep fading. Clear the proxy-side state immediately (the batched
 	// removal would too, but its flush cadence should not gate MID recycling safety).
 	ChunkFadeHolds.Remove(ChunkCoord);
-	const FIntVector4 FadeKey = FVoxelCrossfadeScheduler::ChunkKey(ChunkCoord);
+	const FIntVector4 FadeKey = FVoxelFadeScheduler::ChunkKey(ChunkCoord);
 	if (ActiveFades.Contains(FadeKey))
 	{
 		CancelFade(FadeKey, /*bClearRenderState=*/true);
@@ -482,7 +482,7 @@ void UVoxelWorldComponent::RemoveChunk(const FIntVector& ChunkCoord)
 	RequestRenderBoundsRefresh();
 }
 
-void UVoxelWorldComponent::ClearAllChunks()
+void UVoxelRegionComponent::ClearAllChunks()
 {
 	check(IsInGameThread());
 
@@ -527,7 +527,7 @@ void UVoxelWorldComponent::ClearAllChunks()
 
 // ==================== Water Tile Management ====================
 
-void UVoxelWorldComponent::SetWaterMaterial(UMaterialInterface* InMaterial)
+void UVoxelRegionComponent::SetWaterMaterial(UMaterialInterface* InMaterial)
 {
 	check(IsInGameThread());
 
@@ -562,7 +562,7 @@ void UVoxelWorldComponent::SetWaterMaterial(UMaterialInterface* InMaterial)
 	MarkRenderStateDirtyAndNotify();
 }
 
-void UVoxelWorldComponent::UpdateWaterTileFromCPUData(
+void UVoxelRegionComponent::UpdateWaterTileFromCPUData(
 	const FIntVector2& TileCoord,
 	TArray<FVoxelVertex>&& Vertices,
 	TArray<uint32>&& Indices,
@@ -601,7 +601,7 @@ void UVoxelWorldComponent::UpdateWaterTileFromCPUData(
 	RequestRenderBoundsRefresh();
 }
 
-void UVoxelWorldComponent::RemoveWaterTile(const FIntVector2& TileCoord)
+void UVoxelRegionComponent::RemoveWaterTile(const FIntVector2& TileCoord)
 {
 	check(IsInGameThread());
 
@@ -626,7 +626,7 @@ void UVoxelWorldComponent::RemoveWaterTile(const FIntVector2& TileCoord)
 	RequestRenderBoundsRefresh();
 }
 
-void UVoxelWorldComponent::ClearAllWaterTiles()
+void UVoxelRegionComponent::ClearAllWaterTiles()
 {
 	check(IsInGameThread());
 
@@ -649,17 +649,17 @@ void UVoxelWorldComponent::ClearAllWaterTiles()
 	RequestRenderBoundsRefresh();
 }
 
-void UVoxelWorldComponent::RequestRenderBoundsRefresh()
+void UVoxelRegionComponent::RequestRenderBoundsRefresh()
 {
 	bRenderBoundsStale = true;
 	// The tick refreshes the bounds and hands them to the scene; a component with no fade running does not tick on its
-	// own (AdvanceCrossfades turns the tick off when idle, after this frame's refresh).
+	// own (AdvanceFades turns the tick off when idle, after this frame's refresh).
 	SetComponentTickEnabled(true);
 }
 
 // ==================== Seam Meshes (seam-ownership P1) ====================
 
-void UVoxelWorldComponent::UpdateSeamMeshFromCPUData(
+void UVoxelRegionComponent::UpdateSeamMeshFromCPUData(
 	const FIntVector& OwnerChunkCoord,
 	uint8 Axis,
 	int32 LODLevel,
@@ -686,10 +686,10 @@ void UVoxelWorldComponent::UpdateSeamMeshFromCPUData(
 	// until the transition releases, then fade in with the interior it meets), otherwise when it lies
 	// beyond voxel.MeshFade.AppearMinDistance (R24 P3: frontier seams stop popping in). A bucket that is
 	// still appearing keeps fading in on the same alpha, the new merge replacing it in place.
-	const FIntVector4 FadeKey = FVoxelCrossfadeScheduler::SeamKey(OwnerChunkCoord, Axis);
+	const FIntVector4 FadeKey = FVoxelFadeScheduler::SeamKey(OwnerChunkCoord, Axis);
 	const bool bOwnerHeld = SeamFadeHolds.Contains(OwnerChunkCoord);
 	bool bFade = false;
-	if (bCrossfade && CanCrossfadeSeams())
+	if (bCrossfade && CanSwapFadeSeams())
 	{
 		if (bExisted)
 		{
@@ -723,7 +723,7 @@ void UVoxelWorldComponent::UpdateSeamMeshFromCPUData(
 	}
 }
 
-void UVoxelWorldComponent::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis, bool bFadeOut)
+void UVoxelRegionComponent::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 Axis, bool bFadeOut)
 {
 	check(IsInGameThread());
 
@@ -742,8 +742,8 @@ void UVoxelWorldComponent::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uin
 	// Fade to nothing (R24): a seam that dissolves during a fade-enabled rebuild dithers out with
 	// the surface it belonged to instead of vanishing on the spot. A bucket still appearing just goes
 	// (it is not fully shown; fading it out would first snap it to solid).
-	const FIntVector4 FadeKey = FVoxelCrossfadeScheduler::SeamKey(OwnerChunkCoord, Axis);
-	const bool bFade = bFadeOut && bExisted && CanCrossfadeSeams() && !FadeScheduler.IsAppearing(FadeKey) && StartFade(FadeKey);
+	const FIntVector4 FadeKey = FVoxelFadeScheduler::SeamKey(OwnerChunkCoord, Axis);
+	const bool bFade = bFadeOut && bExisted && CanSwapFadeSeams() && !FadeScheduler.IsAppearing(FadeKey) && StartFade(FadeKey);
 	if (!bFade && ActiveFades.Contains(FadeKey))
 	{
 		// The removal command below releases the proxy-side fade state with the bucket.
@@ -762,7 +762,7 @@ void UVoxelWorldComponent::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uin
 	}
 }
 
-void UVoxelWorldComponent::ClearAllSeamMeshes()
+void UVoxelRegionComponent::ClearAllSeamMeshes()
 {
 	check(IsInGameThread());
 
@@ -773,7 +773,7 @@ void UVoxelWorldComponent::ClearAllSeamMeshes()
 	TArray<FIntVector4> SeamFadeKeys;
 	for (const TPair<FIntVector4, FActiveChunkFade>& Pair : ActiveFades)
 	{
-		if (FVoxelCrossfadeScheduler::IsSeamKey(Pair.Key))
+		if (FVoxelFadeScheduler::IsSeamKey(Pair.Key))
 		{
 			SeamFadeKeys.Add(Pair.Key);
 		}
@@ -797,7 +797,7 @@ void UVoxelWorldComponent::ClearAllSeamMeshes()
 
 // ==================== Mesh-Swap Crossfade ====================
 
-void UVoxelWorldComponent::SetFadeMaterial(UMaterialInterface* InFadeMaterial)
+void UVoxelRegionComponent::SetFadeMaterial(UMaterialInterface* InFadeMaterial)
 {
 	check(IsInGameThread());
 
@@ -835,24 +835,24 @@ void UVoxelWorldComponent::SetFadeMaterial(UMaterialInterface* InFadeMaterial)
 	FadeMaterial = InFadeMaterial;
 	PushFadeMaterialToProxy(GetVoxelSceneProxy());
 
-	UE_LOG(LogVoxelRendering, Log, TEXT("UVoxelWorldComponent: Fade material set to %s (crossfade %s)"),
+	UE_LOG(LogVoxelRendering, Log, TEXT("UVoxelRegionComponent: Fade material set to %s (crossfade %s)"),
 		FadeMaterial ? *FadeMaterial->GetName() : TEXT("null"),
 		FadeMaterial ? TEXT("available") : TEXT("disabled"));
 }
 
-bool UVoxelWorldComponent::CanCrossfade() const
+bool UVoxelRegionComponent::CanSwapFade() const
 {
 	return CVarVoxelMeshFade.GetValueOnGameThread() != 0
 		&& FadeMaterial != nullptr
 		&& GetVoxelSceneProxy() != nullptr;
 }
 
-bool UVoxelWorldComponent::CanCrossfadeSeams() const
+bool UVoxelRegionComponent::CanSwapFadeSeams() const
 {
-	return CanCrossfade();
+	return CanSwapFade();
 }
 
-void UVoxelWorldComponent::SetFadeViewerPosition(const FVector& ViewerPosition)
+void UVoxelRegionComponent::SetFadeViewerPosition(const FVector& ViewerPosition)
 {
 	FadeViewerPosition = ViewerPosition;
 	bHasFadeViewer = true;
@@ -864,7 +864,7 @@ static double GetVoxelAppearMinDistance()
 	return FMath::Max(0.0, static_cast<double>(CVarVoxelMeshFadeAppearMinDistance.GetValueOnGameThread()));
 }
 
-double UVoxelWorldComponent::GetFadeViewerDistance(const FIntVector& ChunkCoord) const
+double UVoxelRegionComponent::GetFadeViewerDistance(const FIntVector& ChunkCoord) const
 {
 	// Nearest point of the chunk's cell: a seam bucket lies on its owner's max faces, so the owner's
 	// cell bounds it from below too. Nothing inside the gate ever fades, wherever its vertices are.
@@ -873,21 +873,21 @@ double UVoxelWorldComponent::GetFadeViewerDistance(const FIntVector& ChunkCoord)
 	return FMath::Sqrt(Cell.ComputeSquaredDistanceToPoint(FadeViewerPosition));
 }
 
-bool UVoxelWorldComponent::WillFadeInChunk(const FIntVector& ChunkCoord) const
+bool UVoxelRegionComponent::WillFadeInChunk(const FIntVector& ChunkCoord) const
 {
-	if (!bHasFadeViewer || !CanCrossfade() || IsChunkLoaded(ChunkCoord))
+	if (!bHasFadeViewer || !CanSwapFade() || IsChunkLoaded(ChunkCoord))
 	{
 		return false;
 	}
-	const FIntVector4 Key = FVoxelCrossfadeScheduler::ChunkKey(ChunkCoord);
+	const FIntVector4 Key = FVoxelFadeScheduler::ChunkKey(ChunkCoord);
 	return !FadeScheduler.Contains(Key)
 		&& FadeScheduler.Num() < CVarVoxelMeshFadeMaxConcurrent.GetValueOnGameThread()
 		&& GetFadeViewerDistance(ChunkCoord) >= GetVoxelAppearMinDistance();
 }
 
-bool UVoxelWorldComponent::StartChunkMeshFade(const FIntVector4& Key, bool bMeshExisted)
+bool UVoxelRegionComponent::StartChunkMeshFade(const FIntVector4& Key, bool bMeshExisted)
 {
-	if (!CanCrossfade())
+	if (!CanSwapFade())
 	{
 		return false;
 	}
@@ -900,7 +900,7 @@ bool UVoxelWorldComponent::StartChunkMeshFade(const FIntVector4& Key, bool bMesh
 	return StartAppearFade(Key, /*bBypassGate*/ false);
 }
 
-bool UVoxelWorldComponent::StartAppearFade(const FIntVector4& Key, bool bBypassGate)
+bool UVoxelRegionComponent::StartAppearFade(const FIntVector4& Key, bool bBypassGate)
 {
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	UWorld* World = GetWorld();
@@ -909,9 +909,9 @@ bool UVoxelWorldComponent::StartAppearFade(const FIntVector4& Key, bool bBypassG
 		return false;
 	}
 
-	const bool bSeam = FVoxelCrossfadeScheduler::IsSeamKey(Key);
-	const FIntVector Coord = FVoxelCrossfadeScheduler::KeyCoord(Key);
-	if (bSeam ? !CanCrossfadeSeams() : !CanCrossfade())
+	const bool bSeam = FVoxelFadeScheduler::IsSeamKey(Key);
+	const FIntVector Coord = FVoxelFadeScheduler::KeyCoord(Key);
+	if (bSeam ? !CanSwapFadeSeams() : !CanSwapFade())
 	{
 		return false;
 	}
@@ -978,10 +978,10 @@ bool UVoxelWorldComponent::StartAppearFade(const FIntVector4& Key, bool bBypassG
 	return true;
 }
 
-float UVoxelWorldComponent::GetSeamFadeRemainingSeconds(const FIntVector& OwnerChunkCoord) const
+float UVoxelRegionComponent::GetSeamFadeRemainingSeconds(const FIntVector& OwnerChunkCoord) const
 {
 	const UWorld* World = GetWorld();
-	if (!World || !CanCrossfadeSeams())
+	if (!World || !CanSwapFadeSeams())
 	{
 		return 0.0f;
 	}
@@ -990,12 +990,12 @@ float UVoxelWorldComponent::GetSeamFadeRemainingSeconds(const FIntVector& OwnerC
 	float Remaining = 0.0f;
 	for (uint8 Slot = 0; Slot <= 6; ++Slot)
 	{
-		Remaining = FMath::Max(Remaining, FadeScheduler.GetRemainingSeconds(FVoxelCrossfadeScheduler::SeamKey(OwnerChunkCoord, Slot), Now, Duration));
+		Remaining = FMath::Max(Remaining, FadeScheduler.GetRemainingSeconds(FVoxelFadeScheduler::SeamKey(OwnerChunkCoord, Slot), Now, Duration));
 	}
 	return Remaining;
 }
 
-FString UVoxelWorldComponent::GetFadeDebugString(int32 MaxEntries, const FVector* FocusPoint) const
+FString UVoxelRegionComponent::GetFadeDebugString(int32 MaxEntries, const FVector* FocusPoint) const
 {
 	check(IsInGameThread());
 
@@ -1003,7 +1003,7 @@ FString UVoxelWorldComponent::GetFadeDebugString(int32 MaxEntries, const FVector
 	const double Now = World ? World->GetRealTimeSeconds() : 0.0;
 	const float Duration = CVarVoxelMeshFadeDuration.GetValueOnGameThread();
 	FString Out = FString::Printf(TEXT("%s: can crossfade %d (fade material %s), tick registered %d enabled %d, active fades %d, scheduled %d, chunk holds %d, seam holds %d, pending releases %d, interior fades started %lld (appearances %lld)"),
-		*GetName(), CanCrossfade() ? 1 : 0, FadeMaterial ? *FadeMaterial->GetName() : TEXT("none"),
+		*GetName(), CanSwapFade() ? 1 : 0, FadeMaterial ? *FadeMaterial->GetName() : TEXT("none"),
 		PrimaryComponentTick.IsTickFunctionRegistered() ? 1 : 0, IsComponentTickEnabled() ? 1 : 0,
 		ActiveFades.Num(), FadeScheduler.Num(), ChunkFadeHolds.Num(), SeamFadeHolds.Num(), PendingHoldReleases.Num(),
 		FadeStartCounts[0], FadeAppearCounts[0]);
@@ -1020,7 +1020,7 @@ FString UVoxelWorldComponent::GetFadeDebugString(int32 MaxEntries, const FVector
 		}
 		FScopeLock Lock(&ChunkInfoLock);
 		const FChunkInfo* Info = ChunkInfoMap.Find(FocusChunk.GetValue());
-		const FIntVector4 Key = FVoxelCrossfadeScheduler::ChunkKey(FocusChunk.GetValue());
+		const FIntVector4 Key = FVoxelFadeScheduler::ChunkKey(FocusChunk.GetValue());
 		Out += FString::Printf(TEXT("\n  focus chunk %s: game side %s, pending adds %d, fade scheduled %d held %d appearing %d"),
 			*FocusChunk->ToString(), Info ? *FString::Printf(TEXT("%lld tris, LOD %d"), Info->TriangleCount, Info->LODLevel) : TEXT("none"),
 			Pending, FadeScheduler.Contains(Key) ? 1 : 0, FadeScheduler.IsHeld(Key) ? 1 : 0, FadeScheduler.IsAppearing(Key) ? 1 : 0);
@@ -1034,8 +1034,8 @@ FString UVoxelWorldComponent::GetFadeDebugString(int32 MaxEntries, const FVector
 		}
 		const FIntVector4& Key = Pair.Key;
 		Out += FString::Printf(TEXT("\n  %s %s: scheduled %d held %d appearing %d, %.2f s left"),
-			FVoxelCrossfadeScheduler::IsSeamKey(Key) ? *FString::Printf(TEXT("seam slot %d of"), Key.W) : TEXT("chunk"),
-			*FVoxelCrossfadeScheduler::KeyCoord(Key).ToString(), FadeScheduler.Contains(Key) ? 1 : 0, FadeScheduler.IsHeld(Key) ? 1 : 0,
+			FVoxelFadeScheduler::IsSeamKey(Key) ? *FString::Printf(TEXT("seam slot %d of"), Key.W) : TEXT("chunk"),
+			*FVoxelFadeScheduler::KeyCoord(Key).ToString(), FadeScheduler.Contains(Key) ? 1 : 0, FadeScheduler.IsHeld(Key) ? 1 : 0,
 			FadeScheduler.IsAppearing(Key) ? 1 : 0, FadeScheduler.GetRemainingSeconds(Key, Now, Duration));
 	}
 
@@ -1058,7 +1058,7 @@ FString UVoxelWorldComponent::GetFadeDebugString(int32 MaxEntries, const FVector
 	return Out;
 }
 
-bool UVoxelWorldComponent::GetChunkDrawInfo(const FIntVector& ChunkCoord, FVoxelChunkDrawInfo& OutInfo) const
+bool UVoxelRegionComponent::GetChunkDrawInfo(const FIntVector& ChunkCoord, FVoxelChunkDrawInfo& OutInfo) const
 {
 	check(IsInGameThread());
 
@@ -1080,7 +1080,7 @@ bool UVoxelWorldComponent::GetChunkDrawInfo(const FIntVector& ChunkCoord, FVoxel
 	return OutInfo.CurrentTriangles > 0;
 }
 
-bool UVoxelWorldComponent::GetWaterTileDrawInfo(const FIntVector2& TileCoord, FString& Out) const
+bool UVoxelRegionComponent::GetWaterTileDrawInfo(const FIntVector2& TileCoord, FString& Out) const
 {
 	check(IsInGameThread());
 
@@ -1136,7 +1136,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelMeshFadeStatsCmd(
 			FocusPoint = FVector(FCString::Atod(*Args[1]), FCString::Atod(*Args[2]), FCString::Atod(*Args[3]));
 		}
 		int32 Components = 0;
-		for (TObjectIterator<UVoxelWorldComponent> It; It; ++It)
+		for (TObjectIterator<UVoxelRegionComponent> It; It; ++It)
 		{
 			if (It->IsRegistered() && (!World || It->GetWorld() == World))
 			{
@@ -1148,7 +1148,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelMeshFadeStatsCmd(
 			World ? *World->GetName() : TEXT("any world"));
 	}));
 
-bool UVoxelWorldComponent::StartFade(const FIntVector4& Key)
+bool UVoxelRegionComponent::StartFade(const FIntVector4& Key)
 {
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	UWorld* World = GetWorld();
@@ -1157,8 +1157,8 @@ bool UVoxelWorldComponent::StartFade(const FIntVector4& Key)
 		return false;
 	}
 
-	const bool bSeam = FVoxelCrossfadeScheduler::IsSeamKey(Key);
-	const FIntVector Coord = FVoxelCrossfadeScheduler::KeyCoord(Key);
+	const bool bSeam = FVoxelFadeScheduler::IsSeamKey(Key);
+	const FIntVector Coord = FVoxelFadeScheduler::KeyCoord(Key);
 	const bool bHold = bSeam ? SeamFadeHolds.Contains(Coord) : ChunkFadeHolds.Contains(Coord);
 
 	// A resubmit during an active fade restarts it (the proxy keeps one retained generation) —
@@ -1166,7 +1166,7 @@ bool UVoxelWorldComponent::StartFade(const FIntVector4& Key)
 	FadeScheduler.SetMaxConcurrent(CVarVoxelMeshFadeMaxConcurrent.GetValueOnGameThread());
 	// Diagnostics: a resubmit while the key fades unheld (alpha < 1) restarts it and drops the mesh it was
 	// fading out of (one retained generation). The seam pipeline defers such resubmits; this shows if any
-	// slip through. A fade at alpha 1 that AdvanceCrossfades has not retired yet has nothing left to drop.
+	// slip through. A fade at alpha 1 that AdvanceFades has not retired yet has nothing left to drop.
 	{
 		const int32 Kind = bSeam ? 1 : 0;
 		++FadeStartCounts[Kind];
@@ -1230,15 +1230,15 @@ bool UVoxelWorldComponent::StartFade(const FIntVector4& Key)
 	return true;
 }
 
-void UVoxelWorldComponent::EnqueueClearFadeState(const FIntVector4& Key)
+void UVoxelRegionComponent::EnqueueClearFadeState(const FIntVector4& Key)
 {
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (!Proxy)
 	{
 		return;
 	}
-	const FIntVector Coord = FVoxelCrossfadeScheduler::KeyCoord(Key);
-	if (FVoxelCrossfadeScheduler::IsSeamKey(Key))
+	const FIntVector Coord = FVoxelFadeScheduler::KeyCoord(Key);
+	if (FVoxelFadeScheduler::IsSeamKey(Key))
 	{
 		const uint8 Slot = static_cast<uint8>(Key.W);
 		ENQUEUE_RENDER_COMMAND(ClearVoxelSeamFade)(
@@ -1259,7 +1259,7 @@ void UVoxelWorldComponent::EnqueueClearFadeState(const FIntVector4& Key)
 	}
 }
 
-void UVoxelWorldComponent::CancelFade(const FIntVector4& Key, bool bClearRenderState)
+void UVoxelRegionComponent::CancelFade(const FIntVector4& Key, bool bClearRenderState)
 {
 	FadeScheduler.Cancel(Key);
 
@@ -1275,7 +1275,7 @@ void UVoxelWorldComponent::CancelFade(const FIntVector4& Key, bool bClearRenderS
 	}
 }
 
-void UVoxelWorldComponent::CancelAllFades()
+void UVoxelRegionComponent::CancelAllFades()
 {
 	for (auto& FadePair : ActiveFades)
 	{
@@ -1288,7 +1288,7 @@ void UVoxelWorldComponent::CancelAllFades()
 	PendingHoldReleases.Reset();
 }
 
-void UVoxelWorldComponent::ReleaseHeldFade(const FIntVector4& Key)
+void UVoxelRegionComponent::ReleaseHeldFade(const FIntVector4& Key)
 {
 	UWorld* World = GetWorld();
 	if (World && FadeScheduler.Release(Key, World->GetRealTimeSeconds()))
@@ -1297,7 +1297,7 @@ void UVoxelWorldComponent::ReleaseHeldFade(const FIntVector4& Key)
 	}
 }
 
-void UVoxelWorldComponent::FlushHoldReleases()
+void UVoxelRegionComponent::FlushHoldReleases()
 {
 	if (PendingHoldReleases.Num() == 0)
 	{
@@ -1318,7 +1318,7 @@ void UVoxelWorldComponent::FlushHoldReleases()
 	PendingHoldReleases.Reset();
 }
 
-void UVoxelWorldComponent::SetChunkFadeHold(const FIntVector& ChunkCoord, bool bHold)
+void UVoxelRegionComponent::SetChunkFadeHold(const FIntVector& ChunkCoord, bool bHold)
 {
 	check(IsInGameThread());
 
@@ -1328,10 +1328,10 @@ void UVoxelWorldComponent::SetChunkFadeHold(const FIntVector& ChunkCoord, bool b
 		return;
 	}
 	ChunkFadeHolds.Remove(ChunkCoord);
-	ReleaseHeldFade(FVoxelCrossfadeScheduler::ChunkKey(ChunkCoord));
+	ReleaseHeldFade(FVoxelFadeScheduler::ChunkKey(ChunkCoord));
 }
 
-void UVoxelWorldComponent::SetSeamFadeHold(const FIntVector& OwnerChunkCoord, bool bHold)
+void UVoxelRegionComponent::SetSeamFadeHold(const FIntVector& OwnerChunkCoord, bool bHold)
 {
 	check(IsInGameThread());
 
@@ -1343,11 +1343,11 @@ void UVoxelWorldComponent::SetSeamFadeHold(const FIntVector& OwnerChunkCoord, bo
 	SeamFadeHolds.Remove(OwnerChunkCoord);
 	for (uint8 Slot = 0; Slot <= 6; ++Slot)
 	{
-		ReleaseHeldFade(FVoxelCrossfadeScheduler::SeamKey(OwnerChunkCoord, Slot));
+		ReleaseHeldFade(FVoxelFadeScheduler::SeamKey(OwnerChunkCoord, Slot));
 	}
 }
 
-void UVoxelWorldComponent::AdvanceCrossfades()
+void UVoxelRegionComponent::AdvanceFades()
 {
 	check(IsInGameThread());
 
@@ -1384,14 +1384,14 @@ void UVoxelWorldComponent::AdvanceCrossfades()
 	else
 	{
 		const float Duration = FMath::Max(0.02f, CVarVoxelMeshFadeDuration.GetValueOnGameThread());
-		FVoxelCrossfadeScheduler::FAdvanceResult Result;
+		FVoxelFadeScheduler::FAdvanceResult Result;
 		FadeScheduler.Advance(World->GetRealTimeSeconds(), Duration, VoxelFadeHoldFailsafeSeconds, Result);
 
 		// Holds nobody released: drop the request too, and tell the proxy they are no longer held.
 		for (const FIntVector4& Key : Result.TimedOutHolds)
 		{
-			const FIntVector Coord = FVoxelCrossfadeScheduler::KeyCoord(Key);
-			if (FVoxelCrossfadeScheduler::IsSeamKey(Key))
+			const FIntVector Coord = FVoxelFadeScheduler::KeyCoord(Key);
+			if (FVoxelFadeScheduler::IsSeamKey(Key))
 			{
 				SeamFadeHolds.Remove(Coord);
 			}
@@ -1403,7 +1403,7 @@ void UVoxelWorldComponent::AdvanceCrossfades()
 		}
 		if (Result.TimedOutHolds.Num() > 0)
 		{
-			UE_LOG(LogVoxelRendering, Verbose, TEXT("AdvanceCrossfades: %d fade hold(s) released by the failsafe"), Result.TimedOutHolds.Num());
+			UE_LOG(LogVoxelRendering, Verbose, TEXT("AdvanceFades: %d fade hold(s) released by the failsafe"), Result.TimedOutHolds.Num());
 			FlushHoldReleases();
 		}
 
@@ -1424,13 +1424,13 @@ void UVoxelWorldComponent::AdvanceCrossfades()
 					Fade->OutMID->SetScalarParameterValue(VoxelFadeAlphaParamName, Pair.Value);
 				}
 			}
-			if (FVoxelCrossfadeScheduler::IsSeamKey(Pair.Key))
+			if (FVoxelFadeScheduler::IsSeamKey(Pair.Key))
 			{
 				SeamAlphas.Add(Pair);
 			}
 			else
 			{
-				ChunkAlphas.Emplace(FVoxelCrossfadeScheduler::KeyCoord(Pair.Key), Pair.Value);
+				ChunkAlphas.Emplace(FVoxelFadeScheduler::KeyCoord(Pair.Key), Pair.Value);
 			}
 		}
 		if (ChunkAlphas.Num() > 0)
@@ -1471,7 +1471,7 @@ void UVoxelWorldComponent::AdvanceCrossfades()
 	}
 }
 
-UMaterialInstanceDynamic* UVoxelWorldComponent::AcquireFadeMID(bool bInvert)
+UMaterialInstanceDynamic* UVoxelRegionComponent::AcquireFadeMID(bool bInvert)
 {
 	TArray<UMaterialInstanceDynamic*>& FreeList = bInvert ? FreeFadeOutMIDs : FreeFadeInMIDs;
 
@@ -1552,7 +1552,7 @@ UMaterialInstanceDynamic* UVoxelWorldComponent::AcquireFadeMID(bool bInvert)
 	return MID;
 }
 
-void UVoxelWorldComponent::RetireFadeMIDs(FActiveChunkFade& Fade)
+void UVoxelRegionComponent::RetireFadeMIDs(FActiveChunkFade& Fade)
 {
 	if (Fade.InMID)
 	{
@@ -1566,7 +1566,7 @@ void UVoxelWorldComponent::RetireFadeMIDs(FActiveChunkFade& Fade)
 	}
 }
 
-void UVoxelWorldComponent::RefreshDerivedFadeMaterial()
+void UVoxelRegionComponent::RefreshDerivedFadeMaterial()
 {
 	if (bExplicitFadeMaterial)
 	{
@@ -1606,7 +1606,7 @@ void UVoxelWorldComponent::RefreshDerivedFadeMaterial()
 	}
 }
 
-void UVoxelWorldComponent::PushFadeMaterialToProxy(FVoxelSceneProxy* TargetProxy)
+void UVoxelRegionComponent::PushFadeMaterialToProxy(FVoxelSceneProxy* TargetProxy)
 {
 	FVoxelSceneProxy* Proxy = TargetProxy;
 	if (!Proxy)
@@ -1633,22 +1633,22 @@ void UVoxelWorldComponent::PushFadeMaterialToProxy(FVoxelSceneProxy* TargetProxy
 
 // ==================== Configuration ====================
 
-void UVoxelWorldComponent::SetVoxelSize(float InVoxelSize)
+void UVoxelRegionComponent::SetVoxelSize(float InVoxelSize)
 {
 	VoxelSize = FMath::Max(1.0f, InVoxelSize);
 }
 
-void UVoxelWorldComponent::SetChunkWorldSize(float InChunkWorldSize)
+void UVoxelRegionComponent::SetChunkWorldSize(float InChunkWorldSize)
 {
 	ChunkWorldSize = FMath::Max(100.0f, InChunkWorldSize);
 }
 
-void UVoxelWorldComponent::SetWorldOrigin(const FVector& InWorldOrigin)
+void UVoxelRegionComponent::SetWorldOrigin(const FVector& InWorldOrigin)
 {
 	WorldOrigin = InWorldOrigin;
 }
 
-void UVoxelWorldComponent::SetRadialFaceUp(bool bRadial, const FVector& Center)
+void UVoxelRegionComponent::SetRadialFaceUp(bool bRadial, const FVector& Center)
 {
 	if (bRadialFaceUp == bRadial && FaceUpCenter == Center)
 	{
@@ -1661,7 +1661,7 @@ void UVoxelWorldComponent::SetRadialFaceUp(bool bRadial, const FVector& Center)
 
 // ==================== Material Atlas ====================
 
-void UVoxelWorldComponent::SetMaterialAtlas(UVoxelMaterialAtlas* InAtlas)
+void UVoxelRegionComponent::SetMaterialAtlas(UVoxelMaterialAtlas* InAtlas)
 {
 	MaterialAtlas = InAtlas;
 
@@ -1678,7 +1678,7 @@ void UVoxelWorldComponent::SetMaterialAtlas(UVoxelMaterialAtlas* InAtlas)
 	}
 }
 
-UMaterialInstanceDynamic* UVoxelWorldComponent::CreateVoxelMaterialInstance(UMaterialInterface* MasterMaterial)
+UMaterialInstanceDynamic* UVoxelRegionComponent::CreateVoxelMaterialInstance(UMaterialInterface* MasterMaterial)
 {
 	if (!MasterMaterial)
 	{
@@ -1703,7 +1703,7 @@ UMaterialInstanceDynamic* UVoxelWorldComponent::CreateVoxelMaterialInstance(UMat
 	return DynamicMaterialInstance;
 }
 
-void UVoxelWorldComponent::UpdateMaterialAtlasParameters()
+void UVoxelRegionComponent::UpdateMaterialAtlasParameters()
 {
 	UE_LOG(LogVoxelRendering, Log, TEXT("UpdateMaterialAtlasParameters called - DynamicMaterial: %s, MaterialAtlas: %s"),
 		DynamicMaterialInstance ? TEXT("Valid") : TEXT("NULL"),
@@ -1808,7 +1808,7 @@ void UVoxelWorldComponent::UpdateMaterialAtlasParameters()
 		MaterialAtlas->PackedAlbedoAtlas ? TEXT("valid") : TEXT("null"));
 }
 
-void UVoxelWorldComponent::SetUseSmoothMeshing(bool bUseSmooth)
+void UVoxelRegionComponent::SetUseSmoothMeshing(bool bUseSmooth)
 {
 	if (bUseSmoothMeshing != bUseSmooth)
 	{
@@ -1824,25 +1824,25 @@ void UVoxelWorldComponent::SetUseSmoothMeshing(bool bUseSmooth)
 
 // ==================== Queries ====================
 
-bool UVoxelWorldComponent::IsChunkLoaded(const FIntVector& ChunkCoord) const
+bool UVoxelRegionComponent::IsChunkLoaded(const FIntVector& ChunkCoord) const
 {
 	FScopeLock Lock(&ChunkInfoLock);
 	return ChunkInfoMap.Contains(ChunkCoord);
 }
 
-int32 UVoxelWorldComponent::GetLoadedChunkCount() const
+int32 UVoxelRegionComponent::GetLoadedChunkCount() const
 {
 	FScopeLock Lock(&ChunkInfoLock);
 	return ChunkInfoMap.Num();
 }
 
-void UVoxelWorldComponent::GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const
+void UVoxelRegionComponent::GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const
 {
 	check(IsInGameThread());
 	SeamBucketSlotMasks.GetKeys(OutOwners);
 }
 
-bool UVoxelWorldComponent::ConsumeLostRenderData(TArray<FIntVector>& OutChunks)
+bool UVoxelRegionComponent::ConsumeLostRenderData(TArray<FIntVector>& OutChunks)
 {
 	check(IsInGameThread());
 	OutChunks.Reset();
@@ -1856,7 +1856,7 @@ bool UVoxelWorldComponent::ConsumeLostRenderData(TArray<FIntVector>& OutChunks)
 	return true;
 }
 
-bool UVoxelWorldComponent::HasRenderContent() const
+bool UVoxelRegionComponent::HasRenderContent() const
 {
 	check(IsInGameThread());
 	{
@@ -1870,7 +1870,7 @@ bool UVoxelWorldComponent::HasRenderContent() const
 		|| HasPendingOperations() || PendingHoldReleases.Num() > 0;
 }
 
-void UVoxelWorldComponent::GetLoadedChunks(TArray<FIntVector>& OutChunks) const
+void UVoxelRegionComponent::GetLoadedChunks(TArray<FIntVector>& OutChunks) const
 {
 	FScopeLock Lock(&ChunkInfoLock);
 
@@ -1881,7 +1881,7 @@ void UVoxelWorldComponent::GetLoadedChunks(TArray<FIntVector>& OutChunks) const
 	}
 }
 
-bool UVoxelWorldComponent::GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const
+bool UVoxelRegionComponent::GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const
 {
 	FScopeLock Lock(&ChunkInfoLock);
 
@@ -1897,7 +1897,7 @@ bool UVoxelWorldComponent::GetChunkBounds(const FIntVector& ChunkCoord, FBox& Ou
 
 // ==================== Statistics ====================
 
-void UVoxelWorldComponent::SetChunkStats(FChunkInfo& Info, int64 VertexCount, int64 TriangleCount, int64 GPUMemory)
+void UVoxelRegionComponent::SetChunkStats(FChunkInfo& Info, int64 VertexCount, int64 TriangleCount, int64 GPUMemory)
 {
 	// Replace, not add: a re-meshed chunk used to count its old mesh too, so the totals only ever grew
 	// (54.7 M "vertices" where the renderer held 7.7 M; WORLD_MODES_REVIEW_PLAN.md G1).
@@ -1909,42 +1909,42 @@ void UVoxelWorldComponent::SetChunkStats(FChunkInfo& Info, int64 VertexCount, in
 	Info.GPUMemory = GPUMemory;
 }
 
-int64 UVoxelWorldComponent::GetGPUMemoryUsage() const
+int64 UVoxelRegionComponent::GetGPUMemoryUsage() const
 {
 	return CachedGPUMemory;
 }
 
-int64 UVoxelWorldComponent::GetTotalVertexCount() const
+int64 UVoxelRegionComponent::GetTotalVertexCount() const
 {
 	return CachedVertexCount;
 }
 
-int64 UVoxelWorldComponent::GetTotalTriangleCount() const
+int64 UVoxelRegionComponent::GetTotalTriangleCount() const
 {
 	return CachedTriangleCount;
 }
 
 // ==================== Internal ====================
 
-void UVoxelWorldComponent::SendRenderDynamicData_Concurrent()
+void UVoxelRegionComponent::SendRenderDynamicData_Concurrent()
 {
 	Super::SendRenderDynamicData_Concurrent();
 
 	// Scene proxy will handle data updates via render commands
 }
 
-void UVoxelWorldComponent::MarkRenderStateDirtyAndNotify()
+void UVoxelRegionComponent::MarkRenderStateDirtyAndNotify()
 {
 	MarkRenderStateDirty();
 	MarkRenderDynamicDataDirty();
 }
 
-FVoxelSceneProxy* UVoxelWorldComponent::GetVoxelSceneProxy() const
+FVoxelSceneProxy* UVoxelRegionComponent::GetVoxelSceneProxy() const
 {
 	return static_cast<FVoxelSceneProxy*>(SceneProxy);
 }
 
-void UVoxelWorldComponent::FlushPendingOperations()
+void UVoxelRegionComponent::FlushPendingOperations()
 {
 	check(IsInGameThread());
 
@@ -2002,6 +2002,6 @@ void UVoxelWorldComponent::FlushPendingOperations()
 		}
 	);
 
-	UE_LOG(LogVoxelRendering, Verbose, TEXT("UVoxelWorldComponent: Flushed %d adds, %d removals in single batch"),
+	UE_LOG(LogVoxelRendering, Verbose, TEXT("UVoxelRegionComponent: Flushed %d adds, %d removals in single batch"),
 		NumAdds, NumRemovals);
 }

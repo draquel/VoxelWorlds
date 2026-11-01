@@ -8,8 +8,8 @@
 /**
  * Cell-domain restriction for seam-ownership meshing (SEAM_OWNERSHIP_ARCHITECTURE.md §2, P1+).
  *
- * Full = whole-chunk meshing: the chunk meshes its own cells plus the -1 boundary layer against
- * neighbor slices (the collision cook's request). Interior = the seam-ownership interior pass: only
+ * WholeChunk = the chunk meshes its own cells plus the -1 boundary layer against neighbor slices
+ * (the collision cook's request; Full until CR3, MESH-28). Interior = the seam-ownership interior pass: only
  * cells with zero neighbor dependence are meshed ([0, GridSize-1) per axis — no quad references a
  * -1 or GridSize-1 boundary-layer cell) and the request deliberately carries NO neighbor data
  * (gradient taps that would exit the chunk use the absent-neighbor Air fallback -> one-sided rim
@@ -18,7 +18,7 @@
  */
 enum class EVoxelMeshCellDomain : uint8
 {
-	Full = 0,
+	WholeChunk = 0,
 	Interior = 1,
 };
 
@@ -86,7 +86,7 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	TArray<FVoxelData> NeighborZPosDeep;
 	TArray<FVoxelData> NeighborZNegDeep;
 
-	/** Total provided depth of the face-neighbor data (1 = single plane = legacy). */
+	/** Total provided depth of the face-neighbor data (1 = a single plane, what LOD 0 needs). */
 	int32 NeighborPlaneDepth = 1;
 
 	/**
@@ -215,17 +215,17 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	int32 NeighborLODLevels[6] = {-1, -1, -1, -1, -1, -1};
 
 	/**
-	 * Cell-domain restriction (seam-ownership P1). Full = whole-chunk meshing (default,
-	 * bit-identical to pre-P1 behavior). Interior = interior-only pass with zero neighbor deps;
+	 * Cell-domain restriction (seam-ownership P1). WholeChunk = whole-chunk meshing (the default;
+	 * the collision cook's request). Interior = interior-only pass with zero neighbor deps;
 	 * see EVoxelMeshCellDomain. Honored by all three meshers.
 	 */
-	EVoxelMeshCellDomain MeshCellDomain = EVoxelMeshCellDomain::Full;
+	EVoxelMeshCellDomain MeshCellDomain = EVoxelMeshCellDomain::WholeChunk;
 
 	/**
 	 * MC seam jobs only (P3): overrides voxel.MCBoundaryMorphWidth (units: coarse cells) for
 	 * the boundary geomorph. Seam-band cells morph with a ramp that reaches ZERO exactly at
-	 * the band's inner edge — a wider (legacy) ramp would move vertices shared with the
-	 * unmorphed interior mesh and crack the junction. <= 0 uses the cvar (legacy meshing).
+	 * the band's inner edge — a wider ramp would move vertices shared with the
+	 * unmorphed interior mesh and crack the junction. <= 0 uses the cvar (whole-chunk meshing).
 	 */
 	float MorphWidthOverride = -1.0f;
 
@@ -343,7 +343,7 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	 * Resolve a face-neighbor voxel at plane `PlaneIdx` into the neighbor, where
 	 * PlaneIdx 0 is the first (single) face slice and PlaneIdx >= 1 reads the Deep
 	 * array. Clamps past the provided depth, and falls back to plane 0 when no Deep
-	 * data is present (legacy single-plane behavior). InPlaneIdx is the index within
+	 * data is present (the single-plane read). InPlaneIdx is the index within
 	 * a face slice (e.g. Y + Z*ChunkSize for an X face).
 	 */
 	FORCEINLINE FVoxelData NeighborPlaneVoxel(const TArray<FVoxelData>& Plane0, const TArray<FVoxelData>& Deep,
@@ -357,7 +357,7 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 		const int32 DeepPlanes = SliceSize > 0 ? Deep.Num() / SliceSize : 0;
 		if (DeepPlanes <= 0)
 		{
-			return Plane0[InPlaneIdx]; // legacy: only the single plane is available
+			return Plane0[InPlaneIdx]; // only the single plane is available
 		}
 		const int32 K = FMath::Min(PlaneIdx - 1, DeepPlanes - 1);
 		return Deep[K * SliceSize + InPlaneIdx];
@@ -367,7 +367,7 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	 * Resolve an edge-neighbor voxel at depth (DepthA, DepthB) into the two pinned axes,
 	 * where (0,0) is the base Edge* strip and >=1 reads the Deep grid. FreeIdx is the
 	 * index along the free axis (0..ChunkSize-1). Clamps past the provided depth, and
-	 * falls back to the base strip when no Deep data is present (legacy LOD0 behavior).
+	 * falls back to the base strip when no Deep data is present (the LOD 0 read).
 	 */
 	FORCEINLINE FVoxelData EdgeDeepVoxel(const TArray<FVoxelData>& Base1D, const TArray<FVoxelData>& Deep2D,
 		int32 FreeIdx, int32 DepthA, int32 DepthB) const
@@ -391,7 +391,7 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	 * Resolve a corner-neighbor voxel at depth (DepthA, DepthB, DepthC) into the three
 	 * pinned axes, where (0,0,0) is the single Corner* voxel and >=1 reads the Deep box.
 	 * Clamps past the provided depth, and falls back to the scalar corner when no Deep
-	 * data is present (legacy LOD0 behavior).
+	 * data is present (the LOD 0 read).
 	 */
 	FORCEINLINE FVoxelData CornerDeepVoxel(const FVoxelData& Base, const TArray<FVoxelData>& Deep3D,
 		int32 DepthA, int32 DepthB, int32 DepthC) const

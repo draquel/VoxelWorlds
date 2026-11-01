@@ -461,8 +461,8 @@ public:
 	/**
 	 * Runtime Virtual Textures the terrain writes into.
 	 *
-	 * The UVoxelWorldComponent is created at runtime by the custom-VF renderer; this list is
-	 * copied onto WorldComponent->RuntimeVirtualTextures BEFORE RegisterComponent() so the voxel
+	 * The UVoxelRegionComponent is created at runtime by the custom-VF renderer; this list is
+	 * copied onto OriginRegionComponent->RuntimeVirtualTextures BEFORE RegisterComponent() so the voxel
 	 * scene proxy (created during registration) opts into the RVT pass and emits a mesh batch per
 	 * RuntimeVirtualTextureMaterialType into these pages. Leave empty to disable RVT writes
 	 * (zero overhead — the emission loop is a no-op when no RVT is assigned).

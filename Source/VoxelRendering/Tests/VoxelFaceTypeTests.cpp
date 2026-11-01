@@ -4,7 +4,7 @@
 #include "Misc/AutomationTest.h"
 #include "UObject/Package.h"
 #include "VoxelLocalVertexFactory.h"
-#include "VoxelWorldComponent.h"
+#include "VoxelRegionComponent.h"
 #include "VoxelVertex.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -53,7 +53,7 @@ bool FVoxelPlanetFaceTypeTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("The old conversion called that top face a side face"),
 		FMath::RoundToInt(FVoxelLocalVertex::FromVoxelVertex([] { FVoxelVertex V; V.Position = FVector3f::ZeroVector; V.SetNormal(FVector3f(1, 0, 0)); return V; }()).TexCoord1.Y), 1);
 
-	UVoxelWorldComponent* Component = NewObject<UVoxelWorldComponent>(GetTransientPackage());
+	UVoxelRegionComponent* Component = NewObject<UVoxelRegionComponent>(GetTransientPackage());
 	TestFalse(TEXT("A world component starts with face types along +Z"), Component->IsRadialFaceUp());
 	Component->SetRadialFaceUp(true, FVector(100.0, 200.0, 300.0));
 	TestTrue(TEXT("SetRadialFaceUp turns the radial face up on"), Component->IsRadialFaceUp());

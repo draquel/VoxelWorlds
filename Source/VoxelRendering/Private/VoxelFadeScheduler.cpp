@@ -1,8 +1,8 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
-#include "VoxelCrossfadeScheduler.h"
+#include "VoxelFadeScheduler.h"
 
-bool FVoxelCrossfadeScheduler::Start(const FIntVector4& Key, double NowSeconds, bool bHold)
+bool FVoxelFadeScheduler::Start(const FIntVector4& Key, double NowSeconds, bool bHold)
 {
 	FEntry* Entry = Entries.Find(Key);
 	if (!Entry)
@@ -21,7 +21,7 @@ bool FVoxelCrossfadeScheduler::Start(const FIntVector4& Key, double NowSeconds, 
 	return true;
 }
 
-bool FVoxelCrossfadeScheduler::StartAppear(const FIntVector4& Key, double NowSeconds, bool bHold, double DistanceToViewer)
+bool FVoxelFadeScheduler::StartAppear(const FIntVector4& Key, double NowSeconds, bool bHold, double DistanceToViewer)
 {
 	// Near geometry appears at once: a see-through patch in front of the player reads as a glitch,
 	// while at the frontier a fade only replaces a pop.
@@ -37,7 +37,7 @@ bool FVoxelCrossfadeScheduler::StartAppear(const FIntVector4& Key, double NowSec
 	return true;
 }
 
-float FVoxelCrossfadeScheduler::GetRemainingSeconds(const FIntVector4& Key, double NowSeconds, float DurationSeconds) const
+float FVoxelFadeScheduler::GetRemainingSeconds(const FIntVector4& Key, double NowSeconds, float DurationSeconds) const
 {
 	const FEntry* Entry = Entries.Find(Key);
 	if (!Entry || Entry->bHeld)
@@ -48,7 +48,7 @@ float FVoxelCrossfadeScheduler::GetRemainingSeconds(const FIntVector4& Key, doub
 	return static_cast<float>(FMath::Max(0.0, Entry->StartSeconds + Duration - NowSeconds));
 }
 
-bool FVoxelCrossfadeScheduler::Release(const FIntVector4& Key, double NowSeconds)
+bool FVoxelFadeScheduler::Release(const FIntVector4& Key, double NowSeconds)
 {
 	FEntry* Entry = Entries.Find(Key);
 	if (!Entry || !Entry->bHeld)
@@ -60,18 +60,18 @@ bool FVoxelCrossfadeScheduler::Release(const FIntVector4& Key, double NowSeconds
 	return true;
 }
 
-bool FVoxelCrossfadeScheduler::Cancel(const FIntVector4& Key)
+bool FVoxelFadeScheduler::Cancel(const FIntVector4& Key)
 {
 	return Entries.Remove(Key) > 0;
 }
 
-void FVoxelCrossfadeScheduler::CancelAll(TArray<FIntVector4>& OutCancelled)
+void FVoxelFadeScheduler::CancelAll(TArray<FIntVector4>& OutCancelled)
 {
 	Entries.GetKeys(OutCancelled);
 	Entries.Reset();
 }
 
-void FVoxelCrossfadeScheduler::Advance(double NowSeconds, float DurationSeconds, double HoldTimeoutSeconds, FAdvanceResult& Out)
+void FVoxelFadeScheduler::Advance(double NowSeconds, float DurationSeconds, double HoldTimeoutSeconds, FAdvanceResult& Out)
 {
 	Out.Alphas.Reset();
 	Out.Completed.Reset();

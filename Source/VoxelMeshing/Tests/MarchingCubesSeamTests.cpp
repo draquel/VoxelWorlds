@@ -2,7 +2,7 @@
 
 // Seam-ownership P3 closure tests for the Marching Cubes seam meshers
 // (VoxelCPUMarchingCubesSeams.cpp). Mirrors the DC SeamClosure suite's structure:
-//   MCS0 — interior-domain output is an exact subset of the Full-domain output
+//   MCS0 — interior-domain output is an exact subset of the WholeChunk-domain output
 //   MCS1 — same-LOD face seam closes the junction slab between two interior meshes
 //   MCS2 — 2x2x2 assembly (8 interiors + 12 faces + 6 edges + 1 corner) closes its interior
 //   MCS3 — mixed-LOD face seam (fine|coarse, ribbon + band-confined morph): junction
@@ -167,7 +167,7 @@ static int32 CountOpenEdgesInWindow(const FChunkMeshData& Mesh,
 	return Open;
 }
 
-// Fill facing slices for a legacy (Full-domain) request from the neighbor's volume.
+// Fill facing slices for a whole-chunk (WholeChunk-domain) request from the neighbor's volume.
 static void FillLegacyFacing(FVoxelMeshingRequest& R, int32 Axis, bool bPos, int32 Depth,
 	const TArray<FVoxelData>& Other)
 {
@@ -215,7 +215,7 @@ bool FMCSeamMCS0Test::RunTest(const FString& Parameters)
 	auto Voxels = MakeChunkVoxels(FIntVector::ZeroValue);
 
 	FVoxelMeshingRequest Full = MakeInteriorRequest(FIntVector::ZeroValue, 0, *Voxels);
-	Full.MeshCellDomain = EVoxelMeshCellDomain::Full;
+	Full.MeshCellDomain = EVoxelMeshCellDomain::WholeChunk;
 	FVoxelMeshingRequest Interior = MakeInteriorRequest(FIntVector::ZeroValue, 0, *Voxels);
 
 	FChunkMeshData FullMesh, InteriorMesh;
@@ -415,14 +415,14 @@ bool FMCSeamMCS3Test::RunTest(const FString& Parameters)
 	FChunkMeshData LegacyA, LegacyB, LegacyAll;
 	{
 		FVoxelMeshingRequest RA = MakeInteriorRequest(CoordA, 0, *VoxA);
-		RA.MeshCellDomain = EVoxelMeshCellDomain::Full;
+		RA.MeshCellDomain = EVoxelMeshCellDomain::WholeChunk;
 		RA.NeighborLODLevels[1] = 1; // +X coarser
 		RA.TransitionFaces = FVoxelMeshingRequest::TRANSITION_XPOS;
 		FillLegacyFacing(RA, 0, true, 5, *VoxB);
 		Mesher().GenerateMeshCPU(RA, LegacyA);
 
 		FVoxelMeshingRequest RB = MakeInteriorRequest(CoordB, 1, *VoxB);
-		RB.MeshCellDomain = EVoxelMeshCellDomain::Full;
+		RB.MeshCellDomain = EVoxelMeshCellDomain::WholeChunk;
 		RB.NeighborLODLevels[0] = 0; // -X finer
 		FillLegacyFacing(RB, 0, false, 5, *VoxA);
 		Mesher().GenerateMeshCPU(RB, LegacyB);

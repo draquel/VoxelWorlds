@@ -170,7 +170,7 @@ struct VOXELCORE_API FVoxelMaterialTextureConfig
  * - Smooth Terrain: Uses Texture2DArrays with triplanar projection
  *
  * Create this asset in the Content Browser, configure the atlas textures,
- * and assign it to your VoxelWorldComponent.
+ * and assign it to your VoxelRegionComponent.
  */
 UCLASS(BlueprintType)
 class VOXELCORE_API UVoxelMaterialAtlas : public UDataAsset

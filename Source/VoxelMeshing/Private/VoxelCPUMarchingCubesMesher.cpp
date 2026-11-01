@@ -237,7 +237,7 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 	// which left holes on the fine-interior side and depth-offset slivers near coarse
 	// corners — see LOD_SEAM_INVESTIGATION.md.)
 	// Interior domain: cells [Stride, ChunkSize-2*Stride] per axis (exclude the first and last
-	// cell layer — the seam-job band). Full domain: all cells [0, ChunkSize).
+	// cell layer — the seam-job band). WholeChunk domain: all cells [0, ChunkSize).
 	const int32 CellLo = bInteriorDomain ? Stride : 0;
 	const int32 CellHiEx = bInteriorDomain ? (ChunkSize - Stride) : ChunkSize;
 	for (int32 Z = CellLo; Z < CellHiEx; Z += Stride)

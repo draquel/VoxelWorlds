@@ -18,7 +18,7 @@
 // "[MeshDigest] <case> crc=<hex> v=<vertices> i=<indices>" lines. A refactor of the meshers that changes no
 // behaviour leaves every line as it was; the lines of a build are compared against the record in
 // Documentation/CodeReview/CR2/. Every path: both smooth meshers' chunk meshes at LOD 0, 1 and 2 in the
-// Interior domain and in the Full domain with every neighbour plane, strip and corner (deep, as the extractor
+// Interior domain and in the WholeChunk domain with every neighbour plane, strip and corner (deep, as the extractor
 // fills them) and with most missing (the missing-neighbour rule), Marching Cubes' transition ribbon and boundary
 // geomorph along +Z and along a tilted local up, and both meshers' face, edge and corner seams at uniform and
 // mixed LODs; each under the default cvars and under each of the meshing cvars turned off. Pure CPU; headless.
@@ -77,7 +77,7 @@ namespace VoxelMeshingDigest
 		return Data;
 	}
 
-	/** Which neighbours a Full-domain request carries. */
+	/** Which neighbours a WholeChunk-domain request carries. */
 	enum class ENeighbours : uint8 { None, All, PositiveFaces };
 
 	/**
@@ -359,11 +359,11 @@ namespace VoxelMeshingDigest
 					D.Chunk(Mesher, FString::Printf(TEXT("t%d.interior.lod%d"), TI, LOD),
 						MakeRequest(T, FIntVector::ZeroValue, LOD, EVoxelMeshCellDomain::Interior, ENeighbours::None));
 					D.Chunk(Mesher, FString::Printf(TEXT("t%d.full.lod%d"), TI, LOD),
-						MakeRequest(T, FIntVector::ZeroValue, LOD, EVoxelMeshCellDomain::Full, ENeighbours::All));
+						MakeRequest(T, FIntVector::ZeroValue, LOD, EVoxelMeshCellDomain::WholeChunk, ENeighbours::All));
 					D.Chunk(Mesher, FString::Printf(TEXT("t%d.full.posfaces.lod%d"), TI, LOD),
-						MakeRequest(T, FIntVector::ZeroValue, LOD, EVoxelMeshCellDomain::Full, ENeighbours::PositiveFaces));
+						MakeRequest(T, FIntVector::ZeroValue, LOD, EVoxelMeshCellDomain::WholeChunk, ENeighbours::PositiveFaces));
 					D.Chunk(Mesher, FString::Printf(TEXT("t%d.full.nonbr.lod%d"), TI, LOD),
-						MakeRequest(T, FIntVector::ZeroValue, LOD, EVoxelMeshCellDomain::Full, ENeighbours::None));
+						MakeRequest(T, FIntVector::ZeroValue, LOD, EVoxelMeshCellDomain::WholeChunk, ENeighbours::None));
 				}
 			}
 			// Marching Cubes' transition ribbon and boundary geomorph: every face against a coarser neighbour, along +Z
@@ -372,7 +372,7 @@ namespace VoxelMeshingDigest
 			{
 				for (int32 Tilt = 0; Tilt <= 1; ++Tilt)
 				{
-					FVoxelMeshingRequest R = MakeRequest(T, FIntVector::ZeroValue, LOD, EVoxelMeshCellDomain::Full, ENeighbours::All);
+					FVoxelMeshingRequest R = MakeRequest(T, FIntVector::ZeroValue, LOD, EVoxelMeshCellDomain::WholeChunk, ENeighbours::All);
 					R.TransitionFaces = 0x3F;
 					for (int32 F = 0; F < 6; ++F) { R.NeighborLODLevels[F] = LOD + 1; }
 					if (Tilt) { R.LocalUp = FVector(0.2, 0.3, 0.93).GetSafeNormal(); }

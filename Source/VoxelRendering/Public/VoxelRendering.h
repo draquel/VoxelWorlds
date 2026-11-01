@@ -9,8 +9,8 @@ DECLARE_LOG_CATEGORY_EXTERN(LogVoxelRendering, Log, All);
 /**
  * VoxelRendering module - Rendering system for VoxelWorlds.
  *
- * Provides mesh rendering through the IVoxelMeshRenderer interface: FVoxelCustomVFRenderer, one
- * UVoxelWorldComponent per render region, its FVoxelSceneProxy drawing the chunk, seam and water
+ * Provides mesh rendering through the IVoxelMeshRenderer interface: FVoxelMeshRenderer, one
+ * UVoxelRegionComponent per render region, its FVoxelSceneProxy drawing the chunk, seam and water
  * meshes through UE's FLocalVertexFactory. (The ProceduralMeshComponent fallback renderer was
  * deleted in code review CR1, D-CR7.)
  *
