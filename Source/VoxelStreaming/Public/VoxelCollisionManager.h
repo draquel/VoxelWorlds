@@ -308,7 +308,7 @@ public:
 	int32 MarkNeighborsDirtyForEdit(const FIntVector& EditedChunk, const FVector& EditCenter, float EditRadius);
 
 	/**
-	 * G32 audit (voxel.Collision.AuditNeighbors): how many cooked chunks read a neighbour as air that has voxel data now.
+	 * The neighbour audit (voxel.Collision.AuditNeighbors, G32): how many cooked chunks read a neighbour as air that has voxel data now.
 	 * With the re-cook on, a chunk is in that state only between the neighbour's arrival and the re-cook (counted as
 	 * awaiting); with it off, until something else re-cooks it.
 	 *

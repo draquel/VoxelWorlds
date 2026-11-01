@@ -1106,7 +1106,7 @@ public:
 	bool HasWaterTile(const FIntPoint& Column) const;
 
 	/**
-	 * G77: audit the 2D water tiles against the generated surface. Every voxel column whose generated ground lies more
+	 * Audit the 2D water tiles against the generated surface (G77). Every voxel column whose generated ground lies more
 	 * than a voxel under the water plane should be wet in its chunk column's tile (the tile's masks OR-ed over the
 	 * layers). Logs the totals over every chunk column with a tile or a loaded chunk at the water plane's layer, then
 	 * the chunk columns with the most columns missing, each with its loaded chunks (residency, edits, water settled,
@@ -1119,7 +1119,7 @@ public:
 	 */
 	void AuditWaterTiles(int32 MaxList, const FIntPoint& DetailColumn);
 
-	/** G77 diagnostics: mark every water tile dirty so its mesh is sent to the renderer again. @return The tile count */
+	/** A diagnostic (G77): mark every water tile dirty so its mesh is sent to the renderer again. @return The tile count */
 	int32 ResendWaterTiles();
 
 	/**
@@ -1748,14 +1748,19 @@ protected:
 	// ==================== Generation/Meshing Callbacks ====================
 
 	/**
+	 * The renderer lost its geometry (a recreated scene proxy starts empty): re-mesh every chunk whose mesh it
+	 * held, and send every seam bucket and water tile again. Each chunk is meshed once on the seam path, so
+	 * nothing else would ever replace a lost mesh. Called at the start of each tick.
+	 */
+	void RecoverLostRenderData();
+
+	/**
 	 * Called when chunk generation completes.
-	 * (Placeholder - actual implementation in Phase 2)
 	 */
 	void OnChunkGenerationComplete(const FIntVector& ChunkCoord);
 
 	/**
 	 * Called when chunk meshing completes.
-	 * (Placeholder - actual implementation in Phase 2)
 	 */
 	void OnChunkMeshingComplete(const FIntVector& ChunkCoord);
 
@@ -1825,7 +1830,7 @@ protected:
 
 	/**
 	 * Whether the per-chunk water tiles run: water on with a WaterMeshMaterial, in a heightmap world. They are XY
-	 * columns meshed at the WaterLevel plane, so a planet (whose sea is a sphere) has none until SP-E2.
+	 * columns meshed at the WaterLevel plane, so a planet has none: its sea is the sea sphere (FVoxelPlanetOcean).
 	 *
 	 * @return True when water tiles are built, updated and drawn
 	 */
@@ -1855,13 +1860,6 @@ protected:
 	 * @param MaxTilesPerFrame Maximum number of water tiles to process this frame
 	 */
 	void ProcessDirtyWaterTiles(int32 MaxTilesPerFrame);
-
-	/**
-	 * The renderer lost its geometry (a recreated scene proxy starts empty): re-mesh every chunk whose mesh it
-	 * held, and send every seam bucket and water tile again. Each chunk is meshed once on the seam path, so
-	 * nothing else would ever replace a lost mesh. Called at the start of each tick.
-	 */
-	void RecoverLostRenderData();
 
 	// ==================== Queue Management ====================
 
@@ -1966,7 +1964,7 @@ protected:
 	/** Push this-tick seam enable/debug flags from cvars, then run the seam scheduler + stub processor. */
 	void TickSeamScheduler();
 
-	// ==================== Seam meshing runtime pipeline (seam-ownership P1) ====================
+	// ==================== Seam meshing runtime pipeline ====================
 	// When voxel.Seam.Meshing is on AND the active mesher is the CPU DC mesher, chunks mesh
 	// interior-only (EVoxelMeshCellDomain::Interior — zero neighbor deps, no slices/defer/weld)
 	// and drained seam-registry jobs execute the single-owner face-seam mesher async, submitting

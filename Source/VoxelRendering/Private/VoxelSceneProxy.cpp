@@ -292,7 +292,7 @@ FVoxelSceneProxy::~FVoxelSceneProxy()
 	}
 	WaterTileVertexFactories.Empty();
 
-	// Release all seam mesh resources (seam-ownership P1), including buckets retained for fades
+	// Release all seam mesh resources, including buckets retained for fades
 	ReleaseAllSeamFadeStates_AssumesLocked();
 	for (auto& Pair : SeamRenderData)
 	{
@@ -613,7 +613,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 		}
 	}
 
-	// ==================== Seam Mesh Pass (seam-ownership P1) ====================
+	// ==================== Seam Mesh Pass ====================
 	// Seam buckets: terrain geometry, so they draw with the terrain material and emit RVT clones like
 	// chunk batches (a seam missing from RVT would crack the cached ground). Since R24 they crossfade
 	// like chunks: a retained Previous bucket dithers out under the FadeOut MID while the current one
@@ -1544,7 +1544,7 @@ void FVoxelSceneProxy::ClearAllWaterTiles_RenderThread()
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Cleared all water tiles"));
 }
 
-// ==================== Seam Meshes (seam-ownership P1) ====================
+// ==================== Seam Meshes ====================
 
 void FVoxelSceneProxy::UpdateSeamMeshFromCPUData_RenderThread(
 	FRHICommandListBase& RHICmdList,

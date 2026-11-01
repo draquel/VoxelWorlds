@@ -746,7 +746,7 @@ protected:
 	/** Whether the hand-off's tree-mode rule lets a type spawn at this distance (VoxelInjection types only). */
 	bool PassesTreeModeRule(const FScatterDefinition& Def, float ChunkDistance) const;
 
-	/** G79: hand off the chunks awaiting their first extraction that have come within the scatter horizon, nearest first. */
+	/** Hand off the chunks awaiting their first extraction that have come within the scatter horizon, nearest first (G79). */
 	void ProcessDeferredFirstExtractions();
 
 	/** Build the cross-chunk classification context from the world mode + configuration (water level, noise params). */

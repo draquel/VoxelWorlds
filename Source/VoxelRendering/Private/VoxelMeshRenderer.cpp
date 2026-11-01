@@ -577,7 +577,7 @@ void FVoxelMeshRenderer::ClearAllWaterTiles()
 	}
 }
 
-// ==================== Seam Meshes (seam-ownership P1) ====================
+// ==================== Seam Meshes ====================
 
 void FVoxelMeshRenderer::UpdateSeamMeshFromCPU(
 	const FIntVector& OwnerChunkCoord,

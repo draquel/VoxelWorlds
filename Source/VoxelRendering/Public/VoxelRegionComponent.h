@@ -146,7 +146,7 @@ public:
 	 */
 	void ClearAllWaterTiles();
 
-	// ==================== Seam Meshes (seam-ownership P1) ====================
+	// ==================== Seam Meshes ====================
 
 	/**
 	 * Update a single-owner face-seam mesh from CPU vertex data. Enqueues render command.

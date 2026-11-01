@@ -1,6 +1,6 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
-// Seam-ownership P3: single-owner Marching Cubes seam meshing (SEAM_OWNERSHIP_ARCHITECTURE.md §2.2).
+// Single-owner Marching Cubes seam meshing (SEAM_OWNERSHIP_ARCHITECTURE.md §2.2).
 //
 // Design: MC vertices and normals are pure functions of local density samples (edge-lerp crossings,
 // central-difference gradients) — no QEF, no accumulation-order sensitivity. So each participant's

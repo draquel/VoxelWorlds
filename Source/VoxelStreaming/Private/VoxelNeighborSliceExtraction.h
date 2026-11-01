@@ -5,7 +5,7 @@
 // The 26-neighborhood extraction logic (face slices + deep planes, edge strips + deep grids,
 // corner voxels + deep boxes, EdgeCornerFlags, NeighborPlaneDepth), reading through two callables
 // so it is independent of where the voxels live. Its user is the collision cook worker, which reads
-// pre-grabbed shared voxel snapshots (edit-merged), off the game thread (P4a): collision is meshed
+// pre-grabbed shared voxel snapshots (edit-merged), off the game thread: collision is meshed
 // whole-chunk, boundary faces included. Render meshing needs no slices: chunk meshes are the Interior
 // domain and seam jobs read whole neighbour snapshots (the game-thread path that fed render meshes,
 // UVoxelChunkManager::ExtractNeighborEdgeSlices, went with the legacy boundary path in M5).

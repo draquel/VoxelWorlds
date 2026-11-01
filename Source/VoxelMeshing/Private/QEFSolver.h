@@ -122,7 +122,7 @@ struct FQEFSolver
 
 		JacobiEigen3x3(M, Eigenvalues, V, bAboutMassPoint);
 
-		// G81: the right-hand side for the offset from the mass point, A^T*b - A^T*A * MP. Before, the pseudoinverse solved
+		// The right-hand side for the offset from the mass point, A^T*b - A^T*A * MP (G81). Before, the pseudoinverse solved
 		// for the position itself, so a direction the threshold dropped (along a flat surface every direction but its
 		// normal) went to the frame's origin: the vertex of a flat cell was the plane's point nearest the chunk's corner,
 		// usually outside the cell, then pulled back toward the mass point by the bias blend, often only part of the way.
@@ -173,7 +173,7 @@ struct FQEFSolver
 			const float CellSize = CellBounds.GetExtent().X * 2.0f;
 			const float Blend = FMath::Clamp(DistOutside / FMath::Max(CellSize, 0.001f) * BiasStrength * 2.0f, 0.0f, 1.0f);
 			QEFResult = FMath::Lerp(QEFResult, MP, Blend);
-			// G81: the vertex inside its own cell (a law of the seams, #44). The mass point is (on the cell's edges, its
+			// The vertex inside its own cell (a law of the seams, #44; G81). The mass point is (on the cell's edges, its
 			// crossings average inside it), so the segment from it to the result is cut at the cell's faces. Before, a
 			// solution that was far out reached the mass point by the blend and one just outside stayed outside.
 			if (bAboutMassPoint && !CellBounds.IsInsideOrOn(QEFResult))
@@ -203,7 +203,7 @@ private:
 	 * Jacobi eigenvalue decomposition for a 3x3 symmetric matrix.
 	 * Finds eigenvalues and eigenvectors via iterative Givens rotations.
 	 *
-	 * G81: each rotation zeroes the pivot on both sides of the diagonal. Before, only A[p][q] was zeroed: the search reads
+	 * Each rotation zeroes the pivot on both sides of the diagonal (G81). Before, only A[p][q] was zeroed: the search reads
 	 * the upper triangle, but the next rotation's update reads A[r][p] and A[r][q] below the diagonal too, so the stale
 	 * A[q][p] fed the decomposition and it "converged" to wrong eigenpairs (a rank-1 matrix 3 n n^T at a planet's
 	 * diagonal normal gave 3.16 and -0.16 for 3 and 0). Where a cell's normals were nearly parallel, an eigenvalue over

@@ -6,7 +6,7 @@
 #include "VoxelData.h"
 
 /**
- * Cell-domain restriction for seam-ownership meshing (SEAM_OWNERSHIP_ARCHITECTURE.md §2, P1+).
+ * Cell-domain restriction for seam-ownership meshing (SEAM_OWNERSHIP_ARCHITECTURE.md §2).
  *
  * WholeChunk = the chunk meshes its own cells plus the -1 boundary layer against neighbor slices
  * (the collision cook's request; Full until CR3, MESH-28). Interior = the seam-ownership interior pass: only
@@ -215,14 +215,14 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	int32 NeighborLODLevels[6] = {-1, -1, -1, -1, -1, -1};
 
 	/**
-	 * Cell-domain restriction (seam-ownership P1). WholeChunk = whole-chunk meshing (the default;
+	 * Cell-domain restriction. WholeChunk = whole-chunk meshing (the default;
 	 * the collision cook's request). Interior = interior-only pass with zero neighbor deps;
 	 * see EVoxelMeshCellDomain. Honored by all three meshers.
 	 */
 	EVoxelMeshCellDomain MeshCellDomain = EVoxelMeshCellDomain::WholeChunk;
 
 	/**
-	 * MC seam jobs only (P3): overrides voxel.Mesh.MCBoundaryMorphWidth (units: coarse cells) for
+	 * MC seam jobs only: overrides voxel.Mesh.MCBoundaryMorphWidth (units: coarse cells) for
 	 * the boundary geomorph. Seam-band cells morph with a ramp that reaches ZERO exactly at
 	 * the band's inner edge — a wider ramp would move vertices shared with the
 	 * unmorphed interior mesh and crack the junction. <= 0 uses the cvar (whole-chunk meshing).
@@ -416,7 +416,7 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 };
 
 /**
- * Request for a single-owner FACE-SEAM meshing job (seam-ownership P1,
+ * Request for a single-owner FACE-SEAM meshing job (
  * SEAM_OWNERSHIP_ARCHITECTURE.md §2.2).
  *
  * Same-LOD chunk pair: owner A (the min-coordinate participant) + neighbour B = A + unit(Axis).
@@ -441,7 +441,7 @@ struct VOXELMESHING_API FVoxelFaceSeamRequest
 
 	/**
 	 * Neighbour-side LOD level, or -1 for a same-LOD pair (== LODLevel). When the LODs differ
-	 * (seam-ownership P2c) the seam meshes the owner's slab at the owner's stride, recomputes
+	 * the seam meshes the owner's slab at the owner's stride, recomputes
 	 * each ring at ITS side's stride, and stitches the face plane at the finer granularity
 	 * (T-junction fans onto the coarser side's ring vertices).
 	 */
@@ -484,7 +484,7 @@ struct VOXELMESHING_API FVoxelFaceSeamRequest
 };
 
 /**
- * Request for a single-owner EDGE-SEAM meshing job (seam-ownership P2a,
+ * Request for a single-owner EDGE-SEAM meshing job (
  * SEAM_OWNERSHIP_ARCHITECTURE.md §2.2 / "P2 plan").
  *
  * Same-LOD 4-tuple sharing the chunk edge parallel to EdgeAxis. Participants sit in the plane of
@@ -512,7 +512,7 @@ struct VOXELMESHING_API FVoxelEdgeSeamRequest
 
 	/**
 	 * Per-participant LOD levels (quadrant order), or all -1 for a same-LOD tuple (== LODLevel).
-	 * When any differ (seam-ownership P2d) the mixed-LOD edge mesher runs: each ring/slab column
+	 * When any differ the mixed-LOD edge mesher runs: each ring/slab column
 	 * computes at its OWNING job's stride, and stitching enumerates at the finest granularity
 	 * with T-junction fans.
 	 */
@@ -576,7 +576,7 @@ struct VOXELMESHING_API FVoxelEdgeSeamRequest
 };
 
 /**
- * Request for a single-owner CORNER-SEAM meshing job (seam-ownership P2b,
+ * Request for a single-owner CORNER-SEAM meshing job (
  * SEAM_OWNERSHIP_ARCHITECTURE.md "P2 plan").
  *
  * Same-LOD 8-tuple sharing the chunk corner at Owner + (1,1,1) chunks. Participants are in octant
@@ -598,7 +598,7 @@ struct VOXELMESHING_API FVoxelCornerSeamRequest
 
 	/**
 	 * Per-participant LOD levels (octant order), or all -1 for a same-LOD tuple (== LODLevel).
-	 * When any differ (seam-ownership P2d) the mixed-LOD corner mesher runs.
+	 * When any differ the mixed-LOD corner mesher runs.
 	 */
 	int32 LODLevels[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
 

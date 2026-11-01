@@ -191,7 +191,7 @@ public:
 		// Default: no-op (renderer doesn't support water tiles)
 	}
 
-	// ==================== Seam Meshes (seam-ownership P1/P2) ====================
+	// ==================== Seam Meshes ====================
 	// Single-owner seam meshes (SEAM_OWNERSHIP_ARCHITECTURE.md §2.2/§2.4): small
 	// independently-swappable meshes covering the boundaries a chunk OWNS, keyed by
 	// (owner chunk, SeamSlot). SeamSlot encoding: 0-2 = face seams (+X/+Y/+Z), 3-5 = edge

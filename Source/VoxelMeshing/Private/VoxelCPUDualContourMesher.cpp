@@ -468,9 +468,9 @@ void FVoxelCPUDualContourMesher::DetectEdgeCrossings(
 
 						const int32 EIdx = EdgeIndex(CX, CY, CZ, Axis, GridDim);
 						FDCEdgeCrossing& Crossing = OutEdgeCrossings[EIdx];
-						// G80: at a stride, LOD 0's crossing on the edge and the fitted gradient's normal there (G62's shading
+						// At a stride, LOD 0's crossing on the edge and the fitted gradient's normal there (G62's shading
 						// normal: exact for a plane, so the QEF's vertex lies on it; the central difference tilts with the
-						// voxel phase, and a strided cell spreads that tilt over a stride).
+						// voxel phase, and a strided cell spreads that tilt over a stride; G80).
 						Crossing.Position = bVoxelCrossings
 							? VoxelLODCrossing::FindVoxelCrossing(DensityFn, VX, VY, VZ, Axis, Stride, IsoLevel, NoEdgeOffset).VoxelPosition * VoxelSize
 							: P0 + (P1 - P0) * t;
@@ -479,7 +479,7 @@ void FVoxelCPUDualContourMesher::DetectEdgeCrossings(
 						const float CrossVoxelX = Crossing.Position.X / VoxelSize;
 						const float CrossVoxelY = Crossing.Position.Y / VoxelSize;
 						const float CrossVoxelZ = Crossing.Position.Z / VoxelSize;
-						// G62: LOD 0's vertex normal sums its crossings' shading normals.
+						// LOD 0's vertex normal sums its crossings' shading normals (G62).
 						if (Stride == 1 && VoxelCrossingGradient::UseCrossingGradientNormals())
 						{
 							Crossing.ShadingNormal = CalculateShadingNormal(Request, CrossVoxelX, CrossVoxelY, CrossVoxelZ);
@@ -548,7 +548,7 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 	// Edge detection still iterates to GridSize so cells at GridSize-1 get full
 	// boundary edge data from their +1 neighbor edges.
 	//
-	// Interior domain (seam-ownership P1): solve only the interior cells [0, GridSize-1) —
+	// Interior domain: solve only the interior cells [0, GridSize-1) —
 	// the -1 and GridSize-1 boundary layers belong to the single-owner seam jobs.
 	const bool bInteriorDomain = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
 	const int32 CellMin = bInteriorDomain ? 0 : -1;
@@ -658,7 +658,7 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 	// Only material-border cells ever land here, so the map stays small.
 	TMap<uint64, int32> DuplicateVertexCache;
 
-	// Interior domain (seam-ownership P1): quads may only reference interior cells
+	// Interior domain: quads may only reference interior cells
 	// ([0, GridSize-1) per axis). Any quad touching a -1/GridSize-1 boundary-layer cell
 	// belongs to a face/edge/corner seam job.
 	const bool bInteriorDomain = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
@@ -958,7 +958,7 @@ FVector3f FVoxelCPUDualContourMesher::CalculateShadingNormal(
 }
 
 // ============================================================================
-// Face-Seam Meshing (seam-ownership P1 — SEAM_OWNERSHIP_ARCHITECTURE.md §2.2)
+// Face-Seam Meshing (SEAM_OWNERSHIP_ARCHITECTURE.md §2.2)
 // ============================================================================
 
 namespace VoxelDCFaceSeam
@@ -1012,7 +1012,7 @@ namespace VoxelDCFaceSeam
 	 *   BOnly    — B-local coords; Air outside B. Exactly B's Interior-pass view.
 	 *   Combined — owner-local coords; A for axis-coord [0, ChunkSize), B for
 	 *              [ChunkSize, 2*ChunkSize) (shifted), Air otherwise (transverse
-	 *              out-of-bounds is edge/corner-neighbour territory — P2).
+	 *              out-of-bounds is edge/corner-neighbour territory).
 	 * Ring recomputes MUST use the per-side views so their results are bit-identical to the
 	 * interior passes (same data, same Air clamp); only slab cells use the combined view.
 	 */
@@ -1099,12 +1099,12 @@ namespace VoxelDCFaceSeam
 	};
 
 	/**
-	 * Quadrant-visibility sampler over an edge-seam request (seam-ownership P2a).
+	 * Quadrant-visibility sampler over an edge-seam request.
 	 *
 	 * Works in a chosen participant's FRAME (FrameOffsetVoxels maps frame-local coords into the
 	 * owner-frame quadrant space) with a 4-bit visibility mask over the (PerpA, PerpB) quadrants
 	 * (bit = dv + dw*2, matching FVoxelEdgeSeamRequest::VoxelData order). Along the edge-parallel
-	 * axis only [0, ChunkSize) is owned — outside is Air (corner-seam territory, P2b). With the
+	 * axis only [0, ChunkSize) is owned — outside is Air (corner-seam territory). With the
 	 * right mask+frame this reproduces EXACTLY every earlier job's sampler: a participant's
 	 * interior view (single quadrant) and a face job's pair view (two quadrants along one axis) —
 	 * which is what makes the edge seam's ring recomputes bit-identical to those jobs' outputs.
@@ -1170,7 +1170,7 @@ namespace VoxelDCFaceSeam
 	};
 
 	/**
-	 * Octant-visibility sampler over a corner-seam request (seam-ownership P2b).
+	 * Octant-visibility sampler over a corner-seam request.
 	 *
 	 * The 3D generalization of FQuadSampler: eight participants around the shared corner, an
 	 * 8-bit visibility mask (bit = dx + dy*2 + dz*4, matching FVoxelCornerSeamRequest::VoxelData
@@ -1459,7 +1459,7 @@ namespace VoxelDCFaceSeam
 	}
 
 	/**
-	 * Mixed-LOD face seam (seam-ownership P2c — the §2.3 cross-resolution mesher).
+	 * Mixed-LOD face seam (the §2.3 cross-resolution mesher).
 	 *
 	 * The slab is ALWAYS the owner's last cell layer at the OWNER's stride (the interior domain
 	 * [0, Grid-1) covers the neighbour's first layer but not the owner's last — regardless of
@@ -1738,7 +1738,7 @@ namespace VoxelDCFaceSeam
 		};
 
 		int32 EdgeCell[3];
-		// G1: face-crossing U-edges (4 slab cells).
+		// Face-crossing U-edges (4 slab cells; G1).
 		for (int32 w = 1; w <= SLA - 1; ++w)
 		{
 			for (int32 v = 1; v <= SLA - 1; ++v)
@@ -1749,7 +1749,7 @@ namespace VoxelDCFaceSeam
 				EmitAQuad(EdgeCell, U);
 			}
 		}
-		// G2/G3: slab <-> ring-A stitching at the owner's stride.
+		// Slab <-> ring-A stitching at the owner's stride (G2/G3).
 		for (int32 Sel = 1; Sel <= SLA - 1; ++Sel)
 		{
 			for (int32 Run = 0; Run <= SLA - 1; ++Run)
@@ -1808,7 +1808,7 @@ namespace VoxelDCFaceSeam
 					FSeamCellVertex& Cell = RingB[BV + BW * SLB];
 					if (!Cell.bValid && !Cell.bFallbackTried)
 					{
-						// G17: a coarser ring cell with no crossing at its stride; B's interior never emits it.
+						// A coarser ring cell with no crossing at its stride (G17); B's interior never emits it.
 						int32 C[3];
 						C[U] = 0;
 						C[V] = BV;
@@ -1836,7 +1836,7 @@ namespace VoxelDCFaceSeam
 					FSeamCellVertex& Cell = Slab[AV + AW * SLA];
 					if (!Cell.bValid && !Cell.bFallbackTried)
 					{
-						// G17: a coarser slab cell with no crossing at the owner's stride.
+						// A coarser slab cell with no crossing at the owner's stride (G17).
 						int32 C[3];
 						C[U] = SLA;
 						C[V] = AV;
@@ -1879,7 +1879,7 @@ namespace VoxelDCFaceSeam
 	}
 
 	// =========================================================================================
-	// Shared emission helpers for the mixed-LOD edge/corner meshers (seam-ownership P2d).
+	// Shared emission helpers for the mixed-LOD edge/corner meshers.
 	// =========================================================================================
 
 	/** A cell reference for fan emission: the solved cell + a job-unique dedup key. */
@@ -1890,7 +1890,7 @@ namespace VoxelDCFaceSeam
 	};
 
 	/**
-	 * Vertex/fan emitter shared by the P2d meshers: per-cell/per-material vertex dedup, cyclic
+	 * Vertex/fan emitter shared by the mixed-LOD edge and corner meshers: per-cell/per-material vertex dedup, cyclic
 	 * duplicate collapse (quad -> triangle at T-junctions), and the adaptive max-min-area
 	 * diagonal for full quads — the exact emission semantics of the earlier seam paths.
 	 */
@@ -2030,9 +2030,9 @@ namespace VoxelDCFaceSeam
 	};
 
 	/**
-	 * Mixed-LOD edge seam (seam-ownership P2d). Participants may render at up to four different
+	 * Mixed-LOD edge seam. Participants may render at up to four different
 	 * LODs. Each of the 9 columns computes at its OWNING job's stride (column owner = the low
-	 * quadrant per axis — the P2c ownership rule per column), reproducing that job's cells
+	 * quadrant per axis — the mixed-LOD face seam's ownership rule per column), reproducing that job's cells
 	 * bit-exactly. Slot classification is by rectangle containment (mixed strides don't tile as
 	 * a product grid), and ownership follows the participant-union rule: a fine edge belongs to
 	 * this job iff its slots span >= 3 participants (pairs are the face jobs' territory,
@@ -2203,7 +2203,7 @@ namespace VoxelDCFaceSeam
 					FSeamCellVertex& Cell = Col.Cells[CellIdx];
 					if (!Cell.bValid && !Cell.bFallbackTried)
 					{
-						// G17: a coarser cell with no crossing at its stride, solved as every job solves it.
+						// A coarser cell with no crossing at its stride, solved as every job solves it (G17).
 						int32 C[3];
 						C[U] = UVox / Col.StrideC;
 						C[PerpA] = Col.CellABase + IV;
@@ -2300,7 +2300,7 @@ namespace VoxelDCFaceSeam
 	}
 
 	/**
-	 * Mixed-LOD corner seam (seam-ownership P2d). The 27 corner-block cells each compute at
+	 * Mixed-LOD corner seam. The 27 corner-block cells each compute at
 	 * their OWNING job's stride (owner = the low octant per axis), reproducing every
 	 * neighbouring job — interiors, same/mixed face jobs, same/mixed edge jobs — bit-exactly.
 	 * Ownership: a fine edge belongs to the corner job iff its slot participant-union is not
@@ -2475,7 +2475,7 @@ namespace VoxelDCFaceSeam
 				FSeamCellVertex& Cell = Reg.Cells[CellIdx];
 				if (!Cell.bValid && !Cell.bFallbackTried)
 				{
-					// G17: a coarser cell with no crossing at its stride, solved as every job solves it.
+					// A coarser cell with no crossing at its stride, solved as every job solves it (G17).
 					const FOctSampler Sampler{ Req, Reg.ParticipantMask, Reg.FrameOffset };
 					if (ComputeBoundaryFallbackVertex(Sampler, Reg.CellBase[0] + Idx[0], Reg.CellBase[1] + Idx[1], Reg.CellBase[2] + Idx[2],
 						Reg.StrideC, VoxelSize, IsoLevel, SVDThreshold, BiasStrength, Cell))
@@ -2588,8 +2588,8 @@ bool FVoxelCPUDualContourMesher::GenerateFaceSeamMeshCPU(
 		return false;
 	}
 
-	// Mixed-LOD pair (seam-ownership P2c): a dedicated path — the same-LOD path below stays
-	// bit-frozen (its ring identities are asserted by the SC tests and relied on by P2a/P2b).
+	// Mixed-LOD pair: a dedicated path — the same-LOD path below stays
+	// bit-frozen (its ring identities are asserted by the SC tests and relied on by the edge and corner seams).
 	if (SeamRequest.GetLODLevelB() != SeamRequest.LODLevel)
 	{
 		return GenerateMixedFaceSeam(SeamRequest, Config, OutMeshData);
@@ -2631,7 +2631,7 @@ bool FVoxelCPUDualContourMesher::GenerateFaceSeamMeshCPU(
 	// Layer 1 = slab    (owner cell U == SL;   combined view; owner frame)    — the seam proper
 	// Layer 2 = ring B  (B-frame cell U == 0;  B-only view; shifted to owner) — interior ring dup
 	// Transverse extent: cells (v, w) in [0, SL)^2 — the exclusive face region (cells at
-	// transverse -1/SL belong to edge/corner seams, P2).
+	// transverse -1/SL belong to edge/corner seams).
 	TArray<FSeamCellVertex> Layers[3];
 	for (int32 L = 0; L < 3; ++L)
 	{
@@ -2840,7 +2840,7 @@ bool FVoxelCPUDualContourMesher::GenerateFaceSeamMeshCPU(
 	//   group 4: V-axis edges at cell U == SL + 1   (ring-B + slab cells)   v in [0, SL-1], w in [1, SL-1]
 	//   group 5: W-axis edges at cell U == SL + 1   (ring-B + slab cells)   v in [1, SL-1], w in [0, SL-1]
 	// Everything else is owned by an interior pass (all four cells interior to one chunk) or by
-	// a P2 edge/corner seam (cells spanning two+ slabs). This partition is exactly-once.
+	// an edge/corner seam (cells spanning two+ slabs). This partition is exactly-once.
 	int32 EdgeCell[3];
 
 	// Group 1 — face-crossing edges.
@@ -2911,7 +2911,7 @@ bool FVoxelCPUDualContourMesher::GenerateEdgeSeamMeshCPU(
 		return false;
 	}
 
-	// Mixed-LOD tuple (seam-ownership P2d): dedicated path — the same-LOD path below stays
+	// Mixed-LOD tuple: dedicated path — the same-LOD path below stays
 	// bit-frozen (its ring identities are asserted by the ES tests).
 	if (!SeamRequest.IsUniformLOD())
 	{
@@ -3233,7 +3233,7 @@ bool FVoxelCPUDualContourMesher::GenerateCornerSeamMeshCPU(
 		return false;
 	}
 
-	// Mixed-LOD tuple (seam-ownership P2d): dedicated path — the same-LOD path below stays
+	// Mixed-LOD tuple: dedicated path — the same-LOD path below stays
 	// bit-frozen (its ring identities are asserted by the CS tests).
 	if (!SeamRequest.IsUniformLOD())
 	{
