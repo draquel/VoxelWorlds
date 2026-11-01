@@ -242,7 +242,6 @@ namespace VoxelPlanetFarFieldTestUtils
 	}
 
 	using VoxelFarFieldTestRig::FScopedCVar;
-	using VoxelFarFieldTestRig::FNullMeshRenderer;
 }
 
 /**
@@ -969,7 +968,8 @@ bool FFarFieldPlanetChunkManagerTest::RunTest(const FString& Parameters)
 		AActor* Owner = World->SpawnActor<AActor>();
 		UVoxelChunkManager* Manager = NewObject<UVoxelChunkManager>(Owner);
 		Manager->RegisterComponent();
-		FNullMeshRenderer Renderer;
+		VoxelTesting::FRecordingMeshRenderer Renderer;
+		Renderer.bKeepMeshes = false;
 		Renderer.Initialize(World, Config);
 		Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
 
@@ -1110,7 +1110,8 @@ bool FFarFieldPlanetCameraAfterCutTest::RunTest(const FString& Parameters)
 		AActor* Owner = World->SpawnActor<AActor>();
 		UVoxelChunkManager* Manager = NewObject<UVoxelChunkManager>(Owner);
 		Manager->RegisterComponent();
-		FNullMeshRenderer Renderer;
+		VoxelTesting::FRecordingMeshRenderer Renderer;
+		Renderer.bKeepMeshes = false;
 		Renderer.Initialize(World, Config);
 		Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
 

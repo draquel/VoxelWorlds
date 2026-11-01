@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelPlanetNoise.h"
 #include "VoxelNoiseTypes.h"
@@ -29,33 +30,6 @@
 
 namespace VoxelHeightmapNoiseTestUtils
 {
-	/** Sets voxel.Noise.ContinuousSimplex for a scope, at the priority it already holds. */
-	struct FScopedKernel
-	{
-		IConsoleVariable* Var = nullptr;
-		int32 Previous = 1;
-		EConsoleVariableFlags Priority = ECVF_SetByCode;
-
-		explicit FScopedKernel(int32 Value)
-			: Var(IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Noise.ContinuousSimplex")))
-		{
-			if (Var)
-			{
-				Previous = Var->GetInt();
-				Priority = static_cast<EConsoleVariableFlags>(FMath::Max(static_cast<uint32>(Var->GetFlags() & ECVF_SetByMask), static_cast<uint32>(ECVF_SetByCode)));
-				Var->Set(Value, Priority);
-			}
-		}
-
-		~FScopedKernel()
-		{
-			if (Var)
-			{
-				Var->Set(Previous, Priority);
-			}
-		}
-	};
-
 	/** VoxelDemo-like terrain params: Simplex, 4 octaves at 0.0004 (a 2,500 uu wavelength). */
 	FVoxelNoiseParams MakeTerrainParams(EVoxelNoiseType Type = EVoxelNoiseType::Simplex)
 	{
@@ -240,7 +214,7 @@ bool FVoxelPlaneNoiseCreasesTest::RunTest(const FString& Parameters)
 	FStats OnLine[2], Control[2]; // [kernel: 0 classic, 1 continuous]
 	for (int32 Kernel = 0; Kernel < 2; ++Kernel)
 	{
-		FScopedKernel Scoped(Kernel);
+		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Noise.ContinuousSimplex"), Kernel);
 		OnLine[Kernel] = Measure(true, 0x11 + Kernel);
 		Control[Kernel] = Measure(false, 0x21 + Kernel);
 		AddInfo(FString::Printf(TEXT("%s kernel: across X = Y the height steps up to %.4f uu (control off the line %.4f), the slope changes by up to %.4f (control %.4f)"),

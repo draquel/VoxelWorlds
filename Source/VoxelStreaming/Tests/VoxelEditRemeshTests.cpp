@@ -45,51 +45,6 @@
 
 namespace VoxelEditRemeshTest
 {
-	/** A renderer that keeps the latest chunk mesh and merged seam bucket per coordinate. */
-	class FSeamRecordingRenderer : public IVoxelMeshRenderer
-	{
-	public:
-		TMap<FIntVector, FChunkMeshData> ChunkMeshes;
-		TMap<FIntVector, FChunkMeshData> SeamBuckets;
-
-		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
-		virtual void Shutdown() override { bInitialized = false; }
-		virtual bool IsInitialized() const override { return bInitialized; }
-		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override { ChunkMeshes.Add(ChunkCoord, MeshData); }
-		virtual void RemoveChunk(const FIntVector& ChunkCoord) override { ChunkMeshes.Remove(ChunkCoord); }
-		virtual void ClearAllChunks() override { ChunkMeshes.Reset(); }
-		virtual void SetMaterial(UMaterialInterface* Material) override {}
-		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
-		virtual void UpdateMaterialParameters() override {}
-		virtual void UpdateSeamMeshFromCPU(const FIntVector& OwnerChunkCoord, uint8 SeamSlot, int32 LODLevel, FChunkMeshData&& MeshData, bool bCrossfade) override
-		{
-			if (MeshData.IsValid())
-			{
-				SeamBuckets.Add(OwnerChunkCoord, MoveTemp(MeshData));
-			}
-			else
-			{
-				SeamBuckets.Remove(OwnerChunkCoord);
-			}
-		}
-		virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 SeamSlot) override { SeamBuckets.Remove(OwnerChunkCoord); }
-		virtual void ClearAllSeamMeshes() override { SeamBuckets.Reset(); }
-		virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override { SeamBuckets.GetKeys(OutOwners); }
-		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return ChunkMeshes.Contains(ChunkCoord); }
-		virtual int32 GetLoadedChunkCount() const override { return ChunkMeshes.Num(); }
-		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override { ChunkMeshes.GetKeys(OutChunks); }
-		virtual int64 GetGPUMemoryUsage() const override { return 0; }
-		virtual int64 GetTotalVertexCount() const override { return 0; }
-		virtual int64 GetTotalTriangleCount() const override { return 0; }
-		virtual bool GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const override { return false; }
-		virtual FBox GetTotalBounds() const override { return FBox(ForceInit); }
-		virtual FString GetDebugStats() const override { return FString(); }
-		virtual FString GetRendererTypeName() const override { return TEXT("Seam recording (test)"); }
-
-	private:
-		bool bInitialized = false;
-	};
-
 	/** One vertex as a hash: position to 0.01 uu, normal to 1e-3, both UV sets and the colour. */
 	uint64 VertexKey(const FChunkMeshData& Mesh, int32 Index)
 	{
@@ -181,7 +136,7 @@ namespace VoxelEditRemeshTest
 		TMap<FIntVector, TArray<uint64>> Seams;
 	};
 
-	FGeometry CaptureGeometry(const FSeamRecordingRenderer& Renderer)
+	FGeometry CaptureGeometry(const VoxelTesting::FRecordingMeshRenderer& Renderer)
 	{
 		FGeometry G;
 		for (const TPair<FIntVector, FChunkMeshData>& Pair : Renderer.ChunkMeshes)
@@ -497,7 +452,7 @@ namespace VoxelEditRemeshTest
 	}
 
 	/** Configure, start and settle a world for Case; false if no site qualifies. */
-	bool StartWorld(VoxelTesting::FTestChunkWorld& W, FSeamRecordingRenderer& Renderer, const FCase& Case, FVector& OutSite)
+	bool StartWorld(VoxelTesting::FTestChunkWorld& W, const FCase& Case, FVector& OutSite)
 	{
 		W.Create(Case.bPlanet ? TEXT("EditRemeshPlanet") : TEXT("EditRemeshPlane"));
 		if (Case.bPlanet)
@@ -528,11 +483,7 @@ namespace VoxelEditRemeshTest
 				W.Config->WaterLevel = 0.0f;
 			}
 		}
-		W.Owner = W.World->SpawnActor<AActor>();
-		W.Manager = NewObject<UVoxelChunkManager>(W.Owner);
-		W.Manager->RegisterComponent();
-		Renderer.Initialize(W.World, W.Config);
-		W.Manager->Initialize(W.Config, new FDistanceBandLODStrategy(), &Renderer);
+		W.StartManager();
 
 		// The chunk edge along local up nearest the base point where the surface crosses it, for a water case one where the
 		// surface lies a few voxels under the sea: on a plane the edges at whole chunks from (1, 0) chunks, on a planet those
@@ -575,9 +526,8 @@ namespace VoxelEditRemeshTest
 		FRunResult R;
 		const int32 PreviousRule = SetRule(Test, Rule);
 		VoxelTesting::FTestChunkWorld W;
-		FSeamRecordingRenderer Renderer;
 		FVector Site;
-		R.bFound = StartWorld(W, Renderer, Case, Site);
+		R.bFound = StartWorld(W, Case, Site);
 		if (!R.bFound)
 		{
 			W.Stop();
@@ -586,7 +536,7 @@ namespace VoxelEditRemeshTest
 		}
 		R.bSettled = Settle(W);
 		R.LoadedChunks = W.Manager->GetLoadedChunkCount();
-		R.Pre = CaptureGeometry(Renderer);
+		R.Pre = CaptureGeometry(W.Renderer);
 		R.PreVoxels = CaptureVoxels(*W.Manager);
 
 		// The chunk edge running along local up nearest the site, at the surface: its min edge belongs to E, its max edge to E2.
@@ -615,7 +565,7 @@ namespace VoxelEditRemeshTest
 			Edit();
 			R.bSettled = Settle(W) && R.bSettled;
 			R.Work[Index] = FWork::Between(Before, W.Manager->GetMeshWorkStats());
-			R.Post[Index] = CaptureGeometry(Renderer);
+			R.Post[Index] = CaptureGeometry(W.Renderer);
 			R.PostVoxels[Index] = CaptureVoxels(*W.Manager);
 			R.EditWaterChanged[Index] = DiffVoxels(VoxelsBefore, R.PostVoxels[Index], true);
 			R.EditedChunks[Index] = Edited;
@@ -641,7 +591,7 @@ namespace VoxelEditRemeshTest
 				W.Manager->MarkChunkDirty(Chunk);
 			}
 			R.bSettled = Settle(W) && R.bSettled;
-			R.Stale[Index] = Compare(R.Post[Index], CaptureGeometry(Renderer));
+			R.Stale[Index] = Compare(R.Post[Index], CaptureGeometry(W.Renderer));
 			VoxelsBefore = CaptureVoxels(*W.Manager);
 			R.RebuildWaterChanged[Index] = DiffVoxels(R.PostVoxels[Index], VoxelsBefore, true);
 		};

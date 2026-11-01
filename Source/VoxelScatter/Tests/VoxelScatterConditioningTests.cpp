@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "VoxelScatterTestFixtures.h"
 #include "Misc/AutomationTest.h"
 #include "Testing/VoxelScatterTestDefinitions.h"
 #include "Engine/Engine.h"
@@ -36,6 +37,8 @@
 
 namespace VoxelScatterConditioningTestUtils
 {
+	using namespace VoxelScatterTesting;
+
 	constexpr int32 ChunkSize = 32;
 	constexpr float VoxelSize = 100.0f;
 	constexpr float ChunkWorldSize = ChunkSize * VoxelSize;
@@ -78,23 +81,9 @@ namespace VoxelScatterConditioningTestUtils
 	/** A chunk generated from the generated height, as the heightmap generator's SDF makes it (grass, no caves). */
 	TArray<FVoxelData> MakeChunk(const FIntVector& Coord, const TArray<FVoxelConditioningZone>& Zones)
 	{
-		TArray<FVoxelData> Voxels;
-		Voxels.SetNumUninitialized(ChunkSize * ChunkSize * ChunkSize);
-		const FVector Origin = ChunkOrigin(Coord);
-		for (int32 Y = 0; Y < ChunkSize; ++Y)
-		{
-			for (int32 X = 0; X < ChunkSize; ++X)
-			{
-				const float Height = GeneratedHeight(Origin.X + X * VoxelSize, Origin.Y + Y * VoxelSize, Zones);
-				for (int32 Z = 0; Z < ChunkSize; ++Z)
-				{
-					const float SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(static_cast<float>(Origin.Z) + Z * VoxelSize, Height);
-					Voxels[X + Y * ChunkSize + Z * ChunkSize * ChunkSize] =
-						FVoxelData(EVoxelMaterial::Grass, FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize));
-				}
-			}
-		}
-		return Voxels;
+		return MakeHeightmapChunk(ChunkOrigin(Coord), ChunkSize, VoxelSize,
+			[&Zones](double X, double Y) { return GeneratedHeight(X, Y, Zones); },
+			[](int32, int32) { return static_cast<uint8>(EVoxelMaterial::Grass); });
 	}
 
 	FScatterExtractionContext MakeContext(const IVoxelWorldMode& Mode, const TArray<FVoxelConditioningZone>* Zones)
@@ -158,39 +147,16 @@ namespace VoxelScatterConditioningTestUtils
 	}
 
 	/** Private game world + initialized scatter manager (CPU extraction), torn down on destruction. */
-	struct FHarness
+	struct FHarness : VoxelScatterTesting::FScatterTestWorld
 	{
-		UWorld* World = nullptr;
-		UVoxelWorldConfiguration* Config = nullptr;
-		UVoxelScatterManager* Manager = nullptr;
 
 		FHarness()
+			: FScatterTestWorld(TEXT("VoxelScatterConditioningTestWorld"))
 		{
-			World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelScatterConditioningTestWorld"));
-			FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
-			Context.SetCurrentWorld(World);
-			Config = NewObject<UVoxelWorldConfiguration>();
 			Config->ChunkSize = ChunkSize;
 			Config->VoxelSize = VoxelSize;
 			Config->ScatterRadius = 100000.0f;
-			Manager = NewObject<UVoxelScatterManager>();
-			Manager->AddToRoot();
-			Manager->Initialize(Config, World);
-			VoxelScatterTesting::AddCubicDefinitions(*Manager); // the configuration's default meshing mode is cubic
-		}
-
-		~FHarness()
-		{
-			if (Manager)
-			{
-				Manager->Shutdown();
-				Manager->RemoveFromRoot();
-			}
-			if (World)
-			{
-				GEngine->DestroyWorldContext(World);
-				World->DestroyWorld(false);
-			}
+			StartManager(/*bSmoothDefinitions=*/false); // the configuration's default meshing mode is cubic
 		}
 
 		/** Submit a chunk as if its mesh just arrived and pump until its surface data is cached. */

@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "VoxelScatterTestFixtures.h"
 #include "Misc/AutomationTest.h"
 #include "Testing/VoxelScatterTestDefinitions.h"
 #include "Engine/Engine.h"
@@ -32,47 +33,26 @@
 
 namespace VoxelScatterCleanupTestUtils
 {
+	using namespace VoxelScatterTesting;
+
 	constexpr int32 TestChunkSize = 16;
 	constexpr float TestVoxelSize = 100.0f;
 
 	/** Private game world + initialized scatter manager, torn down on destruction. */
-	struct FScatterTestHarness
+	struct FScatterTestHarness : VoxelScatterTesting::FScatterTestWorld
 	{
-		UWorld* World = nullptr;
-		UVoxelWorldConfiguration* Config = nullptr;
-		UVoxelScatterManager* Manager = nullptr;
 
 		explicit FScatterTestHarness(int32 MaxAsyncTasks)
+			: FScatterTestWorld(TEXT("VoxelScatterCleanupTestWorld"))
 		{
-			World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelScatterCleanupTestWorld"));
-			FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
-			Context.SetCurrentWorld(World);
-
-			Config = NewObject<UVoxelWorldConfiguration>();
 			Config->ChunkSize = TestChunkSize;
 			Config->VoxelSize = TestVoxelSize;
 			Config->ScatterRadius = 100000.0f; // keep every test chunk in range of the origin viewer
 			Config->MaxAsyncScatterTasks = MaxAsyncTasks;
 
-			Manager = NewObject<UVoxelScatterManager>();
-			Manager->AddToRoot();
-			Manager->Initialize(Config, World);
-			VoxelScatterTesting::AddCubicDefinitions(*Manager); // the configuration's default meshing mode is cubic
+			StartManager(/*bSmoothDefinitions=*/false); // the configuration's default meshing mode is cubic
 		}
 
-		~FScatterTestHarness()
-		{
-			if (Manager)
-			{
-				Manager->Shutdown();
-				Manager->RemoveFromRoot();
-			}
-			if (World)
-			{
-				GEngine->DestroyWorldContext(World);
-				World->DestroyWorld(false);
-			}
-		}
 	};
 
 	/** Flat grass slab filling the bottom half of the chunk — guarantees surface + spawn points. */

@@ -20,7 +20,9 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelCPUMarchingCubesMesher.h"
+#include "VoxelMeshingTestFixtures.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
@@ -28,8 +30,7 @@
 
 namespace MarchingCubesLODBoundaryTestHelpers
 {
-	constexpr int32 TestChunkSize = 32;
-	constexpr float TestVoxelSize = 100.0f;
+	using namespace VoxelMeshingTestFixtures;
 	constexpr float BoundaryPlaneWorldX = TestChunkSize * TestVoxelSize; // 3200
 
 	/** Vertices within this distance of the boundary plane count as boundary vertices. */
@@ -230,20 +231,6 @@ namespace MarchingCubesLODBoundaryTestHelpers
 			FVoxelMeshingRequest::CORNER_XNEG_YNEG_ZPOS | FVoxelMeshingRequest::CORNER_XNEG_YNEG_ZNEG;
 	}
 
-	/** Mesher config matching production smooth meshing, with seams controllable. */
-	FVoxelMeshingConfig MakeConfig(bool bUseTransvoxel)
-	{
-		FVoxelMeshingConfig Config;
-		Config.IsoLevel = 0.5f;
-		Config.bGenerateUVs = true;
-		Config.bCalculateAO = false;
-		Config.bUseTransvoxel = bUseTransvoxel;
-		// Skirts would drape extra geometry over the boundary plane and pollute
-		// the watertightness measurement; production "seams off" symptoms in the
-		// investigation are about the core mesh, not the skirt patches.
-		return Config;
-	}
-
 	/** Collect unique world-space vertices lying on the shared boundary plane. */
 	TArray<FVector3f> CollectBoundaryVertices(const FChunkMeshData& Mesh, const FVector3f& ChunkWorldOffset)
 	{
@@ -392,7 +379,7 @@ namespace MarchingCubesLODBoundaryTestHelpers
 	{
 		FVoxelCPUMarchingCubesMesher Mesher;
 		Mesher.Initialize();
-		Mesher.SetConfig(MakeConfig(bUseTransvoxel));
+		Mesher.SetConfig(MakeMCConfig(bUseTransvoxel));
 		FVoxelMeshingStats Stats;
 		const bool bOk = Mesher.GenerateMeshCPU(Request, OutMesh, Stats);
 		Mesher.Shutdown();
@@ -673,18 +660,6 @@ namespace MarchingCubesLODBoundaryTestHelpers
 		return BestZ;
 	}
 
-	/** Scoped voxel.Mesh.VoxelLODCrossings (G80: a strided vertex at the voxel crossing on its edge). */
-	struct FScopedVoxelLODCrossings
-	{
-		IConsoleVariable* CVar = nullptr;
-		int32 Prev = 1;
-		explicit FScopedVoxelLODCrossings(int32 Value)
-		{
-			CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Mesh.VoxelLODCrossings"));
-			if (CVar) { Prev = CVar->GetInt(); CVar->Set(Value, ECVF_SetByConsole); }
-		}
-		~FScopedVoxelLODCrossings() { if (CVar) { CVar->Set(Prev, ECVF_SetByConsole); } }
-	};
 } // namespace MarchingCubesLODBoundaryTestHelpers
 using namespace MarchingCubesLODBoundaryTestHelpers;
 
@@ -1458,7 +1433,7 @@ bool FMCLODBoundaryT13BoundaryMorphTest::RunTest(const FString& Parameters)
 	int32 Holes[2] = {};
 	for (int32 Crossings = 0; Crossings < 2; ++Crossings)
 	{
-		FScopedVoxelLODCrossings C(Crossings);
+		VoxelTesting::FScopedCVar C(TEXT("voxel.Mesh.VoxelLODCrossings"), Crossings);
 		FChunkMeshData Coarse;
 		MeshChunk(RequestB, true, Coarse);
 		MeshB = Coarse;

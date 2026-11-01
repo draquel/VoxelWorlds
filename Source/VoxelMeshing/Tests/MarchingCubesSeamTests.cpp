@@ -17,6 +17,7 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelMeshingTypes.h"
 
@@ -452,15 +453,6 @@ bool FMCSeamMCS3Test::RunTest(const FString& Parameters)
 namespace MCSeamTest
 {
 
-/** voxel.Seam.MCReadInPlace for a scope. */
-struct FScopedReadInPlace
-{
-	IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Seam.MCReadInPlace"));
-	int32 Previous = Var ? Var->GetInt() : 1;
-	explicit FScopedReadInPlace(int32 Value) { if (Var) { Var->Set(Value, ECVF_SetByConsole); } }
-	~FScopedReadInPlace() { if (Var) { Var->Set(Previous, ECVF_SetByConsole); } }
-};
-
 /** A planet's local up at 45N 20E. */
 static FVector PlanetUp()
 {
@@ -551,11 +543,11 @@ bool FMCSeamMCS4Test::RunTest(const FString& Parameters)
 			FChunkMeshData Copied, InPlace;
 			bool bOkCopied, bOkInPlace;
 			{
-				FScopedReadInPlace Setting(0);
+				VoxelTesting::FScopedCVar Setting(TEXT("voxel.Seam.MCReadInPlace"), 0);
 				bOkCopied = Mesh(Copied);
 			}
 			{
-				FScopedReadInPlace Setting(1);
+				VoxelTesting::FScopedCVar Setting(TEXT("voxel.Seam.MCReadInPlace"), 1);
 				bOkInPlace = Mesh(InPlace);
 			}
 			++Jobs;

@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "VoxelScatterTestFixtures.h"
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -44,66 +45,22 @@
 
 namespace VoxelScatterReloadTestUtils
 {
+	using namespace VoxelScatterTesting;
+
 	constexpr int32 ChunkSize = 16;
 	constexpr float VoxelSize = 100.0f;
 	constexpr float ChunkWorldSize = ChunkSize * VoxelSize;
 	constexpr int32 TreeID = 2; // VoxelScatterTesting::SmoothDefinitions' trees (SpawnDistance 20,000)
-
-	/** A heightmap world mode whose natural terrain is the plane H = Offset + SlopeX * X + SlopeY * Y. */
-	struct FTiltedPlaneWorldMode : public IVoxelWorldMode
-	{
-		float Offset = 0.0f;
-		float SlopeX = 0.0f;
-		float SlopeY = 0.0f;
-		FTiltedPlaneWorldMode(float InOffset, float InSlopeX, float InSlopeY) : Offset(InOffset), SlopeX(InSlopeX), SlopeY(InSlopeY) {}
-		float GetTerrainHeightAt(float X, float Y, const FVoxelNoiseParams&) const { return Offset + SlopeX * X + SlopeY * Y; }
-		virtual FVoxelTerrainSurfacePoint GetSurfaceOnUpLine(const FVector& P, const FVoxelNoiseParams& N) const override
-		{
-			FVoxelTerrainSurfacePoint S;
-			S.Position = FVector(P.X, P.Y, GetTerrainHeightAt(static_cast<float>(P.X), static_cast<float>(P.Y), N));
-			S.Altitude = static_cast<float>(S.Position.Z);
-			return S;
-		}
-		virtual bool IsHeightmapBased() const override { return true; }
-		virtual float GetDensityAt(const FVector&, int32, float) const override { return 0.0f; }
-		virtual FIntVector WorldToChunkCoord(const FVector&, int32, float) const override { return FIntVector::ZeroValue; }
-		virtual FVector ChunkCoordToWorld(const FIntVector&, int32, float, int32) const override { return FVector::ZeroVector; }
-		virtual int32 GetMinZ() const override { return -100000; }
-		virtual int32 GetMaxZ() const override { return 100000; }
-		virtual EWorldMode GetWorldModeType() const override { return EWorldMode::InfinitePlane; }
-		virtual uint8 GetMaterialAtDepth(const FVector&, float, float) const override { return 0; }
-	};
-
-	/** H = 300.37 + 0.13 X + 0.11 Y: 300 to 1,068 over two chunks each way, inside chunk layer 0, about 10 degrees of slope. */
-	const FTiltedPlaneWorldMode& Plane()
-	{
-		static const FTiltedPlaneWorldMode Mode(300.37f, 0.13f, 0.11f);
-		return Mode;
-	}
 
 	FVector ChunkCenter(const FIntVector& Coord) { return (FVector(Coord) + FVector(0.5)) * ChunkWorldSize; }
 
 	/** A chunk of the plane with the heightmap generator's SDF: grass, with every third column dirt (rocks grow there). */
 	TArray<FVoxelData> MakeChunk(const FIntVector& Coord)
 	{
-		TArray<FVoxelData> Voxels;
-		Voxels.SetNumUninitialized(ChunkSize * ChunkSize * ChunkSize);
-		const FVector Origin = FVector(Coord) * ChunkWorldSize;
-		for (int32 Y = 0; Y < ChunkSize; ++Y)
-		{
-			for (int32 X = 0; X < ChunkSize; ++X)
-			{
-				const float Height = Plane().GetTerrainHeightAt(Origin.X + X * VoxelSize, Origin.Y + Y * VoxelSize, FVoxelNoiseParams());
-				const uint8 Material = ((Coord.X * ChunkSize + X) + (Coord.Y * ChunkSize + Y)) % 3 == 0 ? EVoxelMaterial::Dirt : EVoxelMaterial::Grass;
-				for (int32 Z = 0; Z < ChunkSize; ++Z)
-				{
-					const float SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(static_cast<float>(Origin.Z) + Z * VoxelSize, Height);
-					Voxels[X + Y * ChunkSize + Z * ChunkSize * ChunkSize] =
-						FVoxelData(Material, FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize));
-				}
-			}
-		}
-		return Voxels;
+		// Every third column of the lattice is dirt, the rest grass.
+		return MakeHeightmapChunk(FVector(Coord) * ChunkWorldSize, ChunkSize, VoxelSize,
+			[](double X, double Y) { return TiltedPlane().GetTerrainHeightAt(X, Y, FVoxelNoiseParams()); },
+			[&Coord](int32 X, int32 Y) { return static_cast<uint8>(((Coord.X * ChunkSize + X) + (Coord.Y * ChunkSize + Y)) % 3 == 0 ? EVoxelMaterial::Dirt : EVoxelMaterial::Grass); });
 	}
 
 	/** One spawn point as the digest keys it (type, position to 0.1 uu, yaw, scale, local up). */
@@ -147,29 +104,20 @@ namespace VoxelScatterReloadTestUtils
 	}
 
 	/** Private game world + initialized scatter manager for a smooth world, torn down on destruction. */
-	struct FHarness
+	struct FHarness : VoxelScatterTesting::FScatterTestWorld
 	{
-		UWorld* World = nullptr;
-		UVoxelWorldConfiguration* Config = nullptr;
-		UVoxelScatterManager* Manager = nullptr;
 		FVector Viewer = FVector::ZeroVector;
 
 		explicit FHarness(const TCHAR* WorldName)
+			: FScatterTestWorld(WorldName)
 		{
-			World = UWorld::CreateWorld(EWorldType::Game, false, WorldName);
-			FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
-			Context.SetCurrentWorld(World);
-			Config = NewObject<UVoxelWorldConfiguration>();
 			Config->ChunkSize = ChunkSize;
 			Config->VoxelSize = VoxelSize;
 			Config->ScatterRadius = 100000.0f;
 			Config->MeshingMode = EMeshingMode::DualContouring;
-			Manager = NewObject<UVoxelScatterManager>();
-			Manager->AddToRoot();
-			Manager->Initialize(Config, World);
-			VoxelScatterTesting::AddSmoothDefinitions(*Manager);
+			StartManager(/*bSmoothDefinitions=*/true);
 			Manager->SetSurfacePointSpacing(VoxelSize);
-			Manager->SetWorldMode(&Plane());
+			UseWorldMode(&TiltedPlane());
 
 			// The test definitions have no mesh, so the renderer would make no instance.Give each the engine cube; trees
 			// dense enough that every chunk has some.
@@ -182,21 +130,6 @@ namespace VoxelScatterReloadTestUtils
 					Copy.Density = ID == TreeID ? 0.3f : Copy.Density;
 					Manager->AddScatterDefinition(Copy);
 				}
-			}
-		}
-
-		~FHarness()
-		{
-			if (Manager)
-			{
-				Manager->SetWorldMode(nullptr);
-				Manager->Shutdown();
-				Manager->RemoveFromRoot();
-			}
-			if (World)
-			{
-				GEngine->DestroyWorldContext(World);
-				World->DestroyWorld(false);
 			}
 		}
 
@@ -319,7 +252,7 @@ bool FVoxelScatterReloadSameAsFreshTest::RunTest(const FString& Parameters)
 		Fresh.Submit(Coord);
 	}
 	Fresh.Settle(Near);
-	const FVector ClearAt(ChunkCenter(Target).X, ChunkCenter(Target).Y, Plane().GetTerrainHeightAt(ChunkCenter(Target).X, ChunkCenter(Target).Y, FVoxelNoiseParams()));
+	const FVector ClearAt(ChunkCenter(Target).X, ChunkCenter(Target).Y, TiltedPlane().GetTerrainHeightAt(ChunkCenter(Target).X, ChunkCenter(Target).Y, FVoxelNoiseParams()));
 	Harness.Manager->ClearScatterInRadius(ClearAt, 300.0f);
 	Fresh.Manager->ClearScatterInRadius(ClearAt, 300.0f);
 	Harness.Settle(Near);

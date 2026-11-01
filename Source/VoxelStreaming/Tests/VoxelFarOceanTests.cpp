@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "Testing/VoxelTestChunkWorld.h"
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -249,59 +250,6 @@ bool FVoxelFarOceanGeometryTest::RunTest(const FString& Parameters)
 
 namespace VoxelFarOceanTest
 {
-	/** A renderer that records chunk meshes and water tiles (what the far ocean must never cover). */
-	class FWaterRecordingRenderer : public IVoxelMeshRenderer
-	{
-	public:
-		TSet<FIntVector> Chunks;
-		TSet<FIntVector2> WaterTiles;
-
-		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
-		virtual void Shutdown() override { bInitialized = false; }
-		virtual bool IsInitialized() const override { return bInitialized; }
-		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override { Chunks.Add(ChunkCoord); }
-		virtual void RemoveChunk(const FIntVector& ChunkCoord) override { Chunks.Remove(ChunkCoord); }
-		virtual void ClearAllChunks() override { Chunks.Reset(); }
-		virtual void SetMaterial(UMaterialInterface* Material) override {}
-		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
-		virtual void UpdateMaterialParameters() override {}
-		virtual void UpdateWaterTileMesh(const FIntVector2& TileCoord, const FChunkMeshData& WaterMeshData) override { WaterTiles.Add(TileCoord); }
-		virtual void RemoveWaterTile(const FIntVector2& TileCoord) override { WaterTiles.Remove(TileCoord); }
-		virtual void ClearAllWaterTiles() override { WaterTiles.Reset(); }
-		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return Chunks.Contains(ChunkCoord); }
-		virtual int32 GetLoadedChunkCount() const override { return Chunks.Num(); }
-		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override { OutChunks = Chunks.Array(); }
-		virtual int64 GetGPUMemoryUsage() const override { return 0; }
-		virtual int64 GetTotalVertexCount() const override { return 0; }
-		virtual int64 GetTotalTriangleCount() const override { return 0; }
-		virtual bool GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const override { return false; }
-		virtual FBox GetTotalBounds() const override { return FBox(ForceInit); }
-		virtual FString GetDebugStats() const override { return FString(); }
-		virtual FString GetRendererTypeName() const override { return TEXT("Water recording (test)"); }
-
-		/** Drop the water tiles and chunks, as a recreated terrain proxy does (G15), and report it once. */
-		void SimulateProxyRecreated()
-		{
-			Lost = Chunks.Array();
-			Chunks.Reset();
-			WaterTiles.Reset();
-			bLost = true;
-		}
-		virtual bool ConsumeLostRenderData(TArray<FIntVector>& OutChunks) override
-		{
-			OutChunks.Reset();
-			if (!bLost) { return false; }
-			bLost = false;
-			OutChunks = MoveTemp(Lost);
-			return true;
-		}
-
-	private:
-		bool bInitialized = false;
-		bool bLost = false;
-		TArray<FIntVector> Lost;
-	};
-
 	/** Vertices of a procedural mesh section, or 0. */
 	int32 SectionVertices(UProceduralMeshComponent* Component, int32 Section)
 	{
@@ -358,7 +306,8 @@ bool FVoxelFarOceanStreamingTest::RunTest(const FString& Parameters)
 	AActor* Owner = World->SpawnActor<AActor>();
 	UVoxelChunkManager* Manager = NewObject<UVoxelChunkManager>(Owner);
 	Manager->RegisterComponent();
-	FWaterRecordingRenderer Renderer;
+	VoxelTesting::FRecordingMeshRenderer Renderer;
+	Renderer.bKeepMeshes = false; // the tiles' and chunks' presence is what the test reads
 	Renderer.Initialize(World, Config);
 	Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
 

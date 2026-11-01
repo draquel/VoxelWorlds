@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelBiomeBlendDither.h"
 #include "VoxelBiomeSnapshot.h"
 
@@ -29,31 +30,6 @@
 
 namespace BiomeBlendDitherTestUtils
 {
-	/** Sets voxel.Biome.BlendDither for a scope. */
-	struct FScopedBlendDither
-	{
-		IConsoleVariable* Var = nullptr;
-		int32 Previous = 1;
-
-		explicit FScopedBlendDither(int32 Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Biome.BlendDither"));
-			if (Var)
-			{
-				Previous = Var->GetInt();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-
-		~FScopedBlendDither()
-		{
-			if (Var)
-			{
-				Var->Set(Previous, ECVF_SetByConsole);
-			}
-		}
-	};
-
 	/** A two-biome blend: biome 3 (weight W3) and biome 7 (1 - W3), sorted by weight as GetBiomeBlend sorts them. */
 	FBiomeBlend TwoBiomes(float W3)
 	{
@@ -80,7 +56,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBiomeBlendDitherUniformTest, "VoxelWorlds.Biom
 bool FBiomeBlendDitherUniformTest::RunTest(const FString& Parameters)
 {
 	using namespace BiomeBlendDitherTestUtils;
-	FScopedBlendDither Scoped(1);
+	VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Biome.BlendDither"), 1);
 	FRandomStream Random(39);
 	constexpr int32 N = 2000000;
 	int32 Bins[16] = {};
@@ -121,7 +97,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBiomeBlendDitherPatchesTest, "VoxelWorlds.Biom
 bool FBiomeBlendDitherPatchesTest::RunTest(const FString& Parameters)
 {
 	using namespace BiomeBlendDitherTestUtils;
-	FScopedBlendDither Scoped(1);
+	VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Biome.BlendDither"), 1);
 	const FBiomeBlend Blend = TwoBiomes(0.5f);
 	FRandomStream Random(40);
 	int32 Same[3] = {}, Pairs = 0;
@@ -189,7 +165,7 @@ bool FBiomeBlendDitherNoGridBandsTest::RunTest(const FString& Parameters)
 	const FBiomeBlend Blend = TwoBiomes(0.7f);
 	auto PhaseSpread = [&](int32 Mode, float& OutMin, float& OutMax)
 	{
-		FScopedBlendDither Scoped(Mode);
+		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Biome.BlendDither"), Mode);
 		int32 Count[8] = {}, Took[8] = {};
 		for (int32 X = -600; X < 600; ++X)
 		{
@@ -232,7 +208,7 @@ bool FBiomeBlendDitherDominanceFlipTest::RunTest(const FString& Parameters)
 	// The same voxels with biome 3 just dominant and just not (sorted by weight, so the blend's order flips): a walk in
 	// weight order would read the dither against the other biome; the BiomeID walk changes only voxels between the two
 	// weights.
-	FScopedBlendDither Scoped(1);
+	VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Biome.BlendDither"), 1);
 	const FBiomeBlend Before = TwoBiomes(0.501f);
 	const FBiomeBlend After = TwoBiomes(0.499f);
 	FRandomStream Random(42);

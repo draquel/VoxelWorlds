@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "VoxelScatterTestFixtures.h"
 #include "Misc/AutomationTest.h"
 #include "Testing/VoxelScatterTestDefinitions.h"
 #include "Algo/AllOf.h"
@@ -50,36 +51,12 @@
 
 namespace VoxelScatterLineTopTestUtils
 {
+	using namespace VoxelScatterTesting;
+
 	constexpr float Radius = 250000.0f;
 	constexpr float VoxelSize = 75.0f;
 	constexpr int32 ChunkSize = 32;
 	constexpr double ChunkWorld = ChunkSize * VoxelSize;
-
-	/** VoxelScatterPlanetTests' planet: no biomes, caves or water. */
-	UVoxelWorldConfiguration* MakePlanetConfig()
-	{
-		UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
-		Config->AddToRoot();
-		Config->WorldMode = EWorldMode::SphericalPlanet;
-		Config->WorldOrigin = FVector(1000.0, -2000.0, 500.0);
-		Config->WorldRadius = Radius;
-		Config->PlanetHeightScale = 3000.0f;
-		Config->BaseHeight = 0.0f;
-		Config->PlanetMaxTerrainHeight = 4000.0f;
-		Config->PlanetMaxTerrainDepth = 4000.0f;
-		Config->VoxelSize = VoxelSize;
-		Config->ChunkSize = ChunkSize;
-		Config->bEnableBiomes = false;
-		Config->bEnableCaves = false;
-		Config->bEnableWaterLevel = false;
-		Config->NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-		Config->NoiseParams.Seed = 248675;
-		Config->NoiseParams.Octaves = 3;
-		Config->NoiseParams.Frequency = 0.000025f;
-		Config->NoiseParams.Lacunarity = 1.681f;
-		Config->NoiseParams.Persistence = 0.5f;
-		return Config;
-	}
 
 	FVector ChunkOrigin(const UVoxelWorldConfiguration* Config, const FIntVector& Coord)
 	{
@@ -585,39 +562,15 @@ namespace VoxelScatterLineTopTestUtils
 	}
 
 	/** Private game world + initialized scatter manager (CPU extraction) on the planet, torn down on destruction. */
-	struct FPlanetHarness
+	struct FPlanetHarness : VoxelScatterTesting::FScatterTestWorld
 	{
-		UWorld* World = nullptr;
-		UVoxelWorldConfiguration* Config = nullptr;
-		UVoxelScatterManager* Manager = nullptr;
 
 		explicit FPlanetHarness(UVoxelWorldConfiguration* InConfig)
-			: Config(InConfig)
+			: FScatterTestWorld(TEXT("VoxelScatterLineTopTestWorld"), InConfig)
 		{
-			World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelScatterLineTopTestWorld"));
-			FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
-			Context.SetCurrentWorld(World);
 			Config->ScatterRadius = 100000.0f;
 			Config->MeshingMode = EMeshingMode::MarchingCubes; // planets are smooth (the config's default is cubic)
-			Manager = NewObject<UVoxelScatterManager>();
-			Manager->AddToRoot();
-			Manager->Initialize(Config, World);
-			VoxelScatterTesting::AddSmoothDefinitions(*Manager);
-		}
-
-		~FPlanetHarness()
-		{
-			if (Manager)
-			{
-				Manager->SetWorldMode(nullptr);
-				Manager->Shutdown();
-				Manager->RemoveFromRoot();
-			}
-			if (World)
-			{
-				GEngine->DestroyWorldContext(World);
-				World->DestroyWorld(false);
-			}
+			StartManager(/*bSmoothDefinitions=*/true);
 		}
 
 		/** Submit a chunk as if its mesh just arrived, with the viewer at its centre, and pump until its extraction is done. */
@@ -647,7 +600,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterPlanetLineTopDuplicatesTest,
 bool FVoxelScatterPlanetLineTopDuplicatesTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelScatterLineTopTestUtils;
-	UVoxelWorldConfiguration* Config = MakePlanetConfig();
+	UVoxelWorldConfiguration* Config = MakePlanetScatterConfig();
 	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
 	const TMap<FIntVector, FChunkEditLayer> NoEdits;
 	int32 OldPairs = 0, OldOver = 0;
@@ -690,7 +643,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterPlanetLineTopFlatPadTest,
 bool FVoxelScatterPlanetLineTopFlatPadTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelScatterLineTopTestUtils;
-	UVoxelWorldConfiguration* Config = MakePlanetConfig();
+	UVoxelWorldConfiguration* Config = MakePlanetScatterConfig();
 	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
 	const TMap<FIntVector, FChunkEditLayer> NoEdits;
 
@@ -728,7 +681,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterPlanetLineTopEditsTest,
 bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelScatterLineTopTestUtils;
-	UVoxelWorldConfiguration* Config = MakePlanetConfig();
+	UVoxelWorldConfiguration* Config = MakePlanetScatterConfig();
 	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
 
 	// The neighbours the shell reads: the seven on the +X, +Y and +Z sides, wherever local up points.
@@ -987,7 +940,7 @@ namespace VoxelScatterPlanetFaceCavesTestUtils
 
 		FCaveSetup()
 		{
-			Config = MakePlanetConfig();
+			Config = MakePlanetScatterConfig();
 			Config->bEnableBiomes = true;
 			Biomes = NewObject<UVoxelBiomeConfiguration>();
 			Biomes->AddToRoot();

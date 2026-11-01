@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelCPUDualContourMesher.h"
+#include "VoxelMeshingTestFixtures.h"
 #include "VoxelMeshingTypes.h"
 #include "ChunkRenderData.h"
 #include "VoxelData.h"
@@ -19,63 +20,7 @@
 
 namespace VoxelMixedSeamTestUtils
 {
-	constexpr int32 TestChunkSize = 32;
-	constexpr float TestVoxelSize = 100.0f;
-
-	static TArray<FVoxelData> FillVoxels(const FIntVector& ChunkOffsetVoxels,
-		TFunctionRef<bool(int32, int32, int32)> SolidFn)
-	{
-		TArray<FVoxelData> Data;
-		Data.SetNumUninitialized(TestChunkSize * TestChunkSize * TestChunkSize);
-		for (int32 Z = 0; Z < TestChunkSize; ++Z)
-		{
-			for (int32 Y = 0; Y < TestChunkSize; ++Y)
-			{
-				for (int32 X = 0; X < TestChunkSize; ++X)
-				{
-					const int32 Index = X + Y * TestChunkSize + Z * TestChunkSize * TestChunkSize;
-					const bool bSolid = SolidFn(X + ChunkOffsetVoxels.X, Y + ChunkOffsetVoxels.Y, Z + ChunkOffsetVoxels.Z);
-					Data[Index] = bSolid ? FVoxelData::Solid(1, 0) : FVoxelData::Air();
-				}
-			}
-		}
-		return Data;
-	}
-
-	/** FillVoxels wrapped as the shared immutable snapshot the seam requests carry. */
-	static TSharedPtr<const TArray<FVoxelData>> SharedVoxels(const FIntVector& ChunkOffsetVoxels,
-		TFunctionRef<bool(int32, int32, int32)> SolidFn)
-	{
-		return MakeShared<TArray<FVoxelData>>(FillVoxels(ChunkOffsetVoxels, SolidFn));
-	}
-
-	static FVoxelMeshingConfig MakeConfig()
-	{
-		FVoxelMeshingConfig Config;
-		Config.IsoLevel = 0.5f;
-		Config.bGenerateUVs = true;
-		Config.bCalculateAO = false;
-		Config.QEFSVDThreshold = 0.1f;
-		return Config;
-	}
-
-	static bool MeshInterior(const FIntVector& ChunkOffsetVoxels, int32 LOD,
-		TFunctionRef<bool(int32, int32, int32)> SolidFn, FChunkMeshData& Out)
-	{
-		FVoxelMeshingRequest Request;
-		Request.LODLevel = LOD;
-		Request.ChunkSize = TestChunkSize;
-		Request.VoxelSize = TestVoxelSize;
-		Request.MeshCellDomain = EVoxelMeshCellDomain::Interior;
-		Request.VoxelData = FillVoxels(ChunkOffsetVoxels, SolidFn);
-
-		FVoxelCPUDualContourMesher Mesher;
-		Mesher.Initialize();
-		Mesher.SetConfig(MakeConfig());
-		const bool bOk = Mesher.GenerateMeshCPU(Request, Out);
-		Mesher.Shutdown();
-		return bOk;
-	}
+	using namespace VoxelMeshingTestFixtures;
 
 	/** Mixed-LOD +X face seam between A at (0,0,0) [LODA] and B at (1,0,0) [LODB]. */
 	static bool MeshMixedFaceSeamX(int32 LODA, int32 LODB,
@@ -92,44 +37,10 @@ namespace VoxelMixedSeamTestUtils
 
 		FVoxelCPUDualContourMesher Mesher;
 		Mesher.Initialize();
-		Mesher.SetConfig(MakeConfig());
+		Mesher.SetConfig(MakeDCConfig());
 		const bool bOk = Mesher.GenerateFaceSeamMeshCPU(Seam, Out);
 		Mesher.Shutdown();
 		return bOk;
-	}
-
-	static FString PosKey(const FVector3f& P)
-	{
-		return BytesToHex(reinterpret_cast<const uint8*>(&P), sizeof(FVector3f));
-	}
-
-	static void AccumulateEdges(const FChunkMeshData& M, const FVector3f& Offset, TMap<FString, int32>& EdgeUse)
-	{
-		const int32 TriCount = M.Indices.Num() / 3;
-		for (int32 T = 0; T < TriCount; ++T)
-		{
-			FVector3f P[3];
-			for (int32 i = 0; i < 3; ++i)
-			{
-				P[i] = M.Positions[M.Indices[T * 3 + i]] + Offset;
-			}
-			for (int32 i = 0; i < 3; ++i)
-			{
-				const FString KA = PosKey(P[i]);
-				const FString KB = PosKey(P[(i + 1) % 3]);
-				if (KA == KB)
-				{
-					continue;
-				}
-				const FString Key = (KA < KB) ? (KA + KB) : (KB + KA);
-				EdgeUse.FindOrAdd(Key)++;
-			}
-		}
-	}
-
-	static bool FlatGround(int32 X, int32 Y, int32 Z)
-	{
-		return Z <= 12;
 	}
 
 	static bool SlopedGround(int32 X, int32 Y, int32 Z)
@@ -196,7 +107,7 @@ namespace VoxelMixedSeamTestUtils
 
 		FVoxelCPUDualContourMesher Mesher;
 		Mesher.Initialize();
-		Mesher.SetConfig(MakeConfig());
+		Mesher.SetConfig(MakeDCConfig());
 		const bool bOk = Mesher.GenerateMeshCPU(Request, Out);
 		Mesher.Shutdown();
 		return bOk;
@@ -217,7 +128,7 @@ namespace VoxelMixedSeamTestUtils
 
 		FVoxelCPUDualContourMesher Mesher;
 		Mesher.Initialize();
-		Mesher.SetConfig(MakeConfig());
+		Mesher.SetConfig(MakeDCConfig());
 		const bool bOk = Mesher.GenerateFaceSeamMeshCPU(Seam, Out);
 		Mesher.Shutdown();
 		return bOk;

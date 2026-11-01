@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "Testing/VoxelTestChunkWorld.h"
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -30,39 +31,6 @@
 
 namespace VoxelCubicGameplayTestUtils
 {
-	/** A renderer that accepts everything and keeps nothing. */
-	class FNullMeshRenderer : public IVoxelMeshRenderer
-	{
-	public:
-		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
-		virtual void Shutdown() override { bInitialized = false; }
-		virtual bool IsInitialized() const override { return bInitialized; }
-		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override { Chunks.Add(ChunkCoord); }
-		virtual void RemoveChunk(const FIntVector& ChunkCoord) override { Chunks.Remove(ChunkCoord); }
-		virtual void ClearAllChunks() override { Chunks.Reset(); }
-		virtual void SetMaterial(UMaterialInterface* Material) override {}
-		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
-		virtual void UpdateMaterialParameters() override {}
-		virtual void UpdateSeamMeshFromCPU(const FIntVector& OwnerChunkCoord, uint8 SeamSlot, int32 LODLevel, FChunkMeshData&& MeshData, bool bCrossfade) override {}
-		virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 SeamSlot) override {}
-		virtual void ClearAllSeamMeshes() override {}
-		virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override { OutOwners.Reset(); }
-		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return Chunks.Contains(ChunkCoord); }
-		virtual int32 GetLoadedChunkCount() const override { return Chunks.Num(); }
-		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override { OutChunks = Chunks.Array(); }
-		virtual int64 GetGPUMemoryUsage() const override { return 0; }
-		virtual int64 GetTotalVertexCount() const override { return 0; }
-		virtual int64 GetTotalTriangleCount() const override { return 0; }
-		virtual bool GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const override { return false; }
-		virtual FBox GetTotalBounds() const override { return FBox(ForceInit); }
-		virtual FString GetDebugStats() const override { return FString(); }
-		virtual FString GetRendererTypeName() const override { return TEXT("Null (test)"); }
-
-	private:
-		bool bInitialized = false;
-		TSet<FIntVector> Chunks;
-	};
-
 	/** Two tree templates: a 1x1 trunk under a sphere and a cross trunk under a cone (both the cubic demo's materials). */
 	TArray<FVoxelTreeTemplate> MakeTreeTemplates()
 	{
@@ -85,13 +53,8 @@ namespace VoxelCubicGameplayTestUtils
 	}
 
 	/** A small world streamed around a fixed viewer by a real chunk manager (CPU generation, no caves or water). */
-	struct FGameplayWorld
+	struct FGameplayWorld : VoxelTesting::FTestChunkWorld
 	{
-		UWorld* World = nullptr;
-		UVoxelWorldConfiguration* Config = nullptr;
-		AActor* Owner = nullptr;
-		UVoxelChunkManager* Manager = nullptr;
-		FNullMeshRenderer Renderer;
 
 		/**
 		 * @param MeshingMode Cubic or a smooth mesher
@@ -100,12 +63,8 @@ namespace VoxelCubicGameplayTestUtils
 		 */
 		void Start(const TCHAR* WorldName, EMeshingMode MeshingMode, bool bTrees, const FVoxelConditioningZone& Zone)
 		{
-			World = UWorld::CreateWorld(EWorldType::Game, false, WorldName);
-			FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
-			WorldContext.SetCurrentWorld(World);
-
-			Config = NewObject<UVoxelWorldConfiguration>();
-			Config->AddToRoot();
+			Create(WorldName);
+			Renderer.bKeepMeshes = false; // the chunk set is enough here
 			Config->WorldMode = EWorldMode::InfinitePlane;
 			Config->MeshingMode = MeshingMode;
 			Config->bUseGreedyMeshing = true;
@@ -130,54 +89,25 @@ namespace VoxelCubicGameplayTestUtils
 			Config->TreeTemplates = bTrees ? MakeTreeTemplates() : TArray<FVoxelTreeTemplate>();
 			Config->TreeDensity = bTrees ? 4.0f : 0.0f;
 			Config->TreeMode = EVoxelTreeMode::VoxelData;
-			for (FLODBand& Band : Config->LODBands)
-			{
-				Band.MaxDistance = FMath::Min(Band.MaxDistance, Config->ViewDistance);
-				Band.MinDistance = FMath::Min(Band.MinDistance, Config->ViewDistance);
-			}
-			Config->LODBands.RemoveAll([this](const FLODBand& Band) { return Band.MinDistance >= Config->ViewDistance; });
+			ClampLODBandsToViewDistance();
 
-			Owner = World->SpawnActor<AActor>();
-			Manager = NewObject<UVoxelChunkManager>(Owner);
-			Manager->RegisterComponent();
+			SpawnManager();
 			if (Zone.InnerRadius > 0.0f)
 			{
 				Manager->AddConditioningZone(Zone);
 			}
-			Renderer.Initialize(World, Config);
-			Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
+			InitializeManager();
 
 			const FVector Viewer = Config->WorldOrigin;
 			const float SurfaceZ = Manager->GetGeneratedSurfacePoint(FVector(Viewer.X, Viewer.Y, 0.0)).Z;
-			Manager->ResetBenchCounters();
-			Manager->SetBenchmarkView(true, FVector(Viewer.X, Viewer.Y, SurfaceZ + 200.0));
+			SetViewer(FVector(Viewer.X, Viewer.Y, SurfaceZ + 200.0));
 		}
 
 		/** Tick until the pipeline has been idle for 60 ticks; false if it does not settle within 90 s. */
 		bool Settle()
 		{
-			int32 IdleTicks = 0;
-			const double Deadline = FPlatformTime::Seconds() + 90.0;
-			while (IdleTicks < 60 && FPlatformTime::Seconds() < Deadline)
-			{
-				Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
-				const bool bIdle = Manager->GetPendingGenerationCount() == 0 && Manager->GetPendingMeshingCount() == 0
-					&& Manager->GetAsyncGenerationInProgressCount() == 0 && Manager->GetAsyncMeshingInProgressCount() == 0
-					&& Manager->GetPendingMeshUploadCount() == 0 && Manager->GetSeamJobsInFlightCount() == 0;
-				IdleTicks = bIdle ? IdleTicks + 1 : 0;
-				FPlatformProcess::Sleep(0.002f);
-			}
-			return IdleTicks >= 60;
-		}
-
-		void Stop()
-		{
-			Manager->SetBenchmarkView(false, FVector::ZeroVector);
-			Manager->Shutdown();
-			Owner->Destroy();
-			GEngine->DestroyWorldContext(World);
-			World->DestroyWorld(false);
-			Config->RemoveFromRoot();
+			SettleIdleTicks = 60;
+			return FTestChunkWorld::Settle(90.0);
 		}
 
 		/** Centre of a global voxel's cell. */

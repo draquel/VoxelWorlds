@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "VoxelScatterTestFixtures.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelScatterManager.h"
 #include "VoxelScatterTypes.h"
@@ -29,38 +30,11 @@
 
 namespace VoxelScatterPlanetTestUtils
 {
+	using namespace VoxelScatterTesting;
+
 	constexpr float Radius = 250000.0f;
 	constexpr float VoxelSize = 75.0f;
 	constexpr int32 ChunkSize = 32;
-
-	/**
-	 * A planet like Review_Planet; with AtScale one like Review_Planet_L (R 10^8, its terrain noise: the small planet's
-	 * scaled by K 64 with six more octaves, relief to +-192,000; spherical Phase 6, WM-BP11).
-	 */
-	UVoxelWorldConfiguration* MakePlanetConfig(bool bAtScale = false)
-	{
-		UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
-		Config->AddToRoot();
-		Config->WorldMode = EWorldMode::SphericalPlanet;
-		Config->WorldOrigin = FVector(1000.0, -2000.0, 500.0);
-		Config->WorldRadius = bAtScale ? 1.0e8f : Radius;
-		Config->PlanetHeightScale = bAtScale ? 192000.0f : 3000.0f;
-		Config->BaseHeight = 0.0f;
-		Config->PlanetMaxTerrainHeight = bAtScale ? 250000.0f : 4000.0f;
-		Config->PlanetMaxTerrainDepth = bAtScale ? 250000.0f : 4000.0f;
-		Config->VoxelSize = VoxelSize;
-		Config->ChunkSize = ChunkSize;
-		Config->bEnableBiomes = false;
-		Config->bEnableCaves = false;
-		Config->bEnableWaterLevel = false;
-		Config->NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
-		Config->NoiseParams.Seed = 248675;
-		Config->NoiseParams.Octaves = bAtScale ? 9 : 3;
-		Config->NoiseParams.Frequency = bAtScale ? 0.000025f / 64.0f : 0.000025f;
-		Config->NoiseParams.Lacunarity = 1.681f;
-		Config->NoiseParams.Persistence = 0.5f;
-		return Config;
-	}
 
 	/**
 	 * The surface points of the 3x3x3 chunks around a site, extracted along local up at one point per voxel. With
@@ -148,7 +122,7 @@ bool FVoxelScatterPlanetAlongLocalUpAtScaleTest::RunTest(const FString& Paramete
 
 void VoxelScatterPlanetTestUtils::RunAlongLocalUp(FAutomationTestBase& Test, bool bAtScale)
 {
-	UVoxelWorldConfiguration* Config = MakePlanetConfig(bAtScale);
+	UVoxelWorldConfiguration* Config = MakePlanetScatterConfig(bAtScale);
 	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
 	const FVector Center = Config->WorldOrigin;
 
@@ -209,7 +183,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterPlanetConditionedLineTopTest,
 bool FVoxelScatterPlanetConditionedLineTopTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelScatterPlanetTestUtils;
-	UVoxelWorldConfiguration* Config = MakePlanetConfig();
+	UVoxelWorldConfiguration* Config = MakePlanetScatterConfig();
 	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
 	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*Mode);
 	const FVector Center = Config->WorldOrigin;
@@ -252,7 +226,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterPlanetDensityTest,
 bool FVoxelScatterPlanetDensityTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelScatterPlanetTestUtils;
-	UVoxelWorldConfiguration* Config = MakePlanetConfig();
+	UVoxelWorldConfiguration* Config = MakePlanetScatterConfig();
 	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
 	const FVector Center = Config->WorldOrigin;
 

@@ -5,6 +5,7 @@
 #include "VoxelEditManager.h"
 #include "VoxelWorldConfiguration.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -279,31 +280,6 @@ bool FVoxelEditUndoRedoRecordsTest::RunTest(const FString& Parameters)
 
 namespace VoxelEditUndoRedoTestUtils
 {
-	/** Sets voxel.Edit.UndoHistoryMB at console priority for a scope. */
-	struct FScopedUndoHistoryMB
-	{
-		IConsoleVariable* Var = nullptr;
-		float Previous = 32.0f;
-
-		explicit FScopedUndoHistoryMB(float Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Edit.UndoHistoryMB"));
-			if (Var)
-			{
-				Previous = Var->GetFloat();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-
-		~FScopedUndoHistoryMB()
-		{
-			if (Var)
-			{
-				Var->Set(Previous, ECVF_SetByConsole);
-			}
-		}
-	};
-
 	/** Twelve digs of radius 3 voxels a few voxels apart (about 110 voxels and 13 KB of history each). */
 	void DigTwelve(UVoxelEditManager& Manager, TArray<FLayerSnapshot>* OutAfterEach = nullptr)
 	{
@@ -329,7 +305,7 @@ bool FVoxelEditUndoHistoryBudgetTest::RunTest(const FString& Parameters)
 	// ---- No budget: the twelve digs are all kept. ----
 	int64 TwelveBytes = 0;
 	{
-		FScopedUndoHistoryMB Scoped(0.0f);
+		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Edit.UndoHistoryMB"), 0.0f);
 		UVoxelEditManager* Manager = MakeManager();
 		DigTwelve(*Manager);
 		TwelveBytes = Manager->GetHistoryMemoryUsage();
@@ -340,7 +316,7 @@ bool FVoxelEditUndoHistoryBudgetTest::RunTest(const FString& Parameters)
 	// ---- A budget of about a third of that: the oldest are dropped, the history within it, the rest undoes exactly. ----
 	{
 		const float BudgetMB = static_cast<float>(TwelveBytes / 3) / (1024.0f * 1024.0f);
-		FScopedUndoHistoryMB Scoped(BudgetMB);
+		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Edit.UndoHistoryMB"), BudgetMB);
 		UVoxelEditManager* Manager = MakeManager();
 		TArray<FLayerSnapshot> AfterEach;
 		DigTwelve(*Manager, &AfterEach);
@@ -367,7 +343,7 @@ bool FVoxelEditUndoHistoryBudgetTest::RunTest(const FString& Parameters)
 
 	// ---- A budget smaller than one operation: the newest is still kept, alone. ----
 	{
-		FScopedUndoHistoryMB Scoped(0.001f);
+		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Edit.UndoHistoryMB"), 0.001f);
 		UVoxelEditManager* Manager = MakeManager();
 		DigTwelve(*Manager);
 		TestEqual(TEXT("Tiny budget: the newest operation kept"), Manager->GetUndoCount(), 1);

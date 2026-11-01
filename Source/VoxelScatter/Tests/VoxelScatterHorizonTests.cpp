@@ -1,12 +1,14 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "VoxelScatterTestFixtures.h"
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "Testing/VoxelScatterTestDefinitions.h"
 #include "Engine/StaticMesh.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelScatterManager.h"
 #include "VoxelScatterRenderer.h"
 #include "VoxelScatterTypes.h"
@@ -39,6 +41,8 @@
 
 namespace VoxelScatterHorizonTestUtils
 {
+	using namespace VoxelScatterTesting;
+
 	constexpr int32 ChunkSize = 16;
 	constexpr float VoxelSize = 100.0f;
 	constexpr float ChunkWorldSize = ChunkSize * VoxelSize;
@@ -47,84 +51,17 @@ namespace VoxelScatterHorizonTestUtils
 	constexpr int32 RockID = 1;
 	constexpr int32 TreeID = 2; // VoxelScatterTesting::SmoothDefinitions' trees (SpawnDistance 20,000)
 
-	struct FScopedCVar
-	{
-		IConsoleVariable* Var = nullptr;
-		FString Previous;
-		EConsoleVariableFlags Priority = ECVF_SetByCode;
-		FScopedCVar(const TCHAR* Name, const TCHAR* Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(Name);
-			if (Var)
-			{
-				Previous = Var->GetString();
-				Priority = static_cast<EConsoleVariableFlags>(FMath::Max(static_cast<uint32>(Var->GetFlags() & ECVF_SetByMask), static_cast<uint32>(ECVF_SetByCode)));
-				Var->Set(Value, Priority);
-			}
-		}
-		~FScopedCVar()
-		{
-			if (Var)
-			{
-				Var->Set(*Previous, Priority);
-			}
-		}
-	};
-
-	/** A heightmap world mode whose natural terrain is the plane H = Offset + SlopeX * X + SlopeY * Y. */
-	struct FTiltedPlaneWorldMode : public IVoxelWorldMode
-	{
-		float Offset = 0.0f;
-		float SlopeX = 0.0f;
-		float SlopeY = 0.0f;
-		FTiltedPlaneWorldMode(float InOffset, float InSlopeX, float InSlopeY) : Offset(InOffset), SlopeX(InSlopeX), SlopeY(InSlopeY) {}
-		float GetTerrainHeightAt(float X, float Y, const FVoxelNoiseParams&) const { return Offset + SlopeX * X + SlopeY * Y; }
-		virtual FVoxelTerrainSurfacePoint GetSurfaceOnUpLine(const FVector& P, const FVoxelNoiseParams& N) const override
-		{
-			FVoxelTerrainSurfacePoint S;
-			S.Position = FVector(P.X, P.Y, GetTerrainHeightAt(static_cast<float>(P.X), static_cast<float>(P.Y), N));
-			S.Altitude = static_cast<float>(S.Position.Z);
-			return S;
-		}
-		virtual bool IsHeightmapBased() const override { return true; }
-		virtual float GetDensityAt(const FVector&, int32, float) const override { return 0.0f; }
-		virtual FIntVector WorldToChunkCoord(const FVector&, int32, float) const override { return FIntVector::ZeroValue; }
-		virtual FVector ChunkCoordToWorld(const FIntVector&, int32, float, int32) const override { return FVector::ZeroVector; }
-		virtual int32 GetMinZ() const override { return -100000; }
-		virtual int32 GetMaxZ() const override { return 100000; }
-		virtual EWorldMode GetWorldModeType() const override { return EWorldMode::InfinitePlane; }
-		virtual uint8 GetMaterialAtDepth(const FVector&, float, float) const override { return 0; }
-	};
-
-	const FTiltedPlaneWorldMode& Plane()
-	{
-		static const FTiltedPlaneWorldMode Mode(300.37f, 0.13f, 0.11f);
-		return Mode;
-	}
+	using FScopedCVar = VoxelTesting::FScopedCVar; // the one scoped cvar (code review CR2 row 17)
 
 	FVector ChunkCenter(const FIntVector& Coord) { return (FVector(Coord) + FVector(0.5)) * ChunkWorldSize; }
 
 	/** A chunk of the plane with the heightmap generator's SDF: grass, with every third column dirt (rocks grow there). */
 	TArray<FVoxelData> MakeChunk(const FIntVector& Coord)
 	{
-		TArray<FVoxelData> Voxels;
-		Voxels.SetNumUninitialized(ChunkSize * ChunkSize * ChunkSize);
-		const FVector Origin = FVector(Coord) * ChunkWorldSize;
-		for (int32 Y = 0; Y < ChunkSize; ++Y)
-		{
-			for (int32 X = 0; X < ChunkSize; ++X)
-			{
-				const float Height = Plane().GetTerrainHeightAt(Origin.X + X * VoxelSize, Origin.Y + Y * VoxelSize, FVoxelNoiseParams());
-				const uint8 Material = ((Coord.X * ChunkSize + X) + (Coord.Y * ChunkSize + Y)) % 3 == 0 ? EVoxelMaterial::Dirt : EVoxelMaterial::Grass;
-				for (int32 Z = 0; Z < ChunkSize; ++Z)
-				{
-					const float SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(static_cast<float>(Origin.Z) + Z * VoxelSize, Height);
-					Voxels[X + Y * ChunkSize + Z * ChunkSize * ChunkSize] =
-						FVoxelData(Material, FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize));
-				}
-			}
-		}
-		return Voxels;
+		// Every third column of the lattice is dirt, the rest grass.
+		return MakeHeightmapChunk(FVector(Coord) * ChunkWorldSize, ChunkSize, VoxelSize,
+			[](double X, double Y) { return TiltedPlane().GetTerrainHeightAt(X, Y, FVoxelNoiseParams()); },
+			[&Coord](int32 X, int32 Y) { return static_cast<uint8>(((Coord.X * ChunkSize + X) + (Coord.Y * ChunkSize + Y)) % 3 == 0 ? EVoxelMaterial::Dirt : EVoxelMaterial::Grass); });
 	}
 
 	FString SpawnKey(const FScatterSpawnPoint& Point)
@@ -147,32 +84,23 @@ namespace VoxelScatterHorizonTestUtils
 	};
 
 	/** Private game world + initialized scatter manager; the "chunk manager" is a set of loaded chunks the requester resubmits from. */
-	struct FHarness
+	struct FHarness : VoxelScatterTesting::FScatterTestWorld
 	{
-		UWorld* World = nullptr;
-		UVoxelWorldConfiguration* Config = nullptr;
-		UVoxelScatterManager* Manager = nullptr;
 		FVector Viewer = FVector::ZeroVector;
 		TSet<FIntVector> Loaded;
 		int32 Requests = 0;
 		int32 RequestsForUnloaded = 0;
 
 		explicit FHarness(const TCHAR* WorldName)
+			: FScatterTestWorld(WorldName)
 		{
-			World = UWorld::CreateWorld(EWorldType::Game, false, WorldName);
-			FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
-			Context.SetCurrentWorld(World);
-			Config = NewObject<UVoxelWorldConfiguration>();
 			Config->ChunkSize = ChunkSize;
 			Config->VoxelSize = VoxelSize;
 			Config->ScatterRadius = ScatterRadius;
 			Config->MeshingMode = EMeshingMode::DualContouring;
-			Manager = NewObject<UVoxelScatterManager>();
-			Manager->AddToRoot();
-			Manager->Initialize(Config, World);
-			VoxelScatterTesting::AddSmoothDefinitions(*Manager);
+			StartManager(/*bSmoothDefinitions=*/true);
 			Manager->SetSurfacePointSpacing(VoxelSize);
-			Manager->SetWorldMode(&Plane());
+			UseWorldMode(&TiltedPlane());
 			for (const int32 ID : { GrassID, RockID, TreeID })
 			{
 				if (const FScatterDefinition* Def = Manager->GetScatterDefinition(ID))
@@ -195,21 +123,6 @@ namespace VoxelScatterHorizonTestUtils
 				Manager->OnChunkMeshDataReady(Coord, MakeChunk(Coord), ChunkSize, VoxelSize);
 				return true;
 			});
-		}
-
-		~FHarness()
-		{
-			if (Manager)
-			{
-				Manager->SetWorldMode(nullptr);
-				Manager->Shutdown();
-				Manager->RemoveFromRoot();
-			}
-			if (World)
-			{
-				GEngine->DestroyWorldContext(World);
-				World->DestroyWorld(false);
-			}
 		}
 
 		void Update() { Manager->Update(Viewer, 0.05f); }

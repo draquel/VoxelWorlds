@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "VoxelScatterTestFixtures.h"
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -28,59 +29,20 @@
 
 namespace VoxelScatterBoundaryTestUtils
 {
+	using namespace VoxelScatterTesting;
+
 	constexpr int32 ChunkSize = 16;
 	constexpr float VoxelSize = 100.0f;
 	constexpr float ChunkWorldSize = ChunkSize * VoxelSize;
-
-	/** A heightmap world mode whose natural terrain is the plane H = Offset + SlopeX * X + SlopeY * Y. */
-	struct FTiltedPlaneWorldMode : public IVoxelWorldMode
-	{
-		float Offset = 0.0f;
-		float SlopeX = 0.0f;
-		float SlopeY = 0.0f;
-		FTiltedPlaneWorldMode(float InOffset, float InSlopeX, float InSlopeY) : Offset(InOffset), SlopeX(InSlopeX), SlopeY(InSlopeY) {}
-		float GetTerrainHeightAt(float X, float Y, const FVoxelNoiseParams&) const { return Offset + SlopeX * X + SlopeY * Y; }
-		virtual FVoxelTerrainSurfacePoint GetSurfaceOnUpLine(const FVector& P, const FVoxelNoiseParams& N) const override
-		{
-			FVoxelTerrainSurfacePoint S;
-			S.Position = FVector(P.X, P.Y, GetTerrainHeightAt(static_cast<float>(P.X), static_cast<float>(P.Y), N));
-			S.Altitude = static_cast<float>(S.Position.Z);
-			return S;
-		}
-		virtual bool IsHeightmapBased() const override { return true; }
-		virtual float GetDensityAt(const FVector&, int32, float) const override { return 0.0f; }
-		virtual FIntVector WorldToChunkCoord(const FVector&, int32, float) const override { return FIntVector::ZeroValue; }
-		virtual FVector ChunkCoordToWorld(const FIntVector&, int32, float, int32) const override { return FVector::ZeroVector; }
-		virtual int32 GetMinZ() const override { return -100000; }
-		virtual int32 GetMaxZ() const override { return 100000; }
-		virtual EWorldMode GetWorldModeType() const override { return EWorldMode::InfinitePlane; }
-		virtual uint8 GetMaterialAtDepth(const FVector&, float, float) const override { return 0; }
-
-		float HeightAt(double X, double Y) const { return GetTerrainHeightAt(static_cast<float>(X), static_cast<float>(Y), FVoxelNoiseParams()); }
-	};
 
 	FVector ChunkOrigin(const FIntVector& Coord) { return FVector(Coord) * ChunkWorldSize; }
 
 	/** A chunk generated from the world mode's height with the heightmap generator's SDF (grass, no caves). */
 	TArray<FVoxelData> MakeChunk(const FIntVector& Coord, const FTiltedPlaneWorldMode& Mode)
 	{
-		TArray<FVoxelData> Voxels;
-		Voxels.SetNumUninitialized(ChunkSize * ChunkSize * ChunkSize);
-		const FVector Origin = ChunkOrigin(Coord);
-		for (int32 Y = 0; Y < ChunkSize; ++Y)
-		{
-			for (int32 X = 0; X < ChunkSize; ++X)
-			{
-				const float Height = Mode.HeightAt(Origin.X + X * VoxelSize, Origin.Y + Y * VoxelSize);
-				for (int32 Z = 0; Z < ChunkSize; ++Z)
-				{
-					const float SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(static_cast<float>(Origin.Z) + Z * VoxelSize, Height);
-					Voxels[X + Y * ChunkSize + Z * ChunkSize * ChunkSize] =
-						FVoxelData(EVoxelMaterial::Grass, FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize));
-				}
-			}
-		}
-		return Voxels;
+		return MakeHeightmapChunk(ChunkOrigin(Coord), ChunkSize, VoxelSize,
+			[&Mode](double X, double Y) { return Mode.HeightAt(X, Y); },
+			[](int32, int32) { return static_cast<uint8>(EVoxelMaterial::Grass); });
 	}
 }
 

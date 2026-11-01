@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelCPUDualContourMesher.h"
+#include "VoxelMeshingTestFixtures.h"
 #include "VoxelMeshingTypes.h"
 #include "ChunkRenderData.h"
 #include "VoxelData.h"
@@ -20,8 +21,7 @@
 
 namespace VoxelInteriorDomainTestUtils
 {
-	constexpr int32 TestChunkSize = 32;
-	constexpr float TestVoxelSize = 100.0f;
+	using namespace VoxelMeshingTestFixtures;
 
 	/** Build a request over a density lambda: Fn(VX,VY,VZ) -> solid? No neighbor data. */
 	static FVoxelMeshingRequest MakeRequest(int32 LODLevel, EVoxelMeshCellDomain Domain,
@@ -55,29 +55,12 @@ namespace VoxelInteriorDomainTestUtils
 		return (DX * DX + DY * DY + DZ * DZ) <= (8.0f * 8.0f);
 	}
 
-	/** Flat ground: solid at and below voxel Z = 12 — the surface crosses every side boundary. */
-	static bool FlatGround(int32 X, int32 Y, int32 Z)
-	{
-		return Z <= 12;
-	}
-
-	/** DC mesher config matching the DT harness: smooth meshing, default QEF params, skirts off. */
-	static FVoxelMeshingConfig MakeConfig()
-	{
-		FVoxelMeshingConfig Config;
-		Config.IsoLevel = 0.5f;
-		Config.bGenerateUVs = true;
-		Config.bCalculateAO = false;
-		Config.QEFSVDThreshold = 0.1f;
-		return Config;
-	}
-
 	/** Mesh a request with a locally-initialized DC mesher. */
 	static bool Mesh(const FVoxelMeshingRequest& Request, FChunkMeshData& Out)
 	{
 		FVoxelCPUDualContourMesher Mesher;
 		Mesher.Initialize();
-		Mesher.SetConfig(MakeConfig());
+		Mesher.SetConfig(MakeDCConfig());
 		const bool bOk = Mesher.GenerateMeshCPU(Request, Out);
 		Mesher.Shutdown();
 		return bOk;
