@@ -21,6 +21,7 @@
 #include "VoxelLODEvalSchedule.h"
 #include "VoxelWorldComponentOwners.h"
 #include "VoxelWaterTiles.h"
+#include "VoxelStreamingViewerPolicy.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelSurfaceQuery.h"
 #include "VoxelTreeInjector.h"
@@ -218,34 +219,6 @@ struct FVoxelWorldReportNotes
 
 	/** At the end of the cut-over line (a flight in progress, the landing hold). */
 	FString Cutover;
-};
-
-/**
- * A change of a planet window's cut-over state (spherical Phase 6, WM-BP10), as the chunk manager records it for the
- * bench, the log and tests (G49, WORLD_MODES_REVIEW_PLAN.md §20.28): when the window resumed or suspended, where the
- * camera and the streaming viewer were, and for a suspension what the window had done since it last resumed.
- */
-struct FVoxelCutoverTransition
-{
-	/** Seconds of streaming ticks since the world started, and the state entered: true = suspended, false = resumed. */
-	double Time = 0.0;
-	bool bSuspended = false;
-
-	/** The camera's and the streaming viewer's altitude over the surface under them (uu), and the prefetch's lead. */
-	double CameraOverSurface = 0.0;
-	double ViewerOverSurface = 0.0;
-	double Lead = 0.0;
-
-	/** Suspensions: seconds since the window last resumed (-1: active since the world started, never resumed). */
-	double ActiveSeconds = -1.0;
-
-	/** Suspensions: chunks loaded when it suspended (all of them unload), and queued generations evicted then. */
-	int32 ChunksHeld = 0;
-	int32 GenerationsDropped = 0;
-
-	/** Suspensions: chunks generated and meshed since the window last resumed (since the world started if it never did). */
-	int64 GeneratedSinceResume = 0;
-	int64 MeshedSinceResume = 0;
 };
 
 /**
@@ -1033,32 +1006,22 @@ public:
 	FVector GetStreamingViewerPosition() const { return CurrentViewerPosition; }
 
 	/** How far under the camera the streaming viewer is this tick (uu along local down; 0 = at the camera). */
-	double GetStreamingViewerLead() const { return StreamingViewerLead; }
+	double GetStreamingViewerLead() const { return ViewerPolicy.GetLead(); }
 
 	/**
 	 * The window's cut-over transitions since the world started, oldest first (at most MaxCutoverTransitions kept; the
 	 * count of all of them is GetCutoverTransitionCount). G49's instrument: a suspension soon after a resume, with the
 	 * chunks it held and the generations it dropped, is the window resumed for nothing.
 	 */
-	const TArray<FVoxelCutoverTransition>& GetCutoverTransitions() const { return CutoverTransitions; }
-	int64 GetCutoverTransitionCount() const { return CutoverTransitionCount; }
-	static constexpr int32 MaxCutoverTransitions = 256;
+	const TArray<FVoxelCutoverTransition>& GetCutoverTransitions() const { return ViewerPolicy.GetTransitions(); }
+	int64 GetCutoverTransitionCount() const { return ViewerPolicy.GetTransitionCount(); }
+	static constexpr int32 MaxCutoverTransitions = FVoxelStreamingViewerPolicy::MaxCutoverTransitions;
 
-	/**
-	 * Pure: the descent prefetch's lead (WM-BP10; every world mode since world modes review WM-MP3): under a camera descending
-	 * faster than MinDescentSpeed, the streaming viewer goes ahead of it along local down by the distance it covers in
-	 * LeadSeconds, at most half its altitude and stopping Clearance over the surface, so the voxel window resumes from the
-	 * cut-over and refines its LOD before the camera gets there (a descent slowing toward the ground resumes it from twice
-	 * the cut-over at most).
-	 *
-	 * @param RadialSpeed The camera's smoothed speed along local up (uu/s, negative descending)
-	 * @param AltitudeOverSurface The camera's altitude over the surface under it (the terrain, or the sea where higher)
-	 * @param LeadSeconds How far ahead (0 = no prefetch)
-	 * @param MinDescentSpeed Slower descents have no lead (a jump, a walk downhill)
-	 * @param Clearance How close to the surface the streaming viewer may go
-	 * @return The lead (uu along local down, >= 0)
-	 */
-	static double ComputeDescentLead(double RadialSpeed, double AltitudeOverSurface, double LeadSeconds, double MinDescentSpeed, double Clearance);
+	/** The descent prefetch's lead (FVoxelStreamingViewerPolicy::ComputeDescentLead, which this forwards to). */
+	static double ComputeDescentLead(double RadialSpeed, double AltitudeOverSurface, double LeadSeconds, double MinDescentSpeed, double Clearance)
+	{
+		return FVoxelStreamingViewerPolicy::ComputeDescentLead(RadialSpeed, AltitudeOverSurface, LeadSeconds, MinDescentSpeed, Clearance);
+	}
 
 	// ==================== Configuration Access ====================
 
@@ -2805,26 +2768,8 @@ private:
 	/** The camera this tick, before the descent prefetch moves the streaming viewer under it (spherical Phase 6, WM-BP10). */
 	FVector CurrentCameraPosition = FVector::ZeroVector;
 
-	/** The camera's last position and its smoothed speed along local up (uu/s, negative descending), for the prefetch. */
-	FVector LastPrefetchCamera = FVector(FLT_MAX);
-	double CameraRadialSpeed = 0.0;
-
-	/** How far under the camera the streaming viewer is this tick (uu along local down; 0 = at the camera). */
-	double StreamingViewerLead = 0.0;
-
-	/** Local down at the camera on the tick the lead was computed (toward a planet's centre; -Z on a heightmap world). */
-	FVector StreamingViewerDown = -FVector::UpVector;
-
-	/** The window's cut-over state on the last tick (IVoxelLODStrategy::IsWindowSuspended), to act when it changes. */
-	bool bWasWindowSuspended = false;
-
-	/** The cut-over transitions (GetCutoverTransitions), their count, and the last resume's time and counters (-1: none). */
-	TArray<FVoxelCutoverTransition> CutoverTransitions;
-	int64 CutoverTransitionCount = 0;
-	double CutoverClock = 0.0; // seconds of streaming ticks since the world started (the transitions' Time)
-	double LastWindowResumeTime = -1.0;
-	int64 GeneratedAtWindowResume = 0;
-	int64 MeshedAtWindowResume = 0;
+	/** The streaming viewer's lead under the camera and the cut-over record (the descent prefetch, G49's transitions) */
+	FVoxelStreamingViewerPolicy ViewerPolicy;
 
 	/** Smoothed frame time for stable throttle decisions (EMA) */
 	float SmoothedFrameTimeMs = 16.67f;

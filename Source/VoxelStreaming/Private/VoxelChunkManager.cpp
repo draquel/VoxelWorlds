@@ -827,7 +827,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// prefetch; every world mode since WM-MP3), so the window resumes from the cut-over and refines before the camera arrives.
 	CurrentCameraPosition = Context.ViewerPosition;
 	ApplyDescentPrefetch(Context, DeltaTime);
-	CutoverClock += DeltaTime;
+	ViewerPolicy.AdvanceClock(DeltaTime);
 
 	// Cache the current viewer position for the stale-cull distance test used by the queue
 	// processors (which don't build their own context). Reflects the benchmark view override.
@@ -879,36 +879,17 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// for it (nothing is wanted up there) and every chunk unloads; when it resumes, the next streaming update asks for the
 	// window again.
 	const bool bWindowSuspended = IsVoxelWindowSuspended();
-	if (bWindowSuspended != bWasWindowSuspended)
+	FVoxelCutoverTransition Transition;
+	if (ViewerPolicy.BeginTransition(bWindowSuspended, LODStrategy ? LODStrategy->GetViewerSurfaceAltitude() : 0.0,
+		TotalChunksGenerated, TotalChunksMeshed, Transition))
 	{
-		bWasWindowSuspended = bWindowSuspended;
 		bForceStreamingUpdate = true;
-		FVoxelCutoverTransition Transition;
-		Transition.Time = CutoverClock;
-		Transition.bSuspended = bWindowSuspended;
-		Transition.ViewerOverSurface = LODStrategy ? LODStrategy->GetViewerSurfaceAltitude() : 0.0;
-		Transition.Lead = StreamingViewerLead;
-		Transition.CameraOverSurface = Transition.ViewerOverSurface + StreamingViewerLead;
 		if (bWindowSuspended)
 		{
 			Transition.ChunksHeld = LoadedChunkCoords.Num();
 			Transition.GenerationsDropped = ReprioritizeQueues(Context);
-			Transition.ActiveSeconds = LastWindowResumeTime >= 0.0 ? Transition.Time - LastWindowResumeTime : -1.0;
-			Transition.GeneratedSinceResume = TotalChunksGenerated - GeneratedAtWindowResume;
-			Transition.MeshedSinceResume = TotalChunksMeshed - MeshedAtWindowResume;
 		}
-		else
-		{
-			LastWindowResumeTime = Transition.Time;
-			GeneratedAtWindowResume = TotalChunksGenerated;
-			MeshedAtWindowResume = TotalChunksMeshed;
-		}
-		if (CutoverTransitions.Num() >= MaxCutoverTransitions)
-		{
-			CutoverTransitions.RemoveAt(0);
-		}
-		CutoverTransitions.Add(Transition);
-		++CutoverTransitionCount;
+		ViewerPolicy.RecordTransition(Transition);
 		if (bWindowSuspended)
 		{
 			UE_LOG(LogVoxelStreaming, Log, TEXT("Voxel window suspended above the cut-over (unloading; the far field draws the world): camera %.0f over the surface, streaming viewer %.0f (lead %.0f); %d chunks held, %d queued generations dropped; %s, %lld chunks generated and %lld meshed in it."),
@@ -1176,16 +1157,7 @@ void UVoxelChunkManager::Initialize(
 	LODStrategy = InLODStrategy;
 	MeshRenderer = InRenderer;
 	// The voxel cut-over and the descent prefetch (spherical Phase 6, WM-BP10) start over with the world.
-	bWasWindowSuspended = false;
-	StreamingViewerLead = 0.0;
-	CameraRadialSpeed = 0.0;
-	LastPrefetchCamera = FVector(FLT_MAX);
-	CutoverTransitions.Reset();
-	CutoverTransitionCount = 0;
-	CutoverClock = 0.0;
-	LastWindowResumeTime = -1.0;
-	GeneratedAtWindowResume = 0;
-	MeshedAtWindowResume = 0;
+	ViewerPolicy.Reset();
 
 	// Settings that run but give wrong results (tree template material ids, ...): say so at world start too,
 	// since an editor session loads the asset long before Play.
@@ -2501,27 +2473,9 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 FLODQueryContext UVoxelChunkManager::BuildStreamingContext() const
 {
 	FLODQueryContext Context = BuildQueryContext();
-	if (StreamingViewerLead > 0.0)
-	{
-		// Under the camera by this tick's lead, along the local down the prefetch found there (WM-MP3: every world mode).
-		Context.ViewerPosition += StreamingViewerDown * StreamingViewerLead;
-		Context.ViewerLead = StreamingViewerLead;
-	}
+	// Under the camera by this tick's lead, along the local down the prefetch found there (WM-MP3: every world mode).
+	ViewerPolicy.ApplyLead(Context);
 	return Context;
-}
-
-double UVoxelChunkManager::ComputeDescentLead(double RadialSpeed, double AltitudeOverSurface, double LeadSeconds, double MinDescentSpeed,
-	double Clearance)
-{
-	const double Descent = -RadialSpeed;
-	if (LeadSeconds <= 0.0 || Descent <= FMath::Max(MinDescentSpeed, 0.0))
-	{
-		return 0.0;
-	}
-	// At most half the altitude: a descent that slows toward the ground (vox.FlyTo's falls by the same factor every
-	// second) would otherwise put the viewer at the ground from any height and resume the window far above the cut-over.
-	const double MaxLead = FMath::Min(0.5 * AltitudeOverSurface, AltitudeOverSurface - Clearance);
-	return FMath::Clamp(Descent * LeadSeconds, 0.0, FMath::Max(MaxLead, 0.0));
 }
 
 void UVoxelChunkManager::ApplyDescentPrefetch(FLODQueryContext& Context, float DeltaTime)
@@ -2529,71 +2483,44 @@ void UVoxelChunkManager::ApplyDescentPrefetch(FLODQueryContext& Context, float D
 	const double LeadSeconds = CVarStreamDescentLead.GetValueOnGameThread();
 	if (!Configuration || !WorldMode || LeadSeconds <= 0.0)
 	{
-		StreamingViewerLead = 0.0;
-		CameraRadialSpeed = 0.0;
-		LastPrefetchCamera = FVector(FLT_MAX);
+		ViewerPolicy.DisablePrefetch();
 		return;
 	}
 
 	// Local up at the camera and its height along it: on a planet the direction from the centre and the distance to it;
 	// on a heightmap world +Z and Z (world modes review WM-MP3: the prefetch in every world mode).
-	const bool bPlanet = Configuration->WorldMode == EWorldMode::SphericalPlanet;
-	const FVector Centre = Configuration->WorldOrigin;
-	const FVector Camera = Context.ViewerPosition;
-	const FVector Up = bPlanet ? (Camera - Centre).GetSafeNormal() : FVector::UpVector;
-	if (Up.IsNearlyZero())
-	{
-		StreamingViewerLead = 0.0;
-		return;
-	}
-	auto HeightOf = [bPlanet, &Centre](const FVector& Position) { return bPlanet ? FVector::Dist(Position, Centre) : Position.Z; };
-
-	// The camera's speed along local up, smoothed. A jump of more than ten chunks in a frame is a teleport (or a switch of
-	// view target), not motion: the speed starts over.
-	const double ChunkWorldSize = Configuration->GetChunkWorldSize();
-	const double CameraHeight = HeightOf(Camera);
-	if (DeltaTime > SMALL_NUMBER && LastPrefetchCamera.X != FLT_MAX && FVector::DistSquared(Camera, LastPrefetchCamera) < FMath::Square(10.0 * ChunkWorldSize))
-	{
-		const double Instant = (CameraHeight - HeightOf(LastPrefetchCamera)) / DeltaTime;
-		CameraRadialSpeed = FMath::FInterpTo(CameraRadialSpeed, Instant, static_cast<double>(DeltaTime), 4.0);
-	}
-	else
-	{
-		CameraRadialSpeed = 0.0;
-	}
-	LastPrefetchCamera = Camera;
-
+	FVoxelDescentPrefetchInput Input;
+	Input.bPlanet = Configuration->WorldMode == EWorldMode::SphericalPlanet;
+	Input.Centre = Configuration->WorldOrigin;
+	Input.ChunkWorldSize = Configuration->GetChunkWorldSize();
+	Input.LeadSeconds = LeadSeconds;
+	Input.MinDescentSpeed = CVarStreamDescentMinSpeed.GetValueOnGameThread();
 	// Ahead of the camera along local down by what it covers in LeadSeconds, stopping two chunks over the surface under it
 	// (the generated terrain under the camera: along its direction on a planet, at its (X, Y) on a heightmap world; or the
 	// sea where that is higher): the near window's layers stay over the ground.
-	double SurfaceHeight;
-	if (bPlanet)
+	ViewerPolicy.ApplyDescentPrefetch(Context, DeltaTime, Input, [this, bPlanet = Input.bPlanet](const FVector& Up, const FVector& Camera)
 	{
-		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WorldMode);
-		SurfaceHeight = Configuration->WorldRadius + static_cast<double>(Planet.GetTerrainAltitude(Up, Configuration->GetNoiseParams()));
-		if (Configuration->bEnableWaterLevel)
+		double SurfaceHeight;
+		if (bPlanet)
 		{
-			SurfaceHeight = FMath::Max(SurfaceHeight, static_cast<double>(Configuration->WaterRadius));
+			const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WorldMode);
+			SurfaceHeight = Configuration->WorldRadius + static_cast<double>(Planet.GetTerrainAltitude(Up, Configuration->GetNoiseParams()));
+			if (Configuration->bEnableWaterLevel)
+			{
+				SurfaceHeight = FMath::Max(SurfaceHeight, static_cast<double>(Configuration->WaterRadius));
+			}
 		}
-	}
-	else
-	{
-		SurfaceHeight = GetGeneratedSurfacePoint(FVector(Camera.X, Camera.Y, 0.0)).Z;
-		const FVoxelSeaSurface Sea = GetSeaSurface();
-		if (Sea.bEnabled)
+		else
 		{
-			SurfaceHeight = FMath::Max(SurfaceHeight, Sea.PlaneZ);
+			SurfaceHeight = GetGeneratedSurfacePoint(FVector(Camera.X, Camera.Y, 0.0)).Z;
+			const FVoxelSeaSurface Sea = GetSeaSurface();
+			if (Sea.bEnabled)
+			{
+				SurfaceHeight = FMath::Max(SurfaceHeight, Sea.PlaneZ);
+			}
 		}
-	}
-	StreamingViewerLead = ComputeDescentLead(CameraRadialSpeed, CameraHeight - SurfaceHeight, LeadSeconds,
-		CVarStreamDescentMinSpeed.GetValueOnGameThread(), 2.0 * ChunkWorldSize);
-	StreamingViewerDown = -Up;
-	if (StreamingViewerLead > 0.0)
-	{
-		Context.ViewerPosition = Camera + StreamingViewerDown * StreamingViewerLead;
-		// The cut-over reads the camera's altitude from it (G49: a suspended window resumes only with the camera under it).
-		Context.ViewerLead = StreamingViewerLead;
-	}
+		return SurfaceHeight;
+	});
 }
 
 bool UVoxelChunkManager::IsVoxelWindowSuspended() const
@@ -3699,9 +3626,7 @@ bool UVoxelChunkManager::UpdateStreamingForCamera(const FVector& CameraPosition)
 	// The camera is the streaming viewer for this pass: the prefetch's speed starts over after a jump (ApplyDescentPrefetch).
 	CurrentCameraPosition = Context.ViewerPosition;
 	CurrentViewerPosition = Context.ViewerPosition;
-	StreamingViewerLead = 0.0;
-	CameraRadialSpeed = 0.0;
-	LastPrefetchCamera = Context.ViewerPosition;
+	ViewerPolicy.RestartAt(Context.ViewerPosition);
 	if (MeshRenderer)
 	{
 		MeshRenderer->SetViewerPosition(CurrentCameraPosition);
@@ -5362,7 +5287,7 @@ FVoxelResidencySnapshot UVoxelChunkManager::GetResidencySnapshot() const
 	FVoxelResidencySnapshot Out;
 	Out.Viewer = CurrentViewerPosition;
 	Out.Camera = CurrentCameraPosition;
-	Out.StreamingLead = StreamingViewerLead;
+	Out.StreamingLead = ViewerPolicy.GetLead();
 	if (LODStrategy)
 	{
 		Out.bWindowSuspended = LODStrategy->IsWindowSuspended();
