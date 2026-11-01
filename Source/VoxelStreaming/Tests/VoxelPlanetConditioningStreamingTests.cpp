@@ -119,11 +119,11 @@ bool FVoxelPlanetConditioningGatherTest::RunTest(const FString& Parameters)
 
 	// The generated altitude takes the zone: the target at its centre, the natural altitude far from every zone.
 	{
-		const float AtCentre = W.Manager->GetGeneratedPlanetAltitude(Zones[0].Direction);
+		const float AtCentre = W.Manager->GetAltitudeAt(W.Manager->GetGeneratedSurfacePoint(Center + Zones[0].Direction * Radius));
 		TestEqual(TEXT("The generated altitude at the zone's centre is its target"), AtCentre, Zones[0].TargetHeight, 1e-3f);
 		const FVector Far = FVector(-1, 0.2, -0.3).GetSafeNormal();
 		TestEqual(TEXT("Far from every zone the generated altitude is the natural one"),
-			W.Manager->GetGeneratedPlanetAltitude(Far), W.Manager->GetSurfacePointAt(Center + Far).Altitude, 1e-2f);
+			W.Manager->GetAltitudeAt(W.Manager->GetGeneratedSurfacePoint(Center + Far * Radius)), W.Manager->GetSurfacePointAt(Center + Far).Altitude, 1e-2f);
 	}
 	W.Stop();
 	return true;
@@ -159,7 +159,7 @@ bool FVoxelPlanetConditionedSurfaceTest::RunTest(const FString& Parameters)
 	const float Inner = 900.0f;
 	const float Falloff = 700.0f;
 	W.Manager->AddConditioningZone(FVoxelConditioningZone::MakeRadial(Site, Inner, Falloff, Target));
-	TestEqual(TEXT("The generated altitude at the site is the pad's"), W.Manager->GetGeneratedPlanetAltitude(Site), Target, 1e-3f);
+	TestEqual(TEXT("The generated altitude at the site is the pad's"), W.Manager->GetAltitudeAt(W.Manager->GetGeneratedSurfacePoint(Center + Site * Radius)), Target, 1e-3f);
 
 	// A second pad at the spawn direction: the spawn position stands on it.
 	const float PoleTarget = W.Manager->GetSurfacePointAt(Center + FVector::UpVector).Altitude + 200.0f;

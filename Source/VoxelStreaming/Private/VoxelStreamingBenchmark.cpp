@@ -233,7 +233,7 @@ FVector FVoxelStreamingBenchmark::ApplyAltitude(const FVector& Pos) const
 		const FVector Surface = ChunkManager->GetGeneratedSurfacePoint(Pos);
 		return Surface + ChunkManager->GetUpVectorAt(Surface) * Config.FollowTerrainAltitude;
 	}
-	return FVector(Pos.X, Pos.Y, ChunkManager->GetGeneratedSurfaceHeight(Pos.X, Pos.Y) + Config.FollowTerrainAltitude);
+	return FVector(Pos.X, Pos.Y, ChunkManager->GetGeneratedSurfacePoint(FVector(Pos.X, Pos.Y, 0.0)).Z + Config.FollowTerrainAltitude);
 }
 
 void FVoxelStreamingBenchmark::SetupFlyPawn()

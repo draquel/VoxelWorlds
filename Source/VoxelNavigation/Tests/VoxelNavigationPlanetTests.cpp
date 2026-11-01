@@ -342,11 +342,9 @@ bool FVoxelNavPlaneSubsystemUnchangedTest::RunTest(const FString& Parameters)
 					const FIntPoint Cell(FMath::FloorToInt(X / FMath::Max(Params.CellSize, 1.f)), FMath::FloorToInt(Y / FMath::Max(Params.CellSize, 1.f)));
 					const double CX = (Cell.X + 0.5) * Params.CellSize;
 					const double CY = (Cell.Y + 0.5) * Params.CellSize;
-					float Height = 0.f;
-					FVector Normal;
-					float Slope = 0.f;
-					uint8 Material = 0, Biome = 0;
-					return Manager->QueryEditMergedSurface(CX, CY, Height, Normal, Slope, Material, Biome) ? Height : Manager->GetGeneratedSurfaceHeight(CX, CY);
+					FVoxelSurfaceSample Hit;
+					return Manager->QueryEditMergedSurfacePoint(FVector(CX, CY, 0.0), Hit)
+						? static_cast<float>(Hit.Position.Z) : static_cast<float>(Manager->GetGeneratedSurfacePoint(FVector(CX, CY, 0.0)).Z);
 				},
 				[Manager, &Params](const FIntPoint& Cell)
 				{

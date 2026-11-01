@@ -698,7 +698,7 @@ float UVoxelSurfaceNavigationSubsystem::HeightForCell(FRegionCache& Region, cons
 		bLoaded = ChunkMgr->QueryEditMergedSurfacePoint(Probe, Sample);
 		if (Region.Frame.bIdentity)
 		{
-			Height = bLoaded ? static_cast<float>(Sample.Position.Z) : ChunkMgr->GetGeneratedSurfaceHeight(Centre.X, Centre.Y);
+			Height = bLoaded ? static_cast<float>(Sample.Position.Z) : ChunkMgr->GetGeneratedSurfacePoint(FVector(Centre.X, Centre.Y, 0.0)).Z;
 		}
 		else
 		{

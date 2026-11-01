@@ -192,7 +192,7 @@ namespace VoxelPlanetStreamingTestUtils
 			Config->NoiseParams.Octaves = Octaves;
 			StartManager();
 
-			Viewer = FVector(X, Y, Manager->GetGeneratedSurfaceHeight(X, Y) + ViewerAltitude);
+			Viewer = FVector(X, Y, Manager->GetGeneratedSurfacePoint(FVector(X, Y, 0.0)).Z + ViewerAltitude);
 			Manager->ResetBenchCounters();
 			Manager->SetBenchmarkView(true, Viewer);
 		}

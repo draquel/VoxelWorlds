@@ -174,7 +174,7 @@ namespace VoxelEditReachesProxyTest
 		for (int32 i = 0; i < 6 && !R.bStarted; ++i)
 		{
 			const double X = (i + 0.5) * CW, Y = (j + 0.5) * CW;
-			const double Z = W.Manager->GetGeneratedSurfaceHeight(X, Y);
+			const double Z = W.Manager->GetGeneratedSurfacePoint(FVector(X, Y, 0.0)).Z;
 			const double InChunk = Z - FMath::FloorToDouble(Z / CW) * CW;
 			if (InChunk > 6.0 * VS && InChunk < CW - 6.0 * VS)
 			{

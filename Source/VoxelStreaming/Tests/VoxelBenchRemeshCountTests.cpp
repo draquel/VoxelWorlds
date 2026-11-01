@@ -55,13 +55,13 @@ namespace VoxelBenchRemeshCountTest
 			FLODBand(4000.0f, 6000.0f, 2, 4) };
 		W.StartManager();
 
-		const float SurfaceA = W.Manager->GetGeneratedSurfaceHeight(0.0f, 0.0f);
+		const float SurfaceA = W.Manager->GetGeneratedSurfacePoint(FVector(0.0f, 0.0f, 0.0)).Z;
 		W.SetViewer(FVector(0.0, 0.0, SurfaceA + 200.0));
 		const bool bSettledA = W.Settle();
 
 		// A bench starts here: counters reset, then its view moves.
 		const int64 ResubmitsBefore = W.Renderer.ChunkResubmits;
-		const float SurfaceB = W.Manager->GetGeneratedSurfaceHeight(3000.0f, 0.0f);
+		const float SurfaceB = W.Manager->GetGeneratedSurfacePoint(FVector(3000.0f, 0.0f, 0.0)).Z;
 		W.SetViewer(FVector(3000.0, 0.0, SurfaceB + 200.0));
 		const bool bSettledB = W.Settle();
 

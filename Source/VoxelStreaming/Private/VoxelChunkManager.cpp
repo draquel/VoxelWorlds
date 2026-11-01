@@ -1346,7 +1346,7 @@ void UVoxelChunkManager::Initialize(
 	LastTimingStats = FVoxelTimingStats();
 
 	// Create generation components.
-	// The analytic world mode matching config->WorldMode, so spawn / nav / POI / GetGeneratedSurfaceHeight use the
+	// The analytic world mode matching config->WorldMode, so spawn / nav / POI / GetGeneratedSurfacePoint use the
 	// right terrain math for every mode. Built by the one factory every other consumer uses (WM-A1), with the biome
 	// context set, so its continentalness-modulated height matches generation.
 	WorldMode = FVoxelWorldModeFactory::Create(*Configuration);
@@ -2127,87 +2127,6 @@ bool UVoxelChunkManager::IsChunkWaterSettled(const FIntVector& ChunkCoord) const
 	return State && State->bWaterSettled && State->Descriptor.HasVoxelDataAvailable();
 }
 
-bool UVoxelChunkManager::QueryEditMergedSurface(
-	double WorldX, double WorldY,
-	float& OutHeight, FVector& OutNormal, float& OutSlopeDegrees,
-	uint8& OutMaterialID, uint8& OutBiomeID) const
-{
-	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("surface query"));
-	const IVoxelWorldMode* WM = GetWorldMode();
-	if (!bIsInitialized || !Configuration || !WM)
-	{
-		return false;
-	}
-
-	const float VoxelSize = Configuration->VoxelSize;
-	const int32 ChunkSize = Configuration->ChunkSize;
-	if (VoxelSize <= 0.0f || ChunkSize <= 0)
-	{
-		return false;
-	}
-
-	// Estimate the surface Z from the generator, used only to locate the column window + the
-	// near/far decision (whether the surface's chunk is loaded).
-	const float EstZ = static_cast<float>(WM->GetSurfaceOnUpLine(FVector(WorldX, WorldY, 0.0), Configuration->NoiseParams).Position.Z);
-
-	const FVector RelEst = FVector(WorldX, WorldY, EstZ) - Configuration->WorldOrigin;
-	const FIntVector EstChunk = FVoxelCoordinates::WorldToChunk(RelEst, ChunkSize, VoxelSize);
-	if (!IsChunkLoaded(EstChunk))
-	{
-		return false; // far band — caller falls back to the generator
-	}
-
-	// A block world's surface is the block tops it draws, not the density isosurface under them (WM-C5).
-	if (FVoxelBlockSurface::UsesBlockSurface(*Configuration))
-	{
-		return QueryEditMergedBlockSurface(WorldX, WorldY, EstZ, OutHeight, OutNormal, OutSlopeDegrees, OutMaterialID, OutBiomeID);
-	}
-
-	// Assemble a vertical merged-voxel column over a +/- one-chunk window around the estimate
-	// (covers dig-down / build-up that shifts the surface off the analytic height).
-	const int32 Window = ChunkSize;
-	const float BaseZ = EstZ - Window * VoxelSize;
-	const int32 Count = 2 * Window + 1;
-
-	TArray<FVoxelData> Column;
-	Column.SetNumUninitialized(Count);
-	for (int32 i = 0; i < Count; ++i)
-	{
-		const float Z = BaseZ + i * VoxelSize;
-		Column[i] = GetEditMergedVoxelAtWorldPosition(FVector(WorldX, WorldY, Z));
-	}
-
-	if (!FVoxelSurfaceQuery::ExtractSurfaceFromColumn(Column, BaseZ, VoxelSize, OutHeight, OutMaterialID, OutBiomeID))
-	{
-		return false;
-	}
-
-	// Surface normal from the edit-merged density gradient (central differences at the surface).
-	auto Density = [this](double X, double Y, double Z) -> float
-	{
-		return static_cast<float>(GetEditMergedVoxelAtWorldPosition(FVector(X, Y, Z)).Density);
-	};
-	const float Step = VoxelSize;
-	const float Hz = OutHeight;
-	const float dX = Density(WorldX + Step, WorldY, Hz) - Density(WorldX - Step, WorldY, Hz);
-	const float dY = Density(WorldX, WorldY + Step, Hz) - Density(WorldX, WorldY - Step, Hz);
-	const float dZ = Density(WorldX, WorldY, Hz + Step) - Density(WorldX, WorldY, Hz - Step);
-
-	// Density increases into the solid; the outward surface normal is the negated gradient.
-	OutNormal = FVector(-dX, -dY, -dZ).GetSafeNormal();
-	if (OutNormal.IsNearlyZero())
-	{
-		OutNormal = FVector::UpVector;
-	}
-	else if (OutNormal.Z < 0.0f)
-	{
-		OutNormal = -OutNormal; // keep it up-facing for a top surface
-	}
-
-	OutSlopeDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(static_cast<float>(OutNormal.Z), -1.0f, 1.0f)));
-	return true;
-}
-
 bool UVoxelChunkManager::QueryEditMergedBlockSurface(double WorldX, double WorldY, float EstimateZ,
 	float& OutHeight, FVector& OutNormal, float& OutSlopeDegrees, uint8& OutMaterialID, uint8& OutBiomeID) const
 {
@@ -2293,11 +2212,78 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 
 	if (WM->GetWorldModeType() != EWorldMode::SphericalPlanet)
 	{
-		// Heightmap modes: the column at (X, Y), unchanged.
-		float Height = 0.0f;
-		if (!QueryEditMergedSurface(WorldPos.X, WorldPos.Y, Height, OutSample.Normal, OutSample.SlopeDegrees, OutSample.MaterialID, OutSample.BiomeID))
+		// Heightmap modes: the column at (X, Y) (the one edit-merged query, code review CR2, CM-21).
+		const float VoxelSize = Configuration->VoxelSize;
+		const int32 ChunkSize = Configuration->ChunkSize;
+		if (VoxelSize <= 0.0f || ChunkSize <= 0)
 		{
 			return false;
+		}
+
+		// Estimate the surface Z from the generator, used only to locate the column window + the
+		// near/far decision (whether the surface's chunk is loaded).
+		const float EstZ = static_cast<float>(WM->GetSurfaceOnUpLine(FVector(WorldPos.X, WorldPos.Y, 0.0), Configuration->NoiseParams).Position.Z);
+
+		const FVector RelEst = FVector(WorldPos.X, WorldPos.Y, EstZ) - Configuration->WorldOrigin;
+		const FIntVector EstChunk = FVoxelCoordinates::WorldToChunk(RelEst, ChunkSize, VoxelSize);
+		if (!IsChunkLoaded(EstChunk))
+		{
+			return false; // far band — caller falls back to the generator
+		}
+
+		float Height = 0.0f;
+		// A block world's surface is the block tops it draws, not the density isosurface under them (WM-C5).
+		if (FVoxelBlockSurface::UsesBlockSurface(*Configuration))
+		{
+			if (!QueryEditMergedBlockSurface(WorldPos.X, WorldPos.Y, EstZ, Height, OutSample.Normal, OutSample.SlopeDegrees, OutSample.MaterialID, OutSample.BiomeID))
+			{
+				return false;
+			}
+		}
+		else
+		{
+			// Assemble a vertical merged-voxel column over a +/- one-chunk window around the estimate
+			// (covers dig-down / build-up that shifts the surface off the analytic height).
+			const int32 Window = ChunkSize;
+			const float BaseZ = EstZ - Window * VoxelSize;
+			const int32 Count = 2 * Window + 1;
+
+			TArray<FVoxelData> Column;
+			Column.SetNumUninitialized(Count);
+			for (int32 i = 0; i < Count; ++i)
+			{
+				const float Z = BaseZ + i * VoxelSize;
+				Column[i] = GetEditMergedVoxelAtWorldPosition(FVector(WorldPos.X, WorldPos.Y, Z));
+			}
+
+			if (!FVoxelSurfaceQuery::ExtractSurfaceFromColumn(Column, BaseZ, VoxelSize, Height, OutSample.MaterialID, OutSample.BiomeID))
+			{
+				return false;
+			}
+
+			// Surface normal from the edit-merged density gradient (central differences at the surface).
+			auto Density = [this](double X, double Y, double Z) -> float
+			{
+				return static_cast<float>(GetEditMergedVoxelAtWorldPosition(FVector(X, Y, Z)).Density);
+			};
+			const float Step = VoxelSize;
+			const float Hz = Height;
+			const float dX = Density(WorldPos.X + Step, WorldPos.Y, Hz) - Density(WorldPos.X - Step, WorldPos.Y, Hz);
+			const float dY = Density(WorldPos.X, WorldPos.Y + Step, Hz) - Density(WorldPos.X, WorldPos.Y - Step, Hz);
+			const float dZ = Density(WorldPos.X, WorldPos.Y, Hz + Step) - Density(WorldPos.X, WorldPos.Y, Hz - Step);
+
+			// Density increases into the solid; the outward surface normal is the negated gradient.
+			OutSample.Normal = FVector(-dX, -dY, -dZ).GetSafeNormal();
+			if (OutSample.Normal.IsNearlyZero())
+			{
+				OutSample.Normal = FVector::UpVector;
+			}
+			else if (OutSample.Normal.Z < 0.0f)
+			{
+				OutSample.Normal = -OutSample.Normal; // keep it up-facing for a top surface
+			}
+
+			OutSample.SlopeDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(static_cast<float>(OutSample.Normal.Z), -1.0f, 1.0f)));
 		}
 		OutSample.Position = FVector(WorldPos.X, WorldPos.Y, Height);
 		OutSample.Up = FVector::UpVector;
@@ -2448,7 +2434,17 @@ FVector UVoxelChunkManager::GetGeneratedSurfacePoint(const FVector& WorldPos) co
 	}
 	if (WM->GetWorldModeType() != EWorldMode::SphericalPlanet)
 	{
-		return FVector(WorldPos.X, WorldPos.Y, GetGeneratedSurfaceHeight(WorldPos.X, WorldPos.Y));
+		// A block world (WM-C5, KC6): the top of the topmost block the generator makes in the block column containing (X, Y),
+		// from the height sampled where the generator samples it, the column's lower corner.
+		if (FVoxelBlockSurface::UsesBlockSurface(*Configuration))
+		{
+			const FVector& Origin = Configuration->WorldOrigin;
+			const float VoxelSize = Configuration->VoxelSize;
+			const float ColumnHeight = GetGeneratedColumnHeight(
+				FVoxelBlockSurface::ColumnCorner(WorldPos.X, Origin.X, VoxelSize), FVoxelBlockSurface::ColumnCorner(WorldPos.Y, Origin.Y, VoxelSize));
+			return FVector(WorldPos.X, WorldPos.Y, static_cast<float>(FVoxelBlockSurface::BlockTopForHeight(ColumnHeight, Origin.Z, VoxelSize)));
+		}
+		return FVector(WorldPos.X, WorldPos.Y, GetGeneratedColumnHeight(WorldPos.X, WorldPos.Y));
 	}
 	// A planet: the natural surface along the direction, with the planet conditioning zones there (SP-B10).
 	if (ConditioningZones.Num() > 0 || TerrainConditioner != nullptr)
@@ -2464,27 +2460,6 @@ FVector UVoxelChunkManager::GetGeneratedSurfacePoint(const FVector& WorldPos) co
 		}
 	}
 	return WM->GetSurfacePoint(WorldPos, Configuration->NoiseParams).Position;
-}
-
-float UVoxelChunkManager::GetGeneratedPlanetAltitude(const FVector& Direction) const
-{
-	const IVoxelWorldMode* WM = GetWorldMode();
-	if (!WM || !Configuration || WM->GetWorldModeType() != EWorldMode::SphericalPlanet)
-	{
-		return 0.0f;
-	}
-	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WM);
-	const float Natural = Planet.GetTerrainAltitude(Direction, Configuration->NoiseParams);
-	if (ConditioningZones.Num() == 0 && TerrainConditioner == nullptr)
-	{
-		return Natural;
-	}
-	// The zones at this direction (a point cap), blended as GenerateChunkSphericalPlanet blends them.
-	TArray<FVoxelConditioningZone> Zones;
-	GatherConditioningZonesOnSphere(Direction, 0.0, Zones);
-	return Zones.Num() > 0
-		? FVoxelTerrainConditioning::ApplyToAltitude(Direction, Planet.GetPlanetParams().PlanetRadius, Natural, Zones)
-		: Natural;
 }
 
 // ==================== Debug ====================
@@ -3113,7 +3088,7 @@ void UVoxelChunkManager::ApplyDescentPrefetch(FLODQueryContext& Context, float D
 	}
 	else
 	{
-		SurfaceHeight = GetGeneratedSurfaceHeight(Camera.X, Camera.Y);
+		SurfaceHeight = GetGeneratedSurfacePoint(FVector(Camera.X, Camera.Y, 0.0)).Z;
 		const FVoxelSeaSurface Sea = GetSeaSurface();
 		if (Sea.bEnabled)
 		{
@@ -4934,27 +4909,6 @@ void UVoxelChunkManager::GatherConditioningZonesForPoint(double WorldX, double W
 	GatherConditioningZonesForRegion(FBox2D(P, P), OutZones);
 }
 
-float UVoxelChunkManager::GetGeneratedSurfaceHeight(double WorldX, double WorldY) const
-{
-	const IVoxelWorldMode* WM = GetWorldMode();
-	if (!bIsInitialized || !WM || !Configuration)
-	{
-		return 0.0f;
-	}
-
-	// A block world (WM-C5, KC6): the top of the topmost block the generator makes in the block column containing (X, Y),
-	// from the height sampled where the generator samples it, the column's lower corner.
-	if (FVoxelBlockSurface::UsesBlockSurface(*Configuration))
-	{
-		const FVector& Origin = Configuration->WorldOrigin;
-		const float VoxelSize = Configuration->VoxelSize;
-		const float ColumnHeight = GetGeneratedColumnHeight(
-			FVoxelBlockSurface::ColumnCorner(WorldX, Origin.X, VoxelSize), FVoxelBlockSurface::ColumnCorner(WorldY, Origin.Y, VoxelSize));
-		return static_cast<float>(FVoxelBlockSurface::BlockTopForHeight(ColumnHeight, Origin.Z, VoxelSize));
-	}
-	return GetGeneratedColumnHeight(WorldX, WorldY);
-}
-
 float UVoxelChunkManager::GetGeneratedColumnHeight(double WorldX, double WorldY) const
 {
 	const IVoxelWorldMode* WM = GetWorldMode();
@@ -5006,8 +4960,8 @@ bool UVoxelChunkManager::QuerySurfacePoint(const FVector& WorldPos, EVoxelSurfac
 		GetSeaSurface(), Zones.Num() > 0 ? &Zones : nullptr);
 	if (Layer == EVoxelSurfaceLayer::Generated && IsBlockSurface())
 	{
-		// A block world's generated surface is the block top GetGeneratedSurfaceHeight gives (sampled at the column's corner).
-		OutSample.Position.Z = GetGeneratedSurfaceHeight(WorldPos.X, WorldPos.Y);
+		// A block world's generated surface is the block top GetGeneratedSurfacePoint gives (sampled at the column's corner).
+		OutSample.Position.Z = GetGeneratedSurfacePoint(WorldPos).Z;
 		OutSample.Altitude = WM->GetAltitude(OutSample.Position);
 	}
 	return true;
@@ -6098,7 +6052,7 @@ double UVoxelChunkManager::GetSurfaceOrSeaLevel(const FVector& WorldPos, bool& b
 	if (GetWorldBounds().Shape != EVoxelWorldBoundsShape::Shell)
 	{
 		// A heightmap world (WM-MP11): the generated ground's Z at (X, Y), or the sea plane where higher.
-		const double Ground = GetGeneratedSurfaceHeight(WorldPos.X, WorldPos.Y);
+		const double Ground = GetGeneratedSurfacePoint(FVector(WorldPos.X, WorldPos.Y, 0.0)).Z;
 		bOutSea = Sea.bEnabled && !Sea.bRadial && Sea.PlaneZ > Ground;
 		return bOutSea ? Sea.PlaneZ : Ground;
 	}
@@ -8642,7 +8596,7 @@ void UVoxelChunkManager::AuditWaterTiles(int32 MaxList, const FIntPoint& DetailC
 			{
 				const double WX = Configuration->WorldOrigin.X + (static_cast<double>(TileCoord.X) * CS + X + 0.5) * VS;
 				const double WY = Configuration->WorldOrigin.Y + (static_cast<double>(TileCoord.Y) * CS + Y + 0.5) * VS;
-				const double Ground = GetGeneratedSurfaceHeight(WX, WY);
+				const double Ground = GetGeneratedSurfacePoint(FVector(WX, WY, 0.0)).Z;
 				const bool bShould = Ground < WaterZ - VS; // at least a voxel of water over the ground
 				const bool bWet = Wet[X + Y * CS];
 				A.Wet += bWet ? 1 : 0;
@@ -8753,7 +8707,7 @@ void UVoxelChunkManager::AuditWaterTiles(int32 MaxList, const FIntPoint& DetailC
 						{
 							const double WX = Configuration->WorldOrigin.X + (static_cast<double>(Coord.X) * CS + X + 0.5) * VS;
 							const double WY = Configuration->WorldOrigin.Y + (static_cast<double>(Coord.Y) * CS + Y + 0.5) * VS;
-							FreshMissing += GetGeneratedSurfaceHeight(WX, WY) < WaterZ - VS ? 1 : 0;
+							FreshMissing += GetGeneratedSurfacePoint(FVector(WX, WY, 0.0)).Z < WaterZ - VS ? 1 : 0;
 						}
 					}
 				}
@@ -9168,7 +9122,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 				{
 					const double X = FCString::Atod(*Parts[0]);
 					const double Y = FCString::Atod(*Parts[1]);
-					const FVector Ground(X, Y, CM->GetGeneratedSurfaceHeight(X, Y));
+					const FVector Ground(X, Y, CM->GetGeneratedSurfacePoint(FVector(X, Y, 0.0)).Z);
 					FVoxelStreamingBenchmark::MakeClimbAlong(Config, FVector::UpVector, Ground, Parts.Num() > 2 ? FCString::Atof(*Parts[2]) : 500.0f,
 						FVector2D(X, Y));
 					bHasClimb = true;
@@ -9198,7 +9152,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 				{
 					const double X = FCString::Atod(*Parts[0]);
 					const double Y = FCString::Atod(*Parts[1]);
-					const FVector Ground(X, Y, CM->GetGeneratedSurfaceHeight(X, Y));
+					const FVector Ground(X, Y, CM->GetGeneratedSurfacePoint(FVector(X, Y, 0.0)).Z);
 					FVoxelStreamingBenchmark::MakeDescentAlong(Config, FVector::UpVector, Ground, FCString::Atof(*Parts[2]), FVector2D(X, Y));
 					bHasClimb = true;
 				}
@@ -9300,7 +9254,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 				}
 				else
 				{
-					Start.Z = CM->GetGeneratedSurfaceHeight(Start.X, Start.Y) + 500.0;
+					Start.Z = CM->GetGeneratedSurfacePoint(FVector(Start.X, Start.Y, 0.0)).Z + 500.0;
 				}
 			}
 		}

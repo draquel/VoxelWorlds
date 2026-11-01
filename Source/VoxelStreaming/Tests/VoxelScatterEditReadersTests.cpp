@@ -583,7 +583,7 @@ bool FVoxelScatterEditReadersPlaneTest::RunTest(const FString& Parameters)
 			for (int32 Y = 0; Y < CS; ++Y)
 			for (int32 X = 0; X < CS; ++X)
 			{
-				const double H = W.Manager->GetGeneratedSurfaceHeight(Min.X + (X + 0.5) * VS, Min.Y + (Y + 0.5) * VS);
+				const double H = W.Manager->GetGeneratedSurfacePoint(FVector(Min.X + (X + 0.5) * VS, Min.Y + (Y + 0.5) * VS, 0.0)).Z;
 				InBand += (H > Min.Z + 0.1 * VS && H <= Min.Z + 1.4 * VS) ? 1 : 0;
 			}
 			if (InBand > Best)
@@ -617,7 +617,7 @@ bool FVoxelScatterEditReadersPlaneTest::RunTest(const FString& Parameters)
 			Scatter->AddScatterDefinition(Def);
 		}
 		const double ChunkWorld = W.Config->GetChunkWorldSize();
-		W.SetViewer(FVector(ChunkWorld * 0.5, ChunkWorld * 0.5, W.Manager->GetGeneratedSurfaceHeight(ChunkWorld * 0.5, ChunkWorld * 0.5) + 300.0));
+		W.SetViewer(FVector(ChunkWorld * 0.5, ChunkWorld * 0.5, W.Manager->GetGeneratedSurfacePoint(FVector(ChunkWorld * 0.5, ChunkWorld * 0.5, 0.0)).Z + 300.0));
 		const FPassResult R = RunPass(*this, W, Rule, FIntVector(0, 0, 0), Find, Edit);
 		// Undo and redo are edits too (G60): the chunk below re-extracts after them, so every cached chunk equals a fresh extraction.
 		FUndoRedoAudit U;
