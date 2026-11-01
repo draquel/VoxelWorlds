@@ -73,7 +73,7 @@ namespace PlanetShellWindowTestUtils
 		Config->BaseHeight = 0.0f;
 		Config->NoiseParams.Frequency = Frequency;
 		Config->NoiseParams.Octaves = Octaves;
-		Config->bFarBandSurfaceSlabCulling = bSlab;
+		Config->bSurfaceSlabCulling = bSlab;
 		Config->bEnableFrustumCulling = false;
 		return Config;
 	}
@@ -707,7 +707,7 @@ bool FPlanetNearBandTest::RunTest(const FString& Parameters)
 	for (const FPlanetCase& Case : GetPlanetCases())
 	{
 		UVoxelWorldConfiguration* Config = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
-		Config->PlanetVoxelCutoverAltitude = 1.0e9f; // the window under the cut-over (LOD.Planet.Cutover checks above it)
+		Config->VoxelCutoverAltitude = 1.0e9f; // the window under the cut-over (LOD.Planet.Cutover checks above it)
 		FProbeStrategy Strategy;
 		Strategy.Initialize(Config);
 		const FTerrain Terrain(*Config);
@@ -929,7 +929,7 @@ bool FPlanetNearBandTest::RunTest(const FString& Parameters)
 			if (SeaAltitude + 2.0 * ChunkWorld < ShellTop)
 			{
 				UVoxelWorldConfiguration* SeaConfig = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
-				SeaConfig->PlanetVoxelCutoverAltitude = 1.0e9f;
+				SeaConfig->VoxelCutoverAltitude = 1.0e9f;
 				SeaConfig->bEnableWaterLevel = true;
 				SeaConfig->WaterRadius = static_cast<float>(Case.Radius + SeaAltitude);
 				FProbeStrategy SeaStrategy;
@@ -981,7 +981,7 @@ bool FPlanetGroundHorizonTest::RunTest(const FString& Parameters)
 	{
 		UVoxelWorldConfiguration* Config = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
 		// The window under the voxel cut-over (WM-BP10 empties it above; LOD.Planet.Cutover checks that): out of reach here.
-		Config->PlanetVoxelCutoverAltitude = 1.0e9f;
+		Config->VoxelCutoverAltitude = 1.0e9f;
 		FProbeStrategy Strategy;
 		Strategy.Initialize(Config);
 		const FTerrain Terrain(*Config);
@@ -1058,7 +1058,7 @@ bool FPlanetGroundHorizonTest::RunTest(const FString& Parameters)
 }
 
 /**
- * Spherical Phase 6, WM-BP10 (D18): the voxel cut-over. Above PlanetVoxelCutoverAltitude over the surface under the
+ * Spherical Phase 6, WM-BP10 (D18): the voxel cut-over. Above VoxelCutoverAltitude over the surface under the
  * viewer (the view distance by default) the window is empty: no candidate, every loaded chunk to unload. Between the
  * resume altitude (0.85 of it) and the cut-over a suspended window stays suspended and an active one active
  * (hysteresis); under it the ground disk is back whole. Over open sea the cut-over is measured over the sea, not the
@@ -1087,14 +1087,14 @@ bool FPlanetCutoverTest::RunTest(const FString& Parameters)
 	{
 		UVoxelWorldConfiguration* Config = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
 		{
-			// The default (PlanetVoxelCutoverAltitude 0): three view distances.
+			// The default (VoxelCutoverAltitude 0): three view distances.
 			FProbeStrategy Default;
 			Default.Initialize(Config);
 			TestTrue(*FString::Printf(TEXT("%s: the cut-over defaults to three view distances"), Case.Name),
 				FMath::IsNearlyEqual(Default.GetConfiguredCutoverAltitude(), FDistanceBandLODStrategy::DefaultCutoverViewDistances * ViewDistance, 1.0));
 		}
 		// The checks below at the altitudes of a cut-over at the view distance.
-		Config->PlanetVoxelCutoverAltitude = ViewDistance;
+		Config->VoxelCutoverAltitude = ViewDistance;
 		FProbeStrategy Strategy;
 		Strategy.Initialize(Config);
 		const FTerrain Terrain(*Config);
@@ -1167,7 +1167,7 @@ bool FPlanetCutoverTest::RunTest(const FString& Parameters)
 			}
 			UVoxelWorldConfiguration* SeaConfig = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
 			SeaConfig->bEnableWaterLevel = true;
-			SeaConfig->PlanetVoxelCutoverAltitude = ViewDistance;
+			SeaConfig->VoxelCutoverAltitude = ViewDistance;
 			SeaConfig->WaterRadius = static_cast<float>(Case.Radius + SeabedAltitude + 1.5 * Cutover);
 			FProbeStrategy SeaStrategy;
 			SeaStrategy.Initialize(SeaConfig);
@@ -1251,7 +1251,7 @@ bool FPlanetCutoverResumeGuardTest::RunTest(const FString& Parameters)
 	for (const FPlanetCase& Case : GetPlanetCases())
 	{
 		UVoxelWorldConfiguration* Config = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
-		Config->PlanetVoxelCutoverAltitude = ViewDistance;
+		Config->VoxelCutoverAltitude = ViewDistance;
 		FProbeStrategy Strategy;
 		Strategy.Initialize(Config);
 		const FTerrain Terrain(*Config);
@@ -1319,7 +1319,7 @@ bool FPlanetCutoverFarFieldGateTest::RunTest(const FString& Parameters)
 	for (const FPlanetCase& Case : GetPlanetCases())
 	{
 		UVoxelWorldConfiguration* Config = MakePlanetConfig(ViewDistance, Case.Radius, Case.Shell, true, Case.Frequency, Case.Octaves);
-		Config->PlanetVoxelCutoverAltitude = ViewDistance;
+		Config->VoxelCutoverAltitude = ViewDistance;
 		FProbeStrategy Strategy;
 		Strategy.Initialize(Config);
 		const FTerrain Terrain(*Config);

@@ -153,13 +153,13 @@ public:
 	 * (FLODQueryContext::bFarFieldActive; world modes review WM-MP2, D38; planets too since G78: a suspended window with
 	 * nothing to draw the world is a hole, whatever the mode).
 	 */
-	virtual bool IsWindowSuspended() const override { return bPlanetWindowSuspended; }
+	virtual bool IsWindowSuspended() const override { return bWindowSuspended; }
 
 	/** The window resumes below this fraction of the cut-over altitude (hysteresis: a flyer hovering at it does not churn). */
 	static constexpr double CutoverResumeFraction = 0.85;
 
 	/**
-	 * The default cut-over (PlanetVoxelCutoverAltitude 0) in view distances. At one, a 5,000 uu/s descent onto the 50 km
+	 * The default cut-over (VoxelCutoverAltitude 0) in view distances. At one, a 5,000 uu/s descent onto the 50 km
 	 * test planet resumed the window 10 s before landing and touched down with half of it loaded (the far field drawing
 	 * the rest; P6.5's benches, WORLD_MODES_REVIEW_PLAN.md §20.6); and a viewer 400 m up already saw only the far field.
 	 */
@@ -197,7 +197,7 @@ public:
 
 	/**
 	 * The configured cut-over altitude (uu over the surface; 0 = never), whatever the far field: voxel.World.VoxelCutover
-	 * when set (>= 0), else the configuration's PlanetVoxelCutoverAltitude, else DefaultCutoverViewDistances view distances.
+	 * when set (>= 0), else the configuration's VoxelCutoverAltitude, else DefaultCutoverViewDistances view distances.
 	 * GetCutoverAltitude is the one in force (this, gated by the far field; code review CR2, STREAM-19); the tests read
 	 * the configured value through this.
 	 */
@@ -687,7 +687,7 @@ protected:
 	// ==================== Surface Slab (heightmap worlds) ====================
 
 	/**
-	 * When enabled (config bFarBandSurfaceSlabCulling, heightmap worlds), every column streams the chunks around its OWN
+	 * When enabled (config bSurfaceSlabCulling, heightmap worlds), every column streams the chunks around its OWN
 	 * surface (± SlabSlackChunks, up to the water plane) at every distance, plus the viewer's layer ± NearWindowLayers
 	 * near the viewer (D8, WM-S1). The global height range loads 8 layers per column everywhere (demo geometry), which
 	 * is what makes long view distances explode; cave interiors and edits deeper than the slab load only near the viewer
@@ -774,7 +774,7 @@ protected:
 	const FSphericalPlanetWorldMode* PlanetWorldMode = nullptr;
 
 	/**
-	 * Per-chunk radial slab on a planet (WM-BP8): bFarBandSurfaceSlabCulling on a planet. Off, every chunk in the shell
+	 * Per-chunk radial slab on a planet (WM-BP8): bSurfaceSlabCulling on a planet. Off, every chunk in the shell
 	 * near the viewer streams (the whole shell inside the horizon's cone).
 	 */
 	bool bPlanetSlab = false;
@@ -806,14 +806,14 @@ protected:
 	FVector GroundRadiusViewer = FVector(TNumericLimits<double>::Max());
 	double GroundRadiusCached = 0.0;
 
-	/** The configuration's cut-over altitude (PlanetVoxelCutoverAltitude, else DefaultCutoverViewDistances view distances); 0 off a planet. */
-	double PlanetCutoverConfigured = 0.0;
+	/** The configuration's cut-over altitude (VoxelCutoverAltitude, else DefaultCutoverViewDistances view distances); 0 off a planet. */
+	double CutoverConfigured = 0.0;
 
 	/** The sea's radius (0 without a sea): the cut-over is measured over the sea where it lies above the terrain. */
 	double PlanetSeaRadius = 0.0;
 
 	/** The cut-over state (IsWindowSuspended) and the altitude it was decided at (GetViewerSurfaceAltitude). */
-	bool bPlanetWindowSuspended = false;
+	bool bWindowSuspended = false;
 	double ViewerSurfaceAltitude = 0.0;
 
 	/** The camera's altitude over the same surface (the viewer's plus the context's ViewerLead), and whether it held a resume (G49). */

@@ -175,12 +175,12 @@ struct VOXELSTREAMING_API FVoxelFarFieldSettings
 
 	/**
 	 * Sea cells along a patch's edge: the sea is a smooth sphere, so a grid coarser than the terrain's sags under a uu
-	 * where it is close (a band patch's cell on a 1,000 km planet: 0.002 uu; on the small planet: 0.3 uu)
+	 * where it is close (an edge patch's cell on a 1,000 km planet: 0.002 uu; on the small planet: 0.3 uu)
 	 */
 	static constexpr int32 SeaQuads = 8;
 
-	/** The finest level: patches between one and two chunks across (ComputeBandLevel) */
-	int32 BandLevel = 0;
+	/** The finest level: patches between one and two chunks across (ComputeEdgeLevel) */
+	int32 EdgeLevel = 0;
 
 	/**
 	 * Levels of coarser neighbour a patch's skirts cover: a patch drops a skirt from each edge as deep as the gap to the
@@ -197,13 +197,13 @@ struct VOXELSTREAMING_API FVoxelFarFieldSettings
 
 	/**
 	 * The finest level for a planet: the deepest at which a patch is still at least a chunk across along a face's centre
-	 * lines (pi / 2 x Radius / 2^Level >= ChunkWorldSize), so band patches are one to two chunks across.
+	 * lines (pi / 2 x Radius / 2^Level >= ChunkWorldSize), so edge patches are one to two chunks across.
 	 *
 	 * @param Radius Datum radius
 	 * @param ChunkWorldSize A chunk's edge
-	 * @return Band level (0 for a planet smaller than a few chunks)
+	 * @return Edge level (0 for a planet smaller than a few chunks)
 	 */
-	static int32 ComputeBandLevel(double Radius, double ChunkWorldSize);
+	static int32 ComputeEdgeLevel(double Radius, double ChunkWorldSize);
 
 	// ---- Heightmap worlds (world modes review WM-MP1, D36) ----
 
@@ -214,7 +214,7 @@ struct VOXELSTREAMING_API FVoxelFarFieldSettings
 	 */
 	bool bHeightmap = false;
 
-	/** Heightmap worlds: chunks along a root tile's edge, a power of two (the band level is its log2: band patches one chunk) */
+	/** Heightmap worlds: chunks along a root tile's edge, a power of two (the edge level is its log2: edge patches one chunk) */
 	int32 RootChunks = 64;
 
 	/**
@@ -236,9 +236,9 @@ struct VOXELSTREAMING_API FVoxelFarFieldSettings
 	 * Heightmap worlds: the finest level, at which a patch is one chunk across: log2(RootChunks).
 	 *
 	 * @param InRootChunks Chunks along a root tile's edge (a power of two; rounded down otherwise)
-	 * @return Band level
+	 * @return Edge level
 	 */
-	static int32 ComputeHeightmapBandLevel(int32 InRootChunks);
+	static int32 ComputeHeightmapEdgeLevel(int32 InRootChunks);
 
 	/**
 	 * Heightmap worlds: the root tile size for a far reach (voxel.World.FarFieldRootChunks 0): about a quarter of the
@@ -649,7 +649,7 @@ struct VOXELSTREAMING_API FVoxelFarFieldPatchMesh
 	double BoundsRadius = 0.0;
 
 	/**
-	 * The voxel chunks the patch's surface passes through (band patches): those of its vertices, its quad centres and the
+	 * The voxel chunks the patch's surface passes through (edge patches): those of its vertices, its quad centres and the
 	 * points a vertex spacing from each vertex along each axis. The hole's test: the patch hides only when all are drawn
 	 */
 	TArray<FIntVector> SurfaceChunks;
@@ -687,20 +687,20 @@ struct VOXELSTREAMING_API FVoxelFarFieldView
 
 	/**
 	 * Along the ground from the viewer's ground point: within it the voxel window may hold chunks (its unload distance
-	 * plus a chunk's half diagonal), so patches there split down to the band level and hide where their chunks are drawn
+	 * plus a chunk's half diagonal), so patches there split down to the edge level and hide where their chunks are drawn
 	 */
-	double BandRadius = 0.0;
+	double EdgeRadius = 0.0;
 
 	/**
-	 * Along the ground: band patches reaching past it are built while their chunks are drawn (hidden), ready for when the
+	 * Along the ground: edge patches reaching past it are built while their chunks are drawn (hidden), ready for when the
 	 * chunks unload as the viewer moves away; nearer ones are built only when a chunk under them is missing
 	 */
 	double PrebuildRadius = 0.0;
 
-	/** Seconds (any clock): when a band patch's chunks were first all drawn */
+	/** Seconds (any clock): when an edge patch's chunks were first all drawn */
 	double Time = 0.0;
 
-	/** A band patch hides once its chunks have all been drawn this long (they fade in over it) */
+	/** An edge patch hides once its chunks have all been drawn this long (they fade in over it) */
 	double HideDelay = 0.0;
 
 	/** Version of the voxel chunks' states: the hole is recomputed only when it changes (-1: every update) */
@@ -708,7 +708,7 @@ struct VOXELSTREAMING_API FVoxelFarFieldView
 
 	/**
 	 * A patch hidden this long (seconds) is released: its component goes and it builds again when it is needed. Roots and
-	 * band patches near the window's edge stay. Negative: never
+	 * edge patches near the window's edge stay. Negative: never
 	 */
 	double ReleaseDelay = 10.0;
 
@@ -717,12 +717,12 @@ struct VOXELSTREAMING_API FVoxelFarFieldView
 	 * nearest built ancestor, which draws its whole area instead of everything under it; past the voxel window's band the
 	 * ancestors are released after ReleaseDelay, so that is often a cube face's root, whose coarse surface replaced the
 	 * horizon and rose through the voxel terrain for the frame or more the build took. With this:
-	 * - a band patch whose chunks are all drawn covers its area with nothing to draw, built or not (past PrebuildRadius
+	 * - an edge patch whose chunks are all drawn covers its area with nothing to draw, built or not (past PrebuildRadius
 	 *   once they have been drawn HideDelay; one that must stay built for when its chunks unload builds meanwhile);
 	 * - a patch culled (wholly under the horizon) in its last visit, so drawing nothing, waits for its build drawing nothing
 	 *   while the camera moves (not after a cut: the camera more than a chunk from the last update's, where it may lie in
 	 *   full view).
-	 * False = before: both stood in for, as a covered band patch the viewer moved past PrebuildRadius did
+	 * False = before: both stood in for, as a covered edge patch the viewer moved past PrebuildRadius did
 	 */
 	bool bAvoidStandIns = true;
 
@@ -739,7 +739,7 @@ struct VOXELSTREAMING_API FVoxelFarFieldView
 /** What an update changed, for the owner to apply to its components. */
 struct VOXELSTREAMING_API FVoxelFarFieldChanges
 {
-	/** Patches built or rebuilt: (re)create their components from the meshes (FVoxelPlanetFarField::FindPatch) */
+	/** Patches built or rebuilt: (re)create their components from the meshes (FVoxelFarField::FindPatch) */
 	TArray<uint64> Built;
 
 	/** Patches removed or released: destroy their components */
@@ -772,8 +772,8 @@ struct VOXELSTREAMING_API FVoxelFarFieldChanges
  *   and stays whole below 0.7 of it; patches wholly under the camera's horizon are neither drawn nor split. Built on
  *   the thread pool; a patch keeps drawing until its four children are ready, so the planet never has a hole while it
  *   refines.
- * - The voxel window's hole: within BandRadius of the viewer's ground point patches split to the band level (one to two
- *   chunks), and a band patch hides its terrain once every voxel chunk its surface passes through is drawn (after
+ * - The voxel window's hole: within EdgeRadius of the viewer's ground point patches split to the edge level (one to two
+ *   chunks), and an edge patch hides its terrain once every voxel chunk its surface passes through is drawn (after
  *   HideDelay). Partly covered patches stay drawn under the voxel surface (Sink): no gap and no overlap at the window's
  *   ragged edge, and no far-field floor in holes and caves dug where the chunks are drawn. Patch geometry never depends
  *   on the window, so the hole moves with no rebuild (the far ocean's window-and-frame split, FVoxelFarOcean, done by
@@ -785,7 +785,7 @@ struct VOXELSTREAMING_API FVoxelFarFieldChanges
  * Pure: the owner (UVoxelChunkManager) owns one procedural mesh component per built patch and applies the changes an
  * Update reports. Game thread, except the builds.
  */
-class VOXELSTREAMING_API FVoxelPlanetFarField
+class VOXELSTREAMING_API FVoxelFarField
 {
 public:
 	/** A patch as the selection sees it: its footprint (FVoxelFarFieldFootprint: the cap or the box) and its state. */
@@ -828,19 +828,19 @@ public:
 		double BoundsRadius = 0.0;
 		TArray<FIntVector> SurfaceChunks;
 
-		/** Band patches: whether every chunk under it is drawn, and since when */
+		/** Edge patches: whether every chunk under it is drawn, and since when */
 		bool bCovered = false;
 		double CoveredSince = -1.0;
 		int64 CoveredVersion = -2;
 
-		/** Unbuilt band patches: the chunks at a 9 x 9 grid of surface samples (the lazy test), filled once */
+		/** Unbuilt edge patches: the chunks at a 9 x 9 grid of surface samples (the lazy test), filled once */
 		TArray<FIntVector> SampleChunks;
 
 		/** What the owner was last told is drawn */
 		bool bAppliedTerrain = false;
 		bool bAppliedSea = false;
 
-		/** A band patch standing in for its part of its parent without a mesh this update (nothing to draw) */
+		/** An edge patch standing in for its part of its parent without a mesh this update (nothing to draw) */
 		bool bLazy = false;
 
 		/** Culled (wholly under the horizon) in its last visit: nothing was drawn for it */
@@ -853,11 +853,11 @@ public:
 		bool bDirty = false;
 	};
 
-	FVoxelPlanetFarField();
-	~FVoxelPlanetFarField();
+	FVoxelFarField();
+	~FVoxelFarField();
 
-	FVoxelPlanetFarField(const FVoxelPlanetFarField&) = delete;
-	FVoxelPlanetFarField& operator=(const FVoxelPlanetFarField&) = delete;
+	FVoxelFarField(const FVoxelFarField&) = delete;
+	FVoxelFarField& operator=(const FVoxelFarField&) = delete;
 
 	/**
 	 * Start over with a planet: drops every patch (builds in flight are discarded when they finish).
@@ -902,9 +902,9 @@ public:
 	void InvalidateZone(const FVoxelConditioningZone& Zone);
 
 	/**
-	 * Heightmap worlds: whether the voxel water tile of a chunk column (chunk X, Y) is drawn. A band patch (one chunk column)
+	 * Heightmap worlds: whether the voxel water tile of a chunk column (chunk X, Y) is drawn. An edge patch (one chunk column)
 	 * hides its sea where the tile draws the same water and draws it where none does, so the ring between the window's load
-	 * and unload horizons, whose chunks are drawn without tiles, keeps its sea. Without the query a band patch's sea hides
+	 * and unload horizons, whose chunks are drawn without tiles, keeps its sea. Without the query an edge patch's sea hides
 	 * with its terrain.
 	 */
 	void SetWaterTileQuery(TFunction<bool(const FIntPoint& Column)> InQuery)
@@ -984,7 +984,7 @@ public:
 
 	/**
 	 * Stand-ins over the voxel window in the last update (visual polish VP4): patches drawn because a patch under them was
-	 * not ready to draw, over band patches the voxel chunks cover. Coarser than the voxel terrain, they show through it
+	 * not ready to draw, over edge patches the voxel chunks cover. Coarser than the voxel terrain, they show through it
 	 * wherever their chords rise over it (a flash of the analytic surface for as long as the stand-in lasts).
 	 */
 	int32 GetStandInCount() const { return StandInCount; }
@@ -997,12 +997,12 @@ public:
 	int64 GetStandInUpdates() const { return StandInUpdates; }
 
 	/**
-	 * Band patches that were not ready to draw in the last update (unbuilt or released, and not standing in without a
+	 * Edge patches that were not ready to draw in the last update (unbuilt or released, and not standing in without a
 	 * mesh): covered (every chunk under them drawn) or not.
 	 */
-	int32 GetUnreadyBandCount(bool bCovered) const { return bCovered ? UnreadyCoveredBand : UnreadyUncoveredBand; }
+	int32 GetUnreadyEdgeCount(bool bCovered) const { return bCovered ? UnreadyCoveredEdge : UnreadyUncoveredEdge; }
 
-	/** A chunk under one of the last update's unready, uncovered band patches that was not drawn. False with none. */
+	/** A chunk under one of the last update's unready, uncovered edge patches that was not drawn. False with none. */
 	bool GetUndrawnChunk(FIntVector& OutChunk) const
 	{
 		OutChunk = UndrawnChunk;
@@ -1072,18 +1072,18 @@ private:
 
 	/**
 	 * The selection's recursion: sets what the patch and its subtree draw.
-	 * @return Whether its area is covered (drawn by it or its subtree, culled, or a lazy band patch with nothing to draw)
+	 * @return Whether its area is covered (drawn by it or its subtree, culled, or a lazy edge patch with nothing to draw)
 	 */
 	bool Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutChanges);
 
 	/**
-	 * Whether a band patch without a mesh (unbuilt or released) can stand in for its area drawing nothing: every chunk under
+	 * Whether an edge patch without a mesh (unbuilt or released) can stand in for its area drawing nothing: every chunk under
 	 * it drawn and no sea; inside the prebuild radius, or past it once the chunks have been drawn HideDelay (with
 	 * View.bAvoidStandIns, VP4).
 	 */
 	bool IsLazy(FPatchState& Patch, const FPatchState& Parent);
 
-	/** Whether a patch stays built while hidden: a root, or a band patch near the window's edge. */
+	/** Whether a patch stays built while hidden: a root, or an edge patch near the window's edge. */
 	bool IsKeptBuilt(const FPatchState& Patch) const;
 
 	/** Clear the drawn flags of a patch's descendants. */
@@ -1109,12 +1109,12 @@ private:
 	void UpdateRoots(FVoxelFarFieldChanges& OutChanges);
 
 	/** Whether a patch lies within the band region (with hysteresis while it is split). */
-	bool IsInBand(const FPatchState& Patch) const;
+	bool IsEdgePatch(const FPatchState& Patch) const;
 
-	/** Whether every chunk under a band patch is drawn (cached per chunk-state version). */
+	/** Whether every chunk under an edge patch is drawn (cached per chunk-state version). */
 	bool UpdateCovered(FPatchState& Patch);
 
-	/** Count a patch that is not ready to draw, if it is a band patch (the stand-in figures, VP4). */
+	/** Count a patch that is not ready to draw, if it is an edge patch (the stand-in figures, VP4). */
 	void NoteUnready(FPatchState& Patch);
 
 	/** The chunk holding a world point. */
@@ -1166,10 +1166,10 @@ private:
 	int32 StandInMinLevel = -1;
 	int64 TotalStandIns = 0;
 	int64 StandInUpdates = 0;
-	int32 UnreadyCoveredBand = 0;
-	int32 UnreadyUncoveredBand = 0;
-	/** Band patches visited covered by drawn chunks (a stand-in counts when its subtree had one) */
-	int64 CoveredBandVisits = 0;
+	int32 UnreadyCoveredEdge = 0;
+	int32 UnreadyUncoveredEdge = 0;
+	/** Edge patches visited covered by drawn chunks (a stand-in counts when its subtree had one) */
+	int64 CoveredEdgeVisits = 0;
 	/** The last update's camera, and whether this update's moved more than a chunk from it (a cut: VP4) */
 	FVector LastCamera = FVector::ZeroVector;
 	bool bHasLastCamera = false;

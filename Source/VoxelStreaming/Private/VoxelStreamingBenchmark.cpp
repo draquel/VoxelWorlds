@@ -1117,7 +1117,7 @@ void FVoxelStreamingBenchmark::WriteReport()
 			Json += FString::Printf(TEXT("  \"farFieldStandInsTraverse\": %lld, \"farFieldStandInSamples\": %d,\n"),
 				FarFieldStandInsTraverse, FarFieldStandInSamples);
 			Json += FString::Printf(TEXT("  \"farFieldEnd\": {\"patches\": %d, \"drawn\": %d, \"drawnTerrain\": %d, \"drawnSea\": %d, \"hiddenBand\": %d, \"components\": %d, \"buildsPending\": %d, \"drawsSea\": %s},\n"),
-				FarFieldEnd.Patches, FarFieldEnd.DrawnPatches, FarFieldEnd.DrawnTerrain, FarFieldEnd.DrawnSea, FarFieldEnd.HiddenBand, FarFieldEnd.Components,
+				FarFieldEnd.Patches, FarFieldEnd.DrawnPatches, FarFieldEnd.DrawnTerrain, FarFieldEnd.DrawnSea, FarFieldEnd.HiddenEdge, FarFieldEnd.Components,
 				FarFieldEnd.BuildsPending, FarFieldEnd.bDrawsSea ? TEXT("true") : TEXT("false"));
 		}
 	}

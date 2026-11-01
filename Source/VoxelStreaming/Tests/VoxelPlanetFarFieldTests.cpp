@@ -12,7 +12,7 @@
 #include "Materials/Material.h"
 #include "ProceduralMeshComponent.h"
 #include "VoxelChunkManager.h"
-#include "VoxelPlanetFarField.h"
+#include "VoxelFarField.h"
 #include "VoxelPlanetOcean.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelWorldConfiguration.h"
@@ -124,7 +124,7 @@ namespace VoxelPlanetFarFieldTestUtils
 		Settings.bSea = bSea;
 		Settings.SeaRadius = Config.WaterRadius;
 		Settings.SeaMargin = 2.0 * Config.VoxelSize;
-		Settings.BandLevel = FVoxelFarFieldSettings::ComputeBandLevel(Settings.Radius, Settings.ChunkWorldSize);
+		Settings.EdgeLevel = FVoxelFarFieldSettings::ComputeEdgeLevel(Settings.Radius, Settings.ChunkWorldSize);
 		Settings.ZoneGatherMax = 32.0 * Settings.ChunkWorldSize / Settings.Radius;
 		return Settings;
 	}
@@ -270,12 +270,12 @@ bool FFarFieldPlanetQuadtreeTest::RunTest(const FString& Parameters)
 			const double Seconds = FPlatformTime::Seconds() - Start;
 			TestTrue(*FString::Printf(TEXT("%s, %s: the selection settles"), Case.Name, Site.Name), Updates > 0);
 
-			// The error bound, outside the band (inside it patches split to the band level whatever their error).
+			// The error bound, outside the band (inside it patches split to the edge level whatever their error).
 			const FVector GroundDirection = Site.Up;
-			int32 Drawn = 0, OverBound = 0, InBand = 0, MinLevel = 64, MaxLevel = 0;
+			int32 Drawn = 0, OverBound = 0, InEdge = 0, MinLevel = 64, MaxLevel = 0;
 			double WorstPixels = 0.0;
-			TArray<const FVoxelPlanetFarField::FPatchState*> DrawnPatches;
-			Rig.FarField.ForEachPatch([&](const FVoxelPlanetFarField::FPatchState& Patch)
+			TArray<const FVoxelFarField::FPatchState*> DrawnPatches;
+			Rig.FarField.ForEachPatch([&](const FVoxelFarField::FPatchState& Patch)
 			{
 				if (!Patch.bDrawTerrain && !Patch.bDrawSea)
 				{
@@ -287,9 +287,9 @@ bool FFarFieldPlanetQuadtreeTest::RunTest(const FString& Parameters)
 				MaxLevel = FMath::Max(MaxLevel, Patch.Key.Level);
 				const double Angle = FMath::Atan2(FVector::CrossProduct(GroundDirection, Patch.CapDirection).Size(),
 					FVector::DotProduct(GroundDirection, Patch.CapDirection)) - Patch.CapAngle;
-				if (View.GroundRadius * FMath::Max(Angle, 0.0) < View.BandRadius || Patch.Key.Level >= Rig.Settings.BandLevel)
+				if (View.GroundRadius * FMath::Max(Angle, 0.0) < View.EdgeRadius || Patch.Key.Level >= Rig.Settings.EdgeLevel)
 				{
-					++InBand;
+					++InEdge;
 					return;
 				}
 				const double Distance = FMath::Max(FVector::Dist(View.Camera, Patch.BoundsCenter) - Patch.BoundsRadius, 1.0);
@@ -303,7 +303,7 @@ bool FFarFieldPlanetQuadtreeTest::RunTest(const FString& Parameters)
 			int32 EdgeSamples = 0, Cracks = 0, LevelJumps = 0, MaxLevelDifference = 0;
 			double WorstGap = 0.0, WorstUncovered = 0.0;
 			const int32 Q = Rig.Settings.PatchQuads;
-			for (const FVoxelPlanetFarField::FPatchState* A : DrawnPatches)
+			for (const FVoxelFarField::FPatchState* A : DrawnPatches)
 			{
 				if (!A->bDrawTerrain)
 				{
@@ -317,7 +317,7 @@ bool FFarFieldPlanetQuadtreeTest::RunTest(const FString& Parameters)
 						double FU, FV, OU, OV;
 						EdgeFractions(Edge, Along, 1.0e-4, FU, FV, OU, OV);
 						const FVector Direction = A->Key.GetDirection(FU, FV);
-						const FVoxelPlanetFarField::FPatchState* B = Rig.FarField.FindDrawnPatch(FVoxelFarFieldSample::OfDirection(A->Key.GetDirection(OU, OV)));
+						const FVoxelFarField::FPatchState* B = Rig.FarField.FindDrawnPatch(FVoxelFarFieldSample::OfDirection(A->Key.GetDirection(OU, OV)));
 						if (!B || B == A)
 						{
 							continue;
@@ -347,7 +347,7 @@ bool FFarFieldPlanetQuadtreeTest::RunTest(const FString& Parameters)
 			}
 
 			AddInfo(FString::Printf(TEXT("%s, %s: %d patches, %d drawn (levels %d-%d, %d in the band), settled in %d updates (%.2f s, %lld built, %.2f ms each); worst %.2f px (bound %.1f), %d over; %d edge samples, worst gap %.1f uu, %d cracks past the skirt (worst %.2f uu), level difference up to %d"),
-				Case.Name, Site.Name, Rig.FarField.GetPatchCount(), Drawn, MinLevel, MaxLevel, InBand, Updates, Seconds,
+				Case.Name, Site.Name, Rig.FarField.GetPatchCount(), Drawn, MinLevel, MaxLevel, InEdge, Updates, Seconds,
 				Rig.FarField.GetTotalBuilt(), Rig.FarField.GetTotalBuilt() > 0 ? Rig.FarField.GetTotalBuildMs() / Rig.FarField.GetTotalBuilt() : 0.0,
 				WorstPixels, View.MaxScreenError, OverBound, EdgeSamples, WorstGap, Cracks, WorstUncovered, MaxLevelDifference));
 			TestTrue(*FString::Printf(TEXT("%s, %s: patches drawn"), Case.Name, Site.Name), Drawn > 6);
@@ -388,12 +388,12 @@ bool FFarFieldPlanetHoleTest::RunTest(const FString& Parameters)
 			auto Check = [&](const TCHAR* Stage, const FVoxelFarFieldView& View, TFunctionRef<bool(const FIntVector&)> IsDrawn)
 			{
 				const FVector GroundDirection = (View.Viewer - Rig.Settings.Center).GetSafeNormal();
-				int32 DrawnTerrain = 0, Inside = 0, HiddenBand = 0;
-				Rig.FarField.ForEachPatch([&](const FVoxelPlanetFarField::FPatchState& Patch)
+				int32 DrawnTerrain = 0, Inside = 0, HiddenEdge = 0;
+				Rig.FarField.ForEachPatch([&](const FVoxelFarField::FPatchState& Patch)
 				{
-					if (Patch.Key.Level >= Rig.Settings.BandLevel && !Patch.bDrawTerrain && Patch.bCovered)
+					if (Patch.Key.Level >= Rig.Settings.EdgeLevel && !Patch.bDrawTerrain && Patch.bCovered)
 					{
-						++HiddenBand;
+						++HiddenEdge;
 					}
 					if (!Patch.bDrawTerrain)
 					{
@@ -427,11 +427,11 @@ bool FFarFieldPlanetHoleTest::RunTest(const FString& Parameters)
 						Gaps += Rig.FarField.FindDrawnPatch(FVoxelFarFieldSample::OfDirection(Direction)) ? 0 : 1;
 					}
 				}
-				AddInfo(FString::Printf(TEXT("%s, %s, %s: %d terrain patches drawn, %d band patches hidden by the window, %d wholly inside it; %d directions, %d drawn by voxels, %d gaps"),
-					Case.Name, Site.Name, Stage, DrawnTerrain, HiddenBand, Inside, Samples, ByVoxels, Gaps));
+				AddInfo(FString::Printf(TEXT("%s, %s, %s: %d terrain patches drawn, %d edge patches hidden by the window, %d wholly inside it; %d directions, %d drawn by voxels, %d gaps"),
+					Case.Name, Site.Name, Stage, DrawnTerrain, HiddenEdge, Inside, Samples, ByVoxels, Gaps));
 				TestEqual(*FString::Printf(TEXT("%s, %s, %s: no terrain patch drawn wholly inside the window"), Case.Name, Site.Name, Stage), Inside, 0);
 				TestEqual(*FString::Printf(TEXT("%s, %s, %s: no gap"), Case.Name, Site.Name, Stage), Gaps, 0);
-				TestTrue(*FString::Printf(TEXT("%s, %s, %s: the window hides band patches"), Case.Name, Site.Name, Stage), HiddenBand > 0);
+				TestTrue(*FString::Printf(TEXT("%s, %s, %s: the window hides edge patches"), Case.Name, Site.Name, Stage), HiddenEdge > 0);
 				TestTrue(*FString::Printf(TEXT("%s, %s, %s: the voxels draw the middle"), Case.Name, Site.Name, Stage), ByVoxels > 0);
 			};
 
@@ -444,7 +444,7 @@ bool FFarFieldPlanetHoleTest::RunTest(const FString& Parameters)
 
 			// The viewer moves three chunks east: the hole follows, nothing that stayed is rebuilt.
 			TMap<uint64, uint32> Serials;
-			Rig.FarField.ForEachPatch([&Serials](const FVoxelPlanetFarField::FPatchState& Patch)
+			Rig.FarField.ForEachPatch([&Serials](const FVoxelFarField::FPatchState& Patch)
 			{
 				if (Patch.bBuilt)
 				{
@@ -461,7 +461,7 @@ bool FFarFieldPlanetHoleTest::RunTest(const FString& Parameters)
 			TestTrue(*FString::Printf(TEXT("%s, %s: settles after the move"), Case.Name, Site.Name), Rig.Converge(MovedView, MovedLoaded) > 0);
 			Check(TEXT("moved three chunks"), MovedView, MovedLoaded);
 			int32 Stayed = 0, Rebuilt = 0;
-			Rig.FarField.ForEachPatch([&](const FVoxelPlanetFarField::FPatchState& Patch)
+			Rig.FarField.ForEachPatch([&](const FVoxelFarField::FPatchState& Patch)
 			{
 				if (const uint32* Serial = Serials.Find(Patch.Key.Pack()))
 				{
@@ -511,12 +511,12 @@ bool FFarFieldPlanetHoleTest::RunTest(const FString& Parameters)
  * Visual polish VP4: no coarse stand-in over the voxel window while the viewer walks. With the window loaded around a
  * viewer at 45 degrees on the small planet, settled past the release delay (ancestors hidden under their children are
  * released), the viewer walks 7,500 uu east at 1,500 uu/s, the window following, one update a frame at 30 fps: with
- * View.bAvoidStandIns no update draws a stand-in over the window (under the rule before, covered band patches the viewer
+ * View.bAvoidStandIns no update draws a stand-in over the window (under the rule before, covered edge patches the viewer
  * leaves past the prebuild radius, and a patch coming back over the horizon, need a build, and their nearest built
  * ancestor, up to a face's root, stands in for a frame); every direction out to three view distances stays drawn by a
  * chunk or a patch; and
  * the window shrunk to 0.85 of the view distance (its edge chunks unloading) leaves no gap in the very next update (the
- * band patches near the edge were built meanwhile).
+ * edge patches near the edge were built meanwhile).
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlanetNoStandInTest,
 	"VoxelWorlds.FarField.Planet.NoStandInOverWindow",
@@ -572,10 +572,10 @@ bool FFarFieldPlanetNoStandInTest::RunTest(const FString& Parameters)
 			if (Count > 0)
 			{
 				CoarsestLevel = FMath::Min(CoarsestLevel, Rig.FarField.GetStandInMinLevel());
-				// The band patches this update asked to build (their builds land next update), and where they lie.
+				// The edge patches this update asked to build (their builds land next update), and where they lie.
 				const FVector GroundDirection = Up;
 				FString Waiting;
-				Rig.FarField.ForEachPatch([&](const FVoxelPlanetFarField::FPatchState& Patch)
+				Rig.FarField.ForEachPatch([&](const FVoxelFarField::FPatchState& Patch)
 				{
 					if (!Patch.bBuilding)
 					{
@@ -590,28 +590,28 @@ bool FFarFieldPlanetNoStandInTest::RunTest(const FString& Parameters)
 				});
 				FIntVector Undrawn;
 				const bool bUndrawn = Rig.FarField.GetUndrawnChunk(Undrawn);
-				AddInfo(FString::Printf(TEXT("%s: frame %d: %d stand-in(s), level %d; unready band patches %d covered, %d uncovered%s; building:%s"),
-					Rule, Frame, Count, Rig.FarField.GetStandInMinLevel(), Rig.FarField.GetUnreadyBandCount(true), Rig.FarField.GetUnreadyBandCount(false),
+				AddInfo(FString::Printf(TEXT("%s: frame %d: %d stand-in(s), level %d; unready edge patches %d covered, %d uncovered%s; building:%s"),
+					Rule, Frame, Count, Rig.FarField.GetStandInMinLevel(), Rig.FarField.GetUnreadyEdgeCount(true), Rig.FarField.GetUnreadyEdgeCount(false),
 					bUndrawn ? *FString::Printf(TEXT(" (a chunk not drawn %.0f from the ground point)"), Rig.GroundDistance(View, Rig.ChunkCentre(Undrawn))) : TEXT(""),
 					*Waiting));
 			}
-			UnreadyCovered += Rig.FarField.GetUnreadyBandCount(true);
+			UnreadyCovered += Rig.FarField.GetUnreadyEdgeCount(true);
 			if (Frame % 30 == 0)
 			{
 				WalkGaps += Rig.CountGaps(View, Loaded);
 			}
 		}
-		AddInfo(FString::Printf(TEXT("%s: walking 7,500 uu, %d of %d frames drew a stand-in over the window (%d in all, coarsest level %d, band %d); covered band patches not ready %d; %lld patches released while settling; %d gaps at five checks"),
-			Rule, FramesWithStandIns, Frames, StandIns, FramesWithStandIns > 0 ? CoarsestLevel : -1, Rig.Settings.BandLevel, UnreadyCovered,
+		AddInfo(FString::Printf(TEXT("%s: walking 7,500 uu, %d of %d frames drew a stand-in over the window (%d in all, coarsest level %d, band %d); covered edge patches not ready %d; %lld patches released while settling; %d gaps at five checks"),
+			Rule, FramesWithStandIns, Frames, StandIns, FramesWithStandIns > 0 ? CoarsestLevel : -1, Rig.Settings.EdgeLevel, UnreadyCovered,
 			ReleasedBefore, WalkGaps));
 		TestTrue(*FString::Printf(TEXT("%s: hidden patches were released while settling"), Rule), ReleasedBefore > 0);
 		TestEqual(*FString::Printf(TEXT("%s: no gap while walking"), Rule), WalkGaps, 0);
 		if (bAvoidStandIns)
 		{
 			TestEqual(*FString::Printf(TEXT("%s: no stand-in over the window while walking"), Rule), FramesWithStandIns, 0);
-			TestEqual(*FString::Printf(TEXT("%s: no covered band patch waits for a build"), Rule), UnreadyCovered, 0);
+			TestEqual(*FString::Printf(TEXT("%s: no covered edge patch waits for a build"), Rule), UnreadyCovered, 0);
 
-			// The window's edge unloads: the band patches there were built meanwhile and draw in the very next update.
+			// The window's edge unloads: the edge patches there were built meanwhile and draw in the very next update.
 			TestTrue(*FString::Printf(TEXT("%s: settles after the walk"), Rule), Rig.Converge(View, Loaded) > 0);
 			auto Shrunk = [&Rig, &View](const FIntVector& Coord) { return Rig.InWindow(View, Coord, 0.85 * ViewDistance); };
 			Rig.FarField.Update(View, Shrunk, Changes);
@@ -700,7 +700,7 @@ bool FFarFieldPlanetUnseenFaceTest::RunTest(const FString& Parameters)
 		SIZE_T RootBytes = 0;
 		for (int32 Face = 0; Face < 6; ++Face)
 		{
-			const FVoxelPlanetFarField::FPatchState* Root = Rig.FarField.FindPatch(FVoxelFarFieldPatchKey(Face, 0, 0, 0).Pack());
+			const FVoxelFarField::FPatchState* Root = Rig.FarField.FindPatch(FVoxelFarFieldPatchKey(Face, 0, 0, 0).Pack());
 			if (Root && Root->bResident)
 			{
 				++RootsBuilt;
@@ -708,14 +708,14 @@ bool FFarFieldPlanetUnseenFaceTest::RunTest(const FString& Parameters)
 			}
 		}
 		TSet<uint64> DrawnAtSite;
-		Rig.FarField.ForEachPatch([&DrawnAtSite](const FVoxelPlanetFarField::FPatchState& Patch)
+		Rig.FarField.ForEachPatch([&DrawnAtSite](const FVoxelFarField::FPatchState& Patch)
 		{
 			if (Patch.bDrawTerrain || Patch.bDrawSea)
 			{
 				DrawnAtSite.Add(Patch.Key.Pack());
 			}
 		});
-		const FVoxelPlanetFarField::FPatchState* Destination = Rig.FarField.FindPatch(FarRoot);
+		const FVoxelFarField::FPatchState* Destination = Rig.FarField.FindPatch(FarRoot);
 		TestTrue(*FString::Printf(TEXT("%s: the destination's face lay under the horizon from the site"), Rule), Destination && Destination->bCulled);
 		AddInfo(FString::Printf(TEXT("%s: settled at 45 degrees: %d of 6 roots built (the largest %.1f KB), %d patches drawn; the destination's face %d"),
 			Rule, RootsBuilt, RootBytes / 1024.0, DrawnAtSite.Num(), FarFace));
@@ -746,7 +746,7 @@ bool FFarFieldPlanetUnseenFaceTest::RunTest(const FString& Parameters)
 			if (Frame == 1)
 			{
 				FirstGaps = Gaps;
-				const FVoxelPlanetFarField::FPatchState* Drawn = Rig.FarField.FindDrawnPatch(FVoxelFarFieldSample::OfDirection(Far));
+				const FVoxelFarField::FPatchState* Drawn = Rig.FarField.FindDrawnPatch(FVoxelFarFieldSample::OfDirection(Far));
 				AddInfo(FString::Printf(TEXT("%s: a teleport 90 degrees east onto face %d: %d gaps in the first update, %d patches drawn, under the viewer %s"),
 					Rule, FarFace, Gaps, Rig.FarField.GetDrawnPatchCount(), Drawn ? *Drawn->Key.ToString() : TEXT("nothing")));
 			}
@@ -789,7 +789,7 @@ bool FFarFieldPlanetMatchesSurfaceTest::RunTest(const FString& Parameters)
 	{
 		FRig Rig(Case, 32, /*bSea=*/true);
 		const FVoxelFarFieldSettings& Settings = Rig.Settings;
-		const int32 Band = Settings.BandLevel;
+		const int32 Band = Settings.EdgeLevel;
 		for (int32 SiteIndex : { 1, 3 })
 		{
 			const FSite& Site = Sites[SiteIndex];
@@ -801,7 +801,7 @@ bool FFarFieldPlanetMatchesSurfaceTest::RunTest(const FString& Parameters)
 					FMath::Clamp(FMath::FloorToInt32((Coord.UV.X + 1.0) / 2.0 * Cells), 0, Cells - 1),
 					FMath::Clamp(FMath::FloorToInt32((Coord.UV.Y + 1.0) / 2.0 * Cells), 0, Cells - 1));
 				FVoxelFarFieldPatchMesh Mesh;
-				FVoxelPlanetFarField::BuildPatch(Settings, *Rig.Surface, Rig.NoZones, Key, Mesh);
+				FVoxelFarField::BuildPatch(Settings, *Rig.Surface, Rig.NoZones, Key, Mesh);
 
 				// Float offsets of the patch's size: the tolerance scales with it.
 				const double Arc = Settings.GetPatchArc(Level);
@@ -873,12 +873,12 @@ bool FFarFieldPlanetMatchesSurfaceTest::RunTest(const FString& Parameters)
 				TestTrue(*FString::Printf(TEXT("%s: skirts within their depth"), *Name), WorstSkirt <= Tolerance);
 				TestTrue(*FString::Printf(TEXT("%s: sea vertices at the sea radius"), *Name), WorstSea <= Tolerance);
 				TestTrue(*FString::Printf(TEXT("%s: the sea's sag reported"), *Name), Mesh.SeaSag + Tolerance >= MeasuredSag);
-				TestTrue(*FString::Printf(TEXT("%s: band patches know their chunks"), *Name), Level < Band || Mesh.SurfaceChunks.Num() > 0);
+				TestTrue(*FString::Printf(TEXT("%s: edge patches know their chunks"), *Name), Level < Band || Mesh.SurfaceChunks.Num() > 0);
 			}
 		}
 
 		// A cube edge from both faces: the 45-degree site (0.707, 0, 0.707) lies on the edge between +X and +Z, the plane
-		// x = z, across which the terrain steps (G43). The band patches on either side share their edge vertices exactly.
+		// x = z, across which the terrain steps (G43). The edge patches on either side share their edge vertices exactly.
 		{
 			const FVector OnEdge = Sites[1].Up;
 			const FVector Across = FVector(0.0, 0.0, 1.0e-4);
@@ -891,7 +891,7 @@ bool FFarFieldPlanetMatchesSurfaceTest::RunTest(const FString& Parameters)
 				Keys[Side] = FVoxelFarFieldPatchKey(Coord.Face, Band,
 					FMath::Clamp(FMath::FloorToInt32((Coord.UV.X + 1.0) / 2.0 * Cells), 0, Cells - 1),
 					FMath::Clamp(FMath::FloorToInt32((Coord.UV.Y + 1.0) / 2.0 * Cells), 0, Cells - 1));
-				FVoxelPlanetFarField::BuildPatch(Settings, *Rig.Surface, Rig.NoZones, Keys[Side], Meshes[Side]);
+				FVoxelFarField::BuildPatch(Settings, *Rig.Surface, Rig.NoZones, Keys[Side], Meshes[Side]);
 			}
 			int32 Shared = 0;
 			double WorstShared = 0.0;
@@ -977,7 +977,7 @@ bool FFarFieldPlanetChunkManagerTest::RunTest(const FString& Parameters)
 		TestTrue(*FString::Printf(TEXT("%s: a planet in a game world has a far field"), *Prefix), Manager->HasFarField());
 		TestEqual(*FString::Printf(TEXT("%s: the far field draws the sea only at scale"), *Prefix), Manager->DoesFarFieldDrawSea(), bExpectFarFieldSea);
 		TestEqual(*FString::Printf(TEXT("%s: the ocean shell draws it otherwise"), *Prefix), Manager->HasPlanetOcean(), !bExpectFarFieldSea);
-		if (FVoxelPlanetFarField* FarField = Manager->GetFarFieldMutable())
+		if (FVoxelFarField* FarField = Manager->GetFarFieldMutable())
 		{
 			FarField->SetSynchronousBuilds(true);
 			FarField->SetMaxBuildsInFlight(256);
@@ -993,7 +993,7 @@ bool FFarFieldPlanetChunkManagerTest::RunTest(const FString& Parameters)
 			}
 			Manager->UpdateFarFieldForViewer(Viewer);
 			int32 Built = 0, Drawn = 0, Shown = 0, Hidden = 0, Missing = 0, SeaShown = 0;
-			FarField->ForEachPatch([&](const FVoxelPlanetFarField::FPatchState& Patch)
+			FarField->ForEachPatch([&](const FVoxelFarField::FPatchState& Patch)
 			{
 				if (!Patch.bResident)
 				{
@@ -1118,7 +1118,7 @@ bool FFarFieldPlanetCameraAfterCutTest::RunTest(const FString& Parameters)
 		// The camera: a camera actor, the controller's view target (as vox.Orbit's camera is).
 		APlayerController* PC = World->SpawnActor<APlayerController>();
 		ACameraActor* Camera = World->SpawnActor<ACameraActor>(SiteUp * (Radius + Altitude), FRotator::ZeroRotator);
-		FVoxelPlanetFarField* FarField = Manager->GetFarFieldMutable();
+		FVoxelFarField* FarField = Manager->GetFarFieldMutable();
 		const bool bReady = FarField && PC && PC->PlayerCameraManager && Camera && World->GetFirstPlayerController() == PC;
 		TestTrue(*FString::Printf(TEXT("%s: a far field, and a controller with a camera manager, the world's first"), Rule), bReady);
 		if (bReady)
@@ -1165,7 +1165,7 @@ bool FFarFieldPlanetCameraAfterCutTest::RunTest(const FString& Parameters)
 						const double Angle = Distance / Radius;
 						const FVector Tangent = East * FMath::Cos(Theta) + North * FMath::Sin(Theta);
 						const FVector Direction = (Up * FMath::Cos(Angle) + Tangent * FMath::Sin(Angle)).GetSafeNormal();
-						const FVoxelPlanetFarField::FPatchState* Patch = FarField->FindDrawnPatch(FVoxelFarFieldSample::OfDirection(Direction));
+						const FVoxelFarField::FPatchState* Patch = FarField->FindDrawnPatch(FVoxelFarFieldSample::OfDirection(Direction));
 						const UProceduralMeshComponent* Component = Patch ? Manager->GetFarFieldComponent(Patch->Key.Pack()) : nullptr;
 						++OutSamples;
 						Gaps += (!Component || Component->GetNumSections() == 0 || !Component->IsMeshSectionVisible(0)) ? 1 : 0;
@@ -1189,7 +1189,7 @@ bool FFarFieldPlanetCameraAfterCutTest::RunTest(const FString& Parameters)
 			TestTrue(*FString::Printf(TEXT("%s: settles"), Rule), IdleFrames >= 30);
 			TestTrue(*FString::Printf(TEXT("%s: the camera manager's camera is the camera actor"), Rule),
 				PC->PlayerCameraManager->GetCameraLocation().Equals(Camera->GetActorLocation(), 1.0));
-			const FVoxelPlanetFarField::FPatchState* FarRoot = FarField->FindPatch(FVoxelFarFieldPatchKey(FVoxelCubeSphere::DirectionToSurface(FarUp).Face, 0, 0, 0).Pack());
+			const FVoxelFarField::FPatchState* FarRoot = FarField->FindPatch(FVoxelFarFieldPatchKey(FVoxelCubeSphere::DirectionToSurface(FarUp).Face, 0, 0, 0).Pack());
 			TestTrue(*FString::Printf(TEXT("%s: the destination's face lies under the horizon"), Rule), FarRoot && FarRoot->bCulled);
 
 			// Moving under a chunk a frame: the tick's selection holds, no second update.
@@ -1210,7 +1210,7 @@ bool FFarFieldPlanetCameraAfterCutTest::RunTest(const FString& Parameters)
 			int32 Samples = 0;
 			const int32 FirstGaps = CountGaps(FarUp, Samples);
 			const int64 CutUpdates = Manager->GetFarFieldStats().CameraUpdates - UpdatesBefore;
-			const FVoxelPlanetFarField::FPatchState* Drawn = FarField->FindDrawnPatch(FVoxelFarFieldSample::OfDirection(FarUp));
+			const FVoxelFarField::FPatchState* Drawn = FarField->FindDrawnPatch(FVoxelFarFieldSample::OfDirection(FarUp));
 			Frame();
 			int32 SecondSamples = 0;
 			const int32 SecondGaps = CountGaps(FarUp, SecondSamples);

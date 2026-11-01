@@ -33,7 +33,7 @@ namespace LODCacheScheduleTestHelpers
 			FLODBand(0.0f, 7000.0f, 0, 1),
 			FLODBand(7000.0f, 14000.0f, 1, 2),
 			FLODBand(14000.0f, 40000.0f, 2, 4) };
-		Config->bFarBandSurfaceSlabCulling = false;
+		Config->bSurfaceSlabCulling = false;
 		Config->bEnableFrustumCulling = false;
 		return Config;
 	}

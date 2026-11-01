@@ -45,7 +45,7 @@
 #include "VoxelTreeTypes.h"
 #include "VoxelWorldBoundary.h"
 #include "VoxelFarOcean.h"
-#include "VoxelPlanetFarField.h"
+#include "VoxelFarField.h"
 #include "VoxelPlanetOcean.h"
 #include "Engine/GameViewportClient.h"
 #include "IslandBowlWorldMode.h"
@@ -128,7 +128,7 @@ static TAutoConsoleVariable<int32> CVarPlanetOcean(
 static TAutoConsoleVariable<int32> CVarFarField(
 	TEXT("voxel.World.FarField"),
 	1,
-	TEXT("The far field: the analytic surface drawn beyond the voxel window to the horizon (FVoxelPlanetFarField). On a planet six\n")
+	TEXT("The far field: the analytic surface drawn beyond the voxel window to the horizon (FVoxelFarField). On a planet six\n")
 	TEXT("cube-face quadtrees; on a heightmap world (world modes review WM-MP1) a quadtree of root tiles over the XY plane out to\n")
 	TEXT("voxel.World.FarFieldDistance, with the sea at WaterLevel (an island's far ocean draws its open sea and seabed past the box).\n")
 	TEXT("  1 = drawn (default); at scale a planet's patches also draw the sea in place of the ocean shell\n")
@@ -193,14 +193,14 @@ static TAutoConsoleVariable<float> CVarFarFieldDistance(
 	ECVF_Default);
 
 // Visual polish VP4: the terrain flicker on planets. A far-field patch that needed a build while nothing showed of it (a
-// band patch the voxel chunks covered, past the prebuild radius or with a chunk under it re-meshing an empty mesh; a patch
+// edge patch the voxel chunks covered, past the prebuild radius or with a chunk under it re-meshing an empty mesh; a patch
 // coming up over the horizon) was stood in for by its nearest built ancestor, often a cube face's root, whose coarse
 // surface replaced the horizon and rose through the voxel terrain for the frame or more the build took.
 static TAutoConsoleVariable<int32> CVarFarFieldAvoidStandIns(
 	TEXT("voxel.World.FarFieldAvoidStandIns"),
 	1,
-	TEXT("Planets (visual polish VP4): no far-field stand-in where nothing would show.\n")
-	TEXT("  1 = a band patch whose chunks are all drawn draws nothing, built or not (one kept built for the window's edge builds\n")
+	TEXT("Every world mode with a far field (visual polish VP4): no far-field stand-in where nothing would show.\n")
+	TEXT("  1 = an edge patch whose chunks are all drawn draws nothing, built or not (one kept built for the window's edge builds\n")
 	TEXT("      meanwhile); a chunk re-meshing counts as drawn as it was; a patch coming up over the horizon waits for its build\n")
 	TEXT("      drawing nothing. No coarse ancestor is drawn over the voxel terrain or the horizon for them (default)\n")
 	TEXT("  0 = as before: each needed a build, and its nearest built ancestor (often a cube face's root) flashed in its place,\n")
@@ -239,7 +239,7 @@ struct FMesherWorkerGuard
 static TAutoConsoleVariable<int32> CVarFarFieldCameraUpdate(
 	TEXT("voxel.World.FarFieldCameraUpdate"),
 	1,
-	TEXT("Planets (visual polish F4.3): after a cut, update the far field again for the camera the frame renders with.\n")
+	TEXT("Every world mode with a far field (visual polish F4.3): after a cut, update the far field again for the camera the frame renders with.\n")
 	TEXT("  1 = in TG_PostUpdateWork, after the camera managers, when the camera lies more than a chunk from the camera of\n")
 	TEXT("      the tick's update (a teleport), the far field updates for it: the first frame after a teleport draws the\n")
 	TEXT("      far field there (default)\n")
@@ -263,9 +263,9 @@ static TAutoConsoleVariable<int32> CVarStreamCameraCutUpdate(
 static TAutoConsoleVariable<int32> CVarFarFieldTrace(
 	TEXT("voxel.World.FarFieldTrace"),
 	0,
-	TEXT("Planets (visual polish VP4): log every far-field update with a stand-in over the voxel window (a coarser patch drawn\n")
-	TEXT("because a patch under it was not ready, over band patches the chunks cover): the frame, the stand-ins and the coarsest's\n")
-	TEXT("level, the band patches not ready (covered by drawn chunks or not) and a chunk not drawn under one, with its state.\n")
+	TEXT("Every world mode with a far field (visual polish VP4): log every far-field update with a stand-in over the voxel window (a coarser patch drawn\n")
+	TEXT("because a patch under it was not ready, over edge patches the chunks cover): the frame, the stand-ins and the coarsest's\n")
+	TEXT("level, the edge patches not ready (covered by drawn chunks or not) and a chunk not drawn under one, with its state.\n")
 	TEXT("0 = off (default)."),
 	ECVF_Default);
 
@@ -1127,7 +1127,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	UpdatePlanetOceanUnderside(CurrentViewerPosition);
 
 	// === Planet far field (spherical Phase 6, WM-BP9) ===
-	// After this tick's generation results, meshes and unloads: a band patch shows in the tick its chunks leave and
+	// After this tick's generation results, meshes and unloads: an edge patch shows in the tick its chunks leave and
 	// hides once they have been drawn a moment. Timed into FarFieldStats.UpdateMs (the bench's FarFieldMs).
 	if (FarField)
 	{
@@ -4029,7 +4029,7 @@ void UVoxelChunkManager::RebuildPlanetOcean()
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("Planet ocean: not drawn, the configuration has no WaterMeshMaterial."));
 		return;
 	}
-	if (FVoxelPlanetFarField::ShouldDrawSea(Configuration->WaterRadius, PlanetOceanSettings.MaxSag, PlanetOceanSettings.MinSegments,
+	if (FVoxelFarField::ShouldDrawSea(Configuration->WaterRadius, PlanetOceanSettings.MaxSag, PlanetOceanSettings.MinSegments,
 		PlanetOceanSettings.MaxSegments))
 	{
 		// At scale the shell's quads sag past its budget (G40: up to 3,189 uu on a 1,000 km planet, its vertices floats of
@@ -4121,7 +4121,7 @@ void UVoxelChunkManager::SetPlanetOceanVisible(bool bVisible)
 	}
 }
 
-// ==================== Planet Far Field (spherical Phase 6, WM-BP9) ====================
+// ==================== The far field (spherical Phase 6 WM-BP9; every world mode since MP3) ====================
 
 namespace VoxelFarFieldManagerPrivate
 {
@@ -4227,7 +4227,7 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 	Settings.GridOrigin = Configuration->WorldOrigin;
 	Settings.ChunkWorldSize = Configuration->GetChunkWorldSize();
 	Settings.VoxelSize = Configuration->VoxelSize;
-	// Quads along a patch's edge (16: a band patch's error stays a fraction of the sink on the review planets, and the
+	// Quads along a patch's edge (16: an edge patch's error stays a fraction of the sink on the review planets, and the
 	// procedural mesh components hold about 200 bytes a vertex, CPU and GPU copies).
 	Settings.PatchQuads = static_cast<int32>(FMath::RoundUpToPowerOfTwo(static_cast<uint32>(FMath::Clamp(CVarFarFieldQuads.GetValueOnGameThread(), 4, 64))));
 	// A voxel under the analytic surface: the voxel surface (which DC and MC follow within a few uu) hides it wherever a
@@ -4250,9 +4250,9 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 		// keeps its shell.
 		const FVoxelPlanetOceanSettings OceanDefaults;
 		Settings.bSea = Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial
-			&& FVoxelPlanetFarField::ShouldDrawSea(Configuration->WaterRadius, OceanDefaults.MaxSag, OceanDefaults.MinSegments, OceanDefaults.MaxSegments);
+			&& FVoxelFarField::ShouldDrawSea(Configuration->WaterRadius, OceanDefaults.MaxSag, OceanDefaults.MinSegments, OceanDefaults.MaxSegments);
 		Settings.SeaRadius = Configuration->WaterRadius;
-		Settings.BandLevel = FVoxelFarFieldSettings::ComputeBandLevel(Settings.Radius, Settings.ChunkWorldSize);
+		Settings.EdgeLevel = FVoxelFarFieldSettings::ComputeEdgeLevel(Settings.Radius, Settings.ChunkWorldSize);
 		// Zones (POI pads, a few chunks across) only for patches up to 32 chunks in radius: past that they do not show, and a
 		// wide cap would ask the POI system for every POI in it (G37).
 		Settings.ZoneGatherMax = 32.0 * Settings.ChunkWorldSize / FMath::Max(Settings.Radius, 1.0);
@@ -4283,12 +4283,12 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 		// inside the bounds are the far field's now).
 		Settings.bSea = Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial;
 		Settings.SeaZ = Configuration->WaterLevel;
-		Settings.BandLevel = FVoxelFarFieldSettings::ComputeHeightmapBandLevel(Settings.RootChunks);
+		Settings.EdgeLevel = FVoxelFarFieldSettings::ComputeHeightmapEdgeLevel(Settings.RootChunks);
 		// Zones for patches up to 64 chunks across (a root tile of 64 included): the gather is a box query over the zones.
 		Settings.ZoneGatherMax = 64.0 * Settings.ChunkWorldSize + 1.0;
 	}
 
-	FarField = MakeUnique<FVoxelPlanetFarField>();
+	FarField = MakeUnique<FVoxelFarField>();
 	FarField->Initialize(Settings, Surface);
 	FarField->SetMaxBuildsInFlight(CVarFarFieldMaxBuilds.GetValueOnGameThread());
 	// The cut-over is in force only with a far field (D38, every mode since G78): told now, not at the next Update.
@@ -4327,7 +4327,7 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 	{
 		UE_LOG(LogVoxelStreaming, Log,
 			TEXT("Far field: radius %.0f, %d quads a patch, band level %d (patches %.0f uu across near the voxel window), drawn %.0f uu under the surface, altitudes %.0f to %.0f, sea %s"),
-			Settings.Radius, Settings.PatchQuads, Settings.BandLevel, Settings.GetPatchArc(Settings.BandLevel), Settings.Sink,
+			Settings.Radius, Settings.PatchQuads, Settings.EdgeLevel, Settings.GetPatchArc(Settings.EdgeLevel), Settings.Sink,
 			Settings.MinAltitude, Settings.MaxAltitude,
 			Settings.bSea ? *FString::Printf(TEXT("drawn by the far field (radius %.0f)"), Settings.SeaRadius)
 				: (Configuration->bEnableWaterLevel ? TEXT("drawn by the ocean shell") : TEXT("off")));
@@ -4336,7 +4336,7 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 	{
 		UE_LOG(LogVoxelStreaming, Log,
 			TEXT("Far field (heightmap): root tiles of %d chunks (%.0f uu), %d quads a patch, band level %d (patches %.0f uu across near the voxel window), out to %.0f uu from the camera%s, drawn %.0f uu under the surface, heights %.0f to %.0f, sea %s%s"),
-			Settings.RootChunks, Settings.GetRootTileSize(), Settings.PatchQuads, Settings.BandLevel, Settings.GetPatchArc(Settings.BandLevel),
+			Settings.RootChunks, Settings.GetRootTileSize(), Settings.PatchQuads, Settings.EdgeLevel, Settings.GetPatchArc(Settings.EdgeLevel),
 			Settings.FarDistance, Settings.Bounds.IsBounded() ? TEXT(" and within the world's bounds") : TEXT(""), Settings.Sink,
 			Settings.MinAltitude, Settings.MaxAltitude,
 			Settings.bSea ? *FString::Printf(TEXT("drawn by the far field at Z %.0f"), Settings.SeaZ) : TEXT("off"),
@@ -4399,7 +4399,7 @@ bool UVoxelChunkManager::IsChunkDrawnForFarField(const FIntVector& ChunkCoord) c
 	case EChunkState::PendingMeshing:
 	case EChunkState::Meshing:
 		// Re-meshing (an LOD change, an edit): its old mesh is still drawn. A chunk loaded before is drawn as it was, also
-		// with an empty mesh the renderer holds nothing for (VP4: such a chunk under a band patch uncovered the patch for its
+		// with an empty mesh the renderer holds nothing for (VP4: such a chunk under an edge patch uncovered the patch for its
 		// re-mesh, and the patch's ancestor flashed over the terrain).
 		return (CVarFarFieldAvoidStandIns.GetValueOnGameThread() != 0 && LoadedChunkCoords.Contains(ChunkCoord))
 			|| (MeshRenderer && MeshRenderer->IsChunkLoaded(ChunkCoord));
@@ -4559,15 +4559,15 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	}
 	View.GroundRadius = FarFieldGroundRadius;
 	// Within the unload distance of the ground point (plus a chunk's reach past its centre) the window may hold chunks;
-	// band patches reaching past three quarters of the load distance are built while covered, ready for when their
+	// edge patches reaching past three quarters of the load distance are built while covered, ready for when their
 	// chunks unload.
 	const double HalfDiagonal = 0.5 * UE_DOUBLE_SQRT_3 * Settings.ChunkWorldSize;
 	const double LoadDistance = LODStrategy ? LODStrategy->GetLoadDistance() : Configuration->ViewDistance;
 	const double UnloadDistance = LODStrategy ? LODStrategy->GetUnloadDistance() : Configuration->ViewDistance * 1.2;
 	// Above the voxel cut-over (WM-BP10) the window empties: once it holds no chunk there is no hole to cut, and the far
-	// field refines by its error alone (the band's forced splits would build band patches for a window that is empty).
+	// field refines by its error alone (the band's forced splits would build edge patches for a window that is empty).
 	const bool bNoWindow = IsVoxelWindowSuspended() && LoadedChunkCoords.Num() == 0;
-	View.BandRadius = bNoWindow ? 0.0 : UnloadDistance + HalfDiagonal;
+	View.EdgeRadius = bNoWindow ? 0.0 : UnloadDistance + HalfDiagonal;
 	View.PrebuildRadius = bNoWindow ? 0.0 : 0.75 * LoadDistance;
 	View.Time = FPlatformTime::Seconds();
 	// A new chunk fades in over the patch under it (the appearance fade, R24 P3): hide the patch once it has.
@@ -4605,7 +4605,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	}
 	for (const uint64 Key : Changes.Built)
 	{
-		const FVoxelPlanetFarField::FPatchState* Patch = FarField->FindPatch(Key);
+		const FVoxelFarField::FPatchState* Patch = FarField->FindPatch(Key);
 		if (!Patch || !Patch->Mesh.IsValid() || !Owner)
 		{
 			continue;
@@ -4623,7 +4623,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 		}
 		SetPatchSection(Component, 0, Mesh.Terrain, false, TerrainMaterial);
 		// The sea's underside only near the voxel window: seen from under the water, the surface is only visible close by.
-		const bool bUnderside = Settings.bSea && !Mesh.Sea.IsEmpty() && Patch->Key.Level >= Settings.BandLevel - FarFieldUndersideLevels;
+		const bool bUnderside = Settings.bSea && !Mesh.Sea.IsEmpty() && Patch->Key.Level >= Settings.EdgeLevel - FarFieldUndersideLevels;
 		if (Settings.bSea && !Mesh.Sea.IsEmpty())
 		{
 			SetPatchSection(Component, 1, Mesh.Sea, false, WaterMaterial);
@@ -4649,7 +4649,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	}
 	auto ApplyVisibility = [this, bUnderSea](uint64 Key)
 	{
-		const FVoxelPlanetFarField::FPatchState* Patch = FarField->FindPatch(Key);
+		const FVoxelFarField::FPatchState* Patch = FarField->FindPatch(Key);
 		const TObjectPtr<UProceduralMeshComponent>* Found = FarFieldComponents.Find(Key);
 		if (!Patch || !Found || !IsValid(*Found))
 		{
@@ -4691,12 +4691,12 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	Stats.DrawnPatches = FarField->GetDrawnPatchCount();
 	Stats.DrawnTerrain = 0;
 	Stats.DrawnSea = 0;
-	Stats.HiddenBand = 0;
-	FarField->ForEachPatch([&Stats, &Settings](const FVoxelPlanetFarField::FPatchState& Patch)
+	Stats.HiddenEdge = 0;
+	FarField->ForEachPatch([&Stats, &Settings](const FVoxelFarField::FPatchState& Patch)
 	{
 		Stats.DrawnTerrain += Patch.bDrawTerrain ? 1 : 0;
 		Stats.DrawnSea += Patch.bDrawSea ? 1 : 0;
-		Stats.HiddenBand += (Patch.Key.Level >= Settings.BandLevel && !Patch.bDrawTerrain && Patch.bCovered) ? 1 : 0;
+		Stats.HiddenEdge += (Patch.Key.Level >= Settings.EdgeLevel && !Patch.bDrawTerrain && Patch.bCovered) ? 1 : 0;
 	});
 	Stats.PatchesBuilt = FarField->ConsumeBuiltCount();
 	Stats.BuildsPending = FarField->GetBuildsPending();
@@ -4725,8 +4725,8 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 				LoadedChunkCoords.Contains(Undrawn) ? 1 : 0);
 		}
 		UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.FarFieldTrace: frame %llu (dumping %d): %d stand-in(s) over the window, coarsest level %d (band %d); band patches not ready: %d covered, %d uncovered; a chunk not drawn under one: %s"),
-			static_cast<uint64>(GFrameCounter), GIsDumpingMovie, Stats.StandIns, Stats.StandInMinLevel, Settings.BandLevel,
-			FarField->GetUnreadyBandCount(true), FarField->GetUnreadyBandCount(false), *UndrawnText);
+			static_cast<uint64>(GFrameCounter), GIsDumpingMovie, Stats.StandIns, Stats.StandInMinLevel, Settings.EdgeLevel,
+			FarField->GetUnreadyEdgeCount(true), FarField->GetUnreadyEdgeCount(false), *UndrawnText);
 	}
 }
 
@@ -4742,13 +4742,13 @@ FString UVoxelChunkManager::GetFarFieldDebugString() const
 	const int32 Roots = FarField->GetRoots().Num();
 	for (const uint64 Key : FarField->GetRoots())
 	{
-		const FVoxelPlanetFarField::FPatchState* Root = FarField->FindPatch(Key);
+		const FVoxelFarField::FPatchState* Root = FarField->FindPatch(Key);
 		RootsBuilt += Root && Root->bResident ? 1 : 0;
 	}
 	return FString::Printf(TEXT("%spatches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s; stand-ins over the window %lld in %lld updates (voxel.World.FarFieldAvoidStandIns %d); roots built %d of %d (voxel.World.FarFieldBuildAllRoots %d); updates for the frame's camera after a cut %lld (voxel.World.FarFieldCameraUpdate %d)"),
 		Settings.bHeightmap ? *FString::Printf(TEXT("heightmap (root tiles of %d chunks, out to %.0f uu) "), Settings.RootChunks, Settings.FarDistance) : TEXT(""),
-		Stats.Patches, Stats.DrawnPatches, Stats.DrawnTerrain, Stats.DrawnSea, Stats.HiddenBand, Stats.Components, Stats.BuildsPending,
-		Stats.TotalBuilt, Stats.BuildMsMean, Stats.UpdateMs, Stats.MemoryMB, Settings.BandLevel, Settings.GetPatchArc(Settings.BandLevel),
+		Stats.Patches, Stats.DrawnPatches, Stats.DrawnTerrain, Stats.DrawnSea, Stats.HiddenEdge, Stats.Components, Stats.BuildsPending,
+		Stats.TotalBuilt, Stats.BuildMsMean, Stats.UpdateMs, Stats.MemoryMB, Settings.EdgeLevel, Settings.GetPatchArc(Settings.EdgeLevel),
 		Settings.Sink, Settings.bSea ? TEXT("far field") : (Settings.bHeightmap ? TEXT("tiles / far ocean / none") : TEXT("ocean shell / none")),
 		Stats.TotalStandIns, Stats.StandInUpdates,
 		CVarFarFieldAvoidStandIns.GetValueOnGameThread(), RootsBuilt, Roots, CVarFarFieldBuildAllRoots.GetValueOnGameThread(),
@@ -6120,7 +6120,7 @@ void UVoxelChunkManager::GetWorldReport(const FVoxelWorldReportNotes& Notes, TAr
 			ByLOD.IsEmpty() ? TEXT("-") : *ByLOD, LowLayer, HighLayer, Residency.MaxDistance, Residency.MaxGroundDistance,
 			Residency.MinChunkAltitude, Residency.MaxChunkAltitude, Configuration->ViewDistance,
 			Far.bActive ? *FString::Printf(TEXT("%d of %d patches drawn (terrain %d, sea %d), %d hidden by the voxel window, %d builds pending, %lld built (%.2f ms each), %.2f ms, %.1f MB%s"),
-				Far.DrawnPatches, Far.Patches, Far.DrawnTerrain, Far.DrawnSea, Far.HiddenBand, Far.BuildsPending,
+				Far.DrawnPatches, Far.Patches, Far.DrawnTerrain, Far.DrawnSea, Far.HiddenEdge, Far.BuildsPending,
 				Far.TotalBuilt, Far.BuildMsMean, Far.UpdateMs, Far.MemoryMB, Far.bDrawsSea ? TEXT(", with the sea") : TEXT(""))
 				: TEXT("none (voxel.World.FarField 0: nothing is drawn past the voxel window but the sea)")));
 	}
@@ -6133,7 +6133,7 @@ void UVoxelChunkManager::GetWorldReport(const FVoxelWorldReportNotes& Notes, TAr
 			ByLOD.IsEmpty() ? TEXT("-") : *ByLOD, LowLayer, HighLayer, Residency.MaxDistance, Residency.MaxGroundDistance,
 			Residency.MinChunkAltitude, Residency.MaxChunkAltitude, Configuration->ViewDistance,
 			Far.bActive ? *FString::Printf(TEXT("%d of %d patches drawn (terrain %d, sea %d), %d hidden by the voxel window, %d builds pending, %lld built (%.2f ms each), %.2f ms, %.1f MB%s; %s"),
-				Far.DrawnPatches, Far.Patches, Far.DrawnTerrain, Far.DrawnSea, Far.HiddenBand, Far.BuildsPending,
+				Far.DrawnPatches, Far.Patches, Far.DrawnTerrain, Far.DrawnSea, Far.HiddenEdge, Far.BuildsPending,
 				Far.TotalBuilt, Far.BuildMsMean, Far.UpdateMs, Far.MemoryMB, Far.bDrawsSea ? TEXT(", with the sea") : TEXT(""),
 				*GetFarFieldDebugString())
 				: TEXT("none (voxel.World.FarField 0: nothing is drawn past the voxel window)")));
@@ -8475,7 +8475,7 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 
 	if (bAnyWater)
 	{
-		// A new tile: the far field's band patches over this column hide their sea under it (WM-MP1), so they re-select
+		// A new tile: the far field's edge patches over this column hide their sea under it (WM-MP1), so they re-select
 		// (the far field re-reads the window on a chunk-state version change).
 		const bool bNewTile = !WaterTiles.Contains(TileCoord);
 		FWaterTileState& Tile = WaterTiles.FindOrAdd(TileCoord);
@@ -8752,7 +8752,7 @@ void UVoxelChunkManager::RemoveWaterTileContribution(const FIntVector& ChunkCoor
 
 	if (Tile->PartialMasks.IsEmpty())
 	{
-		// No more contributors — remove the tile entirely. The far field's band patches over this column drew no sea
+		// No more contributors — remove the tile entirely. The far field's edge patches over this column drew no sea
 		// under it (WM-MP1): a chunk-state version change has them re-select.
 		if (MeshRenderer)
 		{

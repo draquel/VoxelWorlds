@@ -96,7 +96,7 @@ float FInfinitePlaneWorldMode::GetDensityAt(const FVector& WorldPos,
 - **Horizon** (load at the view distance, unload at 1.2×) is measured horizontally; **LOD distance** in 3D
 - **The far field** (mode parity WM-MP1, decision D36, 2026-10-26): past the window the generated surface is drawn to
   `voxel.World.FarFieldDistance` (2,000,000 uu) by the planet's far field over root tiles of `voxel.World.FarFieldRootChunks`
-  chunks on the chunk grid, the sea at `WaterLevel` in it, band patches (one chunk column) hidden where the window's
+  chunks on the chunk grid, the sea at `WaterLevel` in it, edge patches (one chunk column) hidden where the window's
   chunks are drawn; `Features/LOD_SYSTEM.md`, "The Far Field". Before, the sky showed under the window's edge
 - **The voxel cut-over** (WM-MP2, D38): above three view distances over the ground or the sea under the streaming viewer
   the window unloads and the far field alone draws; it streams back under 0.85 of it, ahead of a descending camera (the
@@ -533,7 +533,7 @@ A planet streams by chunk (`FDistanceBandLODStrategy::IsInPlanetWindow`, spheric
   cube-sphere cells its corners span, ± 1.5 chunks; near the viewer also the viewer's altitude ± 2 chunks, up to the
   top of the slab there or the sea's surface and none for a viewer above them (G52: above them that band is air).
 - **The shell**: the terrain's real bounds (`GetDisplacementBounds` within `[R - MaxTerrainDepth, R + MaxTerrainHeight]`)
-  widened by half a chunk; nothing outside it loads. With `bFarBandSurfaceSlabCulling` off the window is the whole shell
+  widened by half a chunk; nothing outside it loads. With `bSurfaceSlabCulling` off the window is the whole shell
   (until WM-BP8 the window was each column's crossing of the shell within the viewer's Z ± the view distance,
   `GetPlanetShellWindow`).
 - **Horizon culling** (SP-C2): chunks farther than `√(2Rh + h²) + √(2RH + H²)` (h the viewer's altitude, H the
@@ -557,7 +557,7 @@ A planet streams by chunk (`FDistanceBandLODStrategy::IsInPlanetWindow`, spheric
   8 uu) the far field draws the sea over the cells whose analytic terrain lies near or under it instead
 - The sun has no axial tilt: the poles sit in a low sun all day (decision D12)
 - The far field (spherical Phase 6, WM-BP9, [LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field") draws the planet beyond the
-  voxel window, to the horizon and from altitude; above the voxel cut-over (`PlanetVoxelCutoverAltitude`, three times the view
+  voxel window, to the horizon and from altitude; above the voxel cut-over (`VoxelCutoverAltitude`, three times the view
   distance by default) the window unloads and the far field alone draws the planet, and on the way down the window
   streams back ahead of a descending camera and fades in (WM-BP10, "Orbit and Back" in the same doc). The far field
   shows neither caves, overhangs nor edits beyond the window, so they disappear above the cut-over and come back with
@@ -602,7 +602,7 @@ the heightmap modes every planet feature that is not tied to the sphere. One cod
 | Feature | Heightmap worlds | Planets | Since |
 |---------|------------------|---------|-------|
 | Terrain past the view distance | The far field to the horizon: a quadtree per root tile on the XY grid (`FVoxelFarFieldTileKey`), the island's over its bounds with the far ocean beyond (D37), the sea at `WaterLevel`, a cubic world's patches at the block tops; `voxel.World.FarField`, `voxel.World.FarFieldDistance` (2,000,000 uu), `voxel.World.FarFieldHeightmapError` (4 px) | Six cube-face quadtrees (`voxel.World.FarFieldError` 2 px) | MP3 (WM-MP1, D36) |
-| The voxel window at altitude | Suspended above three view distances over the ground or the sea under the streaming viewer, only while a far field is on (D38, kept by D41); resumed under 0.85 of it with the camera under it (G49) | The same (`PlanetVoxelCutoverAltitude`, `voxel.World.VoxelCutover`), the far-field gate included since G78 | MP3 (WM-MP2); G78 (§23.13) |
+| The voxel window at altitude | Suspended above three view distances over the ground or the sea under the streaming viewer, only while a far field is on (D38, kept by D41); resumed under 0.85 of it with the camera under it (G49) | The same (`VoxelCutoverAltitude`, `voxel.World.VoxelCutover`), the far-field gate included since G78 | MP3 (WM-MP2); G78 (§23.13) |
 | Streaming ahead of a fall | The descent prefetch leads the streaming viewer under a descending camera (`voxel.Stream.DescentLead`) | The same | MP1 (WM-MP3) |
 | The frame of a teleport | A second streaming pass for the frame's camera after a cut of more than a chunk (`voxel.Stream.CameraCutUpdate`) | The same, and the far field's second update (F4.3) | MP1 (WM-MP4) |
 | Precision far from the origin | Render regions and scatter regions (`voxel.Render.RegionChunks` 16, `voxel.Scatter.RegionChunks`): no float of the world's size | The same | MP2 (WM-MP5, D40) |

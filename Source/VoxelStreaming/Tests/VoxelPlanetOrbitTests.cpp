@@ -10,7 +10,7 @@
 #include "VoxelChunkManager.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
-#include "VoxelPlanetFarField.h"
+#include "VoxelFarField.h"
 #include "VoxelWorldConfiguration.h"
 #include "DistanceBandLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
@@ -75,10 +75,10 @@ namespace VoxelPlanetOrbitTestUtils
 			Config->NoiseParams.Seed = 9001;
 			Config->NoiseParams.Frequency = 0.0004f;
 			Config->NoiseParams.Octaves = 3;
-			// The cut-over at the view distance (the default is three: PlanetVoxelCutoverAltitude 0).
-			Config->PlanetVoxelCutoverAltitude = ViewDistance;
+			// The cut-over at the view distance (the default is three: VoxelCutoverAltitude 0).
+			Config->VoxelCutoverAltitude = ViewDistance;
 			StartManager();
-			if (FVoxelPlanetFarField* FarField = Manager->GetFarFieldMutable())
+			if (FVoxelFarField* FarField = Manager->GetFarFieldMutable())
 			{
 				FarField->SetSynchronousBuilds(true);
 				FarField->SetMaxBuildsInFlight(64);
@@ -166,7 +166,7 @@ bool FVoxelPlanetCutoverDescentTest::RunTest(const FString& Parameters)
 	if (W.Manager->HasFarField())
 	{
 		W.Manager->UpdateFarFieldForViewer(At(Cutover + 2000.0));
-		TestEqual(TEXT("Above the cut-over the far field hides no band patch"), W.Manager->GetFarFieldStats().HiddenBand, 0);
+		TestEqual(TEXT("Above the cut-over the far field hides no edge patch"), W.Manager->GetFarFieldStats().HiddenEdge, 0);
 		TestTrue(TEXT("Above the cut-over the far field draws the planet"), W.Manager->GetFarFieldStats().DrawnPatches > 0);
 	}
 

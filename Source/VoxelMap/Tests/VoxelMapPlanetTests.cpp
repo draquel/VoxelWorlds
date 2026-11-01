@@ -18,7 +18,7 @@
 #include "VoxelWorldModeFactory.h"
 #include "SphericalPlanetWorldMode.h"
 #include "Testing/VoxelTestChunkWorld.h"
-#include "VoxelPlanetFarField.h"
+#include "VoxelFarField.h"
 #include "HAL/IConsoleManager.h"
 #include "Algo/AllOf.h"
 #include "Async/TaskGraphInterfaces.h"

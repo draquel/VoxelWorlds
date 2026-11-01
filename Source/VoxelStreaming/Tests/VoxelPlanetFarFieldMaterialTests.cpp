@@ -4,7 +4,7 @@
 #include "Misc/AutomationTest.h"
 #include "HAL/IConsoleManager.h"
 #include "Testing/VoxelTestScopedCVar.h"
-#include "VoxelPlanetFarField.h"
+#include "VoxelFarField.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelWorldConfiguration.h"
@@ -88,7 +88,7 @@ namespace VoxelFarFieldMaterialTestUtils
 			Settings.bSea = true;
 			Settings.SeaRadius = Config->WaterRadius;
 			Settings.SeaMargin = 2.0 * Config->VoxelSize;
-			Settings.BandLevel = FVoxelFarFieldSettings::ComputeBandLevel(Settings.Radius, Settings.ChunkWorldSize);
+			Settings.EdgeLevel = FVoxelFarFieldSettings::ComputeEdgeLevel(Settings.Radius, Settings.ChunkWorldSize);
 			Settings.ZoneGatherMax = 32.0 * Settings.ChunkWorldSize / Settings.Radius;
 		}
 
@@ -208,14 +208,14 @@ bool FFarFieldPlanetMaterialBlendTest::RunTest(const FString& Parameters)
 		for (const FVector& Site : Sites)
 		{
 			const FVoxelSurfaceCoord Coord = FVoxelCubeSphere::DirectionToSurface(Site);
-			for (const int32 Level : { FMath::Max(Rig.Settings.BandLevel - 6, 2), FMath::Max(Rig.Settings.BandLevel - 3, 3) })
+			for (const int32 Level : { FMath::Max(Rig.Settings.EdgeLevel - 6, 2), FMath::Max(Rig.Settings.EdgeLevel - 3, 3) })
 			{
 				const int32 Cells = 1 << Level;
 				const FVoxelFarFieldPatchKey Key(Coord.Face, Level,
 					FMath::Clamp(FMath::FloorToInt32((Coord.UV.X + 1.0) / 2.0 * Cells), 0, Cells - 1),
 					FMath::Clamp(FMath::FloorToInt32((Coord.UV.Y + 1.0) / 2.0 * Cells), 0, Cells - 1));
 				FVoxelFarFieldPatchMesh Mesh;
-				FVoxelPlanetFarField::BuildPatch(Rig.Settings, *Rig.Surface, Rig.NoZones, Key, Mesh);
+				FVoxelFarField::BuildPatch(Rig.Settings, *Rig.Surface, Rig.NoZones, Key, Mesh);
 				const FVoxelFarFieldSection& Terrain = Mesh.Terrain;
 
 				// Per triangle: both materials flat; a blend triangle where the corners' weights differ.

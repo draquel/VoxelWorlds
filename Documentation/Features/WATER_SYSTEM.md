@@ -254,7 +254,7 @@ and no rebuild. `voxel.World.PlanetOcean 0` hides it. Where the analytic sea pas
 sea level), the shell shows there too: it is a sphere, not a per-chunk surface.
 
 **The far field's sea (spherical Phase 6, WM-BP9).** Where the shell's 160 quads a face edge would sag more than 8 uu
-(`FVoxelPlanetFarField::ShouldDrawSea`: from about R 3.3 x 10^5, so the 50 km and 1,000 km test planets) the chunk
+(`FVoxelFarField::ShouldDrawSea`: from about R 3.3 x 10^5, so the 50 km and 1,000 km test planets) the chunk
 manager builds no shell and the far field's patches draw the sea ([LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field"): each
 patch a section at `WaterRadius` over its cells whose terrain reaches under the sea or within two voxels of it, an 8 x 8
 grid a patch, UVs in voxels of arc along the face as the shell's (less a whole number of 1,024 per patch, so the floats
@@ -552,7 +552,7 @@ with `bIslandFarOcean` draws the sea past that: a procedural mesh component on t
 `WaterMeshMaterial` and world-space UVs as the tiles (one seamless surface), out to `IslandFarOceanDistance` past the edge.
 
 - **From the bounds box outward.** Inside the island's bounds box the far field draws the land and the sea at
-  `WaterLevel` (mode parity WM-MP1, decision D37, 2026-10-26: a band patch's sea hidden with its terrain where the
+  `WaterLevel` (mode parity WM-MP1, decision D37, 2026-10-26: an edge patch's sea hidden with its terrain where the
   window's chunks and tiles are, so a tile and the far field never overlap); the far ocean's open sea starts at the box.
   The far field's sea uses the tiles' UVs too (world X and Y over the voxel size), one pattern across the three. (The
   grid water that covered unloaded columns inside the box while the far field was off went in code review CR1, D-CR13.)
