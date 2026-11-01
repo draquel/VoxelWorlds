@@ -657,7 +657,7 @@ void UVoxelRegionComponent::RequestRenderBoundsRefresh()
 	SetComponentTickEnabled(true);
 }
 
-// ==================== Seam Meshes (seam-ownership P1) ====================
+// ==================== Seam Meshes ====================
 
 void UVoxelRegionComponent::UpdateSeamMeshFromCPUData(
 	const FIntVector& OwnerChunkCoord,

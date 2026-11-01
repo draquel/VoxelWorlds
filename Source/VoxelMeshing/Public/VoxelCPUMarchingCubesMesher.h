@@ -52,7 +52,7 @@ public:
 	virtual FString GetMesherTypeName() const override { return TEXT("CPU MarchingCubes"); }
 
 	// ============================================================================
-	// Seam-Ownership Meshing (P3 — implemented in VoxelCPUMarchingCubesSeams.cpp)
+	// Seam-Ownership Meshing (implemented in VoxelCPUMarchingCubesSeams.cpp)
 	// ============================================================================
 
 	/**

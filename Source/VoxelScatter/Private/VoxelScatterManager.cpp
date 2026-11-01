@@ -1696,8 +1696,8 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 		return;
 	}
 
-	// G79: the chunks that arrived beyond every type's reach, once within the scatter horizon (before the cache check: they
-	// have nothing cached yet)
+	// The chunks that arrived beyond every type's reach, once within the scatter horizon (before the cache check: they
+	// have nothing cached yet; G79)
 	ProcessDeferredFirstExtractions();
 
 	if (SurfaceCache.Num() == 0)

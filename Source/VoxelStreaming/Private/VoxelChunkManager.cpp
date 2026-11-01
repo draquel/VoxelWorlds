@@ -914,7 +914,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// Cache the current viewer position for the stale-cull distance test used by the queue
 	// processors (which don't build their own context). Reflects the benchmark view override.
 	CurrentViewerPosition = Context.ViewerPosition;
-	// R24 P3: the renderer fades new geometry in only away from the viewer: the camera, what the player sees from.
+	// The renderer fades new geometry in only away from the viewer (R24 P3): the camera, what the player sees from.
 	if (MeshRenderer)
 	{
 		MeshRenderer->SetViewerPosition(CurrentCameraPosition);
@@ -1962,7 +1962,7 @@ void UVoxelChunkManager::MarkChunkDirty(const FIntVector& ChunkCoord)
 		{
 			State->Descriptor.bIsDirty = true;
 
-			// Seam-ownership P0: an explicit dirty (voxel edit / forced remesh) may have changed the
+			// An explicit dirty (voxel edit / forced remesh) may have changed the
 			// chunk's content — restale its incident seams. ContentVersion is bumped by the edit itself.
 			if (SeamRegistry.IsValid())
 			{
@@ -4712,7 +4712,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	Stats.CameraUpdates = FarFieldCameraUpdates;
 	Stats.UpdateMs = static_cast<float>((FPlatformTime::Seconds() - StartTime) * 1000.0);
 
-	// VP4: what stood in over the voxel window this update, and why.
+	// What stood in over the voxel window this update, and why (VP4).
 	if (CVarFarFieldTrace.GetValueOnGameThread() != 0 && Stats.StandIns > 0)
 	{
 		FIntVector Undrawn;
@@ -6277,7 +6277,7 @@ void UVoxelChunkManager::RemoveChunkState(const FIntVector& ChunkCoord)
 	// of waiting on — or being completed by — the old job.
 	CancelInFlightGeneration(ChunkCoord);
 	CancelInFlightMesh(ChunkCoord);
-	// R24: a departed chunk cannot finish an LOD transition. Drop any hold request it left in the
+	// A departed chunk cannot finish an LOD transition (R24). Drop any hold request it left in the
 	// renderer (its meshes are gone) and stop waiting for seams it participates in.
 	if (MeshRenderer && (SeamHolds.IsChunkHeld(ChunkCoord) || SeamHolds.IsSeamOwnerHeld(ChunkCoord)))
 	{
@@ -6285,7 +6285,7 @@ void UVoxelChunkManager::RemoveChunkState(const FIntVector& ChunkCoord)
 		MeshRenderer->SetSeamFadeHold(ChunkCoord, false);
 	}
 	SeamHolds.OnChunkRemoved(ChunkCoord);
-	// Seam-ownership P0: this chunk's voxel data is gone — restale/prune its incident seams.
+	// This chunk's voxel data is gone — restale/prune its incident seams.
 	if (SeamRegistry.IsValid())
 	{
 		SeamRegistry->UnregisterChunk(ChunkCoord);
@@ -6375,8 +6375,8 @@ void UVoxelChunkManager::TickSeamScheduler()
 		}
 	}
 
-	// R24: release LOD transitions whose seams have all landed (results were submitted at the top
-	// of this tick, deferred buckets just below), or that hit the hold cap. Everything released here
+	// Release LOD transitions whose seams have all landed (results were submitted at the top
+	// of this tick, deferred buckets just below), or that hit the hold cap (R24). Everything released here
 	// starts fading on one clock.
 	FlushDueSeamBuckets();
 	{
@@ -6513,9 +6513,7 @@ void UVoxelChunkManager::FinishSeamJob(const FVoxelSeamKey& Key, bool bAbandoned
 void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 {
 	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("seam job"));
-	// P2 scope: same-LOD FACE (2), EDGE (4), and CORNER (8 participants) seams. Mixed-LOD is
-	// P2c/d — dropped jobs stay clean until a participant changes, which re-schedules them
-	// (and the filter drops them again until the missing mesher lands).
+	// Face (2 participants), edge (4) and corner (8) seams, at one LOD or several.
 	const int32 ExpectedParticipants =
 		(Job.Key.Type == EVoxelSeamType::Face) ? 2 :
 		(Job.Key.Type == EVoxelSeamType::Edge) ? 4 :
@@ -6545,8 +6543,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		return;
 	}
 
-	// Gather live states: every participant must have voxel data and share one rendered LOD.
-	// (Mixed-LOD tuples wait for P2c/d; a later LOD change re-dirties and re-schedules.)
+	// Gather live states: every participant must have voxel data.
 	FVoxelChunkState* States[8] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
 	for (int32 i = 0; i < ExpectedParticipants; ++i)
 	{
@@ -6558,8 +6555,8 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 			return; // a participant vanished between schedule and drain; the unregister path re-dirties
 		}
 	}
-	// Every participant needs a rendered mesh. Participants may differ in LOD — the P2c/P2d
-	// mixed-LOD meshers stitch across resolutions; the same-LOD fast paths run when uniform.
+	// Every participant needs a rendered mesh. Participants may differ in LOD: the mixed-LOD
+	// meshers stitch across resolutions; the same-LOD fast paths run when uniform.
 	int32 MinParticipantLOD = TNumericLimits<int32>::Max();
 	for (int32 i = 0; i < ExpectedParticipants; ++i)
 	{
@@ -6802,7 +6799,7 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 		OwnerSlots.Slots[SeamSlot] = MoveTemp(Result.MeshData); // may be empty = seam dissolved
 		OwnerSlots.SlotLOD[SeamSlot] = Result.LODLevel;
 
-		// R24: the bucket crossfades from the one it replaces. If an LOD transition is waiting for
+		// The bucket crossfades from the one it replaces (R24). If an LOD transition is waiting for
 		// this seam (or already holds this owner's bucket), the submit holds the new bucket at alpha 0
 		// so it fades in with the interior it meets when the transition releases.
 		SeamHolds.OnSeamResult(Result.Key);
@@ -7487,9 +7484,9 @@ FString UVoxelChunkManager::DescribeSnapshotCache() const
 		TEXT("only its own cook %d (%.0f MB), both %d (%.0f MB), other %d (%.0f MB)\n"),
 		ReadN[0], ReadMB[0], ReadN[1], ReadMB[1], ReadN[2], ReadMB[2], ReadN[3], ReadMB[3], ReadN[4], ReadMB[4]);
 	{
-		// G71: the entries a seam job or a chunk mesh took, by the chunk's rendered LOD (0, 1, 2, 3+, none) and by who took
+		// The entries a seam job or a chunk mesh took, by the chunk's rendered LOD (0, 1, 2, 3+, none) and by who took
 		// them (seam jobs only, its chunk mesh only, both), and what a boundary shell deep enough for that LOD's seam rings
-		// would hold: 2 * stride + 2 voxels on the -X/-Y/-Z faces (the neighbour side's first cell layer and its gradient
+		// would hold (G71): 2 * stride + 2 voxels on the -X/-Y/-Z faces (the neighbour side's first cell layer and its gradient
 		// taps), 3 * stride + 2 on the +X/+Y/+Z faces (the owner side's ring a layer further in).
 		const int64 CS = Configuration ? Configuration->ChunkSize : 0;
 		int32 N[5][3] = {};
@@ -7875,7 +7872,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 						SubmitScatterSecondsThisTick += FPlatformTime::Seconds() - ScatT0;
 					}
 
-					// R24: an LOD change (or a faded-in first appearance, P3) holds the swap until its seams land (see BeginSeamHold).
+					// An LOD change (or a faded-in first appearance, P3) holds the swap until its seams land (see BeginSeamHold; R24).
 					const bool bHoldForSeams = ShouldHoldForSeams(ChunkCoord, PreviousMeshedLOD,
 						PendingMeshQueue[i].LODLevel, PendingMeshQueue[i].MeshData);
 					if (bHoldForSeams)
@@ -7891,7 +7888,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 						MoveTemp(PendingMeshQueue[i].MeshData));
 					SubmitRendererSecondsThisTick += FPlatformTime::Seconds() - RendT0;
 					State->MeshedLODLevel = PendingMeshQueue[i].LODLevel;
-					// Seam-ownership P0: rendered LOD known — refresh the seam registry (no-op if unchanged).
+					// Rendered LOD known — refresh the seam registry (no-op if unchanged).
 					if (SeamRegistry.IsValid())
 					{
 						SeamRegistry->UpdateChunkRenderedLOD(ChunkCoord, State->MeshedLODLevel);
@@ -7962,7 +7959,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			SubmitScatterSecondsThisTick += FPlatformTime::Seconds() - ScatT0;
 		}
 
-		// R24: an LOD change (or a faded-in first appearance, P3) holds the swap until its seams land (see BeginSeamHold).
+		// An LOD change (or a faded-in first appearance, P3) holds the swap until its seams land (see BeginSeamHold; R24).
 		const bool bHoldForSeams = ShouldHoldForSeams(ChunkCoord, PreviousMeshedLOD, PendingMesh.LODLevel, PendingMesh.MeshData);
 		if (bHoldForSeams)
 		{
@@ -7981,7 +7978,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		// Track which LOD is actually rendered so neighbors can read the correct
 		// LOD level for MergeLODBoundaryCells and transition face setup.
 		State->MeshedLODLevel = PendingMesh.LODLevel;
-		// Seam-ownership P0: rendered LOD known — refresh the seam registry (no-op if unchanged).
+		// Rendered LOD known — refresh the seam registry (no-op if unchanged).
 		if (SeamRegistry.IsValid())
 		{
 			SeamRegistry->UpdateChunkRenderedLOD(ChunkCoord, State->MeshedLODLevel);
@@ -9774,7 +9771,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 	}));
 
 // Console: voxel.Water.TileAudit [maxList=8] [chunkX chunkY]
-// G77: the water tiles against the generated surface (UVoxelChunkManager::AuditWaterTiles).
+// The water tiles against the generated surface (UVoxelChunkManager::AuditWaterTiles; G77).
 static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterTileAuditCmd(
 	TEXT("voxel.Water.TileAudit"),
 	TEXT("Audit the 2D water tiles against the generated surface: voxel columns under the water plane that no tile marks ")
@@ -9800,7 +9797,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterTileAuditCmd(
 	}));
 
 // Console: voxel.Water.ResendTiles
-// G77 diagnostics: mark every water tile dirty so its mesh is generated and sent to the renderer again.
+// A diagnostic (G77): mark every water tile dirty so its mesh is generated and sent to the renderer again.
 static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterResendTilesCmd(
 	TEXT("voxel.Water.ResendTiles"),
 	TEXT("Send every 2D water tile's mesh to the renderer again (every tile marked dirty)."),

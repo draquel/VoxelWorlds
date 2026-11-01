@@ -156,7 +156,7 @@ bool FVoxelCPUMarchingCubesMesher::GenerateMeshCPU(
 		}
 	}
 
-	// Seam-ownership (SEAM_OWNERSHIP_ARCHITECTURE.md §2.1, P3): the Interior domain meshes only
+	// Seam ownership (SEAM_OWNERSHIP_ARCHITECTURE.md §2.1): the Interior domain meshes only
 	// cells with zero neighbor dependence. MC cells sample their own 8 corners plus gradient
 	// normals reaching ±stride, so excluding the FIRST and LAST cell layer per axis leaves every
 	// remaining cell (corners AND normal taps) entirely inside own voxel data — no clamping, no
@@ -351,7 +351,7 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 	const uint16* VertexDataRow = TransvoxelTables::RegularVertexData[CaseIndex];
 	FVector3f CellVertices[12];
 	int32 VertexCorners[12][2];
-	// G80: at a stride, the vertex at the voxel crossing on its edge (the point G61's normal reads).
+	// At a stride, the vertex at the voxel crossing on its edge (the point G61's normal reads; G80).
 	const bool bVoxelCrossings = VoxelCrossingGradient::UseVoxelLODCrossings(Stride);
 
 	for (int32 i = 0; i < VertexCount; i++)
@@ -1467,8 +1467,8 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 
 			VertexPos = InterpolateEdge(DensityA, DensityB, PosA, PosB, IsoLevel);
 
-			// G80: a strided edge's vertex at its voxel crossing, as the coincident fine or coarse MC cell on the edge
-			// puts it (corner-corner edges are the coarser neighbour's, face-face ones the fine mesh's).
+			// A strided edge's vertex at its voxel crossing, as the coincident fine or coarse MC cell on the edge
+			// puts it (corner-corner edges are the coarser neighbour's, face-face ones the fine mesh's; G80).
 			const FIntVector EndA = SampleVoxel(SampleA);
 			const FIntVector EndB = SampleVoxel(SampleB);
 			const FIntVector EdgeDelta = EndB - EndA;
@@ -1539,13 +1539,13 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 		// Calculate normal using gradient — match the stride of the adjacent mesh:
 		// Outer face vertices use CoarserStride (matches coarser neighbor MC normals),
 		// interior/depth vertices use CurrentStride (matches finer chunk MC normals).
-		// G61: at a stride > 1, LOD 0's normal at the voxel crossing on the vertex's edge, as the coincident vertex of the
-		// fine or the coarse MC cell on that edge gets it.
+		// At a stride > 1, LOD 0's normal at the voxel crossing on the vertex's edge, as the coincident vertex of the
+		// fine or the coarse MC cell on that edge gets it (G61).
 		const int32 NormalStride = VertexOnOuterFace[i] ? Stride : CurrentStride;
 		const FVector3f PosVoxel(Pos.X / VoxelSize, Pos.Y / VoxelSize, Pos.Z / VoxelSize);
 		const int32 SampleA = VertexSamples[i][0];
 		const int32 SampleB = VertexSamples[i][1];
-		// G62: at stride 1 the fitted gradient at the vertex, as ProcessCubeLOD's.
+		// At stride 1 the fitted gradient at the vertex, as ProcessCubeLOD's (G62).
 		const FVector3f Normal = VoxelCrossingGradient::UseVoxelShadingNormals(NormalStride)
 			? CalculateEdgeShadingNormal(Request, SampleVoxel(SampleA), SampleVoxel(SampleB), Densities[SampleA], Densities[SampleB],
 				PosVoxel, NormalStride)

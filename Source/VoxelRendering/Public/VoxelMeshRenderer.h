@@ -77,7 +77,7 @@ public:
 	virtual void RemoveWaterTile(const FIntVector2& TileCoord) override;
 	virtual void ClearAllWaterTiles() override;
 
-	// Seam Meshes (seam-ownership P1)
+	// Seam Meshes
 	virtual void UpdateSeamMeshFromCPU(
 		const FIntVector& OwnerChunkCoord,
 		uint8 Axis,

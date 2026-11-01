@@ -1556,7 +1556,7 @@ bool FVoxelFarField::IsLazy(FPatchState& Patch, const FPatchState& Parent)
 	}
 	if (View.bAvoidStandIns)
 	{
-		// VP4: covered is enough wherever the patch lies; near the window's edge its build is requested meanwhile (Visit),
+		// Covered is enough wherever the patch lies (VP4); near the window's edge its build is requested meanwhile (Visit),
 		// and nothing stands in for it in the meantime. Past the prebuild radius only once its chunks have been drawn
 		// HideDelay: a chunk that has just appeared fades in over where the patch's mesh would be.
 		return UpdateCovered(Patch)

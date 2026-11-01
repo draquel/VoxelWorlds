@@ -45,7 +45,7 @@ public:
 		FVoxelMeshingStats& OutStats) override;
 
 	/**
-	 * Seam-ownership P1 (SEAM_OWNERSHIP_ARCHITECTURE.md §2.2): mesh the single-owner FACE seam
+	 * Mesh the single-owner FACE seam
 	 * between a same-LOD chunk pair, from BOTH sides' full voxel data.
 	 *
 	 * Emits ONLY the seam geometry: quads dual to the edges whose surrounding cells include a
@@ -54,7 +54,7 @@ public:
 	 * interior "ring" cells (owner GridSize-2 / neighbour 0) are recomputed with each side's OWN
 	 * data + Air clamp, bit-identical to what that side's Interior-domain pass produced — so the
 	 * seam terminates exactly on both interior meshes with no communication. Edges that also touch
-	 * another face's slab (the transverse rim) are left open — they belong to the P2 edge/corner
+	 * another face's slab (the transverse rim) are left open — they belong to the edge/corner
 	 * seam jobs. Pair with EVoxelMeshCellDomain::Interior chunk meshes.
 	 *
 	 * Output positions are in the OWNER's local frame. Thread-safety matches GenerateMeshCPU
@@ -69,7 +69,7 @@ public:
 		FChunkMeshData& OutMeshData) override;
 
 	/**
-	 * Seam-ownership P2a: mesh the single-owner EDGE seam of a same-LOD chunk 4-tuple.
+	 * Mesh the single-owner EDGE seam of a same-LOD chunk 4-tuple.
 	 *
 	 * Emits the quads dual to edges whose surrounding cells include an edge-column cell
 	 * (owner-frame column at both face-slab layers, excluding the corner cells at its ends).
@@ -79,7 +79,7 @@ public:
 	 * single sampler, face-slab columns with the face jobs' pair samplers, each in its
 	 * original computation frame — so the edge seam terminates bit-exactly on the interior
 	 * meshes and the face-seam meshes with no communication (§2.2, composed).
-	 * The corner cells at the column ends belong to the P2b corner-seam jobs and stay open.
+	 * The corner cells at the column ends belong to the corner-seam jobs and stay open.
 	 *
 	 * Output positions are in the OWNER's local frame. Thread-safety matches GenerateMeshCPU.
 	 *
@@ -92,7 +92,7 @@ public:
 		FChunkMeshData& OutMeshData) override;
 
 	/**
-	 * Seam-ownership P2b: mesh the single-owner CORNER seam of a same-LOD chunk 8-tuple.
+	 * Mesh the single-owner CORNER seam of a same-LOD chunk 8-tuple.
 	 *
 	 * Emits the quads dual to the 12 edges touching the corner cell (the one cell lying in all
 	 * three face slabs). The corner cell solves against all eight participants (octant sampler,
@@ -100,7 +100,7 @@ public:
 	 * twelve face-slab corner cells, and the six adjacent edge-column end cells — are recomputed
 	 * with the SAME restricted octant masks their original jobs' samplers used, in those jobs'
 	 * frames, so the corner seam terminates bit-exactly on every neighbouring mesh with no
-	 * communication (§2.2, fully composed). With face (P1), edge (P2a), and corner seams, a
+	 * communication (§2.2, fully composed). With face, edge and corner seams, a
 	 * uniform-LOD region is completely watertight under voxel.Seam.Meshing.
 	 *
 	 * Output positions are in the OWNER's local frame. Thread-safety matches GenerateMeshCPU.

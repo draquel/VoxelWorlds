@@ -307,7 +307,7 @@ public:
 	 */
 	void ClearAllWaterTiles_RenderThread();
 
-	// ==================== Seam Meshes (seam-ownership P1, Render Thread) ====================
+	// ==================== Seam Meshes (Render Thread) ====================
 	// Single-owner seam buckets keyed by (owner chunk, slot) — a parallel keyspace beside the
 	// per-chunk maps (the water-tile pattern). Drawn with the terrain material, including the RVT
 	// clone pass (seams must write RVT or the cached ground would crack). Since R24 they crossfade
@@ -443,7 +443,7 @@ private:
 	/** Release every retained Previous mesh and all fade states. Caller must hold ChunkDataLock. */
 	void ReleaseAllChunkFadeStates_AssumesLocked();
 
-	// ==================== Seam Mesh Data (seam-ownership P1) ====================
+	// ==================== Seam Mesh Data ====================
 
 	/** Key for a single-owner face-seam bucket: owning chunk + face axis (0=+X, 1=+Y, 2=+Z). */
 	struct FVoxelSeamMeshKey
