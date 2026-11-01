@@ -32,6 +32,14 @@ float FIslandBowlWorldMode::GetDensityAt(
 	return FInfinitePlaneWorldMode::CalculateSignedDistance(WorldPos.Z, FinalTerrainHeight);
 }
 
+FVoxelTerrainSurfacePoint FIslandBowlWorldMode::GetSurfaceOnUpLine(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const
+{
+	FVoxelTerrainSurfacePoint Point;
+	Point.Position = FVector(WorldPos.X, WorldPos.Y, GetTerrainHeightAt(static_cast<float>(WorldPos.X), static_cast<float>(WorldPos.Y), NoiseParams));
+	Point.Altitude = GetAltitude(Point.Position);
+	return Point;
+}
+
 float FIslandBowlWorldMode::GetTerrainHeightAt(
 	float X,
 	float Y,

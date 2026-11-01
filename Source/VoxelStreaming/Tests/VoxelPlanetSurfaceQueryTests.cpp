@@ -148,7 +148,7 @@ bool FVoxelPlaneEditMergedSurfaceUnchangedTest::RunTest(const FString& Parameter
 	}
 
 	FRandomStream Random(77);
-	int32 Found = 0, Identical = 0, Generated = 0;
+	int32 Found = 0, Identical = 0, Generated = 0, Ladder = 0;
 	constexpr int32 Points = 1000;
 	for (int32 i = 0; i < Points; ++i)
 	{
@@ -161,15 +161,27 @@ bool FVoxelPlaneEditMergedSurfaceUnchangedTest::RunTest(const FString& Parameter
 		FVoxelSurfaceSample Hit;
 		const bool bNew = W.Manager->QueryEditMergedSurfacePoint(FVector(X, Y, Random.FRandRange(-5000.0, 5000.0)), Hit);
 		Found += bNew ? 1 : 0;
-		const bool bSame = bOld == bNew && (!bOld || (Hit.Height == Height && Hit.Normal == Normal && Hit.SlopeDegrees == Slope
+		const bool bSame = bOld == bNew && (!bOld || (static_cast<float>(Hit.Position.Z) == Height && Hit.Normal == Normal && Hit.SlopeDegrees == Slope
 			&& Hit.MaterialID == Material && Hit.BiomeID == Biome && Hit.Position == FVector(X, Y, Height) && Hit.Up == FVector::UpVector));
 		Identical += bSame ? 1 : 0;
 		Generated += W.Manager->GetGeneratedSurfacePoint(FVector(X, Y, 123.0)) == FVector(X, Y, W.Manager->GetGeneratedSurfaceHeight(X, Y)) ? 1 : 0;
+
+		// The ladder's one entry (code review CR2, CM-21): each rung's height equals the entry it dispatches to (the natural
+		// and generated rungs sample through FVoxelSurfaceQuery, whose heightmap positions carry the sample's float X and Y).
+		const FVector At(X, Y, 123.0);
+		FVoxelSurfaceSample Natural, GeneratedSample, Edited;
+		Ladder += (W.Manager->QuerySurfacePoint(At, EVoxelSurfaceLayer::Natural, Natural)
+			&& Natural.Position.Z == W.Manager->GetSurfacePointAt(At).Position.Z
+			&& W.Manager->QuerySurfacePoint(At, EVoxelSurfaceLayer::Generated, GeneratedSample)
+			&& GeneratedSample.Position.Z == W.Manager->GetGeneratedSurfacePoint(At).Z
+			&& W.Manager->QuerySurfacePoint(At, EVoxelSurfaceLayer::EditMerged, Edited) == bNew
+			&& (!bNew || Edited.Position == Hit.Position)) ? 1 : 0;
 	}
 	AddInfo(FString::Printf(TEXT("%d points: %d found, %d identical to QueryEditMergedSurface, %d generated points identical"), Points, Found, Identical, Generated));
 	TestTrue(TEXT("Most points have a loaded surface"), Found >= Points * 9 / 10);
 	TestEqual(TEXT("QueryEditMergedSurfacePoint equals QueryEditMergedSurface bit for bit"), Identical, Points);
 	TestEqual(TEXT("GetGeneratedSurfacePoint equals (X, Y, GetGeneratedSurfaceHeight)"), Generated, Points);
+	TestEqual(TEXT("QuerySurfacePoint's three rungs equal the entries they dispatch to"), Ladder, Points);
 	W.Stop();
 	return true;
 }

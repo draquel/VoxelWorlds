@@ -2127,7 +2127,7 @@ bool UVoxelChunkManager::QueryEditMergedSurface(
 
 	// Estimate the surface Z from the generator, used only to locate the column window + the
 	// near/far decision (whether the surface's chunk is loaded).
-	const float EstZ = WM->GetTerrainHeightAt(static_cast<float>(WorldX), static_cast<float>(WorldY), Configuration->NoiseParams);
+	const float EstZ = static_cast<float>(WM->GetSurfaceOnUpLine(FVector(WorldX, WorldY, 0.0), Configuration->NoiseParams).Position.Z);
 
 	const FVector RelEst = FVector(WorldX, WorldY, EstZ) - Configuration->WorldOrigin;
 	const FIntVector EstChunk = FVoxelCoordinates::WorldToChunk(RelEst, ChunkSize, VoxelSize);
@@ -2278,7 +2278,6 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 		{
 			return false;
 		}
-		OutSample.Height = Height;
 		OutSample.Position = FVector(WorldPos.X, WorldPos.Y, Height);
 		OutSample.Up = FVector::UpVector;
 		OutSample.Altitude = WM->GetAltitude(OutSample.Position);
@@ -2406,7 +2405,6 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 	}
 	OutSample.SlopeDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(OutSample.Normal, Up), -1.0, 1.0)));
 	OutSample.Altitude = WM->GetAltitude(OutSample.Position);
-	OutSample.Height = OutSample.Altitude;
 	return true;
 }
 
@@ -4274,11 +4272,9 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 				: (Settings.Bounds.IsBounded() ? FMath::Max(Settings.Bounds.HalfExtent.X, Settings.Bounds.HalfExtent.Y) : 2.0e6);
 			Settings.RootChunks = FVoxelFarFieldSettings::ComputeHeightmapRootChunks(Reach, Settings.ChunkWorldSize);
 		}
-		float MinHeight = 0.0f;
-		float MaxHeight = 0.0f;
-		WorldMode->GetTerrainHeightBounds(MinHeight, MaxHeight);
-		Settings.MinAltitude = MinHeight;
-		Settings.MaxAltitude = MaxHeight;
+		const FVoxelWorldBounds HeightBounds = WorldMode->GetWorldBounds();
+		Settings.MinAltitude = HeightBounds.MinZ;
+		Settings.MaxAltitude = HeightBounds.MaxZ;
 		// The sea at WaterLevel wherever the terrain dips near or under it, as the water tiles draw it over the streamed
 		// columns (D37: an island's far ocean keeps its open sea past the bounds and its seabed; its grid water and floor
 		// inside the bounds are the far field's now).
@@ -4944,22 +4940,54 @@ float UVoxelChunkManager::GetGeneratedColumnHeight(double WorldX, double WorldY)
 		return 0.0f;
 	}
 
-	// Base terrain + continentalness (the world mode carries the biome context set at init).
-	float Height = WM->GetTerrainHeightAt(
-		static_cast<float>(WorldX), static_cast<float>(WorldY), Configuration->NoiseParams);
-
-	// Layer terrain conditioning zones (POI / claim flatten) exactly as generation does.
+	// The generated rung (FVoxelSurfaceQuery::GetGeneratedSurface): base terrain + continentalness (the world mode carries
+	// the biome context set at init) with the terrain conditioning zones there (POI / claim flatten) layered on exactly as
+	// generation does.
+	TArray<FVoxelConditioningZone> Zones;
 	if (ConditioningZones.Num() > 0 || TerrainConditioner != nullptr)
 	{
-		TArray<FVoxelConditioningZone> Zones;
 		GatherConditioningZonesForPoint(WorldX, WorldY, Zones);
-		if (Zones.Num() > 0)
-		{
-			Height = FVoxelTerrainConditioning::ApplyToHeight(WorldX, WorldY, Height, Zones);
-		}
+	}
+	return static_cast<float>(FVoxelSurfaceQuery::GetGeneratedSurface(*WM, FVector(WorldX, WorldY, 0.0), Configuration->NoiseParams,
+		Zones.Num() > 0 ? &Zones : nullptr).Position.Z);
+}
+
+bool UVoxelChunkManager::QuerySurfacePoint(const FVector& WorldPos, EVoxelSurfaceLayer Layer, FVoxelSurfaceSample& OutSample) const
+{
+	const IVoxelWorldMode* WM = GetWorldMode();
+	if (!bIsInitialized || !Configuration || !WM)
+	{
+		return false;
+	}
+	if (Layer == EVoxelSurfaceLayer::EditMerged)
+	{
+		return QueryEditMergedSurfacePoint(WorldPos, OutSample);
 	}
 
-	return Height;
+	// The generated rung's zones, gathered for the place as GetGeneratedSurfacePoint gathers them.
+	TArray<FVoxelConditioningZone> Zones;
+	if (Layer == EVoxelSurfaceLayer::Generated && (ConditioningZones.Num() > 0 || TerrainConditioner != nullptr))
+	{
+		if (WM->GetWorldModeType() == EWorldMode::SphericalPlanet)
+		{
+			const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WM);
+			GatherConditioningZonesOnSphere(FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, Planet.GetPlanetParams().PlanetCenter), 0.0, Zones);
+		}
+		else
+		{
+			GatherConditioningZonesForPoint(WorldPos.X, WorldPos.Y, Zones);
+		}
+	}
+	const FVoxelBiomeSnapshot Snapshot = FVoxelBiomeSnapshot::FromConfig(Configuration->BiomeConfiguration);
+	OutSample = FVoxelSurfaceQuery::SampleSurfacePoint(*WM, WorldPos, Configuration->VoxelSize, Configuration->NoiseParams, Snapshot,
+		GetSeaSurface(), Zones.Num() > 0 ? &Zones : nullptr);
+	if (Layer == EVoxelSurfaceLayer::Generated && IsBlockSurface())
+	{
+		// A block world's generated surface is the block top GetGeneratedSurfaceHeight gives (sampled at the column's corner).
+		OutSample.Position.Z = GetGeneratedSurfaceHeight(WorldPos.X, WorldPos.Y);
+		OutSample.Altitude = WM->GetAltitude(OutSample.Position);
+	}
+	return true;
 }
 
 void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, FVoxelNoiseGenerationRequest GenRequest)

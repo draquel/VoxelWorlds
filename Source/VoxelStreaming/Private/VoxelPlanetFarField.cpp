@@ -165,7 +165,7 @@ float FVoxelFarFieldSurface::SampleHeight(double WorldX, double WorldY, const TA
 		X = FVoxelBlockSurface::ColumnCorner(WorldX, WorldOrigin.X, VoxelSize);
 		Y = FVoxelBlockSurface::ColumnCorner(WorldY, WorldOrigin.Y, VoxelSize);
 	}
-	float Height = WorldMode->GetTerrainHeightAt(static_cast<float>(X), static_cast<float>(Y), NoiseParams);
+	float Height = static_cast<float>(WorldMode->GetSurfaceOnUpLine(FVector(X, Y, 0.0), NoiseParams).Position.Z);
 	if (Zones.Num() > 0)
 	{
 		Height = FVoxelTerrainConditioning::ApplyToHeight(X, Y, Height, Zones);

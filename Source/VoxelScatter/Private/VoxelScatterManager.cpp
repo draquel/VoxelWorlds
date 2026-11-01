@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelScatterManager.h"
+#include "VoxelSurfaceQuery.h"
 #include "VoxelScatterRenderer.h"
 #include "VoxelScatterConfiguration.h"
 #include "VoxelScatterExclusionSubsystem.h"
@@ -2598,11 +2599,10 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 
 float FScatterExtractionContext::GetGeneratedTerrainHeight(double WorldX, double WorldY) const
 {
+	// The ladder's generated rung (code review CR2, SCAT-19): the natural height with the zones layered on as generation does.
 	check(WorldMode != nullptr);
-	const float Natural = WorldMode->GetTerrainHeightAt(static_cast<float>(WorldX), static_cast<float>(WorldY), NoiseParams);
-	return ConditioningZones.IsValid() && ConditioningZones->Num() > 0
-		? FVoxelTerrainConditioning::ApplyToHeight(WorldX, WorldY, Natural, *ConditioningZones)
-		: Natural;
+	return static_cast<float>(FVoxelSurfaceQuery::GetGeneratedSurface(*WorldMode, FVector(WorldX, WorldY, 0.0), NoiseParams,
+		ConditioningZones.IsValid() ? ConditioningZones.Get() : nullptr).Position.Z);
 }
 
 FVoxelData FScatterExtractionContext::GetVoxelAboveChunk(int32 LocalX, int32 LocalY, int32 ChunkSize, const FVector& SamplePos, float GeneratedHeight,

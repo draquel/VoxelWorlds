@@ -155,10 +155,22 @@ public:
 		int32 LODLevel,
 		float NoiseValue) const override;
 
-	virtual float GetTerrainHeightAt(
+	/** The natural surface at (X, Y): (X, Y, GetTerrainHeightAt), Normal = +Z, the altitude above SeaLevel. */
+	virtual FVoxelTerrainSurfacePoint GetSurfaceOnUpLine(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const override;
+
+	/**
+	 * This mode's terrain height at (X, Y): the natural surface's Z, the seabed beyond the island's edge (the heightmap
+	 * modes' own height since code review CR2, CORE-25; code that works in every mode uses GetSurfaceOnUpLine).
+	 *
+	 * @param X World X coordinate
+	 * @param Y World Y coordinate
+	 * @param NoiseParams Noise parameters for terrain generation
+	 * @return Z coordinate of the terrain surface at (X, Y)
+	 */
+	float GetTerrainHeightAt(
 		float X,
 		float Y,
-		const FVoxelNoiseParams& NoiseParams) const override;
+		const FVoxelNoiseParams& NoiseParams) const;
 
 	virtual FIntVector WorldToChunkCoord(
 		const FVector& WorldPos,
@@ -203,10 +215,10 @@ public:
 	}
 
 	/**
-	 * Per-mode vertical-cull bounds (IVoxelWorldMode): the base continentalness extent, with the minimum lowered to
-	 * the seabed's floor beyond the edge (EdgeHeight - SeabedDepth) when that is deeper.
+	 * This mode's vertical-cull bounds (GetWorldBounds' MinZ / MaxZ): the base continentalness extent, with the minimum
+	 * lowered to the seabed's floor beyond the edge (EdgeHeight - SeabedDepth) when that is deeper.
 	 */
-	virtual void GetTerrainHeightBounds(float& OutMin, float& OutMax) const override;
+	void GetTerrainHeightBounds(float& OutMin, float& OutMax) const;
 
 	// ==================== World Bounds and Local Frame (IVoxelWorldMode, WM-A2) ====================
 	// Up is +Z and the surface coordinate is (0, X, Y) (the defaults); the datum is SeaLevel.

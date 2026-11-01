@@ -191,7 +191,7 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 		const float WorldX = WorldOrigin.X + (ChunkVoxelOrigin.X + LocalX) * VoxelSize;
 		const float WorldY = WorldOrigin.Y + (ChunkVoxelOrigin.Y + LocalY) * VoxelSize;
 
-		const float TerrainHeight = WorldMode.GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
+		const float TerrainHeight = static_cast<float>(WorldMode.GetSurfaceOnUpLine(FVector(WorldX, WorldY, 0.0), NoiseParams).Position.Z);
 
 		// Advance seed state to maintain determinism (must happen before any continue)
 		RandomFromSeed(ChunkSeed);

@@ -90,7 +90,7 @@ bool FDistanceBandSlabUsesWorldModeHeightTest::RunTest(const FString& Parameters
 			{
 				const float SX = (X + Offset.X) * ChunkWorldSize;
 				const float SY = (Y + Offset.Y) * ChunkWorldSize;
-				const float H = World->GetTerrainHeightAt(SX, SY, Config->NoiseParams);
+				const float H = static_cast<float>(World->GetSurfaceOnUpLine(FVector(SX, SY, 0.0), Config->NoiseParams).Position.Z);
 				WorldMin = FMath::Min(WorldMin, H);
 				WorldMax = FMath::Max(WorldMax, H);
 				const float S = FInfinitePlaneWorldMode::NoiseToTerrainHeight(
@@ -107,8 +107,7 @@ bool FDistanceBandSlabUsesWorldModeHeightTest::RunTest(const FString& Parameters
 	TestTrue(TEXT("Continentalness moves the surface here (the test would not tell the two apart otherwise)"), MaxStaticOffset > 100.0f);
 
 	// The terrain bounds come from the world mode: one chunk below its minimum.
-	float BoundsMin = 0.0f, BoundsMax = 0.0f;
-	World->GetTerrainHeightBounds(BoundsMin, BoundsMax);
+	const float BoundsMin = World->GetWorldBounds().MinZ;
 	TestEqual(TEXT("Terrain bounds from the world mode"), Strategy.GetTerrainMin(), BoundsMin - ChunkWorldSize, 0.01f);
 
 	Biome->RemoveFromRoot();

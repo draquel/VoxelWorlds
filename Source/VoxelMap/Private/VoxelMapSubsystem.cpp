@@ -379,7 +379,11 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 	// Elevation/depth shading ranges from the world mode's own height bounds (the generation
 	// authority) instead of hardcoded constants, so the gradient spans the terrain this config
 	// actually produces.
-	CachedWorldMode->GetTerrainHeightBounds(CachedTerrainMinHeight, CachedTerrainMaxHeight);
+	{
+		const FVoxelWorldBounds HeightBounds = CachedWorldMode->GetWorldBounds();
+		CachedTerrainMinHeight = HeightBounds.MinZ;
+		CachedTerrainMaxHeight = HeightBounds.MaxZ;
+	}
 
 	// Modes without real bounds (IVoxelWorldMode's default is a deliberately huge no-cull range,
 	// e.g. SphericalPlanet) would flatten the gradient to a constant. Fall back to the config's own
@@ -2102,7 +2106,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord, uint32 Generatio
 				// TRUE generated surface height: the standalone mode carries a value-captured biome
 				// snapshot, so this applies the same continentalness modulation (offset + height-scale)
 				// and per-mode composition (e.g. IslandBowl falloff) as chunk generation.
-				float Height = WorldMode->GetTerrainHeightAt(WorldX, WorldY, NoiseParams);
+				float Height = static_cast<float>(WorldMode->GetSurfaceOnUpLine(FVector(WorldX, WorldY, 0.0), NoiseParams).Position.Z);
 				if (Zones.Num() > 0)
 				{
 					Height = FVoxelTerrainConditioning::ApplyToHeight(WorldX, WorldY, Height, Zones);

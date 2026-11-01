@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "VoxelData.h"
+#include "VoxelWorldModeTypes.h"
 
 struct FVoxelBiomeSnapshot;
 struct FVoxelNoiseParams;
@@ -12,31 +13,32 @@ class IVoxelWorldMode;
 class FSphericalPlanetWorldMode;
 
 /**
- * A sampled terrain surface point: from the procedural generator (FVoxelSurfaceQuery, no loaded chunk data required) or
- * from loaded, edit-merged voxels (UVoxelChunkManager::QueryEditMergedSurfacePoint).
+ * The surface ladder's rungs (GLOSSARY.md), the layers a "where is the ground here" query answers from:
+ * UVoxelChunkManager::QuerySurfacePoint takes one.
  */
-struct VOXELGENERATION_API FVoxelSurfaceSample
+enum class EVoxelSurfaceLayer : uint8
 {
-	/**
-	 * Heightmap modes: world-space Z of the terrain surface at the queried X,Y. On a planet, which has no Z per (X, Y):
-	 * the surface's altitude above the datum (as Altitude).
-	 */
-	float Height = 0.0f;
+	/** The analytic surface without conditioning zones, caves or edits (IVoxelWorldMode::GetSurfaceOnUpLine). */
+	Natural,
+	/** The natural surface with the conditioning zones applied, and the block top on a cubic world: what generation makes. */
+	Generated,
+	/** The surface of the loaded voxels with edits (false where no loaded chunk holds it). */
+	EditMerged
+};
 
-	/** Surface normal derived from the height-field gradient (points up-ish). */
-	FVector Normal = FVector::UpVector;
-
+/**
+ * A sampled terrain surface point with its conditions: from the procedural generator (FVoxelSurfaceQuery, no loaded chunk
+ * data required) or from loaded, edit-merged voxels (UVoxelChunkManager::QueryEditMergedSurfacePoint). The geometry
+ * (Position, Normal, Altitude) is FVoxelTerrainSurfacePoint's (code review CR2, CORE-24: one geometry struct); the
+ * heightmap height is Position.Z, the planet's altitude is Altitude.
+ */
+struct VOXELGENERATION_API FVoxelSurfaceSample : public FVoxelTerrainSurfacePoint
+{
 	/** Slope angle in degrees (0 = flat, 90 = vertical), measured against Up. */
 	float SlopeDegrees = 0.0f;
 
-	/** World position of the surface point (heightmap modes: (X, Y, Height)); spherical SP-A3. */
-	FVector Position = FVector::ZeroVector;
-
 	/** Local up at the point: +Z in heightmap modes, the radial direction on a planet. */
 	FVector Up = FVector::UpVector;
-
-	/** The point's altitude above the datum (IVoxelWorldMode::GetAltitude). */
-	float Altitude = 0.0f;
 
 	/** Surface material ID (biome-blended; 0 when no biome config). */
 	uint8 MaterialID = 0;
@@ -78,7 +80,83 @@ struct FVoxelSurfaceMaterialMix
 class VOXELGENERATION_API FVoxelSurfaceQuery
 {
 public:
-	/** Terrain surface Z at a world X,Y. Thin wrapper over IVoxelWorldMode::GetTerrainHeightAt. */
+	// ==================== The ladder's rungs in every mode (code review CR2, CORE-27) ====================
+	// One entry per question, taking the world mode and a world position: the generated surface (GetGeneratedSurface, one
+	// sample), the conditions at a surface point (QuerySurfaceConditionsAt, QuerySurfaceMaterialMixAt) and everything at
+	// once (SampleSurfacePoint). The Z-up and planet forms below them are their implementations, kept for the callers
+	// whose arithmetic they are until those move (the far field, the map).
+
+	/**
+	 * The generated surface on the local up-line through a position, one sample (the surface ladder's generated rung,
+	 * GLOSSARY.md): the natural surface (IVoxelWorldMode::GetSurfaceOnUpLine) with the conditioning zones there layered
+	 * on as generation does (FVoxelTerrainConditioning::ApplyToHeight on a heightmap, ApplyToAltitude on a planet). The
+	 * normal is local up; the block top of a cubic world is the chunk manager's (SnapToBlockTop), not applied here.
+	 *
+	 * @param WorldMode World mode
+	 * @param WorldPos Any position on the up-line
+	 * @param NoiseParams Terrain noise
+	 * @param Zones The conditioning zones there (gathered for the place), or null / empty for the natural surface
+	 * @param OutContinentalness Optional: on a planet the continentalness its height sampled (what its conditions reuse);
+	 *        0 on a heightmap world (its conditions sample their own)
+	 * @return The surface point, with Normal = local up
+	 */
+	static FVoxelTerrainSurfacePoint GetGeneratedSurface(
+		const IVoxelWorldMode& WorldMode,
+		const FVector& WorldPos,
+		const FVoxelNoiseParams& NoiseParams,
+		const TArray<struct FVoxelConditioningZone>* Zones,
+		float* OutContinentalness = nullptr);
+
+	/**
+	 * The surface material and biome at a surface point, in any world mode: the same biome pipeline as generation
+	 * (temperature / moisture / continentalness, the tiered blend, the blended material at depth 0 with the sea's variant
+	 * under it, height rules). Heightmap modes: QuerySurfaceConditions at the point's (X, Y, Z); a planet:
+	 * QueryPlanetSurfaceConditionsAt along the point's direction at its altitude (depth 0).
+	 *
+	 * @param WorldMode World mode
+	 * @param Surface The surface point (GetGeneratedSurface or GetSurfaceOnUpLine)
+	 * @param Continentalness On a planet, what GetGeneratedSurface returned for it (the blend reuses it); ignored elsewhere
+	 * @param VoxelSize Voxel size (the dither's key)
+	 * @param NoiseParams Terrain noise (its seed derives the climate seeds)
+	 * @param BiomeSnapshot Value-captured biome data (FVoxelBiomeSnapshot::FromConfig)
+	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig)
+	 * @param OutSurfaceMaterial Surface material ID (0 when the snapshot is invalid)
+	 * @param OutBiomeID Dominant biome ID (0 when the snapshot is invalid)
+	 */
+	static void QuerySurfaceConditionsAt(
+		const IVoxelWorldMode& WorldMode,
+		const FVoxelTerrainSurfacePoint& Surface,
+		float Continentalness,
+		float VoxelSize,
+		const FVoxelNoiseParams& NoiseParams,
+		const FVoxelBiomeSnapshot& BiomeSnapshot,
+		const FVoxelSeaSurface& Sea,
+		uint8& OutSurfaceMaterial, uint8& OutBiomeID);
+
+	/**
+	 * The surface material mix at a surface point, in any world mode (G45 / WM-MP1: what the per-voxel picks cover there
+	 * on average, for the far field). Heightmap modes: QuerySurfaceMaterialMix at the point's (X, Y, Z); a planet:
+	 * QueryPlanetSurfaceMaterialMixAt along its direction.
+	 *
+	 * @param WorldMode World mode
+	 * @param Surface The surface point
+	 * @param Continentalness On a planet, what GetGeneratedSurface returned for it; ignored elsewhere
+	 * @param NoiseParams Terrain noise
+	 * @param BiomeSnapshot Value-captured biome data
+	 * @param Sea The world's sea
+	 * @return The mix (material 0 and weight 0 when the snapshot is invalid)
+	 */
+	static FVoxelSurfaceMaterialMix QuerySurfaceMaterialMixAt(
+		const IVoxelWorldMode& WorldMode,
+		const FVoxelTerrainSurfacePoint& Surface,
+		float Continentalness,
+		const FVoxelNoiseParams& NoiseParams,
+		const FVoxelBiomeSnapshot& BiomeSnapshot,
+		const FVoxelSeaSurface& Sea);
+
+	// ==================== Heightmap (Z-up) forms ====================
+
+	/** Terrain surface Z at a world X,Y: the natural surface (IVoxelWorldMode::GetSurfaceOnUpLine) in a heightmap mode. */
 	static float GetSurfaceHeight(
 		const IVoxelWorldMode& WorldMode,
 		float WorldX, float WorldY,

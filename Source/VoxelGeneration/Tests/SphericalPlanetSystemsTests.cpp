@@ -21,8 +21,7 @@
 // Spherical Phase 4, systems: the terrain queries (WORLD_MODES_REVIEW_PLAN.md §18, WM-SY1, WM-SY2;
 // SPHERICAL_PLANET_REQUIREMENTS.md SP-A3, SP-A4). Pure CPU, runs headless.
 //
-// - The legacy GetTerrainHeightAt on a planet returns the Z where the vertical line meets the terrain on the upper
-//   hemisphere (a fallback for stray callers), not a radius.
+// - GetSurfaceOnUpLine on a planet is the point along the direction from the centre at the terrain's altitude there.
 // - GetAltitudeBounds: the height bounds as altitudes on the plane and the island, the shell on a planet.
 // - The planet's surface conditions (material, biome) equal what generation writes in the surface voxel.
 // ---------------------------------------------------------------------------
@@ -115,60 +114,6 @@ namespace PlanetSystemsTestUtils
 }
 
 /**
- * SP-A3: the legacy height query on a planet. At points spread over the northern hemisphere (out to 0.95 of the radius
- * from the axis), the returned Z is where the vertical line through (X, Y) meets the terrain: the point (X, Y, Z) lies
- * on the surface along its own direction to within 1 uu. Past the terrain's radius the line misses and the centre's Z
- * comes back.
- */
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetLegacyHeightTest,
-	"VoxelWorlds.WorldModes.Planet.LegacyHeight",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FPlanetLegacyHeightTest::RunTest(const FString& Parameters)
-{
-	using namespace PlanetSystemsTestUtils;
-
-	AddExpectedMessagePlain(TEXT("GetTerrainHeightAt called on a planet"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
-
-	UVoxelBiomeConfiguration* Biomes = NewObject<UVoxelBiomeConfiguration>();
-	Biomes->AddToRoot();
-	Biomes->bEnableContinentalness = true;
-	Biomes->RebuildBakedCurves();
-	UVoxelWorldConfiguration* Config = MakePlanetConfig(Biomes, FVector(12345.0, -6789.0, 1000.0));
-	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
-	const FVector Center = Config->WorldOrigin;
-
-	double WorstError = 0.0;
-	int32 Samples = 0;
-	for (int32 Ring = 0; Ring < 6; ++Ring)
-	{
-		const double Rho = Radius * 0.95 * Ring / 5.0;
-		for (int32 Bearing = 0; Bearing < 4; ++Bearing)
-		{
-			const double Angle = UE_DOUBLE_PI * 0.5 * Bearing + 0.3 * Ring;
-			const double X = Center.X + Rho * FMath::Cos(Angle);
-			const double Y = Center.Y + Rho * FMath::Sin(Angle);
-			const float Z = Mode->GetTerrainHeightAt(static_cast<float>(X), static_cast<float>(Y), Config->NoiseParams);
-			const FVector OnLine(X, Y, Z);
-			const FVoxelTerrainSurfacePoint Surface = Mode->GetSurfacePoint(OnLine, Config->NoiseParams);
-			const double Error = FVector::Dist(OnLine, Surface.Position);
-			WorstError = FMath::Max(WorstError, Error);
-			TestTrue(*FString::Printf(TEXT("The point is on the upper hemisphere (rho %.0f)"), Rho), Z > Center.Z);
-			++Samples;
-		}
-	}
-	AddInfo(FString::Printf(TEXT("%d points on the northern hemisphere: worst distance from the surface %.4f uu"), Samples, WorstError));
-	TestTrue(TEXT("Every (X, Y, GetTerrainHeightAt) lies on the terrain within 1 uu"), WorstError <= 1.0);
-
-	const float Missed = Mode->GetTerrainHeightAt(static_cast<float>(Center.X + Radius * 1.2), static_cast<float>(Center.Y), Config->NoiseParams);
-	TestEqual(TEXT("A line past the terrain returns the centre's Z"), Missed, static_cast<float>(Center.Z));
-
-	Config->RemoveFromRoot();
-	Biomes->RemoveFromRoot();
-	return true;
-}
-
-/**
  * SP-A4: GetAltitudeBounds. On the plane and the island the height bounds become altitudes (Z - SeaLevel); on a planet
  * they are the shell, and every surface the planet generates lies inside them. The planet's GetTerrainHeightBounds is
  * the shell's world-Z extent, as its GetWorldBounds reports.
@@ -200,7 +145,8 @@ bool FWorldModeAltitudeBoundsTest::RunTest(const FString& Parameters)
 		Config->SeaLevel = -300.0f;
 		const TSharedRef<IVoxelWorldMode> Island = FVoxelWorldModeFactory::Create(*Config);
 		float MinZ = 0.0f, MaxZ = 0.0f, MinAlt = 0.0f, MaxAlt = 0.0f;
-		Island->GetTerrainHeightBounds(MinZ, MaxZ);
+		MinZ = Island->GetWorldBounds().MinZ;
+		MaxZ = Island->GetWorldBounds().MaxZ;
 		Island->GetAltitudeBounds(MinAlt, MaxAlt);
 		TestEqual(TEXT("Island: lowest altitude = lowest height - SeaLevel"), MinAlt, Island->GetAltitude(FVector(0.0, 0.0, MinZ)));
 		TestEqual(TEXT("Island: highest altitude = highest height - SeaLevel"), MaxAlt, Island->GetAltitude(FVector(0.0, 0.0, MaxZ)));
@@ -219,7 +165,8 @@ bool FWorldModeAltitudeBoundsTest::RunTest(const FString& Parameters)
 		const TSharedRef<IVoxelWorldMode> Planet = FVoxelWorldModeFactory::Create(*Config);
 		float MinAlt = 0.0f, MaxAlt = 0.0f, MinZ = 0.0f, MaxZ = 0.0f;
 		Planet->GetAltitudeBounds(MinAlt, MaxAlt);
-		Planet->GetTerrainHeightBounds(MinZ, MaxZ);
+		MinZ = Planet->GetWorldBounds().MinZ;
+		MaxZ = Planet->GetWorldBounds().MaxZ;
 		TestEqual(TEXT("Planet: lowest altitude = -MaxTerrainDepth"), MinAlt, -6500.0f);
 		TestEqual(TEXT("Planet: highest altitude = MaxTerrainHeight"), MaxAlt, 6500.0f);
 		const FVoxelWorldBounds Bounds = Planet->GetWorldBounds();
