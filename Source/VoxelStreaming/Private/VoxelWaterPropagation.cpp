@@ -549,7 +549,7 @@ bool UVoxelWaterPropagation::ReadVoxel(const FIntVector& Key, FVoxelData& OutVox
 	{
 		return false;
 	}
-	OutVoxel = ChunkManager->GetEditMergedVoxelAtWorldPosition(VoxelKeyToWorld(Key));
+	OutVoxel = ChunkManager->GetVoxelAt(VoxelKeyToWorld(Key));
 	return true;
 }
 

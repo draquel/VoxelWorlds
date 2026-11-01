@@ -215,7 +215,7 @@ namespace VoxelEditRemeshTest
 		Manager.GetLoadedChunks(Loaded);
 		for (const FIntVector& Chunk : Loaded)
 		{
-			const TSharedPtr<const TArray<FVoxelData>> Snapshot = Manager.GetEditMergedSnapshot(Chunk);
+			const TSharedPtr<const TArray<FVoxelData>> Snapshot = Manager.GetVoxelSnapshot(Chunk);
 			if (!Snapshot.IsValid())
 			{
 				continue;
@@ -423,7 +423,7 @@ namespace VoxelEditRemeshTest
 			{
 				continue;
 			}
-			const FVoxelData Current = W.Manager->GetEditMergedVoxelAtWorldPosition(Pos);
+			const FVoxelData Current = W.Manager->GetVoxelAt(Pos);
 			const FVoxelData NewData = bFill ? FVoxelData::Solid(Current.IsSolid() ? Current.MaterialID : static_cast<uint8>(EVoxelMaterial::Stone), Current.BiomeID)
 				: FVoxelData::Air();
 			Count += Edits->ApplyEdit(Pos, NewData, EEditMode::Set) ? 1 : 0;

@@ -22,7 +22,7 @@ namespace VoxelNeighborSlices
 {
 	/**
 	 * How many planes Extract reads from each neighbour next to the shared face (plane 0 included): 1 at stride 1,
-	 * stride + 1 otherwise; at most ChunkSize. A neighbour's boundary shell of this depth (FVoxelChunkShell) holds
+	 * stride + 1 otherwise; at most ChunkSize. A neighbour's boundary shell of this depth (FVoxelFaceSlabs) holds
 	 * everything Extract reads from it (G69).
 	 *
 	 * @param LODLevel  The request's LOD level (stride 2^LOD)

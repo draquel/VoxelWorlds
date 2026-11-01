@@ -41,7 +41,7 @@ namespace VoxelMeshingSampler
 	FORCEINLINE const FVoxelData& OwnVoxel(const FVoxelMeshingRequest& Request, int32 X, int32 Y, int32 Z)
 	{
 		const int32 Index = X + Y * Request.ChunkSize + Z * Request.ChunkSize * Request.ChunkSize;
-		const FVoxelData* Own = Request.VolumeViews[13];
+		const FVoxelData* Own = Request.NeighbourSnapshotViews[13];
 		return Own ? Own[Index] : Request.VoxelData[Index];
 	}
 
@@ -55,7 +55,7 @@ namespace VoxelMeshingSampler
 	{
 		const int32 CS = Request.ChunkSize;
 		const int32 D[3] = { X < 0 ? -1 : (X >= CS ? 1 : 0), Y < 0 ? -1 : (Y >= CS ? 1 : 0), Z < 0 ? -1 : (Z >= CS ? 1 : 0) };
-		const FVoxelData* View = Request.VolumeViews[FVoxelMeshingRequest::VolumeViewIndex(D[0], D[1], D[2])];
+		const FVoxelData* View = Request.NeighbourSnapshotViews[FVoxelMeshingRequest::VolumeViewIndex(D[0], D[1], D[2])];
 		if (View == nullptr)
 		{
 			return OwnVoxel(Request, ClampedX, ClampedY, ClampedZ);
@@ -99,7 +99,7 @@ namespace VoxelMeshingSampler
 		const int32 ClampedZ = FMath::Clamp(Z, 0, ChunkSize - 1);
 
 		// A seam job reading its participants in place (G63): the voxel its copied plane, strip or corner held.
-		if (Request.VolumeViews[13] != nullptr)
+		if (Request.NeighbourSnapshotViews[13] != nullptr)
 		{
 			return NeighbourViewVoxel(Request, X, Y, Z, ClampedX, ClampedY, ClampedZ);
 		}

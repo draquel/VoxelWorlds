@@ -924,9 +924,9 @@ bool FVoxelCPUMarchingCubesMesher::IsVoxelHeld(
 	}
 
 	// GetVoxelAt's sources one voxel past the chunk (each plane, strip and corner holds that depth); it clamps elsewhere.
-	if (Request.VolumeViews[13] != nullptr)
+	if (Request.NeighbourSnapshotViews[13] != nullptr)
 	{
-		return Request.VolumeViews[FVoxelMeshingRequest::VolumeViewIndex(bXPos ? 1 : (bXNeg ? -1 : 0),
+		return Request.NeighbourSnapshotViews[FVoxelMeshingRequest::VolumeViewIndex(bXPos ? 1 : (bXNeg ? -1 : 0),
 			bYPos ? 1 : (bYNeg ? -1 : 0), bZPos ? 1 : (bZNeg ? -1 : 0))] != nullptr;
 	}
 	using R = FVoxelMeshingRequest;
@@ -1142,9 +1142,9 @@ bool FVoxelCPUMarchingCubesMesher::HasRequiredNeighborData(
 					                       (bZPos || bZNeg ? 1 : 0);
 
 					// A seam job reading its participants in place (G63): the neighbour in that direction is held or not.
-					if (Request.VolumeViews[13] != nullptr)
+					if (Request.NeighbourSnapshotViews[13] != nullptr)
 					{
-						if (Request.VolumeViews[FVoxelMeshingRequest::VolumeViewIndex(bXPos ? 1 : (bXNeg ? -1 : 0),
+						if (Request.NeighbourSnapshotViews[FVoxelMeshingRequest::VolumeViewIndex(bXPos ? 1 : (bXNeg ? -1 : 0),
 							bYPos ? 1 : (bYNeg ? -1 : 0), bZPos ? 1 : (bZNeg ? -1 : 0))] == nullptr)
 						{
 							return false;

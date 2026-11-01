@@ -6,10 +6,11 @@
 #include "VoxelData.h"
 
 /**
- * A chunk's voxels within Depth planes of each of its six faces (world modes review G69).
+ * A chunk's voxels within Depth planes of each of its six faces: a view of its snapshot restricted to the face slabs
+ * (world modes review G69; FVoxelChunkShell until CR3, STREAM-30: shell names the planet's terrain band).
  *
  * A collision cook reads its 26 neighbours only next to the faces, edges and corners it shares with them (one plane at
- * collision LOD 0, stride + 1 planes above it: VoxelNeighborSlices::GetNeighborDepth), so it takes each neighbour's shell
+ * collision LOD 0, stride + 1 planes above it: VoxelNeighborSlices::GetNeighborDepth), so it takes each neighbour's face slabs
  * instead of the neighbour's whole ChunkSize^3 array: at 64^3 and depth 1, 96 KB instead of 1 MB. Immutable once built;
  * shared between cooks like the seam snapshots.
  *
@@ -19,7 +20,7 @@
  * an X face; X, Z for a Y face; X, Y for a Z face). A voxel near an edge or a corner lies in several slabs; any of them
  * answers.
  */
-struct FVoxelChunkShell
+struct FVoxelFaceSlabs
 {
 	/** Voxels per chunk axis. */
 	int32 ChunkSize = 0;
@@ -85,7 +86,7 @@ struct FVoxelChunkShell
 	 * @param Out       Receives the shell
 	 * @return False if Full is not ChunkSize^3 voxels (Out is left empty)
 	 */
-	static bool Extract(const TArray<FVoxelData>& Full, int32 InChunkSize, int32 InDepth, FVoxelChunkShell& Out)
+	static bool Extract(const TArray<FVoxelData>& Full, int32 InChunkSize, int32 InDepth, FVoxelFaceSlabs& Out)
 	{
 		Out.ChunkSize = InChunkSize;
 		Out.Depth = FMath::Clamp(InDepth, 1, FMath::Max(1, InChunkSize));
@@ -135,7 +136,7 @@ struct FVoxelChunkShell
 	 * @param InDepth   Planes next to each face
 	 * @param Out       Receives the shell
 	 */
-	static void FillUniform(const FVoxelData& Value, int32 InChunkSize, int32 InDepth, FVoxelChunkShell& Out)
+	static void FillUniform(const FVoxelData& Value, int32 InChunkSize, int32 InDepth, FVoxelFaceSlabs& Out)
 	{
 		Out.ChunkSize = InChunkSize;
 		Out.Depth = FMath::Clamp(InDepth, 1, FMath::Max(1, InChunkSize));

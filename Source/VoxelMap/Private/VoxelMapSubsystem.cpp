@@ -1621,7 +1621,7 @@ TSharedPtr<FVoxelMapOverlayBuildInput> UVoxelMapSubsystem::GatherOverlayInput(FI
 	const int32 VolumeSize = CS * CS * CS;
 	auto Snapshot = [ChunkMgr, VolumeSize](const FIntVector& Coord) -> TSharedPtr<const TArray<FVoxelData>>
 	{
-		TSharedPtr<const TArray<FVoxelData>> Voxels = ChunkMgr->GetEditMergedSnapshot(Coord);
+		TSharedPtr<const TArray<FVoxelData>> Voxels = ChunkMgr->GetVoxelSnapshot(Coord);
 		return (Voxels.IsValid() && Voxels->Num() == VolumeSize) ? Voxels : nullptr;
 	};
 
@@ -1713,7 +1713,7 @@ TSharedPtr<FVoxelMapPlanetOverlayInput> UVoxelMapSubsystem::GatherPlanetOverlayI
 	const int32 VolumeSize = CS * CS * CS;
 	auto Snapshot = [ChunkMgr, VolumeSize](const FIntVector& Coord) -> TSharedPtr<const TArray<FVoxelData>>
 	{
-		TSharedPtr<const TArray<FVoxelData>> Voxels = ChunkMgr->GetEditMergedSnapshot(Coord);
+		TSharedPtr<const TArray<FVoxelData>> Voxels = ChunkMgr->GetVoxelSnapshot(Coord);
 		return (Voxels.IsValid() && Voxels->Num() == VolumeSize) ? Voxels : nullptr;
 	};
 

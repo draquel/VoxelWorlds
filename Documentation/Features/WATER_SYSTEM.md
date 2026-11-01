@@ -128,7 +128,7 @@ Called at each mesh submit of a chunk, before its water tile update. Ensures con
 
 It reads and writes the chunk's **generated** voxels (`FChunkDescriptor`), not the edit layer. Water an edit-driven
 flood put in the edit layer crosses chunk faces through `UVoxelWaterPropagation` instead (the chunk-arrival face scans
-below, G59). Before it writes flags it drops the chunk's edit-merged snapshot (`GetEditMergedSnapshot`), which it does not
+below, G59). Before it writes flags it drops the chunk's edit-merged snapshot (`GetVoxelSnapshot`), which it does not
 version, so the water tile reads them. A resident chunk's snapshot shares its array (G71); dropped first, the write clones
 the array only while a seam job or a cook still holds it, and that reader keeps the voxels it took.
 
@@ -150,7 +150,7 @@ to the sea through loaded chunks, whatever the order. `voxel.Water.PullAgain` (1
 **Class**: `UVoxelWaterPropagation`
 
 When terrain edits (dig, subtract) expose air adjacent to existing water, this system propagates water flags via bounded BFS.
-Every read is of the **edit-merged** voxel (`UVoxelChunkManager::GetEditMergedVoxelAtWorldPosition`: the generated voxel
+Every read is of the **edit-merged** voxel (`UVoxelChunkManager::GetVoxelAt`: the generated voxel
 with the chunk's edit layer applied), so a dug voxel reads as air and a filled one as solid. Voxels are keyed by their
 global index in the chunk grid (relative to `WorldOrigin`), and "below the sea" is tested at the voxel's sample point as
 generation's fill pass tests it.
@@ -203,7 +203,7 @@ generation's fill pass tests it.
   and the water tile's column there (`UVoxelChunkManager::GetWaterTileColumn`: the chunk layers that mark it wet); the log
   line `Water propagation done: N voxels flooded from M seeds` ends each flood
 
-Until 2026-10-20 both steps read the generated voxels without the edit layer (`GetVoxelAtWorldPosition`): a voxel the
+Until 2026-10-20 both steps read the generated voxels without the edit layer (`GetGeneratedVoxelAt`): a voxel the
 player dug still read solid, so a dig under the sea never flooded, and a flood would have set each voxel to its generated
 value plus the flag, undoing an edit there; only brushes were scanned, a flagged fill counted as water, an unloaded chunk
 read as air, and keys ignored `WorldOrigin` (world modes review G58, WORLD_MODES_REVIEW_PLAN.md §19.14). Tests: `VoxelWorlds.Streaming.WaterPropagation.Plane`, `.Planet`.
@@ -366,7 +366,7 @@ TSet<FIntVector2> DirtyWaterTileSet;  // O(1) duplicate check
 
 **Chunk loads or re-meshes** → `UpdateWaterTileContribution(ChunkCoord)`:
 1. Build partial mask from chunk voxel data via `BuildColumnMask()`: the edit-merged snapshot when the chunk has edits
-   (`GetEditMergedSnapshot`; an edit-driven flood's water is in the edit layer, G59), else the generated voxels
+   (`GetVoxelSnapshot`; an edit-driven flood's water is in the edit layer, G59), else the generated voxels
 2. Store mask in `WaterTiles[XY].PartialMasks[Z]`
 3. Mark tile dirty, enqueue for processing
 

@@ -26,7 +26,7 @@
 #include "VoxelCubeSphere.h"
 #include "HAL/IConsoleManager.h"
 #include "Testing/VoxelTestScopedCVar.h"
-#include "VoxelChunkShell.h"
+#include "VoxelFaceSlabs.h"
 #include "VoxelNeighborSliceExtraction.h"
 #include "VoxelEditManager.h"
 
@@ -424,7 +424,7 @@ bool FVoxelPlanetStreamingClosedSurfaceTest::RunTest(const FString& Parameters)
 		int32 Wet = 0, WetAbove = 0, ChunksWithWater = 0;
 		for (const FIntVector& Coord : Loaded)
 		{
-			TSharedPtr<const TArray<FVoxelData>> Voxels = Test.Manager->GetEditMergedSnapshot(Coord);
+			TSharedPtr<const TArray<FVoxelData>> Voxels = Test.Manager->GetVoxelSnapshot(Coord);
 			if (!Voxels.IsValid() || Voxels->Num() != N * N * N)
 			{
 				continue;
@@ -1452,7 +1452,7 @@ namespace VoxelPlanetStreamingTestUtils
 		World.Manager->GetLoadedChunks(Loaded);
 		for (const FIntVector& Coord : Loaded)
 		{
-			const TSharedPtr<const TArray<FVoxelData>> Voxels = World.Manager->GetEditMergedSnapshot(Coord);
+			const TSharedPtr<const TArray<FVoxelData>> Voxels = World.Manager->GetVoxelSnapshot(Coord);
 			if (Voxels.IsValid())
 			{
 				// The water flag is compared apart (its count): the water pull's result at a chunk corner depended on the
@@ -1567,7 +1567,7 @@ namespace VoxelPlanetStreamingTestUtils
 		FVoxelMeshingRequest Request;
 		TSharedPtr<const TArray<FVoxelData>> Own;
 		TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>> Snapshots;
-		TMap<FIntVector, TSharedPtr<const FVoxelChunkShell>> ShellMap;
+		TMap<FIntVector, TSharedPtr<const FVoxelFaceSlabs>> ShellMap;
 		uint32 Missing = 0;
 		TArray<UE::Tasks::FTask> Ready;
 		OutNeighbors = 0;
@@ -1587,7 +1587,7 @@ namespace VoxelPlanetStreamingTestUtils
 		auto Has = [&ShellMap, &Snapshots](const FIntVector& N) { return ShellMap.Contains(N) || Snapshots.Contains(N); };
 		auto Get = [&ShellMap, &Snapshots, CS](const FIntVector& N, int32 X, int32 Y, int32 Z) -> FVoxelData
 		{
-			if (const TSharedPtr<const FVoxelChunkShell>* Shell = ShellMap.Find(N))
+			if (const TSharedPtr<const FVoxelFaceSlabs>* Shell = ShellMap.Find(N))
 			{
 				return (*Shell)->Get(X, Y, Z);
 			}
@@ -1848,7 +1848,7 @@ namespace VoxelPlanetStreamingTestUtils
 		World.Manager->GetLoadedChunks(Loaded);
 		for (const FIntVector& Coord : Loaded)
 		{
-			if (const TSharedPtr<const TArray<FVoxelData>> Voxels = World.Manager->GetEditMergedSnapshot(Coord))
+			if (const TSharedPtr<const TArray<FVoxelData>> Voxels = World.Manager->GetVoxelSnapshot(Coord))
 			{
 				Result.VoxelCrcs.Add(Coord, FCrc::MemCrc32(Voxels->GetData(), Voxels->Num() * sizeof(FVoxelData)));
 			}
@@ -1969,7 +1969,7 @@ namespace VoxelPlanetStreamingTestUtils
 		Result.Loaded = Loaded.Num();
 		for (const FIntVector& Coord : Loaded)
 		{
-			const TSharedPtr<const TArray<FVoxelData>> Voxels = World.Manager->GetEditMergedSnapshot(Coord);
+			const TSharedPtr<const TArray<FVoxelData>> Voxels = World.Manager->GetVoxelSnapshot(Coord);
 			if (Voxels.IsValid())
 			{
 				Result.VoxelCrcs.Add(Coord, FCrc::MemCrc32(Voxels->GetData(), Voxels->Num() * sizeof(FVoxelData)));

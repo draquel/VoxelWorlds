@@ -60,7 +60,7 @@ struct VOXELMAP_API FVoxelMapGlobeAlbedo
  * Voxel edits (QA R22): the analytic terrain knows nothing about digs, builds or POI stamps, so each edited tile
  * keeps an FVoxelMapEditOverlay of the columns whose top surface an edit changed. UVoxelEditManager::OnChunkEdited
  * marks tiles dirty; every voxel.Map.EditRefreshSeconds the dirty tiles whose edited chunks are loaded gather their
- * edit-merged snapshots (UVoxelChunkManager::GetEditMergedSnapshot) and redraw, building the overlay in the tile
+ * edit-merged snapshots (UVoxelChunkManager::GetVoxelSnapshot) and redraw, building the overlay in the tile
  * task. Tiles whose chunks are not loaded keep their current overlay until a chunk of theirs generates.
  *
  * Tile images live under a fixed memory budget (world modes review WM-E2, finding KI15; FVoxelMapTileStore): every
