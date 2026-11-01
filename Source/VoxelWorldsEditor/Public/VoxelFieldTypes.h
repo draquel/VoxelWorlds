@@ -102,6 +102,18 @@ struct FVoxelFieldSampleContext
 	/** On a planet: the analytic surface sample (FVoxelSurfaceQuery::SampleSurfacePoint) above (X, Y). */
 	FVoxelSurfaceSample PlanetSurfaceAbove(double X, double Y) const;
 
+	/**
+	 * The analytic surface above (X, Y) in either kind of world (code review CR2, REND-17): the planet's along the direction
+	 * to the upper hemisphere's datum point there, the heightmap's at (X, Y) (FVoxelSurfaceQuery::SampleSurfacePoint).
+	 */
+	FVoxelSurfaceSample SurfaceAbove(double X, double Y) const;
+
+	/** The surface's height as the fields show it: the altitude on a planet, the world Z on a heightmap world. */
+	float SurfaceHeightOf(const FVoxelSurfaceSample& Sample) const { return bPlanet ? Sample.Altitude : static_cast<float>(Sample.Position.Z); }
+
+	/** Where the climate fields sample above (X, Y): the direction's point on the datum sphere on a planet, (X, Y, 0) on a heightmap world. */
+	FVector ClimateSamplePoint(double X, double Y) const;
+
 	/** Build a context from a world configuration asset. Game thread (instantiates the world mode). */
 	static FVoxelFieldSampleContext FromConfiguration(const UVoxelWorldConfiguration* Config);
 };

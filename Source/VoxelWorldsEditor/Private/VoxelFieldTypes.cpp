@@ -108,6 +108,22 @@ FVoxelSurfaceSample FVoxelFieldSampleContext::PlanetSurfaceAbove(double X, doubl
 		NoiseParams, BiomeSnapshot, Sea);
 }
 
+FVoxelSurfaceSample FVoxelFieldSampleContext::SurfaceAbove(double X, double Y) const
+{
+	if (bPlanet)
+	{
+		return PlanetSurfaceAbove(X, Y);
+	}
+	// A heightmap world: the sample at (X, Y) (SampleSurface at the float position with the sea as the WaterLevel plane).
+	return FVoxelSurfaceQuery::SampleSurfacePoint(*WorldMode, FVector(X, Y, 0.0), VoxelSize, NoiseParams, BiomeSnapshot, Sea);
+}
+
+FVector FVoxelFieldSampleContext::ClimateSamplePoint(double X, double Y) const
+{
+	// A planet's climate is the planet noise at the direction's point on the datum sphere (WM-BP5), as generation samples it.
+	return bPlanet ? FSphericalPlanetWorldMode::GetNoiseSamplePoint(PlanetDirectionAbove(X, Y), PlanetRadius) : FVector(X, Y, 0.0);
+}
+
 // ============================================================================
 // FVoxelEditorField color mapping
 // ============================================================================
@@ -247,11 +263,7 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 		F.RampHigh = FLinearColor(1.0f, 0.98f, 0.85f);
 		F.Sample = [](const FVoxelFieldSampleContext& C, double X, double Y, double /*Z*/)
 		{
-			if (C.bPlanet)
-			{
-				return C.PlanetSurfaceAbove(X, Y).Altitude;
-			}
-			return FVoxelSurfaceQuery::GetSurfaceHeight(*C.WorldMode, static_cast<float>(X), static_cast<float>(Y), C.NoiseParams);
+			return C.SurfaceHeightOf(C.SurfaceAbove(X, Y));
 		};
 		RegisterField(F);
 	}
@@ -269,11 +281,7 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 		F.RampHigh = FLinearColor(0.90f, 0.10f, 0.05f);
 		F.Sample = [](const FVoxelFieldSampleContext& C, double X, double Y, double /*Z*/)
 		{
-			if (C.bPlanet)
-			{
-				return C.PlanetSurfaceAbove(X, Y).SlopeDegrees;
-			}
-			return FVoxelSurfaceQuery::ComputeSlopeDegrees(*C.WorldMode, static_cast<float>(X), static_cast<float>(Y), C.VoxelSize, C.NoiseParams);
+			return C.SurfaceAbove(X, Y).SlopeDegrees;
 		};
 		RegisterField(F);
 	}
@@ -287,15 +295,7 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 		F.ColorMode = EVoxelFieldColor::MaterialPalette;
 		F.Sample = [](const FVoxelFieldSampleContext& C, double X, double Y, double /*Z*/)
 		{
-			if (C.bPlanet)
-			{
-				return static_cast<float>(C.PlanetSurfaceAbove(X, Y).MaterialID);
-			}
-			const float H = FVoxelSurfaceQuery::GetSurfaceHeight(*C.WorldMode, static_cast<float>(X), static_cast<float>(Y), C.NoiseParams);
-			uint8 Mat = 0, Biome = 0;
-			FVoxelSurfaceQuery::QuerySurfaceConditions(static_cast<float>(X), static_cast<float>(Y), H, C.VoxelSize,
-				C.BiomeSnapshot, C.GetSeed(), C.bEnableWaterLevel, C.WaterLevel, Mat, Biome);
-			return static_cast<float>(Mat);
+			return static_cast<float>(C.SurfaceAbove(X, Y).MaterialID);
 		};
 		RegisterField(F);
 	}
@@ -309,15 +309,7 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 		F.ColorMode = EVoxelFieldColor::BiomePalette;
 		F.Sample = [](const FVoxelFieldSampleContext& C, double X, double Y, double /*Z*/)
 		{
-			if (C.bPlanet)
-			{
-				return static_cast<float>(C.PlanetSurfaceAbove(X, Y).BiomeID);
-			}
-			const float H = FVoxelSurfaceQuery::GetSurfaceHeight(*C.WorldMode, static_cast<float>(X), static_cast<float>(Y), C.NoiseParams);
-			uint8 Mat = 0, Biome = 0;
-			FVoxelSurfaceQuery::QuerySurfaceConditions(static_cast<float>(X), static_cast<float>(Y), H, C.VoxelSize,
-				C.BiomeSnapshot, C.GetSeed(), C.bEnableWaterLevel, C.WaterLevel, Mat, Biome);
-			return static_cast<float>(Biome);
+			return static_cast<float>(C.SurfaceAbove(X, Y).BiomeID);
 		};
 		RegisterField(F);
 	}
@@ -334,10 +326,8 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 		F.RampHigh = FLinearColor(0.95f, 0.25f, 0.10f);  // hot  -> red
 		F.Sample = [](const FVoxelFieldSampleContext& C, double X, double Y, double /*Z*/)
 		{
-			const FVector SamplePos = C.bPlanet
-				? FSphericalPlanetWorldMode::GetNoiseSamplePoint(C.PlanetDirectionAbove(X, Y), C.PlanetRadius) : FVector(X, Y, 0.0);
-			// A planet's climate is the planet noise (WM-BP5), as generation samples it
-			return C.bPlanet ? FVoxelPlanetNoise::FBM3D(SamplePos, C.TempNoiseParams) : FVoxelCPUNoiseGenerator::FBM3D(SamplePos, C.TempNoiseParams);
+			// One noise for every world mode (MP4): the climate at the frame's sample point.
+			return FVoxelCPUNoiseGenerator::FBM3D(C.ClimateSamplePoint(X, Y), C.TempNoiseParams);
 		};
 		RegisterField(F);
 	}
@@ -354,9 +344,7 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 		F.RampHigh = FLinearColor(0.05f, 0.45f, 0.35f);  // humid -> teal
 		F.Sample = [](const FVoxelFieldSampleContext& C, double X, double Y, double /*Z*/)
 		{
-			const FVector SamplePos = C.bPlanet
-				? FSphericalPlanetWorldMode::GetNoiseSamplePoint(C.PlanetDirectionAbove(X, Y), C.PlanetRadius) : FVector(X, Y, 0.0);
-			return C.bPlanet ? FVoxelPlanetNoise::FBM3D(SamplePos, C.MoistureNoiseParams) : FVoxelCPUNoiseGenerator::FBM3D(SamplePos, C.MoistureNoiseParams);
+			return FVoxelCPUNoiseGenerator::FBM3D(C.ClimateSamplePoint(X, Y), C.MoistureNoiseParams);
 		};
 		RegisterField(F);
 	}
@@ -373,11 +361,7 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 		F.RampHigh = FLinearColor(0.55f, 0.45f, 0.25f);  // inland
 		F.Sample = [](const FVoxelFieldSampleContext& C, double X, double Y, double /*Z*/)
 		{
-			const FVector SamplePos = C.bPlanet
-				? FSphericalPlanetWorldMode::GetNoiseSamplePoint(C.PlanetDirectionAbove(X, Y), C.PlanetRadius) : FVector(X, Y, 0.0);
-			return C.bUseContinentalness
-				? (C.bPlanet ? FVoxelPlanetNoise::FBM3D(SamplePos, C.ContinentalnessNoiseParams) : FVoxelCPUNoiseGenerator::FBM3D(SamplePos, C.ContinentalnessNoiseParams))
-				: 0.0f;
+			return C.bUseContinentalness ? FVoxelCPUNoiseGenerator::FBM3D(C.ClimateSamplePoint(X, Y), C.ContinentalnessNoiseParams) : 0.0f;
 		};
 		RegisterField(F);
 	}
