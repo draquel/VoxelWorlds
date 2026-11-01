@@ -208,6 +208,19 @@ struct VOXELSTREAMING_API FVoxelResidencySnapshot
 };
 
 /**
+ * What the game module adds to the voxel world's report (vox.Planet / vox.World), each note at its place in a line (code
+ * review CR2, FW-18 / CM-34: the plugin owns the voxel.* diagnostics; voxel.World.Stats prints the report with no notes).
+ */
+struct FVoxelWorldReportNotes
+{
+	/** After the streaming viewer's place in the reach line (" (the orbit camera)"). */
+	FString Viewer;
+
+	/** At the end of the cut-over line (a flight in progress, the landing hold). */
+	FString Cutover;
+};
+
+/**
  * A change of a planet window's cut-over state (spherical Phase 6, WM-BP10), as the chunk manager records it for the
  * bench, the log and tests (G49, WORLD_MODES_REVIEW_PLAN.md §20.28): when the window resumed or suspended, where the
  * camera and the streaming viewer were, and for a suspension what the window had done since it last resumed.
@@ -666,6 +679,16 @@ public:
 	 * @return World position of the surface point (WorldPos before Initialize)
 	 */
 	FVector GetGeneratedSurfacePoint(const FVector& WorldPos) const;
+
+	/**
+	 * The level of the surface under a position (the generated terrain on the up-line through it, or the sea where that
+	 * lies higher), as a flight level: a distance from the centre on a planet, world Z on a heightmap world (what debug
+	 * flight holds, UVCMovementComponent::GetFlightLevel; code review CR2, FW-20).
+	 * @param WorldPos Any position on the up-line
+	 * @param bOutSea Whether the sea is the surface there
+	 * @return The level
+	 */
+	double GetSurfaceOrSeaLevel(const FVector& WorldPos, bool& bOutSea) const;
 
 	/**
 	 * Planets (spherical SP-B10): the generated terrain's altitude along a direction, the world mode's natural altitude
@@ -1572,6 +1595,17 @@ public:
 	 * @return The snapshot
 	 */
 	FVoxelResidencySnapshot GetResidencySnapshot() const;
+
+	/**
+	 * The voxel world's report, three lines with no prefix (voxel.World.Stats logs them; vox.Planet and vox.World log them
+	 * under their own names and add the pawn's line; code review CR2, FW-18 / CM-34): the world (a planet: centre, radius,
+	 * shell, sea, KillZ, orbit radius and ocean shell; a heightmap world: mode, bounds, terrain Z, sea, KillZ and far
+	 * ocean), the voxel window's reach from the streaming viewer with the far field (GetResidencySnapshot,
+	 * GetFarFieldStats), and the cut-over and descent prefetch.
+	 * @param Notes The caller's notes, each at its place in a line (empty for none)
+	 * @param OutLines Receives the lines (none without a configuration)
+	 */
+	void GetWorldReport(const FVoxelWorldReportNotes& Notes, TArray<FString>& OutLines) const;
 
 	/** Chunks generated this session (monotonic; the bench's generated chunks per second). */
 	int64 GetTotalChunksGenerated() const { return TotalChunksGenerated; }
