@@ -12,10 +12,12 @@ class AActor;
 class UBoxComponent;
 class UProceduralMeshComponent;
 class UMaterialInterface;
+class FVoxelFarField;
+struct FVoxelFarFieldChanges;
 
 /**
  * The owners of the components the chunk manager adds to its actor beyond the chunks' own: the walls at a bounded world's
- * edge, an island's far ocean and a planet's sea surface. Each builds its components from settings the chunk manager
+ * edge, an island's far ocean, a planet's sea surface and the far field's patches. Each builds its components from settings the chunk manager
  * makes from the configuration and the world mode, and holds them (UPROPERTY, so the garbage collector sees them while
  * the chunk manager holds the owner). The geometry is the static builders' (FVoxelWorldBoundary, FVoxelFarOcean,
  * FVoxelPlanetOcean).
@@ -156,5 +158,60 @@ private:
 	FVoxelPlanetOceanSettings Settings;
 
 	/** Whether the underside (section 1) is shown: only while the viewer is inside the sea radius */
+	bool bUndersideShown = false;
+};
+
+/**
+ * The far field's components (spherical Phase 6 WM-BP9; every world mode since MP3): one procedural mesh component per
+ * built patch at the patch's origin, section 0 the terrain, 1 the sea's top and 2 its underside. FVoxelFarField selects
+ * and builds the patches; this applies an update's changes to the components (gone with their patches, filled when a
+ * patch is built, its sections shown as the selection drew them) and keeps their memory estimate.
+ */
+USTRUCT()
+struct VOXELSTREAMING_API FVoxelFarFieldPresenter
+{
+	GENERATED_BODY()
+
+	/** Patches this many levels coarser than the edge level or finer get the sea's underside (seen only close by) */
+	static constexpr int32 UndersideLevels = 4;
+
+	/**
+	 * Apply one far-field update's changes to the components.
+	 * @param FarField         The far field (its built meshes are released once copied)
+	 * @param Changes          What the update removed, built and reselected
+	 * @param Owner            The actor new components are added to
+	 * @param TerrainMaterial  The terrain's material (section 0)
+	 * @param WaterMaterial    The water's material (sections 1 and 2)
+	 * @param bUnderSea        Whether the camera is under the sea (the undersides show)
+	 */
+	void Apply(FVoxelFarField& FarField, const FVoxelFarFieldChanges& Changes, AActor* Owner, UMaterialInterface* TerrainMaterial,
+		UMaterialInterface* WaterMaterial, bool bUnderSea);
+
+	/** Destroy every component. */
+	void Destroy();
+
+	/** Start the sea's underside as hidden (a new far field). */
+	void ResetUnderside() { bUndersideShown = false; }
+
+	/** @return A built patch's component, or null */
+	UProceduralMeshComponent* Find(uint64 PackedPatchKey) const;
+
+	/** @return How many components are alive */
+	int32 Num() const { return Components.Num(); }
+
+	/** @return What the components hold on the CPU and the GPU (an estimate: a proc-mesh vertex and a GPU vertex) */
+	int64 GetMemoryBytes() const;
+
+private:
+	/** One component per built patch (owned by the chunk manager's actor) */
+	UPROPERTY(Transient)
+	TMap<uint64, TObjectPtr<UProceduralMeshComponent>> Components;
+
+	/** Vertices and indices each component holds (its memory estimate) */
+	TMap<uint64, FIntPoint> Sizes;
+	int64 Vertices = 0;
+	int64 Indices = 0;
+
+	/** Whether the sea's underside sections are shown (the viewer is inside the sea radius) */
 	bool bUndersideShown = false;
 };
