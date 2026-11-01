@@ -147,7 +147,7 @@ struct VOXELSTREAMING_API FVoxelFarFieldSettings
 	/** A chunk's edge (ChunkSize x VoxelSize) */
 	double ChunkWorldSize = 6400.0;
 
-	/** Voxel size: the sink, and the sea's UVs (voxels of arc, as the ocean shell's) */
+	/** Voxel size: the sink, and the sea's UVs (voxels of arc, as the sea sphere's) */
 	double VoxelSize = 100.0;
 
 	/** Quads along a patch's edge (PatchQuads + 1 vertices) */
@@ -164,7 +164,7 @@ struct VOXELSTREAMING_API FVoxelFarFieldSettings
 	float MinAltitude = 0.0f;
 	float MaxAltitude = 0.0f;
 
-	/** The far field draws the sea (patches at sea level replace the ocean shell: ShouldDrawSea) */
+	/** The far field draws the sea (patches at sea level replace the sea sphere: ShouldDrawSea) */
 	bool bSea = false;
 
 	/** The sea radius (WaterRadius) */
@@ -378,7 +378,7 @@ struct VOXELSTREAMING_API FVoxelFarFieldFrame
 	/** How far a sea quad's drawn middle sags under the sea's sphere (0 on a plane). */
 	double SeaSagAt(const FVector& DrawnMiddle) const;
 
-	/** The sea's UV0 over a patch: voxels of arc along the face as the ocean shell's, or world X and Y over the voxel size as the tiles'. */
+	/** The sea's UV0 over a patch: voxels of arc along the face as the sea sphere's, or world X and Y over the voxel size as the tiles'. */
 	struct FSeaUV
 	{
 		bool bHeightmap = false;
@@ -606,7 +606,7 @@ struct VOXELSTREAMING_API FVoxelFarFieldSection
  * gradient across the quad. The quad's materials are the two largest shares of its corners' mixes
  * (FVoxelFarFieldSurface::SampleMaterialMix); voxel chunks carry alpha 1 and keep their one material. Without the blend
  * each quad takes the most common material and biome of its corners, colour R that material and alpha 1. The sea's
- * attributes match the ocean shell's (FVoxelPlanetOcean).
+ * attributes match the sea sphere's (FVoxelPlanetOcean).
  */
 struct VOXELSTREAMING_API FVoxelFarFieldPatchMesh
 {
@@ -1043,7 +1043,7 @@ public:
 	static bool IsBelowHorizon(const FVector& Center, double OccluderRadius, const FVector& Camera, const FVector& CapDirection,
 		double CapAngle, double TopRadius);
 
-	/** Whether the sea is the far field's to draw: the ocean shell's sag past its budget at its most quads (at scale). */
+	/** Whether the sea is the far field's to draw: the sea sphere's sag past its budget at its most quads (at scale). */
 	static bool ShouldDrawSea(double SeaRadius, double MaxSag, int32 MinSegments, int32 MaxSegments);
 
 private:

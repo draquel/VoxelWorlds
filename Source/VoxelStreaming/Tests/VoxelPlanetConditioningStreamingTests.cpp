@@ -133,7 +133,7 @@ bool FVoxelPlanetConditioningGatherTest::RunTest(const FString& Parameters)
 // WM-PL4: every reader of a planet's generated surface sees the zones. On a streamed planet with a raised pad at 45 degrees
 // (a static planet zone): the edit-merged surface on the pad and its ring (the generated voxels) lies within a voxel of
 // GetGeneratedSurfacePoint and of FVoxelSurfaceQuery::SampleSurfacePoint with the zones (the PCG sampler's far points),
-// the pad's material there is generation's, and GetPlanetSpawnPosition stands on the pad.
+// the pad's material there is generation's, and GetSpawnPosition stands on the pad.
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetConditionedSurfaceTest,
 	"VoxelWorlds.Streaming.Planet.ConditionedSurface",
@@ -164,8 +164,8 @@ bool FVoxelPlanetConditionedSurfaceTest::RunTest(const FString& Parameters)
 	// A second pad at the spawn direction: the spawn position stands on it.
 	const float PoleTarget = W.Manager->GetSurfacePointAt(Center + FVector::UpVector).Altitude + 200.0f;
 	W.Manager->AddConditioningZone(FVoxelConditioningZone::MakeRadial(FVector::UpVector, 500.0f, 300.0f, PoleTarget));
-	TestEqual(TEXT("GetPlanetSpawnPosition stands on the pad under it"),
-		static_cast<double>(W.Manager->GetAltitudeAt(W.Manager->GetPlanetSpawnPosition())), static_cast<double>(PoleTarget), 1.0);
+	TestEqual(TEXT("GetSpawnPosition stands on the pad under it"),
+		static_cast<double>(W.Manager->GetAltitudeAt(W.Manager->GetSpawnPosition())), static_cast<double>(PoleTarget), 1.0);
 
 	W.SetViewer(Center + Site * (Radius + Target + 300.0));
 	if (TestTrue(TEXT("Streaming settles"), W.Settle()))

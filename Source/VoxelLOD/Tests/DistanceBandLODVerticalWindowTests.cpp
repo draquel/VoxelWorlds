@@ -26,7 +26,7 @@ namespace VerticalWindowTestHelpers
 	class FProbeStrategy : public FDistanceBandLODStrategy
 	{
 	public:
-		using FDistanceBandLODStrategy::GetColumnWindow;
+		using FDistanceBandLODStrategy::GetColumnLayerRange;
 		using FDistanceBandLODStrategy::TerrainMinHeight;
 		using FDistanceBandLODStrategy::TerrainMaxHeight;
 	};
@@ -170,7 +170,7 @@ bool FLODVerticalWindowFromTerrainTest::RunTest(const FString& Parameters)
 			TestEqual(*FString::Printf(TEXT("%s, viewer on layer %d: window chunks not streamed"), ModeName, Layer), Missing, 0);
 			TestEqual(*FString::Printf(TEXT("%s, viewer on layer %d: chunks streamed outside the window"), ModeName, Layer), Extra, 0);
 			// Non-vacuous: the slabs of the ~550 columns within the horizon (about two layers each with MP4's noise, whose
-			// per-column ranges are tighter than the table noise's were) plus the near band where it lies within the bounds.
+			// per-column ranges are tighter than the table noise's were) plus the near layers where it lies within the bounds.
 			AddInfo(FString::Printf(TEXT("%s, viewer on layer %d: %d chunks streamed, %d expected"), ModeName, Layer, Got.Num(), Expected.Num()));
 			TestTrue(*FString::Printf(TEXT("%s, viewer on layer %d: candidates (%d)"), ModeName, Layer, Got.Num()), Got.Num() > 500);
 
@@ -214,7 +214,7 @@ bool FLODVerticalWindowKeepTest::RunTest(const FString& Parameters)
 	UVoxelWorldConfiguration* Config = MakeConfig(EWorldMode::InfinitePlane);
 	FProbeStrategy Strategy;
 	Strategy.Initialize(Config);
-	const float NearRadius = Strategy.GetNearWindowRadius();
+	const float NearRadius = Strategy.GetNearLayersRadius();
 	TestEqual(TEXT("Near radius: band 0 plus two chunks"), NearRadius, 7000.0f + 2.0f * ChunkWorldSize);
 
 	const FLODQueryContext Ground = MakeContext(EWorldMode::InfinitePlane, 0);
@@ -239,7 +239,7 @@ bool FLODVerticalWindowKeepTest::RunTest(const FString& Parameters)
 	int32 WrongStays = 0, WrongGoes = 0, NearChunksGone = 0;
 	for (const FIntVector& C : Loaded)
 	{
-		const FProbeStrategy::FColumnWindow Slab = Strategy.GetColumnWindow(C.X, C.Y, Moved, FProbeStrategy::EWindowUse::Load);
+		const FProbeStrategy::FColumnLayerRange Slab = Strategy.GetColumnLayerRange(C.X, C.Y, Moved, FProbeStrategy::EWindowUse::Load);
 		const double Distance = ColumnDistance(C.X, C.Y, Moved.ViewerPosition);
 		const bool bInSlab = C.Z >= Slab.SlabMinZ && C.Z <= Slab.SlabMaxZ;
 		const bool bShouldGo = Distance > 48000.0 || (Distance > NearRadius && !bInSlab);
@@ -257,7 +257,7 @@ bool FLODVerticalWindowKeepTest::RunTest(const FString& Parameters)
 	Whole.Initialize(NoSlab);
 	int32 BoundsMin = 0, BoundsMax = -1;
 	Layers(Whole.TerrainMinHeight, Whole.TerrainMaxHeight, BoundsMin, BoundsMax);
-	const FProbeStrategy::FColumnWindow Far = Whole.GetColumnWindow(8, 0, MakeContext(EWorldMode::InfinitePlane, 5), FProbeStrategy::EWindowUse::Load);
+	const FProbeStrategy::FColumnLayerRange Far = Whole.GetColumnLayerRange(8, 0, MakeContext(EWorldMode::InfinitePlane, 5), FProbeStrategy::EWindowUse::Load);
 	TestEqual(TEXT("Slab off: a far column's window starts at the bounds"), Far.SlabMinZ, BoundsMin);
 	TestEqual(TEXT("Slab off: a far column's window ends at the bounds"), Far.SlabMaxZ, BoundsMax);
 	return true;
@@ -281,7 +281,7 @@ bool FLODHorizonDistanceTest::RunTest(const FString& Parameters)
 	{
 		FDistanceBandLODStrategy Strategy;
 		Strategy.Initialize(MakeConfig(Mode));
-		TestEqual(TEXT("Heightmap world: horizon distance is horizontal"), Strategy.GetHorizonDistance(Chunk, Viewer), 30000.0f, 0.5f);
+		TestEqual(TEXT("Heightmap world: horizon distance is horizontal"), Strategy.GetStreamingHorizon(Chunk, Viewer), 30000.0f, 0.5f);
 	}
 
 	UVoxelWorldConfiguration* Planet = MakeConfig(EWorldMode::SphericalPlanet);
@@ -296,9 +296,9 @@ bool FLODHorizonDistanceTest::RunTest(const FString& Parameters)
 	const FVector Along = FVector(FMath::Sin(Angle), 0.0, FMath::Cos(Angle)) * (250000.0 + 2400.0);
 	TestTrue(TEXT("Planet: the ground point is on the terrain under the viewer"),
 		GroundRadius >= 250000.0 - Planet->PlanetMaxTerrainDepth && GroundRadius <= 250000.0 + Planet->PlanetMaxTerrainHeight);
-	TestEqual(TEXT("Planet: horizon distance is along the ground from the ground point"), Strategy.GetHorizonDistance(Along, High),
+	TestEqual(TEXT("Planet: horizon distance is along the ground from the ground point"), Strategy.GetStreamingHorizon(Along, High),
 		static_cast<float>(GroundRadius * Angle), 0.5f);
-	TestEqual(TEXT("Planet: a chunk straight under the viewer is at 0, however deep"), Strategy.GetHorizonDistance(FVector(0.0, 0.0, 240000.0), High), 0.0f, 0.5f);
+	TestEqual(TEXT("Planet: a chunk straight under the viewer is at 0, however deep"), Strategy.GetStreamingHorizon(FVector(0.0, 0.0, 240000.0), High), 0.0f, 0.5f);
 	return true;
 }
 
@@ -405,7 +405,7 @@ bool FLODVerticalWindowWaterPlaneWithOriginTest::RunTest(const FString& Paramete
 		{
 			for (int32 Y = -8; Y <= 8; ++Y)
 			{
-				if (ColumnDistance(X, Y, Context.ViewerPosition) <= Strategy.GetNearWindowRadius())
+				if (ColumnDistance(X, Y, Context.ViewerPosition) <= Strategy.GetNearLayersRadius())
 				{
 					continue; // far columns only: the slab alone decides there
 				}
@@ -419,7 +419,7 @@ bool FLODVerticalWindowWaterPlaneWithOriginTest::RunTest(const FString& Paramete
 				++Columns;
 				UnderSea += (Surface.Max < Config->WaterLevel) ? 1 : 0;
 				Raised += (FMath::Min(SlabMax, BoundsMax) > FMath::Min(GroundMax, BoundsMax)) ? 1 : 0;
-				const FProbeStrategy::FColumnWindow Window = Strategy.GetColumnWindow(X, Y, Context, FProbeStrategy::EWindowUse::Load);
+				const FProbeStrategy::FColumnLayerRange Window = Strategy.GetColumnLayerRange(X, Y, Context, FProbeStrategy::EWindowUse::Load);
 				Wrong += (Window.SlabMinZ != SlabMin || Window.SlabMaxZ != SlabMax) ? 1 : 0;
 			}
 		}

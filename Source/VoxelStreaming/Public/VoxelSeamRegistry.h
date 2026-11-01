@@ -507,7 +507,7 @@ private:
 	double Now() const;
 
 	/** Fixed-capacity rolling sample window with percentile readout. */
-	struct FLatencyWindow
+	struct FLatencySample
 	{
 		static constexpr int32 Capacity = 512;
 		TArray<float> Samples;
@@ -606,18 +606,18 @@ private:
 	int32 IntervalRequeuedInFlight = 0;
 	int32 IntervalScheduled = 0;
 	int32 IntervalCompleted = 0;
-	FLatencyWindow NearScheduleWindow;
-	FLatencyWindow FarScheduleWindow;
-	FLatencyWindow NearScanWindow;
-	FLatencyWindow FarScanWindow;
-	FLatencyWindow NearEndToEndWindow;
-	FLatencyWindow NearReadyToDoneWindow;
-	FLatencyWindow NearPostScheduleWindow;
+	FLatencySample NearScheduleLatency;
+	FLatencySample FarScheduleLatency;
+	FLatencySample NearScanWindow;
+	FLatencySample FarScanWindow;
+	FLatencySample NearEndToEndWindow;
+	FLatencySample NearReadyToDoneWindow;
+	FLatencySample NearPostScheduleLatency;
 	int32 IntervalRescheduledWithin1s = 0;
 	int32 IntervalDroppedInFlight = 0;
 	int32 IntervalDroppedParticipant = 0;
 	int32 IntervalRejectedDepartedOwner = 0;
-	FLatencyWindow NearQueueWindow;
-	FLatencyWindow NearAsyncWindow;
-	FLatencyWindow NearWorkerWindow;
+	FLatencySample NearQueueWindow;
+	FLatencySample NearAsyncWindow;
+	FLatencySample NearWorkerWindow;
 };

@@ -30,6 +30,10 @@ bool FVoxelWorldsCoreRedirectsTest::RunTest(const FString& Parameters)
 			TEXT("/Script/VoxelCore.VoxelWorldConfiguration.VoxelCutoverAltitude") },
 		{ ECoreRedirectFlags::Type_Property, TEXT("/Script/VoxelCore.VoxelWorldConfiguration.bFarBandSurfaceSlabCulling"),
 			TEXT("/Script/VoxelCore.VoxelWorldConfiguration.bSurfaceSlabCulling") },
+		{ ECoreRedirectFlags::Type_Function, TEXT("/Script/VoxelStreaming.VoxelChunkManager.GetPlanetSpawnPosition"),
+			TEXT("/Script/VoxelStreaming.VoxelChunkManager.GetSpawnPosition") },
+		{ ECoreRedirectFlags::Type_Function, TEXT("/Script/VoxelStreaming.VoxelWorldActor.GetPlanetSpawnPosition"),
+			TEXT("/Script/VoxelStreaming.VoxelWorldActor.GetSpawnPosition") },
 	};
 	for (const FCase& Case : Cases)
 	{

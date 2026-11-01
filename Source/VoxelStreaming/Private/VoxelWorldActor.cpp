@@ -199,7 +199,7 @@ void AVoxelWorldActor::InitializeVoxelWorld()
 	if (Config->WorldMode == EWorldMode::SphericalPlanet)
 	{
 		// The terrain along the spawn direction (SP-B11), once the chunk manager has its world mode.
-		const FVector SpawnPos = GetPlanetSpawnPosition();
+		const FVector SpawnPos = GetSpawnPosition();
 		static const TCHAR* SpawnLocationNames[] = { TEXT("+X Equator"), TEXT("+Y Equator"), TEXT("+Z North Pole"), TEXT("-Z South Pole") };
 		const int32 SpawnLocIdx = FMath::Clamp(Config->PlanetSpawnLocation, 0, 3);
 
@@ -210,7 +210,7 @@ void AVoxelWorldActor::InitializeVoxelWorld()
 			SpawnLocationNames[SpawnLocIdx], Config->PlanetSpawnAltitude);
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("  Recommended Spawn Position: (%.0f, %.0f, %.0f)"),
 			SpawnPos.X, SpawnPos.Y, SpawnPos.Z);
-		UE_LOG(LogVoxelStreaming, Warning, TEXT("  Place PlayerStart at this position or call GetPlanetSpawnPosition()"));
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("  Place PlayerStart at this position or call GetSpawnPosition()"));
 	}
 
 }
@@ -350,13 +350,13 @@ void AVoxelWorldActor::ForceStreamingUpdate()
 	}
 }
 
-FVector AVoxelWorldActor::GetPlanetSpawnPosition() const
+FVector AVoxelWorldActor::GetSpawnPosition() const
 {
 	UVoxelWorldConfiguration* Config = GetActiveConfiguration();
 	if (Config && Config->WorldMode == EWorldMode::SphericalPlanet)
 	{
 		// The terrain along the spawn direction plus PlanetSpawnAltitude (SP-B11); the datum's point before the world starts.
-		return (ChunkManager && ChunkManager->IsInitialized()) ? ChunkManager->GetPlanetSpawnPosition() : Config->GetPlanetSpawnPosition();
+		return (ChunkManager && ChunkManager->IsInitialized()) ? ChunkManager->GetSpawnPosition() : Config->GetPlanetSpawnPosition();
 	}
 
 	// For non-spherical modes, return the world origin (actor location)

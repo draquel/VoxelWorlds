@@ -180,7 +180,7 @@ struct VOXELSTREAMING_API FVoxelResidencySnapshot
 
 	/**
 	 * Farthest tracked chunk centre from the viewer's ground point, as the LOD strategy measures its horizons
-	 * (IVoxelLODStrategy::GetHorizonDistance): on a planet along the ground from the terrain under the viewer (spherical
+	 * (IVoxelLODStrategy::GetStreamingHorizon): on a planet along the ground from the terrain under the viewer (spherical
 	 * Phase 6, WM-BP8), on a heightmap world from the viewer's XY (2D distance).
 	 */
 	double MaxGroundDistance = 0.0;
@@ -280,7 +280,7 @@ struct VOXELSTREAMING_API FVoxelFarFieldStats
 	int64 TotalBuilt = 0;
 	float BuildMsMean = 0.0f;
 
-	/** The far field draws the sea (the ocean shell's sag is past its budget: at scale) */
+	/** The far field draws the sea (the sea sphere's sag is past its budget: at scale) */
 	bool bDrawsSea = false;
 
 	/** Patch components alive (built patches, shown or not) */
@@ -810,14 +810,15 @@ public:
 	FVector GlobalVoxelToWorldCentre(const FIntVector& GlobalVoxel) const;
 
 	/**
-	 * Where a planet's player spawns (spherical SP-B11): the terrain surface along the configuration's spawn direction
-	 * (PlanetSpawnLocation) plus PlanetSpawnAltitude along its up. UVoxelWorldConfiguration::GetPlanetSpawnPosition,
-	 * which has no world mode, gives the datum's point instead. Other world modes: the configuration's WorldOrigin.
+	 * Where the player spawns, in every world mode: on a planet the terrain surface along the configuration's spawn
+	 * direction (PlanetSpawnLocation) plus PlanetSpawnAltitude along its up (spherical SP-B11;
+	 * UVoxelWorldConfiguration::GetPlanetSpawnPosition, which has no world mode, gives the datum's point instead); in the
+	 * heightmap modes the configuration's WorldOrigin. GetPlanetSpawnPosition until CR3 (CM-22).
 	 *
 	 * @return World position
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
-	FVector GetPlanetSpawnPosition() const;
+	FVector GetSpawnPosition() const;
 
 	/**
 	 * The sea as the water rules see it (FVoxelSeaSurface::FromConfig): the sphere of WaterRadius on a planet, the plane
@@ -942,7 +943,7 @@ public:
 	/** The far field, mutable (tests: synchronous builds). */
 	FVoxelFarField* GetFarFieldMutable() { return FarField.Get(); }
 
-	/** Whether the far field draws the sea, in place of the ocean shell (at scale: FVoxelFarField::ShouldDrawSea). */
+	/** Whether the far field draws the sea, in place of the sea sphere (at scale: FVoxelFarField::ShouldDrawSea). */
 	bool DoesFarFieldDrawSea() const;
 
 /** A built patch's component (section 0 terrain, 1 sea, 2 the sea's underside), or null. */
@@ -952,8 +953,8 @@ public:
 	int32 GetFarFieldComponentCount() const { return FarFieldComponents.Num(); }
 
 	/**
-	 * Build or drop the far field, the ocean shell and the far ocean for voxel.World.FarField: with the far field off the
-	 * ocean shell draws a planet's sea and an island's far ocean builds its grid water, as before.
+	 * Build or drop the far field, the sea sphere and the far ocean for voxel.World.FarField: with the far field off the
+	 * sea sphere draws a planet's sea and an island's far ocean builds its grid water, as before.
 	 *
 	 * @param bEnabled Far field on
 	 */
@@ -1553,7 +1554,7 @@ public:
 	/**
 	 * The voxel world's report, three lines with no prefix (voxel.World.Stats logs them; vox.Planet and vox.World log them
 	 * under their own names and add the pawn's line; code review CR2, FW-18 / CM-34): the world (a planet: centre, radius,
-	 * shell, sea, KillZ, orbit radius and ocean shell; a heightmap world: mode, bounds, terrain Z, sea, KillZ and far
+	 * shell, sea, KillZ, orbit radius and sea sphere; a heightmap world: mode, bounds, terrain Z, sea, KillZ and far
 	 * ocean), the voxel window's reach from the streaming viewer with the far field (GetResidencySnapshot,
 	 * GetFarFieldStats), and the cut-over and descent prefetch.
 	 * @param Notes The caller's notes, each at its place in a line (empty for none)
