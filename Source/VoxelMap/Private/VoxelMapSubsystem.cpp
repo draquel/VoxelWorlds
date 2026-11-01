@@ -726,9 +726,9 @@ TSharedPtr<FVoxelMapGlobeAlbedo> UVoxelMapSubsystem::BuildGlobeAlbedo(const FVox
 		{
 			const FVector Direction = Out->Grid.CellCentreDirection(FIntPoint(X, Y));
 			float Continentalness = 0.0f;
-			const float Altitude = Surface.SampleAltitude(Direction, NoZones, &Continentalness);
+			const float Altitude = Surface.SampleAltitude(FVoxelFarFieldSample::OfDirection(Direction), NoZones, &Continentalness);
 			uint8 Material = 0, Biome = 0;
-			Surface.SampleConditions(Direction, Altitude, Continentalness, Material, Biome);
+			Surface.SampleConditions(FVoxelFarFieldSample::OfDirection(Direction), Altitude, Continentalness, Material, Biome);
 			Altitudes[Y * Width + X] = Altitude;
 			Materials[Y * Width + X] = Material;
 		}

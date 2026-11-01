@@ -60,6 +60,32 @@ namespace VoxelPlanetFarFieldPrivate
 	{
 		return FVector::Dist(Point, FMath::Lerp(A, B, T));
 	}
+
+	/** The distance from a point to a box's nearest point (0 inside) and to its farthest corner. */
+	double DistanceToBoxMin(const FVector2D& Point, const FBox2D& Box)
+	{
+		const double DX = FMath::Max(FMath::Max(Box.Min.X - Point.X, Point.X - Box.Max.X), 0.0);
+		const double DY = FMath::Max(FMath::Max(Box.Min.Y - Point.Y, Point.Y - Box.Max.Y), 0.0);
+		return FMath::Sqrt(DX * DX + DY * DY);
+	}
+
+	double DistanceToBoxMax(const FVector2D& Point, const FBox2D& Box)
+	{
+		const double DX = FMath::Max(FMath::Abs(Point.X - Box.Min.X), FMath::Abs(Point.X - Box.Max.X));
+		const double DY = FMath::Max(FMath::Abs(Point.Y - Box.Min.Y), FMath::Abs(Point.Y - Box.Max.Y));
+		return FMath::Sqrt(DX * DX + DY * DY);
+	}
+
+	/** The world bounds' footprint box (invalid for an unbounded world). */
+	FBox2D BoundsBox(const FVoxelWorldBounds& Bounds)
+	{
+		if (!Bounds.IsBounded())
+		{
+			return FBox2D(ForceInit);
+		}
+		const FVector2D Centre(Bounds.Center.X, Bounds.Center.Y);
+		return FBox2D(Centre - Bounds.HalfExtent, Centre + Bounds.HalfExtent);
+	}
 }
 
 // ==================== FVoxelFarFieldPatchKey ====================
@@ -259,25 +285,39 @@ FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMix(const FVector&
 	return Mix;
 }
 
-// ==================== FVoxelPlanetFarField: statics ====================
-
-void FVoxelPlanetFarField::GetPatchCap(const FVoxelFarFieldPatchKey& Key, FVector& OutDirection, double& OutAngle)
+float FVoxelFarFieldSurface::SampleAltitude(const FVoxelFarFieldSample& Sample, const TArray<FVoxelConditioningZone>& Zones, float* OutContinentalness) const
 {
-	if (Key.IsHeightmap())
+	if (bHeightmap)
 	{
-		// No cap on a heightmap world: the patch's footprint (FPatchState::Box) is its extent.
-		OutDirection = FVector::UpVector;
-		OutAngle = 0.0;
+		if (OutContinentalness)
+		{
+			*OutContinentalness = 0.0f;
+		}
+		return SampleHeight(Sample.XY.X, Sample.XY.Y, Zones);
+	}
+	return SampleAltitude(Sample.Direction, Zones, OutContinentalness);
+}
+
+void FVoxelFarFieldSurface::SampleConditions(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome) const
+{
+	if (bHeightmap)
+	{
+		SampleConditionsXY(Sample.XY.X, Sample.XY.Y, Altitude, OutMaterial, OutBiome);
 		return;
 	}
-	OutDirection = Key.GetDirection(0.5, 0.5);
-	OutAngle = 0.0;
-	for (int32 Corner = 0; Corner < 4; ++Corner)
-	{
-		const FVector CornerDirection = Key.GetDirection(Corner & 1, Corner >> 1);
-		OutAngle = FMath::Max(OutAngle, VoxelPlanetFarFieldPrivate::AngleBetween(OutDirection, CornerDirection));
-	}
+	SampleConditions(Sample.Direction, Altitude, Continentalness, OutMaterial, OutBiome);
 }
+
+FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMix(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness) const
+{
+	if (bHeightmap)
+	{
+		return SampleMaterialMixXY(Sample.XY.X, Sample.XY.Y, Altitude);
+	}
+	return SampleMaterialMix(Sample.Direction, Altitude, Continentalness);
+}
+
+// ==================== FVoxelPlanetFarField: statics ====================
 
 bool FVoxelPlanetFarField::IsBelowHorizon(const FVector& Center, double OccluderRadius, const FVector& Camera, const FVector& CapDirection,
 	double CapAngle, double TopRadius)
@@ -306,6 +346,415 @@ bool FVoxelPlanetFarField::ShouldDrawSea(double SeaRadius, double MaxSag, int32 
 	return FVoxelPlanetOcean::MeasureMaxSag(SeaRadius, Segments) > MaxSag;
 }
 
+// ==================== FVoxelFarFieldFrame ====================
+
+FVoxelFarFieldSample FVoxelFarFieldFrame::SampleOf(const FVoxelFarFieldPatchKey& Key, double FU, double FV) const
+{
+	FVoxelFarFieldSample Sample;
+	if (Settings.bHeightmap)
+	{
+		Sample.XY = Key.GetPoint2D(Settings.GridOrigin, Settings.GetRootTileSize(), FU, FV);
+		return Sample;
+	}
+	Sample.Direction = Key.GetDirection(FU, FV);
+	return Sample;
+}
+
+FVoxelFarFieldSample FVoxelFarFieldFrame::SampleAt(const FVector& WorldPoint, bool bNormalize) const
+{
+	FVoxelFarFieldSample Sample;
+	if (Settings.bHeightmap)
+	{
+		Sample.XY = FVector2D(WorldPoint.X, WorldPoint.Y);
+		return Sample;
+	}
+	Sample.Direction = bNormalize ? (WorldPoint - Settings.Center).GetSafeNormal() : WorldPoint - Settings.Center;
+	return Sample;
+}
+
+FVoxelFarFieldSample FVoxelFarFieldFrame::Normalized(const FVoxelFarFieldSample& Sample) const
+{
+	if (Settings.bHeightmap)
+	{
+		return Sample;
+	}
+	return FVoxelFarFieldSample::OfDirection(Sample.Direction.GetSafeNormal());
+}
+
+FVector FVoxelFarFieldFrame::PointAt(const FVoxelFarFieldSample& Sample, double Altitude, double Sink) const
+{
+	if (Settings.bHeightmap)
+	{
+		return FVector(Sample.XY.X, Sample.XY.Y, Altitude - Sink);
+	}
+	return Settings.Center + Sample.Direction * (Settings.Radius + Altitude - Sink);
+}
+
+double FVoxelFarFieldFrame::ErrorAt(const FVector& DrawnPoint, double Altitude, double Sink) const
+{
+	if (Settings.bHeightmap)
+	{
+		return FMath::Abs(DrawnPoint.Z - (Altitude - Sink));
+	}
+	return FMath::Abs(FVector::Dist(DrawnPoint, Settings.Center) - (Settings.Radius + Altitude - Sink));
+}
+
+FVector FVoxelFarFieldFrame::OriginOf(const FVoxelFarFieldPatchKey& Key, const FVoxelFarFieldSurface& Surface, const TArray<FVoxelConditioningZone>& Zones) const
+{
+	const FVoxelFarFieldSample Centre = SampleOf(Key, 0.5, 0.5);
+	if (Settings.bHeightmap)
+	{
+		return FVector(Centre.XY.X, Centre.XY.Y, Surface.SampleAltitude(Centre, Zones));
+	}
+	return Settings.Center + Centre.Direction * Settings.Radius;
+}
+
+FVector FVoxelFarFieldFrame::GetFaceTangent(const FVoxelFarFieldPatchKey& Key) const
+{
+	if (Settings.bHeightmap)
+	{
+		return FVector::ForwardVector;
+	}
+	FVector FaceN, FaceT, FaceB;
+	FVoxelCubeSphere::GetFaceAxes(Key.Face, FaceN, FaceT, FaceB);
+	return FaceT;
+}
+
+bool FVoxelFarFieldFrame::HasSea() const
+{
+	return Settings.bSea && (Settings.bHeightmap || Settings.SeaRadius > 0.0);
+}
+
+double FVoxelFarFieldFrame::GetSeaAltitude() const
+{
+	return Settings.bHeightmap ? Settings.SeaZ : Settings.SeaRadius - Settings.Radius;
+}
+
+FVector FVoxelFarFieldFrame::SeaPointAt(const FVoxelFarFieldSample& Sample) const
+{
+	if (Settings.bHeightmap)
+	{
+		return FVector(Sample.XY.X, Sample.XY.Y, Settings.SeaZ);
+	}
+	return Settings.Center + Sample.Direction * Settings.SeaRadius;
+}
+
+double FVoxelFarFieldFrame::SeaSagAt(const FVector& DrawnMiddle) const
+{
+	// The sag at the drawn diagonal's middle, its deepest point under the sphere (a plane has none).
+	if (Settings.bHeightmap)
+	{
+		return 0.0;
+	}
+	return Settings.SeaRadius - FVector::Dist(DrawnMiddle, Settings.Center);
+}
+
+FVector2f FVoxelFarFieldFrame::FSeaUV::At(const FVoxelFarFieldSample& Sample, int32 I, int32 J, int32 Q) const
+{
+	if (bHeightmap)
+	{
+		return FVector2f(static_cast<float>(Sample.XY.X / VoxelDiv), static_cast<float>(Sample.XY.Y / VoxelDiv));
+	}
+	return FVector2f(
+		static_cast<float>((UVMin.X + UVSize * I / Q) * Scale - Offset.X),
+		static_cast<float>((UVMin.Y + UVSize * J / Q) * Scale - Offset.Y));
+}
+
+FVoxelFarFieldFrame::FSeaUV FVoxelFarFieldFrame::MakeSeaUV(const FVoxelFarFieldPatchKey& Key) const
+{
+	// UV0 counts voxels of arc along the face as the ocean shell's does, less a whole number of Period per patch: the
+	// pattern continues across patches and the floats stay small at any radius. On a heightmap world (WM-MP1) it is world
+	// X and Y over the voxel size as the tiles' and the far ocean's (one seamless pattern across the three).
+	FSeaUV UV;
+	UV.bHeightmap = Settings.bHeightmap;
+	UV.VoxelDiv = FMath::Max(Settings.VoxelSize, 1.0);
+	if (!Settings.bHeightmap)
+	{
+		UV.UVMin = Key.GetUVMin();
+		UV.UVSize = Key.GetUVSize();
+	}
+	UV.Scale = UE_DOUBLE_PI / 4.0 * Settings.SeaRadius / FMath::Max(Settings.VoxelSize, 1.0);
+	constexpr double Period = 1024.0;
+	UV.Offset = FVector2D(
+		FMath::FloorToDouble((UV.UVMin.X + 0.5 * UV.UVSize) * UV.Scale / Period) * Period,
+		FMath::FloorToDouble((UV.UVMin.Y + 0.5 * UV.UVSize) * UV.Scale / Period) * Period);
+	return UV;
+}
+
+bool FVoxelFarFieldFrame::IsUnderSea(const FVector& Camera) const
+{
+	if (Settings.bHeightmap)
+	{
+		return Camera.Z < Settings.SeaZ;
+	}
+	return FVector::DistSquared(Camera, Settings.Center) < Settings.SeaRadius * Settings.SeaRadius;
+}
+
+FVoxelFarFieldFootprint FVoxelFarFieldFrame::MakeFootprint(const FVoxelFarFieldPatchKey& Key) const
+{
+	FVoxelFarFieldFootprint Footprint;
+	if (Settings.bHeightmap)
+	{
+		// No cap on a heightmap world: the patch's footprint box is its extent.
+		Footprint.Box = Key.GetBox2D(Settings.GridOrigin, Settings.GetRootTileSize());
+		return Footprint;
+	}
+	// The cap: its centre direction and the largest angle from it to a corner (the patch is bounded by great-circle arcs,
+	// so a corner is its farthest point).
+	Footprint.CapDirection = Key.GetDirection(0.5, 0.5);
+	Footprint.CapAngle = 0.0;
+	for (int32 Corner = 0; Corner < 4; ++Corner)
+	{
+		const FVector CornerDirection = Key.GetDirection(Corner & 1, Corner >> 1);
+		Footprint.CapAngle = FMath::Max(Footprint.CapAngle, VoxelPlanetFarFieldPrivate::AngleBetween(Footprint.CapDirection, CornerDirection));
+	}
+	return Footprint;
+}
+
+FVoxelFarFieldRegion FVoxelFarFieldFrame::RegionOf(const FVoxelFarFieldFootprint& Footprint) const
+{
+	FVoxelFarFieldRegion Region;
+	if (Settings.bHeightmap)
+	{
+		Region.Box = Footprint.Box;
+		return Region;
+	}
+	Region.bCap = true;
+	Region.Direction = Footprint.CapDirection;
+	Region.AngularRadius = Footprint.CapAngle;
+	return Region;
+}
+
+FVoxelFarFieldRegion FVoxelFarFieldFrame::RegionOfZone(const FVoxelConditioningZone& Zone) const
+{
+	FVoxelFarFieldRegion Region;
+	if (Settings.bHeightmap)
+	{
+		if (!Zone.IsRadial())
+		{
+			const FVector2D Reach(Zone.InnerRadius + Zone.FalloffWidth);
+			Region.Box = FBox2D(Zone.Center - Reach, Zone.Center + Reach);
+		}
+		return Region;
+	}
+	if (Zone.IsRadial() && Settings.Radius > 0.0)
+	{
+		Region.bCap = true;
+		Region.Direction = Zone.Direction;
+		Region.AngularRadius = (Zone.InnerRadius + Zone.FalloffWidth) / Settings.Radius;
+	}
+	return Region;
+}
+
+bool FVoxelFarFieldFrame::Intersects(const FVoxelFarFieldFootprint& Footprint, const FVoxelFarFieldRegion& Region) const
+{
+	if (Settings.bHeightmap)
+	{
+		return Region.Box.bIsValid && Footprint.Box.Intersect(Region.Box);
+	}
+	return Region.bCap && VoxelPlanetFarFieldPrivate::AngleBetween(Footprint.CapDirection, Region.Direction) <= Footprint.CapAngle + Region.AngularRadius;
+}
+
+bool FVoxelFarFieldFrame::TakesZones(const FVoxelFarFieldFootprint& Footprint) const
+{
+	if (Settings.bHeightmap)
+	{
+		return Footprint.Box.GetSize().X <= Settings.ZoneGatherMax;
+	}
+	return Footprint.CapAngle <= Settings.ZoneGatherMax;
+}
+
+bool FVoxelFarFieldFrame::GetColumn(const FVoxelFarFieldFootprint& Footprint, FIntPoint& OutColumn) const
+{
+	if (!Settings.bHeightmap)
+	{
+		return false;
+	}
+	const FVector2D Centre = Footprint.Box.GetCenter();
+	OutColumn = FIntPoint(FMath::FloorToInt32((Centre.X - Settings.GridOrigin.X) / Settings.ChunkWorldSize),
+		FMath::FloorToInt32((Centre.Y - Settings.GridOrigin.Y) / Settings.ChunkWorldSize));
+	return true;
+}
+
+FVoxelFarFieldFrame::FGround FVoxelFarFieldFrame::GroundOf(const FVector& Viewer, double GroundRadius) const
+{
+	FGround Ground;
+	Ground.Radius = GroundRadius;
+	Ground.XY = FVector2D(Viewer.X, Viewer.Y);
+	Ground.Direction = (Viewer - Settings.Center).GetSafeNormal();
+	if (Ground.Direction.IsNearlyZero())
+	{
+		Ground.Direction = FVector::UpVector;
+	}
+	return Ground;
+}
+
+double FVoxelFarFieldFrame::GroundDistanceMin(const FGround& Ground, const FVoxelFarFieldFootprint& Footprint) const
+{
+	if (Settings.bHeightmap)
+	{
+		return VoxelPlanetFarFieldPrivate::DistanceToBoxMin(Ground.XY, Footprint.Box);
+	}
+	const double Angle = VoxelPlanetFarFieldPrivate::AngleBetween(Ground.Direction, Footprint.CapDirection) - Footprint.CapAngle;
+	return Ground.Radius * FMath::Max(Angle, 0.0);
+}
+
+double FVoxelFarFieldFrame::GroundDistanceMax(const FGround& Ground, const FVoxelFarFieldFootprint& Footprint) const
+{
+	if (Settings.bHeightmap)
+	{
+		return VoxelPlanetFarFieldPrivate::DistanceToBoxMax(Ground.XY, Footprint.Box);
+	}
+	return Ground.Radius * (VoxelPlanetFarFieldPrivate::AngleBetween(Ground.Direction, Footprint.CapDirection) + Footprint.CapAngle);
+}
+
+double FVoxelFarFieldFrame::CameraDistanceMin(const FVector& Camera, const FVoxelFarFieldFootprint& Footprint) const
+{
+	if (Settings.bHeightmap)
+	{
+		return VoxelPlanetFarFieldPrivate::DistanceToBoxMin(FVector2D(Camera.X, Camera.Y), Footprint.Box);
+	}
+	const FVector CapPoint = Settings.Center + Footprint.CapDirection * Settings.Radius;
+	return FMath::Max(FVector::Dist(Camera, CapPoint) - Footprint.CapAngle * Settings.Radius, 0.0);
+}
+
+bool FVoxelFarFieldFrame::IsCulled(const FVector& Camera, const FVoxelFarFieldFootprint& Footprint, float MaxAltitude) const
+{
+	if (Settings.bHeightmap)
+	{
+		// A plane has no horizon: a patch is culled past the far distance from the camera, and on a bounded world when its
+		// footprint lies wholly outside the world's box (the sea in the box's corners past an island's circle stays: the
+		// far ocean's open sea starts at the box).
+		if (Settings.FarDistance > 0.0 && CameraDistanceMin(Camera, Footprint) > Settings.FarDistance)
+		{
+			return true;
+		}
+		const FBox2D Bounds = VoxelPlanetFarFieldPrivate::BoundsBox(Settings.Bounds);
+		return Bounds.bIsValid && !Bounds.Intersect(Footprint.Box);
+	}
+	double Top = Settings.Radius + MaxAltitude;
+	if (Settings.bSea)
+	{
+		Top = FMath::Max(Top, Settings.SeaRadius);
+	}
+	return FVoxelPlanetFarField::IsBelowHorizon(Settings.Center, Settings.Radius + Settings.MinAltitude - Settings.Sink, Camera,
+		Footprint.CapDirection, Footprint.CapAngle, Top);
+}
+
+bool FVoxelFarFieldFrame::GetRootKeys(const FVector& Camera, TArray<FVoxelFarFieldPatchKey>& OutKeys) const
+{
+	if (!Settings.bHeightmap)
+	{
+		for (int32 Face = 0; Face < 6; ++Face)
+		{
+			OutKeys.Add(FVoxelFarFieldPatchKey(Face, 0, 0, 0));
+		}
+		return true;
+	}
+	const double RootTileSize = Settings.GetRootTileSize();
+	if (RootTileSize <= 0.0)
+	{
+		return false;
+	}
+	// The root tiles wanted: those overlapping the square of FarDistance about the camera, and on a bounded world only those
+	// overlapping the world's box. Without either limit, the tile under the camera alone.
+	const FVector2D CameraXY(Camera.X, Camera.Y);
+	FBox2D Region(ForceInit);
+	if (Settings.FarDistance > 0.0)
+	{
+		Region = FBox2D(CameraXY - FVector2D(Settings.FarDistance), CameraXY + FVector2D(Settings.FarDistance));
+	}
+	const FBox2D Bounds = VoxelPlanetFarFieldPrivate::BoundsBox(Settings.Bounds);
+	if (Bounds.bIsValid)
+	{
+		if (Region.bIsValid)
+		{
+			Region = FBox2D(FVector2D::Max(Region.Min, Bounds.Min), FVector2D::Min(Region.Max, Bounds.Max));
+			Region.bIsValid = Region.Min.X <= Region.Max.X && Region.Min.Y <= Region.Max.Y;
+		}
+		else
+		{
+			Region = Bounds;
+		}
+	}
+	if (!Region.bIsValid && Settings.FarDistance <= 0.0 && !Bounds.bIsValid)
+	{
+		Region = FBox2D(CameraXY, CameraXY);
+	}
+	if (!Region.bIsValid)
+	{
+		return true;
+	}
+	const FVector2D GridXY(Settings.GridOrigin.X, Settings.GridOrigin.Y);
+	int32 X0 = FMath::FloorToInt32((Region.Min.X - GridXY.X) / RootTileSize);
+	int32 Y0 = FMath::FloorToInt32((Region.Min.Y - GridXY.Y) / RootTileSize);
+	int32 X1 = FMath::FloorToInt32((Region.Max.X - GridXY.X) / RootTileSize);
+	int32 Y1 = FMath::FloorToInt32((Region.Max.Y - GridXY.Y) / RootTileSize);
+	// A bound on the tree count (a far distance many times a root tile): the nearest tiles to the camera.
+	constexpr int32 MaxRootsPerAxis = 64;
+	const int32 CameraX = FMath::FloorToInt32((CameraXY.X - GridXY.X) / RootTileSize);
+	const int32 CameraY = FMath::FloorToInt32((CameraXY.Y - GridXY.Y) / RootTileSize);
+	if (X1 - X0 + 1 > MaxRootsPerAxis)
+	{
+		X0 = FMath::Max(X0, CameraX - MaxRootsPerAxis / 2);
+		X1 = FMath::Min(X1, X0 + MaxRootsPerAxis - 1);
+	}
+	if (Y1 - Y0 + 1 > MaxRootsPerAxis)
+	{
+		Y0 = FMath::Max(Y0, CameraY - MaxRootsPerAxis / 2);
+		Y1 = FMath::Min(Y1, Y0 + MaxRootsPerAxis - 1);
+	}
+	// Nearest tiles first: a root leaves a hole until it is built, and the build requests take their order from here
+	// only through their distance (RequestBuild), so the order of the visits does not matter for drawing.
+	for (int32 Y = Y0; Y <= Y1; ++Y)
+	{
+		for (int32 X = X0; X <= X1; ++X)
+		{
+			OutKeys.Add(FVoxelFarFieldPatchKey(FVoxelFarFieldPatchKey::HeightmapFace, 0, X, Y));
+		}
+	}
+	return true;
+}
+
+bool FVoxelFarFieldFrame::RootKeyOf(const FVoxelFarFieldSample& Sample, FVoxelFarFieldPatchKey& OutKey) const
+{
+	if (!Settings.bHeightmap)
+	{
+		const FVoxelSurfaceCoord Coord = FVoxelCubeSphere::DirectionToSurface(Sample.Direction);
+		OutKey = FVoxelFarFieldPatchKey(Coord.Face, 0, 0, 0);
+		return true;
+	}
+	const double RootTileSize = Settings.GetRootTileSize();
+	if (RootTileSize <= 0.0)
+	{
+		return false;
+	}
+	const double LocalX = (Sample.XY.X - Settings.GridOrigin.X) / RootTileSize;
+	const double LocalY = (Sample.XY.Y - Settings.GridOrigin.Y) / RootTileSize;
+	OutKey = FVoxelFarFieldPatchKey(FVoxelFarFieldPatchKey::HeightmapFace, 0, FMath::FloorToInt32(LocalX), FMath::FloorToInt32(LocalY));
+	return true;
+}
+
+FVoxelFarFieldPatchKey FVoxelFarFieldFrame::ChildKeyOf(const FVoxelFarFieldPatchKey& Key, const FVoxelFarFieldSample& Sample) const
+{
+	// The child holding the sample: the cell indices at the next level.
+	const int32 ChildLevel = Key.Level + 1;
+	if (Settings.bHeightmap)
+	{
+		const double RootTileSize = Settings.GetRootTileSize();
+		const double LocalX = (Sample.XY.X - Settings.GridOrigin.X) / RootTileSize;
+		const double LocalY = (Sample.XY.Y - Settings.GridOrigin.Y) / RootTileSize;
+		const double Cells = static_cast<double>(1ll << ChildLevel);
+		return FVoxelFarFieldPatchKey(Key.Face, ChildLevel, FMath::FloorToInt32(LocalX * Cells), FMath::FloorToInt32(LocalY * Cells));
+	}
+	const FVoxelSurfaceCoord Coord = FVoxelCubeSphere::DirectionToSurface(Sample.Direction);
+	const double ChildSize = 2.0 / static_cast<double>(1ll << ChildLevel);
+	const int32 Cells = 1 << ChildLevel;
+	const int32 X = FMath::Clamp(FMath::FloorToInt32((Coord.UV.X + 1.0) / ChildSize), 0, Cells - 1);
+	const int32 Y = FMath::Clamp(FMath::FloorToInt32((Coord.UV.Y + 1.0) / ChildSize), 0, Cells - 1);
+	return FVoxelFarFieldPatchKey(Key.Face, ChildLevel, X, Y);
+}
+
 void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, const FVoxelFarFieldSurface& Surface,
 	const TArray<FVoxelConditioningZone>& Zones, const FVoxelFarFieldPatchKey& Key, FVoxelFarFieldPatchMesh& Out)
 {
@@ -318,60 +767,34 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 
 	const int32 Q = FMath::Max(Settings.PatchQuads, 2);
 	const int32 Row = Q + 1;
-	const FVector C = Settings.Center;
-	const double R = Settings.Radius;
 	const double Sink = Settings.Sink;
 	const bool bBandLeaf = Key.Level >= Settings.BandLevel;
-	// A heightmap world (WM-MP1): the patch is a tile of the XY plane, the surface the generated height, local up +Z, the
-	// "altitude" of a sample its world Z. Everything below reads the surface through the lambdas, which branch once.
-	const bool bHeightmap = Settings.bHeightmap && Key.IsHeightmap();
-	const double RootTileSize = Settings.GetRootTileSize();
-	auto PointXY = [&](double FU, double FV) { return Key.GetPoint2D(Settings.GridOrigin, RootTileSize, FU, FV); };
-
-	if (bHeightmap)
-	{
-		const FVector2D Centre = PointXY(0.5, 0.5);
-		Out.Origin = FVector(Centre.X, Centre.Y, Surface.SampleHeight(Centre.X, Centre.Y, Zones));
-	}
-	else
-	{
-		Out.Origin = C + Key.GetDirection(0.5, 0.5) * R;
-	}
+	// The surface frame (code review CR2, STREAM-18): a planet's sphere, or a heightmap world's plane (WM-MP1: the patch a
+	// tile of the XY plane, the surface the generated height, local up +Z, the "altitude" of a sample its world Z).
+	// Everything below reads the surface through it and never asks which it is.
+	const FVoxelFarFieldFrame Frame(Settings);
+	Out.Origin = Frame.OriginOf(Key, Surface, Zones);
 	const FVector Origin = Out.Origin;
 
 	// The grid with one ring of samples past the patch's edges (G x G, index -1 .. Q + 1): the normals' central differences
 	// at the edges then match the neighbour's of the same level.
 	const int32 G = Q + 3;
 	auto GridIndex = [G](int32 I, int32 J) { return (I + 1) + (J + 1) * G; };
-	TArray<FVector> Directions; // local up at the sample (the radial direction; +Z on a heightmap world)
-	TArray<FVector2D> SamplesXY; // heightmap worlds: the sample's world (X, Y)
+	TArray<FVoxelFarFieldSample> Samples; // each grid point's sample: local up (the radial direction; +Z on a heightmap world) and its (X, Y)
 	TArray<double> Altitudes;
 	TArray<float> Continentalness;
-	Directions.SetNumUninitialized(G * G);
+	Samples.SetNum(G * G);
 	Altitudes.SetNumUninitialized(G * G);
 	Continentalness.SetNumUninitialized(G * G);
-	if (bHeightmap)
-	{
-		SamplesXY.SetNumUninitialized(G * G);
-	}
 	for (int32 J = -1; J <= Q + 1; ++J)
 	{
 		for (int32 I = -1; I <= Q + 1; ++I)
 		{
 			const int32 Index = GridIndex(I, J);
-			if (bHeightmap)
-			{
-				const FVector2D XY = PointXY(static_cast<double>(I) / Q, static_cast<double>(J) / Q);
-				SamplesXY[Index] = XY;
-				Directions[Index] = FVector::UpVector;
-				Altitudes[Index] = Surface.SampleHeight(XY.X, XY.Y, Zones);
-				Continentalness[Index] = 0.0f;
-				continue;
-			}
-			const FVector Direction = Key.GetDirection(static_cast<double>(I) / Q, static_cast<double>(J) / Q);
+			const FVoxelFarFieldSample Sample = Frame.SampleOf(Key, static_cast<double>(I) / Q, static_cast<double>(J) / Q);
 			float Cont = 0.0f;
-			Directions[Index] = Direction;
-			Altitudes[Index] = Surface.SampleAltitude(Direction, Zones, &Cont);
+			Samples[Index] = Sample;
+			Altitudes[Index] = Surface.SampleAltitude(Sample, Zones, &Cont);
 			Continentalness[Index] = Cont;
 		}
 	}
@@ -379,31 +802,21 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 	auto SurfacePoint = [&](int32 I, int32 J)
 	{
 		const int32 Index = GridIndex(I, J);
-		return bHeightmap ? FVector(SamplesXY[Index].X, SamplesXY[Index].Y, Altitudes[Index]) : C + Directions[Index] * (R + Altitudes[Index]);
+		return Frame.PointAt(Samples[Index], Altitudes[Index]);
 	};
 	auto DrawnPoint = [&](int32 I, int32 J)
 	{
 		const int32 Index = GridIndex(I, J);
-		return bHeightmap ? FVector(SamplesXY[Index].X, SamplesXY[Index].Y, Altitudes[Index] - Sink) : C + Directions[Index] * (R + Altitudes[Index] - Sink);
+		return Frame.PointAt(Samples[Index], Altitudes[Index], Sink);
 	};
 	// The surface's altitude (world Z on a heightmap world) at a fraction of the patch, and the drawn point there.
 	auto AltitudeAt = [&](double FU, double FV, FVector* OutDrawn)
 	{
-		if (bHeightmap)
-		{
-			const FVector2D XY = PointXY(FU, FV);
-			const double Height = Surface.SampleHeight(XY.X, XY.Y, Zones);
-			if (OutDrawn)
-			{
-				*OutDrawn = FVector(XY.X, XY.Y, Height - Sink);
-			}
-			return Height;
-		}
-		const FVector Direction = Key.GetDirection(FU, FV);
-		const double Altitude = Surface.SampleAltitude(Direction, Zones);
+		const FVoxelFarFieldSample Sample = Frame.SampleOf(Key, FU, FV);
+		const double Altitude = Surface.SampleAltitude(Sample, Zones);
 		if (OutDrawn)
 		{
-			*OutDrawn = C + Direction * (R + Altitude - Sink);
+			*OutDrawn = Frame.PointAt(Sample, Altitude, Sink);
 		}
 		return Altitude;
 	};
@@ -431,28 +844,21 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 			const FVector DU = SurfacePoint(I + 1, J) - SurfacePoint(I - 1, J);
 			const FVector DV = SurfacePoint(I, J + 1) - SurfacePoint(I, J - 1);
 			FVector Normal = FVector::CrossProduct(DU, DV).GetSafeNormal();
-			if (Normal.IsNearlyZero() || FVector::DotProduct(Normal, Directions[Index]) <= 0.0)
+			if (Normal.IsNearlyZero() || FVector::DotProduct(Normal, Samples[Index].Direction) <= 0.0)
 			{
-				Normal = Directions[Index];
+				Normal = Samples[Index].Direction;
 			}
 			Normals[I + J * Row] = FVector3f(Normal);
 			if (bBlendMaterials)
 			{
 				FVoxelSurfaceMaterialMix& Mix = Mixes[I + J * Row];
-				Mix = bHeightmap
-					? Surface.SampleMaterialMixXY(SamplesXY[Index].X, SamplesXY[Index].Y, static_cast<float>(Altitudes[Index]))
-					: Surface.SampleMaterialMix(Directions[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index]);
+				Mix = Surface.SampleMaterialMix(Samples[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index]);
 				Materials[I + J * Row] = Mix.Materials[0];
 				Biomes[I + J * Row] = Mix.BiomeID;
 			}
-			else if (bHeightmap)
-			{
-				Surface.SampleConditionsXY(SamplesXY[Index].X, SamplesXY[Index].Y, static_cast<float>(Altitudes[Index]),
-					Materials[I + J * Row], Biomes[I + J * Row]);
-			}
 			else
 			{
-				Surface.SampleConditions(Directions[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index],
+				Surface.SampleConditions(Samples[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index],
 					Materials[I + J * Row], Biomes[I + J * Row]);
 			}
 			Out.MinAltitude = FMath::Min(Out.MinAltitude, static_cast<float>(Altitudes[Index]));
@@ -477,21 +883,10 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 			const FVector A = DrawnPoint(I, J);
 			const FVector D = DrawnPoint(I + 1, J + 1);
 			const FVector Middle = (A + D) * 0.5;
-			double Altitude;
-			FVector MiddleSurface;
-			if (bHeightmap)
-			{
-				Altitude = Surface.SampleHeight(Middle.X, Middle.Y, Zones);
-				Out.Error = FMath::Max(Out.Error, FMath::Abs(Middle.Z - (Altitude - Sink)));
-				MiddleSurface = FVector(Middle.X, Middle.Y, Altitude);
-			}
-			else
-			{
-				const FVector MiddleDirection = (Middle - C).GetSafeNormal();
-				Altitude = Surface.SampleAltitude(MiddleDirection, Zones);
-				Out.Error = FMath::Max(Out.Error, FMath::Abs(FVector::Dist(Middle, C) - (R + Altitude - Sink)));
-				MiddleSurface = C + MiddleDirection * (R + Altitude);
-			}
+			const FVoxelFarFieldSample MiddleSample = Frame.SampleAt(Middle);
+			const double Altitude = Surface.SampleAltitude(MiddleSample, Zones);
+			Out.Error = FMath::Max(Out.Error, Frame.ErrorAt(Middle, Altitude, Sink));
+			const FVector MiddleSurface = Frame.PointAt(MiddleSample, Altitude);
 			CentreAltitudes[I + J * Q] = Altitude;
 			Out.MinAltitude = FMath::Min(Out.MinAltitude, static_cast<float>(Altitude));
 			Out.MaxAltitude = FMath::Max(Out.MaxAltitude, static_cast<float>(Altitude));
@@ -589,13 +984,7 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 	Out.SkirtDepth = SkirtDepth * 1.25 + FMath::Max(1.0, 0.02 * Spacing);
 
 	// ---- The terrain surface: one material and biome per quad, a grid vertex per (material, biome) it touches ----
-	FVector FaceN = FVector::UpVector, FaceT = FVector::ForwardVector, FaceB = FVector::RightVector;
-	if (!bHeightmap)
-	{
-		FVoxelCubeSphere::GetFaceAxes(Key.Face, FaceN, FaceT, FaceB);
-	}
-	const FVector2D UVMin = bHeightmap ? FVector2D::ZeroVector : Key.GetUVMin();
-	const double UVSize = bHeightmap ? 0.0 : Key.GetUVSize();
+	const FVector FaceT = Frame.GetFaceTangent(Key);
 
 	FVoxelFarFieldSection& Terrain = Out.Terrain;
 	const int32 ExpectedVertices = Row * Row + 4 * Q * 4;
@@ -777,7 +1166,7 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 		}
 		const int32 GridIdx = GridIndex(I, J);
 		const FVector Point = DrawnPoint(I, J);
-		const int32 Index = AddTerrainVertex(Point, Normals[I + J * Row], Directions[GridIdx], TerrainUV0(Point, Normals[I + J * Row]),
+		const int32 Index = AddTerrainVertex(Point, Normals[I + J * Row], Samples[GridIdx].Direction, TerrainUV0(Point, Normals[I + J * Row]),
 			KeyMaterial(QuadKey), KeyBiome(QuadKey), KeySecondary(QuadKey), CornerWeight(I, J, QuadKey));
 		List.Add({ QuadKey, Index });
 		return Index;
@@ -809,8 +1198,8 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 			return *Found;
 		}
 		const int32 GridIdx = GridIndex(I, J);
-		const FVector Point = DrawnPoint(I, J) - Directions[GridIdx] * Out.SkirtDepth;
-		const int32 Index = AddTerrainVertex(Point, Normals[I + J * Row], Directions[GridIdx], TerrainUV0(Point, Normals[I + J * Row]),
+		const FVector Point = DrawnPoint(I, J) - Samples[GridIdx].Direction * Out.SkirtDepth;
+		const int32 Index = AddTerrainVertex(Point, Normals[I + J * Row], Samples[GridIdx].Direction, TerrainUV0(Point, Normals[I + J * Row]),
 			KeyMaterial(QuadKey), KeyBiome(QuadKey), KeySecondary(QuadKey), CornerWeight(I, J, QuadKey));
 		SkirtBottoms.Add(BottomKey, Index);
 		return Index;
@@ -839,18 +1228,12 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 	// ---- The sea: at the sea radius, over the cells whose terrain lies near or under it ----
 	// The sea is a smooth sphere: a coarser grid than the terrain's (SeaQuads a side, SeaStep terrain quads to a cell) sags
 	// under a uu where it is close and keeps the sea's vertices a sixteenth of the terrain's. A cell is drawn when any terrain
-	// quad in it reaches near or under the sea. UV0 counts voxels of arc along the face as the ocean shell's does, less a
-	// whole number of SeaUVPeriod per patch: the pattern continues across patches and the floats stay small at any radius.
-	// On a heightmap world (WM-MP1) the sea is the WaterLevel plane, where the water tiles lie, and UV0 is world X and Y over
-	// the voxel size as the tiles' and the far ocean's (one seamless pattern across the three).
-	if (Settings.bSea && (bHeightmap || Settings.SeaRadius > 0.0))
+	// quad in it reaches near or under the sea. On a heightmap world (WM-MP1) the sea is the WaterLevel plane, where the
+	// water tiles lie. The sea's points and UVs are the frame's (FVoxelFarFieldFrame::SeaPointAt, MakeSeaUV).
+	if (Frame.HasSea())
 	{
-		const double SeaAltitude = bHeightmap ? Settings.SeaZ : Settings.SeaRadius - R;
-		const double SeaUVScale = UE_DOUBLE_PI / 4.0 * Settings.SeaRadius / FMath::Max(Settings.VoxelSize, 1.0);
-		constexpr double SeaUVPeriod = 1024.0;
-		const FVector2D SeaUVOffset(
-			FMath::FloorToDouble((UVMin.X + 0.5 * UVSize) * SeaUVScale / SeaUVPeriod) * SeaUVPeriod,
-			FMath::FloorToDouble((UVMin.Y + 0.5 * UVSize) * SeaUVScale / SeaUVPeriod) * SeaUVPeriod);
+		const double SeaAltitude = Frame.GetSeaAltitude();
+		const FVoxelFarFieldFrame::FSeaUV SeaUV = Frame.MakeSeaUV(Key);
 		const int32 SeaStep = FMath::Max(1, Q / FMath::Clamp(FVoxelFarFieldSettings::SeaQuads, 1, Q));
 		const uint8 SeaMaterial = FVoxelPlanetOcean::WaterMaterialID;
 		TArray<int32> SeaVertex;
@@ -861,18 +1244,9 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 			int32& Index = SeaVertex[I + J * Row];
 			if (Index == INDEX_NONE)
 			{
-				if (bHeightmap)
-				{
-					const FVector2D XY = SamplesXY[GridIndex(I, J)];
-					const FVector2f UV0(static_cast<float>(XY.X / FMath::Max(Settings.VoxelSize, 1.0)), static_cast<float>(XY.Y / FMath::Max(Settings.VoxelSize, 1.0)));
-					Index = AddVertex(Sea, FVector(XY.X, XY.Y, Settings.SeaZ), FVector3f(0.0f, 0.0f, 1.0f), FVector::UpVector, UV0, SeaMaterial, 0, SeaMaterial, 0.0f);
-					return Index;
-				}
-				const FVector Direction = Directions[GridIndex(I, J)];
-				const FVector2f UV0(
-					static_cast<float>((UVMin.X + UVSize * I / Q) * SeaUVScale - SeaUVOffset.X),
-					static_cast<float>((UVMin.Y + UVSize * J / Q) * SeaUVScale - SeaUVOffset.Y));
-				Index = AddVertex(Sea, C + Direction * Settings.SeaRadius, FVector3f(Direction), Direction, UV0, SeaMaterial, 0, SeaMaterial, 0.0f);
+				const FVoxelFarFieldSample& Sample = Samples[GridIndex(I, J)];
+				Index = AddVertex(Sea, Frame.SeaPointAt(Sample), FVector3f(Sample.Direction), Sample.Direction, SeaUV.At(Sample, I, J, Q),
+					SeaMaterial, 0, SeaMaterial, 0.0f);
 			}
 			return Index;
 		};
@@ -909,11 +1283,8 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 				const int32 D = GetSeaVertex(I1, J1);
 				Sea.Triangles.Append({ A, D, B, A, Cc, D });
 				// The sag at the drawn diagonal's middle, its deepest point under the sphere (a plane has none).
-				if (!bHeightmap)
-				{
-					const FVector Middle = (FVector(Sea.Positions[A]) + FVector(Sea.Positions[D])) * 0.5 + Origin;
-					Out.SeaSag = FMath::Max(Out.SeaSag, Settings.SeaRadius - FVector::Dist(Middle, C));
-				}
+				const FVector Middle = (FVector(Sea.Positions[A]) + FVector(Sea.Positions[D])) * 0.5 + Origin;
+				Out.SeaSag = FMath::Max(Out.SeaSag, Frame.SeaSagAt(Middle));
 			}
 		}
 		Out.bHasSea = Sea.Triangles.Num() > 0;
@@ -941,13 +1312,14 @@ void FVoxelPlanetFarField::Initialize(const FVoxelFarFieldSettings& InSettings, 
 	Settings.PatchQuads = FMath::Clamp(Settings.PatchQuads, 2, 64);
 	Settings.BandLevel = FMath::Clamp(Settings.BandLevel, 0, 27);
 	Settings.SkirtLevels = FMath::Clamp(Settings.SkirtLevels, 0, 5);
+	Frame = FVoxelFarFieldFrame(Settings);
 	Surface = MoveTemp(InSurface);
 }
 
 void FVoxelPlanetFarField::Reset()
 {
 	Patches.Reset();
-	HeightmapRoots.Reset();
+	Roots.Reset();
 	// Builds in flight finish into the old sink, which goes when they let it go.
 	Sink = MakeShared<FBuildSink, ESPMode::ThreadSafe>();
 	Requests.Reset();
@@ -980,11 +1352,7 @@ FVoxelPlanetFarField::FPatchState& FVoxelPlanetFarField::GetOrAddPatch(const FVo
 	{
 		Slot = MakeUnique<FPatchState>();
 		Slot->Key = Key;
-		GetPatchCap(Key, Slot->CapDirection, Slot->CapAngle);
-		if (Key.IsHeightmap())
-		{
-			Slot->Box = Key.GetBox2D(Settings.GridOrigin, Settings.GetRootTileSize());
-		}
+		static_cast<FVoxelFarFieldFootprint&>(*Slot) = Frame.MakeFootprint(Key);
 	}
 	return *Slot;
 }
@@ -999,48 +1367,17 @@ void FVoxelPlanetFarField::ForEachPatch(TFunctionRef<void(const FPatchState&)> V
 
 const FVoxelPlanetFarField::FPatchState* FVoxelPlanetFarField::FindDrawnPatchAt(const FVector& WorldPoint, bool bTerrainOnly) const
 {
-	if (!Settings.bHeightmap)
-	{
-		return FindDrawnPatch(WorldPoint - Settings.Center, bTerrainOnly);
-	}
-	const double RootTileSize = Settings.GetRootTileSize();
-	if (RootTileSize <= 0.0)
-	{
-		return nullptr;
-	}
-	const double LocalX = (WorldPoint.X - Settings.GridOrigin.X) / RootTileSize;
-	const double LocalY = (WorldPoint.Y - Settings.GridOrigin.Y) / RootTileSize;
-	FVoxelFarFieldPatchKey Key(FVoxelFarFieldPatchKey::HeightmapFace, 0, FMath::FloorToInt32(LocalX), FMath::FloorToInt32(LocalY));
-	while (true)
-	{
-		const FPatchState* Patch = FindPatch(Key.Pack());
-		if (!Patch)
-		{
-			return nullptr;
-		}
-		if (Patch->bDrawTerrain || (!bTerrainOnly && Patch->bDrawSea))
-		{
-			return Patch;
-		}
-		if (!Patch->bHasChildren)
-		{
-			return nullptr;
-		}
-		// The child holding the point: the cell indices at the next level.
-		const int32 ChildLevel = Key.Level + 1;
-		const double Cells = static_cast<double>(1ll << ChildLevel);
-		Key = FVoxelFarFieldPatchKey(Key.Face, ChildLevel, FMath::FloorToInt32(LocalX * Cells), FMath::FloorToInt32(LocalY * Cells));
-	}
+	return FindDrawnPatch(Frame.SampleAt(WorldPoint, /*bNormalize*/ false), bTerrainOnly);
 }
 
-const FVoxelPlanetFarField::FPatchState* FVoxelPlanetFarField::FindDrawnPatch(const FVector& Direction, bool bTerrainOnly) const
+const FVoxelPlanetFarField::FPatchState* FVoxelPlanetFarField::FindDrawnPatch(const FVoxelFarFieldSample& Sample, bool bTerrainOnly) const
 {
-	if (Settings.bHeightmap)
+	const FVoxelFarFieldSample Lookup = Frame.Normalized(Sample);
+	FVoxelFarFieldPatchKey Key;
+	if (!Frame.RootKeyOf(Lookup, Key))
 	{
 		return nullptr;
 	}
-	const FVoxelSurfaceCoord Coord = FVoxelCubeSphere::DirectionToSurface(Direction.GetSafeNormal());
-	FVoxelFarFieldPatchKey Key(Coord.Face, 0, 0, 0);
 	while (true)
 	{
 		const FPatchState* Patch = FindPatch(Key.Pack());
@@ -1056,12 +1393,7 @@ const FVoxelPlanetFarField::FPatchState* FVoxelPlanetFarField::FindDrawnPatch(co
 		{
 			return nullptr;
 		}
-		const int32 ChildLevel = Key.Level + 1;
-		const double ChildSize = 2.0 / static_cast<double>(1ll << ChildLevel);
-		const int32 Cells = 1 << ChildLevel;
-		const int32 X = FMath::Clamp(FMath::FloorToInt32((Coord.UV.X + 1.0) / ChildSize), 0, Cells - 1);
-		const int32 Y = FMath::Clamp(FMath::FloorToInt32((Coord.UV.Y + 1.0) / ChildSize), 0, Cells - 1);
-		Key = FVoxelFarFieldPatchKey(Key.Face, ChildLevel, X, Y);
+		Key = Frame.ChildKeyOf(Key, Lookup);
 	}
 }
 
@@ -1077,90 +1409,31 @@ void FVoxelPlanetFarField::ReleaseMesh(uint64 PackedKey)
 	}
 }
 
-void FVoxelPlanetFarField::InvalidateCap(const FVector& Direction, double AngularRadius)
+void FVoxelPlanetFarField::InvalidateZone(const FVoxelConditioningZone& Zone)
 {
-	if (Settings.bHeightmap)
+	const FVoxelFarFieldRegion Region = Frame.RegionOfZone(Zone);
+	if (!Region.IsValid())
 	{
 		return;
 	}
 	for (TPair<uint64, TUniquePtr<FPatchState>>& Pair : Patches)
 	{
 		FPatchState& Patch = *Pair.Value;
-		if (Patch.bBuilt && Patch.CapAngle <= Settings.ZoneGatherMaxAngle
-			&& VoxelPlanetFarFieldPrivate::AngleBetween(Patch.CapDirection, Direction) <= Patch.CapAngle + AngularRadius)
+		if (Patch.bBuilt && Frame.TakesZones(Patch) && Frame.Intersects(Patch, Region))
 		{
 			Patch.bDirty = true;
 		}
 	}
-}
-
-void FVoxelPlanetFarField::InvalidateBox(const FBox2D& Region)
-{
-	if (!Settings.bHeightmap)
-	{
-		return;
-	}
-	for (TPair<uint64, TUniquePtr<FPatchState>>& Pair : Patches)
-	{
-		FPatchState& Patch = *Pair.Value;
-		if (Patch.bBuilt && Patch.Box.GetSize().X <= Settings.ZoneGatherMaxSize && Patch.Box.Intersect(Region))
-		{
-			Patch.bDirty = true;
-		}
-	}
-}
-
-namespace VoxelPlanetFarFieldPrivate
-{
-	/** The distance from a point to a box's nearest point (0 inside) and to its farthest corner. */
-	double DistanceToBoxMin(const FVector2D& Point, const FBox2D& Box)
-	{
-		const double DX = FMath::Max(FMath::Max(Box.Min.X - Point.X, Point.X - Box.Max.X), 0.0);
-		const double DY = FMath::Max(FMath::Max(Box.Min.Y - Point.Y, Point.Y - Box.Max.Y), 0.0);
-		return FMath::Sqrt(DX * DX + DY * DY);
-	}
-
-	double DistanceToBoxMax(const FVector2D& Point, const FBox2D& Box)
-	{
-		const double DX = FMath::Max(FMath::Abs(Point.X - Box.Min.X), FMath::Abs(Point.X - Box.Max.X));
-		const double DY = FMath::Max(FMath::Abs(Point.Y - Box.Min.Y), FMath::Abs(Point.Y - Box.Max.Y));
-		return FMath::Sqrt(DX * DX + DY * DY);
-	}
-
-	/** The world bounds' footprint box (invalid for an unbounded world). */
-	FBox2D BoundsBox(const FVoxelWorldBounds& Bounds)
-	{
-		if (!Bounds.IsBounded())
-		{
-			return FBox2D(ForceInit);
-		}
-		const FVector2D Centre(Bounds.Center.X, Bounds.Center.Y);
-		return FBox2D(Centre - Bounds.HalfExtent, Centre + Bounds.HalfExtent);
-	}
-}
-
-double FVoxelPlanetFarField::GetCameraDistanceMin(const FPatchState& Patch) const
-{
-	return VoxelPlanetFarFieldPrivate::DistanceToBoxMin(FVector2D(View.Camera.X, View.Camera.Y), Patch.Box);
 }
 
 double FVoxelPlanetFarField::GetGroundDistanceMin(const FPatchState& Patch) const
 {
-	if (Settings.bHeightmap)
-	{
-		return VoxelPlanetFarFieldPrivate::DistanceToBoxMin(FVector2D(View.Viewer.X, View.Viewer.Y), Patch.Box);
-	}
-	const double Angle = VoxelPlanetFarFieldPrivate::AngleBetween(GroundDirection, Patch.CapDirection) - Patch.CapAngle;
-	return View.GroundRadius * FMath::Max(Angle, 0.0);
+	return Frame.GroundDistanceMin(Ground, Patch);
 }
 
 double FVoxelPlanetFarField::GetGroundDistanceMax(const FPatchState& Patch) const
 {
-	if (Settings.bHeightmap)
-	{
-		return VoxelPlanetFarFieldPrivate::DistanceToBoxMax(FVector2D(View.Viewer.X, View.Viewer.Y), Patch.Box);
-	}
-	return View.GroundRadius * (VoxelPlanetFarFieldPrivate::AngleBetween(GroundDirection, Patch.CapDirection) + Patch.CapAngle);
+	return Frame.GroundDistanceMax(Ground, Patch);
 }
 
 bool FVoxelPlanetFarField::IsInBand(const FPatchState& Patch) const
@@ -1186,19 +1459,12 @@ bool FVoxelPlanetFarField::UpdateCovered(FPatchState& Patch)
 		// quarter of a chunk), without zones.
 		const TArray<FVoxelConditioningZone> NoZones;
 		TSet<FIntVector> Chunks;
-		const double RootTileSize = Settings.GetRootTileSize();
 		for (int32 J = 0; J <= 8; ++J)
 		{
 			for (int32 I = 0; I <= 8; ++I)
 			{
-				if (Settings.bHeightmap)
-				{
-					const FVector2D XY = Patch.Key.GetPoint2D(Settings.GridOrigin, RootTileSize, I / 8.0, J / 8.0);
-					Chunks.Add(GetChunkOf(FVector(XY.X, XY.Y, Surface->SampleHeight(XY.X, XY.Y, NoZones))));
-					continue;
-				}
-				const FVector Direction = Patch.Key.GetDirection(I / 8.0, J / 8.0);
-				Chunks.Add(GetChunkOf(Settings.Center + Direction * (Settings.Radius + Surface->SampleAltitude(Direction, NoZones))));
+				const FVoxelFarFieldSample Sample = Frame.SampleOf(Patch.Key, I / 8.0, J / 8.0);
+				Chunks.Add(GetChunkOf(Frame.PointAt(Sample, Surface->SampleAltitude(Sample, NoZones))));
 			}
 		}
 		Patch.SampleChunks = Chunks.Array();
@@ -1231,25 +1497,7 @@ bool FVoxelPlanetFarField::UpdateCovered(FPatchState& Patch)
 
 bool FVoxelPlanetFarField::IsCulled(const FPatchState& Patch) const
 {
-	if (Settings.bHeightmap)
-	{
-		// A plane has no horizon: a patch is culled past the far distance from the camera, and on a bounded world when its
-		// footprint lies wholly outside the world's box (the sea in the box's corners past an island's circle stays: the
-		// far ocean's open sea starts at the box).
-		if (Settings.FarDistance > 0.0 && GetCameraDistanceMin(Patch) > Settings.FarDistance)
-		{
-			return true;
-		}
-		const FBox2D Bounds = VoxelPlanetFarFieldPrivate::BoundsBox(Settings.Bounds);
-		return Bounds.bIsValid && !Bounds.Intersect(Patch.Box);
-	}
-	double Top = Settings.Radius + (Patch.bBuilt ? Patch.MaxAltitude : Settings.MaxAltitude);
-	if (Settings.bSea)
-	{
-		Top = FMath::Max(Top, Settings.SeaRadius);
-	}
-	return IsBelowHorizon(Settings.Center, Settings.Radius + Settings.MinAltitude - Settings.Sink, View.Camera, Patch.CapDirection,
-		Patch.CapAngle, Top);
+	return Frame.IsCulled(View.Camera, Patch, Patch.bBuilt ? Patch.MaxAltitude : Settings.MaxAltitude);
 }
 
 bool FVoxelPlanetFarField::WantsSplit(const FPatchState& Patch) const
@@ -1281,16 +1529,7 @@ void FVoxelPlanetFarField::RequestBuild(FPatchState& Patch)
 	// Nearest first; a root leaves a hole until it is built, so roots go before everything. The root offset must leave the
 	// distance its precision: 1e30 + a distance is 1e30 in a double, which sorted every non-root request alike, so with a
 	// few builds a tick the patches under the camera could starve behind thousands of far ones (found on a plane, WM-MP1).
-	double Distance;
-	if (Settings.bHeightmap)
-	{
-		Distance = GetCameraDistanceMin(Patch);
-	}
-	else
-	{
-		const FVector CapPoint = Settings.Center + Patch.CapDirection * Settings.Radius;
-		Distance = FMath::Max(FVector::Dist(View.Camera, CapPoint) - Patch.CapAngle * Settings.Radius, 0.0);
-	}
+	const double Distance = Frame.CameraDistanceMin(View.Camera, Patch);
 	Requests.Add({ Patch.Key.Pack(), (Patch.Key.Level == 0 ? 0.0 : 1.0e12) + Distance });
 }
 
@@ -1303,14 +1542,12 @@ bool FVoxelPlanetFarField::IsLazy(FPatchState& Patch, const FPatchState& Parent)
 		return false;
 	}
 	bool bMayHaveSea = Settings.bSea && (Patch.bBuilt ? Patch.bHasSea : (Parent.bBuilt ? Parent.bHasSea : true));
-	if (bMayHaveSea && Settings.bHeightmap && WaterTileQuery)
+	FIntPoint Column;
+	if (bMayHaveSea && WaterTileQuery && Frame.GetColumn(Patch, Column))
 	{
 		// A heightmap column's water tile draws its sea: a covered band patch over one has nothing to draw, sea included,
 		// so it can be lazy (otherwise, released once hidden, it was built again a few seconds later and its parent stood
 		// in over the window for the frames the build took, over and over while the viewer stood still).
-		const FVector2D Centre = Patch.Box.GetCenter();
-		const FIntPoint Column(FMath::FloorToInt32((Centre.X - Settings.GridOrigin.X) / Settings.ChunkWorldSize),
-			FMath::FloorToInt32((Centre.Y - Settings.GridOrigin.Y) / Settings.ChunkWorldSize));
 		bMayHaveSea = !WaterTileQuery(Column);
 	}
 	if (bMayHaveSea)
@@ -1349,19 +1586,10 @@ void FVoxelPlanetFarField::SetDrawn(FPatchState& Patch)
 	// sea is the only one), so a band patch's sea hides where its column's tile is drawn, and without a tile query with its
 	// terrain (WM-MP1). The ring between the window's load and unload horizons holds chunks without tiles: its sea stays.
 	bool bSea = Settings.bSea && Patch.bHasSea;
-	if (bSea && Settings.bHeightmap && Patch.Key.Level >= Settings.BandLevel)
+	FIntPoint Column;
+	if (bSea && Patch.Key.Level >= Settings.BandLevel && Frame.GetColumn(Patch, Column))
 	{
-		if (WaterTileQuery)
-		{
-			const FVector2D Centre = Patch.Box.GetCenter();
-			const FIntPoint Column(FMath::FloorToInt32((Centre.X - Settings.GridOrigin.X) / Settings.ChunkWorldSize),
-				FMath::FloorToInt32((Centre.Y - Settings.GridOrigin.Y) / Settings.ChunkWorldSize));
-			bSea = !WaterTileQuery(Column);
-		}
-		else
-		{
-			bSea = bTerrain;
-		}
+		bSea = WaterTileQuery ? !WaterTileQuery(Column) : bTerrain;
 	}
 	Patch.bDrawSea = bSea;
 	if (Patch.bDrawTerrain || Patch.bDrawSea)
@@ -1550,79 +1778,24 @@ bool FVoxelPlanetFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutCha
 	return bWaitsUndrawn;
 }
 
-void FVoxelPlanetFarField::UpdateHeightmapRoots(FVoxelFarFieldChanges& OutChanges)
+void FVoxelPlanetFarField::UpdateRoots(FVoxelFarFieldChanges& OutChanges)
 {
-	using namespace VoxelPlanetFarFieldPrivate;
-	const double RootTileSize = Settings.GetRootTileSize();
-	if (RootTileSize <= 0.0)
+	TArray<FVoxelFarFieldPatchKey> Keys;
+	if (!Frame.GetRootKeys(View.Camera, Keys))
 	{
 		return;
 	}
-	// The root tiles wanted: those overlapping the square of FarDistance about the camera, and on a bounded world only those
-	// overlapping the world's box. Without either limit, the tile under the camera alone.
-	const FVector2D CameraXY(View.Camera.X, View.Camera.Y);
-	FBox2D Region(ForceInit);
-	if (Settings.FarDistance > 0.0)
+	TSet<uint64> Wanted;
+	for (const FVoxelFarFieldPatchKey& Root : Keys)
 	{
-		Region = FBox2D(CameraXY - FVector2D(Settings.FarDistance), CameraXY + FVector2D(Settings.FarDistance));
+		Wanted.Add(Root.Pack());
+		GetOrAddPatch(Root).bLazy = false;
+		Visit(Root.Pack(), OutChanges);
 	}
-	const FBox2D Bounds = BoundsBox(Settings.Bounds);
-	if (Bounds.bIsValid)
+	// Roots out of reach go with their trees (a planet's six roots are always wanted, so they are kept for ever).
+	for (const uint64 Old : Roots)
 	{
-		if (Region.bIsValid)
-		{
-			Region = FBox2D(FVector2D::Max(Region.Min, Bounds.Min), FVector2D::Min(Region.Max, Bounds.Max));
-			Region.bIsValid = Region.Min.X <= Region.Max.X && Region.Min.Y <= Region.Max.Y;
-		}
-		else
-		{
-			Region = Bounds;
-		}
-	}
-	if (!Region.bIsValid && Settings.FarDistance <= 0.0 && !Bounds.bIsValid)
-	{
-		Region = FBox2D(CameraXY, CameraXY);
-	}
-
-	TSet<uint64> Roots;
-	if (Region.bIsValid)
-	{
-		const FVector2D GridXY(Settings.GridOrigin.X, Settings.GridOrigin.Y);
-		int32 X0 = FMath::FloorToInt32((Region.Min.X - GridXY.X) / RootTileSize);
-		int32 Y0 = FMath::FloorToInt32((Region.Min.Y - GridXY.Y) / RootTileSize);
-		int32 X1 = FMath::FloorToInt32((Region.Max.X - GridXY.X) / RootTileSize);
-		int32 Y1 = FMath::FloorToInt32((Region.Max.Y - GridXY.Y) / RootTileSize);
-		// A bound on the tree count (a far distance many times a root tile): the nearest tiles to the camera.
-		constexpr int32 MaxRootsPerAxis = 64;
-		const int32 CameraX = FMath::FloorToInt32((CameraXY.X - GridXY.X) / RootTileSize);
-		const int32 CameraY = FMath::FloorToInt32((CameraXY.Y - GridXY.Y) / RootTileSize);
-		if (X1 - X0 + 1 > MaxRootsPerAxis)
-		{
-			X0 = FMath::Max(X0, CameraX - MaxRootsPerAxis / 2);
-			X1 = FMath::Min(X1, X0 + MaxRootsPerAxis - 1);
-		}
-		if (Y1 - Y0 + 1 > MaxRootsPerAxis)
-		{
-			Y0 = FMath::Max(Y0, CameraY - MaxRootsPerAxis / 2);
-			Y1 = FMath::Min(Y1, Y0 + MaxRootsPerAxis - 1);
-		}
-		// Nearest tiles first: a root leaves a hole until it is built, and the build requests take their order from here
-		// only through their distance (RequestBuild), so the order of the visits does not matter for drawing.
-		for (int32 Y = Y0; Y <= Y1; ++Y)
-		{
-			for (int32 X = X0; X <= X1; ++X)
-			{
-				const FVoxelFarFieldPatchKey Root(FVoxelFarFieldPatchKey::HeightmapFace, 0, X, Y);
-				Roots.Add(Root.Pack());
-				GetOrAddPatch(Root).bLazy = false;
-				Visit(Root.Pack(), OutChanges);
-			}
-		}
-	}
-	// Roots out of reach go with their trees (a planet's six roots are kept for ever).
-	for (const uint64 Old : HeightmapRoots)
-	{
-		if (Roots.Contains(Old))
+		if (Wanted.Contains(Old))
 		{
 			continue;
 		}
@@ -1633,7 +1806,7 @@ void FVoxelPlanetFarField::UpdateHeightmapRoots(FVoxelFarFieldChanges& OutChange
 			Patches.Remove(Old);
 		}
 	}
-	HeightmapRoots = MoveTemp(Roots);
+	Roots = MoveTemp(Wanted);
 }
 
 void FVoxelPlanetFarField::NoteUnready(FPatchState& Patch)
@@ -1738,16 +1911,9 @@ void FVoxelPlanetFarField::LaunchBuilds()
 			continue;
 		}
 		TArray<FVoxelConditioningZone> Zones;
-		if (Settings.bHeightmap)
+		if (ZoneGatherer && Frame.TakesZones(*Patch))
 		{
-			if (ZoneGatherer2D && Patch->Box.GetSize().X <= Settings.ZoneGatherMaxSize)
-			{
-				ZoneGatherer2D(Patch->Box, Zones);
-			}
-		}
-		else if (ZoneGatherer && Patch->CapAngle <= Settings.ZoneGatherMaxAngle)
-		{
-			ZoneGatherer(Patch->CapDirection, Patch->CapAngle, Zones);
+			ZoneGatherer(Frame.RegionOf(*Patch), Zones);
 		}
 		Patch->bBuilding = true;
 		Patch->bDirty = false;
@@ -1787,11 +1953,7 @@ void FVoxelPlanetFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef
 	{
 		View.GroundRadius = Settings.Radius;
 	}
-	GroundDirection = (View.Viewer - Settings.Center).GetSafeNormal();
-	if (GroundDirection.IsNearlyZero())
-	{
-		GroundDirection = FVector::UpVector;
-	}
+	Ground = Frame.GroundOf(View.Viewer, View.GroundRadius);
 	ChunkDrawn = &IsChunkDrawn;
 	BuiltThisUpdate.Reset();
 	// More than a chunk since the last update is a cut, not motion (VP4's horizon rule holds for motion only).
@@ -1807,19 +1969,7 @@ void FVoxelPlanetFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef
 	DrainBuilds(OutChanges);
 
 	Requests.Reset();
-	if (Settings.bHeightmap)
-	{
-		UpdateHeightmapRoots(OutChanges);
-	}
-	else
-	{
-		for (int32 Face = 0; Face < 6; ++Face)
-		{
-			const FVoxelFarFieldPatchKey Root(Face, 0, 0, 0);
-			GetOrAddPatch(Root).bLazy = false;
-			Visit(Root.Pack(), OutChanges);
-		}
-	}
+	UpdateRoots(OutChanges);
 
 	// Release the components of patches hidden a while (a parent under drawn children, a covered band patch inside the
 	// window): they build again when they are needed. Roots and band patches near the window's edge stay.

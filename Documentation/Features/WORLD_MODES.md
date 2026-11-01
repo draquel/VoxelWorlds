@@ -586,7 +586,7 @@ use the block tops in a cubic heightmap world (`FVoxelBlockSurface::UsesBlockSur
 | Steps | Players and NPCs step one block (`UVCMovementComponent::MaxStepHeight` = V + 5, `vc.Move.StepUpBlocks`); two blocks are a wall; the camera eases a block step | VoxelCharacterPlugin |
 | Navigation | One cell per block column on the voxel grid, a step of at most one block (no √2 on diagonals, no corner cut past a pillar), the node budget scaled by the cell area (`voxel.Nav.BlockSteps`) | `VoxelSurfaceNavigationSubsystem`, see `SURFACE_NAVIGATION.md` |
 | Voxel trees | Recomputed from the injector's seeded positions (`FVoxelTreeInjector::FindTreesWithTrunkAt`, `CollectTreeVoxels`; `UVoxelChunkManager::FindVoxelTreeAt`, `GetVoxelTreeBlocks`, `FellVoxelTree`); chopped like a scatter tree, felled to a stump at the harvest entry's third hit | VoxelWorlds, VoxelCharacterPlugin |
-| The far field | Its patches sample the block tops (`FVoxelFarFieldSurface::SampleHeight`: the column's corner height through `BlockTopForHeight`), so past the window the terrain continues at the blocks' level, a voxel under them, with no step at the window's edge (mode parity WM-MP1, 2026-10-26) | `VoxelPlanetFarField` |
+| The far field | Its patches sample the block tops (`FVoxelFarFieldSurface::SampleAltitude` at a heightmap sample: the column's corner height through `BlockTopForHeight`), so past the window the terrain continues at the blocks' level, a voxel under them, with no step at the window's edge (mode parity WM-MP1, 2026-10-26) | `VoxelPlanetFarField` |
 
 Cubic planets are out of scope: a planet has no block surface (decision D35).
 

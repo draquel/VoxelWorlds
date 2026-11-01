@@ -113,7 +113,7 @@ namespace VoxelFarFieldMaterialTestUtils
 			Settings.SeaRadius = Config->WaterRadius;
 			Settings.SeaMargin = 2.0 * Config->VoxelSize;
 			Settings.BandLevel = FVoxelFarFieldSettings::ComputeBandLevel(Settings.Radius, Settings.ChunkWorldSize);
-			Settings.ZoneGatherMaxAngle = 32.0 * Settings.ChunkWorldSize / Settings.Radius;
+			Settings.ZoneGatherMax = 32.0 * Settings.ChunkWorldSize / Settings.Radius;
 		}
 
 		~FRig()
@@ -125,16 +125,16 @@ namespace VoxelFarFieldMaterialTestUtils
 		FVoxelSurfaceMaterialMix Mix(const FVector& Direction) const
 		{
 			float Continentalness = 0.0f;
-			const float Altitude = Surface->SampleAltitude(Direction, NoZones, &Continentalness);
-			return Surface->SampleMaterialMix(Direction, Altitude, Continentalness);
+			const float Altitude = Surface->SampleAltitude(FVoxelFarFieldSample::OfDirection(Direction), NoZones, &Continentalness);
+			return Surface->SampleMaterialMix(FVoxelFarFieldSample::OfDirection(Direction), Altitude, Continentalness);
 		}
 
 		uint8 Pick(const FVector& Direction) const
 		{
 			float Continentalness = 0.0f;
-			const float Altitude = Surface->SampleAltitude(Direction, NoZones, &Continentalness);
+			const float Altitude = Surface->SampleAltitude(FVoxelFarFieldSample::OfDirection(Direction), NoZones, &Continentalness);
 			uint8 Material = 0, Biome = 0;
-			Surface->SampleConditions(Direction, Altitude, Continentalness, Material, Biome);
+			Surface->SampleConditions(FVoxelFarFieldSample::OfDirection(Direction), Altitude, Continentalness, Material, Biome);
 			return Material;
 		}
 

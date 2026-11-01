@@ -4259,7 +4259,7 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 		Settings.BandLevel = FVoxelFarFieldSettings::ComputeBandLevel(Settings.Radius, Settings.ChunkWorldSize);
 		// Zones (POI pads, a few chunks across) only for patches up to 32 chunks in radius: past that they do not show, and a
 		// wide cap would ask the POI system for every POI in it (G37).
-		Settings.ZoneGatherMaxAngle = 32.0 * Settings.ChunkWorldSize / FMath::Max(Settings.Radius, 1.0);
+		Settings.ZoneGatherMax = 32.0 * Settings.ChunkWorldSize / FMath::Max(Settings.Radius, 1.0);
 	}
 	else
 	{
@@ -4289,7 +4289,7 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 		Settings.SeaZ = Configuration->WaterLevel;
 		Settings.BandLevel = FVoxelFarFieldSettings::ComputeHeightmapBandLevel(Settings.RootChunks);
 		// Zones for patches up to 64 chunks across (a root tile of 64 included): the gather is a box query over the zones.
-		Settings.ZoneGatherMaxSize = 64.0 * Settings.ChunkWorldSize + 1.0;
+		Settings.ZoneGatherMax = 64.0 * Settings.ChunkWorldSize + 1.0;
 	}
 
 	FarField = MakeUnique<FVoxelPlanetFarField>();
@@ -4301,18 +4301,19 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 		LODStrategy->SetFarFieldActive(true);
 	}
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
-	FarField->SetZoneGatherer([WeakThis](const FVector& Direction, double AngularRadius, TArray<FVoxelConditioningZone>& OutZones)
+	// A build's zones: a cap's on the sphere, a box's in the plane (the region is the patch's footprint, FVoxelFarFieldFrame).
+	FarField->SetZoneGatherer([WeakThis](const FVoxelFarFieldRegion& Region, TArray<FVoxelConditioningZone>& OutZones)
 	{
 		if (const UVoxelChunkManager* Manager = WeakThis.Get())
 		{
-			Manager->GatherConditioningZonesOnSphere(Direction, AngularRadius, OutZones);
-		}
-	});
-	FarField->SetZoneGatherer2D([WeakThis](const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones)
-	{
-		if (const UVoxelChunkManager* Manager = WeakThis.Get())
-		{
-			Manager->GatherConditioningZonesForRegion(Region, OutZones);
+			if (Region.bCap)
+			{
+				Manager->GatherConditioningZonesOnSphere(Region.Direction, Region.AngularRadius, OutZones);
+			}
+			else
+			{
+				Manager->GatherConditioningZonesForRegion(Region.Box, OutZones);
+			}
 		}
 	});
 	FarField->SetWaterTileQuery([WeakThis](const FIntPoint& Column)
@@ -4588,9 +4589,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	AActor* Owner = GetOwner();
 	UMaterialInterface* TerrainMaterial = MeshRenderer ? MeshRenderer->GetSurfaceMaterial() : nullptr;
 	UMaterialInterface* WaterMaterial = Configuration->WaterMeshMaterial.Get();
-	const bool bUnderSea = Settings.bSea && (Settings.bHeightmap
-		? CameraPosition.Z < Settings.SeaZ
-		: FVector::DistSquared(CameraPosition, Settings.Center) < Settings.SeaRadius * Settings.SeaRadius);
+	const bool bUnderSea = Settings.bSea && FarField->GetFrame().IsUnderSea(CameraPosition);
 	for (const uint64 Key : Changes.Removed)
 	{
 		if (TObjectPtr<UProceduralMeshComponent>* Found = FarFieldComponents.Find(Key))
@@ -4744,23 +4743,11 @@ FString UVoxelChunkManager::GetFarFieldDebugString() const
 	const FVoxelFarFieldStats& Stats = FarFieldStats;
 	const FVoxelFarFieldSettings& Settings = FarField->GetSettings();
 	int32 RootsBuilt = 0;
-	int32 Roots = 6;
-	if (Settings.bHeightmap)
+	const int32 Roots = FarField->GetRoots().Num();
+	for (const uint64 Key : FarField->GetRoots())
 	{
-		Roots = FarField->GetHeightmapRoots().Num();
-		for (const uint64 Key : FarField->GetHeightmapRoots())
-		{
-			const FVoxelPlanetFarField::FPatchState* Root = FarField->FindPatch(Key);
-			RootsBuilt += Root && Root->bResident ? 1 : 0;
-		}
-	}
-	else
-	{
-		for (int32 Face = 0; Face < 6; ++Face)
-		{
-			const FVoxelPlanetFarField::FPatchState* Root = FarField->FindPatch(FVoxelFarFieldPatchKey(Face, 0, 0, 0).Pack());
-			RootsBuilt += Root && Root->bResident ? 1 : 0;
-		}
+		const FVoxelPlanetFarField::FPatchState* Root = FarField->FindPatch(Key);
+		RootsBuilt += Root && Root->bResident ? 1 : 0;
 	}
 	return FString::Printf(TEXT("%spatches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s; stand-ins over the window %lld in %lld updates (voxel.World.FarFieldAvoidStandIns %d); roots built %d of %d (voxel.World.FarFieldBuildAllRoots %d); updates for the frame's camera after a cut %lld (voxel.World.FarFieldCameraUpdate %d)"),
 		Settings.bHeightmap ? *FString::Printf(TEXT("heightmap (root tiles of %d chunks, out to %.0f uu) "), Settings.RootChunks, Settings.FarDistance) : TEXT(""),
@@ -4788,15 +4775,10 @@ FString UVoxelChunkManager::GetFarOceanDebugString() const
 void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 {
 	ConditioningZones.Add(Zone);
-	if (FarField && Zone.IsRadial() && FarField->GetSettings().Radius > 0.0)
+	if (FarField)
 	{
 		// The far field's patches narrow enough to take zones rebuild with it (their old meshes draw until then).
-		FarField->InvalidateCap(Zone.Direction, (Zone.InnerRadius + Zone.FalloffWidth) / FarField->GetSettings().Radius);
-	}
-	else if (FarField && !Zone.IsRadial() && FarField->GetSettings().bHeightmap)
-	{
-		const FVector2D Reach(Zone.InnerRadius + Zone.FalloffWidth);
-		FarField->InvalidateBox(FBox2D(Zone.Center - Reach, Zone.Center + Reach));
+		FarField->InvalidateZone(Zone);
 	}
 	if (Zone.IsRadial())
 	{
