@@ -3,7 +3,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Testing/VoxelTestChunkWorld.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelPlanetFarField.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelWorldModeFactory.h"
@@ -20,65 +22,7 @@
  */
 namespace VoxelFarFieldTestRig
 {
-	/**
-	 * Sets a console variable for a scope at the priority it already holds: a set below that priority is ignored (a test
-	 * that set it by console earlier in a suite run), and a set above it would outrank the other tests' code-priority sets.
-	 */
-	struct FScopedCVar
-	{
-		IConsoleVariable* Var = nullptr;
-		FString Previous;
-		EConsoleVariableFlags Priority = ECVF_SetByCode;
-		FScopedCVar(const TCHAR* Name, const TCHAR* Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(Name);
-			if (Var)
-			{
-				Previous = Var->GetString();
-				Priority = static_cast<EConsoleVariableFlags>(FMath::Max(static_cast<uint32>(Var->GetFlags() & ECVF_SetByMask), static_cast<uint32>(ECVF_SetByCode)));
-				Var->Set(Value, Priority);
-			}
-		}
-		~FScopedCVar()
-		{
-			if (Var)
-			{
-				Var->Set(*Previous, Priority);
-			}
-		}
-	};
-
-	/** A renderer that draws nothing (the chunk manager needs one to initialise). */
-	class FNullMeshRenderer : public IVoxelMeshRenderer
-	{
-	public:
-		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
-		virtual void Shutdown() override { bInitialized = false; }
-		virtual bool IsInitialized() const override { return bInitialized; }
-		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override {}
-		virtual void RemoveChunk(const FIntVector& ChunkCoord) override {}
-		virtual void ClearAllChunks() override {}
-		virtual void SetMaterial(UMaterialInterface* Material) override {}
-		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
-		virtual void UpdateMaterialParameters() override {}
-		virtual void UpdateSeamMeshFromCPU(const FIntVector& OwnerChunkCoord, uint8 SeamSlot, int32 LODLevel, FChunkMeshData&& MeshData, bool bCrossfade) override {}
-		virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 SeamSlot) override {}
-		virtual void ClearAllSeamMeshes() override {}
-		virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override {}
-		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return false; }
-		virtual int32 GetLoadedChunkCount() const override { return 0; }
-		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override {}
-		virtual int64 GetGPUMemoryUsage() const override { return 0; }
-		virtual int64 GetTotalVertexCount() const override { return 0; }
-		virtual int64 GetTotalTriangleCount() const override { return 0; }
-		virtual bool GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const override { return false; }
-		virtual FBox GetTotalBounds() const override { return FBox(ForceInit); }
-		virtual FString GetDebugStats() const override { return FString(); }
-		virtual FString GetRendererTypeName() const override { return TEXT("Null (test)"); }
-
-	private:
-		bool bInitialized = false;
-	};
+	using FScopedCVar = VoxelTesting::FScopedCVar; // the one scoped cvar (code review CR2 row 17)
 
 	/** A far field over a world configuration (rooted; released with the rig) with synchronous builds, and the selection's view for a viewer. */
 	struct FRig

@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "Testing/VoxelTestChunkWorld.h"
 #include "VoxelChunkManager.h"
 #include "VoxelCoordinates.h"
@@ -28,31 +29,6 @@
 
 namespace VoxelWaterPullOrderTestUtils
 {
-	/** Sets voxel.Water.PullAgain at console priority for a scope. */
-	struct FScopedPullAgain
-	{
-		IConsoleVariable* Var = nullptr;
-		int32 Previous = 1;
-
-		explicit FScopedPullAgain(int32 Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Water.PullAgain"));
-			if (Var)
-			{
-				Previous = Var->GetInt();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-
-		~FScopedPullAgain()
-		{
-			if (Var)
-			{
-				Var->Set(Previous, ECVF_SetByConsole);
-			}
-		}
-	};
-
 	/** What a streamed sea's flags look like against their closure under the flood. */
 	struct FPullResult
 	{
@@ -165,7 +141,7 @@ namespace VoxelWaterPullOrderTestUtils
 		FPullResult Results[2];
 		for (int32 Mode = 0; Mode < 2; ++Mode)
 		{
-			FScopedPullAgain Scoped(Mode);
+			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Water.PullAgain"), Mode);
 			VoxelTesting::FTestChunkWorld W;
 			W.Create(Mode == 0 ? TEXT("WaterPullOrderBefore") : TEXT("WaterPullOrderAfter"));
 			Configure(W);

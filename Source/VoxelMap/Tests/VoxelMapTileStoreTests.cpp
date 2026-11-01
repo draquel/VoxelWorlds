@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "Testing/VoxelTestChunkWorld.h"
 #include "Misc/AutomationTest.h"
 #include "Async/TaskGraphInterfaces.h"
 #include "Engine/Engine.h"
@@ -144,33 +145,6 @@ bool FVoxelMapTileStoreBudgetTest::RunTest(const FString& Parameters)
 
 namespace VoxelMapTileStoreTest
 {
-	/** A renderer that accepts everything and keeps nothing. */
-	class FNullRenderer : public IVoxelMeshRenderer
-	{
-	public:
-		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInit = true; }
-		virtual void Shutdown() override { bInit = false; }
-		virtual bool IsInitialized() const override { return bInit; }
-		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override {}
-		virtual void RemoveChunk(const FIntVector& ChunkCoord) override {}
-		virtual void ClearAllChunks() override {}
-		virtual void SetMaterial(UMaterialInterface* Material) override {}
-		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
-		virtual void UpdateMaterialParameters() override {}
-		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return false; }
-		virtual int32 GetLoadedChunkCount() const override { return 0; }
-		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override { OutChunks.Reset(); }
-		virtual int64 GetGPUMemoryUsage() const override { return 0; }
-		virtual int64 GetTotalVertexCount() const override { return 0; }
-		virtual int64 GetTotalTriangleCount() const override { return 0; }
-		virtual bool GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const override { return false; }
-		virtual FBox GetTotalBounds() const override { return FBox(ForceInit); }
-		virtual FString GetDebugStats() const override { return FString(); }
-		virtual FString GetRendererTypeName() const override { return TEXT("Null (test)"); }
-	private:
-		bool bInit = false;
-	};
-
 	/** Pump the game thread's tasks (tile completions) until the map's queue is empty, or 60 s. */
 	bool DrainMap(UVoxelMapSubsystem* Map)
 	{
@@ -228,7 +202,8 @@ bool FVoxelMapTileBudgetSubsystemTest::RunTest(const FString& Parameters)
 	AActor* Owner = World->SpawnActor<AActor>();
 	UVoxelChunkManager* Manager = NewObject<UVoxelChunkManager>(Owner);
 	Manager->RegisterComponent();
-	FNullRenderer Renderer;
+	VoxelTesting::FRecordingMeshRenderer Renderer;
+	Renderer.bKeepMeshes = false;
 	Renderer.Initialize(World, Config);
 	Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
 
@@ -331,7 +306,8 @@ bool FVoxelMapExploreAllCapPlaneTest::RunTest(const FString& Parameters)
 	AActor* Owner = World->SpawnActor<AActor>();
 	UVoxelChunkManager* Manager = NewObject<UVoxelChunkManager>(Owner);
 	Manager->RegisterComponent();
-	FNullRenderer Renderer;
+	VoxelTesting::FRecordingMeshRenderer Renderer;
+	Renderer.bKeepMeshes = false;
 	Renderer.Initialize(World, Config);
 	Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
 

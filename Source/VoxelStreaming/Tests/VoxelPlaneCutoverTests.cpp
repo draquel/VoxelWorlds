@@ -6,6 +6,7 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "Materials/Material.h"
 #include "Testing/VoxelTestChunkWorld.h"
 #include "VoxelChunkManager.h"
@@ -34,32 +35,7 @@
 
 namespace VoxelPlaneCutoverTestUtils
 {
-	/** Set by code: a console-priority set would outrank the planet tests' own sets of the same variables. */
-	struct FScopedCVar
-	{
-		IConsoleVariable* Var = nullptr;
-		FString Previous;
-		EConsoleVariableFlags Priority = ECVF_SetByCode;
-		// At the priority the variable already holds: a set below it is ignored (a test that set it by console earlier in a
-		// suite run), one above it would outrank the other tests' code-priority sets.
-		FScopedCVar(const TCHAR* Name, const TCHAR* Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(Name);
-			if (Var)
-			{
-				Previous = Var->GetString();
-				Priority = static_cast<EConsoleVariableFlags>(FMath::Max(static_cast<uint32>(Var->GetFlags() & ECVF_SetByMask), static_cast<uint32>(ECVF_SetByCode)));
-				Var->Set(Value, Priority);
-			}
-		}
-		~FScopedCVar()
-		{
-			if (Var)
-			{
-				Var->Set(*Previous, Priority);
-			}
-		}
-	};
+	using FScopedCVar = VoxelTesting::FScopedCVar; // the one scoped cvar (code review CR2 row 17)
 
 	constexpr float ViewDistance = 6000.0f;
 

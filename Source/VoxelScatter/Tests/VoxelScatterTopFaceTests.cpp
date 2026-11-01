@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "VoxelScatterTestFixtures.h"
 #include "Misc/AutomationTest.h"
 #include "Testing/VoxelScatterTestDefinitions.h"
 #include "Engine/Engine.h"
@@ -46,6 +47,8 @@
 
 namespace VoxelScatterTopFaceTestUtils
 {
+	using namespace VoxelScatterTesting;
+
 	constexpr int32 ChunkSize = 32;
 	constexpr float VoxelSize = 100.0f;
 	constexpr float ChunkWorldSize = ChunkSize * VoxelSize;
@@ -90,23 +93,10 @@ namespace VoxelScatterTopFaceTestUtils
 	/** A chunk generated from the world mode's height with the heightmap generator's SDF (grass, no caves). */
 	TArray<FVoxelData> MakeChunk(const FIntVector& Coord, const IVoxelWorldMode& Mode)
 	{
-		TArray<FVoxelData> Voxels;
-		Voxels.SetNumUninitialized(ChunkSize * ChunkSize * ChunkSize);
-		const FVector Origin = ChunkOrigin(Coord);
-		for (int32 Y = 0; Y < ChunkSize; ++Y)
-		{
-			for (int32 X = 0; X < ChunkSize; ++X)
-			{
-				const float Height = HeightAt(Mode, Origin.X + X * VoxelSize);
-				for (int32 Z = 0; Z < ChunkSize; ++Z)
-				{
-					const float SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(static_cast<float>(Origin.Z) + Z * VoxelSize, Height);
-					Voxels[X + Y * ChunkSize + Z * ChunkSize * ChunkSize] =
-						FVoxelData(EVoxelMaterial::Grass, FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize));
-				}
-			}
-		}
-		return Voxels;
+		// The height varies along X only (HeightAt), every column grass.
+		return MakeHeightmapChunk(ChunkOrigin(Coord), ChunkSize, VoxelSize,
+			[&Mode](double X, double Y) { return HeightAt(Mode, X); },
+			[](int32, int32) { return static_cast<uint8>(EVoxelMaterial::Grass); });
 	}
 
 	/** Edits on the upper chunk's bottom layer (local Z 0) over columns X, Y in [Min, Max]: set to NewData. */
@@ -297,40 +287,17 @@ namespace VoxelScatterTopFaceTestUtils
 	}
 
 	/** Private game world + initialized scatter manager (CPU extraction), torn down on destruction. */
-	struct FHarness
+	struct FHarness : VoxelScatterTesting::FScatterTestWorld
 	{
-		UWorld* World = nullptr;
-		UVoxelWorldConfiguration* Config = nullptr;
-		UVoxelScatterManager* Manager = nullptr;
 
 		FHarness()
+			: FScatterTestWorld(TEXT("VoxelScatterTopFaceTestWorld"))
 		{
-			World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelScatterTopFaceTestWorld"));
-			FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Game);
-			Context.SetCurrentWorld(World);
-			Config = NewObject<UVoxelWorldConfiguration>();
 			Config->ChunkSize = ChunkSize;
 			Config->VoxelSize = VoxelSize;
 			Config->ScatterRadius = 100000.0f;
 			Config->MeshingMode = EMeshingMode::MarchingCubes; // smooth: the column scan
-			Manager = NewObject<UVoxelScatterManager>();
-			Manager->AddToRoot();
-			Manager->Initialize(Config, World);
-			VoxelScatterTesting::AddSmoothDefinitions(*Manager);
-		}
-
-		~FHarness()
-		{
-			if (Manager)
-			{
-				Manager->Shutdown();
-				Manager->RemoveFromRoot();
-			}
-			if (World)
-			{
-				GEngine->DestroyWorldContext(World);
-				World->DestroyWorld(false);
-			}
+			StartManager(/*bSmoothDefinitions=*/true);
 		}
 
 		/** Submit a chunk as if its mesh just arrived and pump until its extraction is done; null when it found no point. */

@@ -9,6 +9,7 @@
 #include "GameFramework/Actor.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "Testing/VoxelTestChunkWorld.h"
 #include "VoxelChunkManager.h"
 #include "VoxelWorldConfiguration.h"
@@ -32,33 +33,7 @@
 
 namespace VoxelPlaneCameraStreamingTestUtils
 {
-	/**
-	 * Sets a console variable for a scope at the priority it already holds (code at least): a set below it is ignored (a
-	 * test that set it by console earlier in a suite run), one above it would outrank the other tests' code-priority sets.
-	 */
-	struct FScopedCVar
-	{
-		IConsoleVariable* Var = nullptr;
-		FString Previous;
-		EConsoleVariableFlags Priority = ECVF_SetByCode;
-		FScopedCVar(const TCHAR* Name, const TCHAR* Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(Name);
-			if (Var)
-			{
-				Previous = Var->GetString();
-				Priority = static_cast<EConsoleVariableFlags>(FMath::Max(static_cast<uint32>(Var->GetFlags() & ECVF_SetByMask), static_cast<uint32>(ECVF_SetByCode)));
-				Var->Set(Value, Priority);
-			}
-		}
-		~FScopedCVar()
-		{
-			if (Var)
-			{
-				Var->Set(*Previous, Priority);
-			}
-		}
-	};
+	using FScopedCVar = VoxelTesting::FScopedCVar; // the one scoped cvar (code review CR2 row 17)
 
 	constexpr float ViewDistance = 6000.0f;
 

@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "Testing/VoxelTestChunkWorld.h"
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -37,59 +38,17 @@
 
 namespace VoxelPlanetOrbitTestUtils
 {
-	/** A renderer that records which chunks hold a mesh (the chunk manager needs one to initialise). */
-	class FCountingMeshRenderer : public IVoxelMeshRenderer
-	{
-	public:
-		TSet<FIntVector> Chunks;
-
-		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
-		virtual void Shutdown() override { bInitialized = false; }
-		virtual bool IsInitialized() const override { return bInitialized; }
-		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override { Chunks.Add(ChunkCoord); }
-		virtual void RemoveChunk(const FIntVector& ChunkCoord) override { Chunks.Remove(ChunkCoord); }
-		virtual void ClearAllChunks() override { Chunks.Reset(); }
-		virtual void SetMaterial(UMaterialInterface* Material) override {}
-		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
-		virtual void UpdateMaterialParameters() override {}
-		virtual void UpdateSeamMeshFromCPU(const FIntVector& OwnerChunkCoord, uint8 SeamSlot, int32 LODLevel, FChunkMeshData&& MeshData, bool bCrossfade) override {}
-		virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 SeamSlot) override {}
-		virtual void ClearAllSeamMeshes() override {}
-		virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override {}
-		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return Chunks.Contains(ChunkCoord); }
-		virtual int32 GetLoadedChunkCount() const override { return Chunks.Num(); }
-		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override { OutChunks = Chunks.Array(); }
-		virtual int64 GetGPUMemoryUsage() const override { return 0; }
-		virtual int64 GetTotalVertexCount() const override { return 0; }
-		virtual int64 GetTotalTriangleCount() const override { return 0; }
-		virtual bool GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const override { return false; }
-		virtual FBox GetTotalBounds() const override { return FBox(ForceInit); }
-		virtual FString GetDebugStats() const override { return FString(); }
-		virtual FString GetRendererTypeName() const override { return TEXT("Counting (test)"); }
-
-	private:
-		bool bInitialized = false;
-	};
-
 	constexpr float Radius = 20000.0f;
 	constexpr float ViewDistance = 6000.0f;
 
 	/** A small planet (R 20,000, terrain +-800, a sea 200 under the datum) streamed by a real chunk manager. */
-	struct FOrbitWorld
+	struct FOrbitWorld : VoxelTesting::FTestChunkWorld
 	{
-		UWorld* World = nullptr;
-		UVoxelWorldConfiguration* Config = nullptr;
-		AActor* Owner = nullptr;
-		UVoxelChunkManager* Manager = nullptr;
-		FCountingMeshRenderer Renderer;
 
 		void Start(const TCHAR* Name)
 		{
-			World = UWorld::CreateWorld(EWorldType::Game, false, Name);
-			FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
-			WorldContext.SetCurrentWorld(World);
-			Config = NewObject<UVoxelWorldConfiguration>();
-			Config->AddToRoot();
+			Create(Name);
+			Renderer.bKeepMeshes = false; // the chunk set is enough here
 			Config->WorldMode = EWorldMode::SphericalPlanet;
 			Config->WorldOrigin = FVector::ZeroVector;
 			Config->WorldRadius = Radius;
@@ -118,29 +77,12 @@ namespace VoxelPlanetOrbitTestUtils
 			Config->NoiseParams.Octaves = 3;
 			// The cut-over at the view distance (the default is three: PlanetVoxelCutoverAltitude 0).
 			Config->PlanetVoxelCutoverAltitude = ViewDistance;
-			Owner = World->SpawnActor<AActor>();
-			Manager = NewObject<UVoxelChunkManager>(Owner);
-			Manager->RegisterComponent();
-			Renderer.Initialize(World, Config);
-			Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
+			StartManager();
 			if (FVoxelPlanetFarField* FarField = Manager->GetFarFieldMutable())
 			{
 				FarField->SetSynchronousBuilds(true);
 				FarField->SetMaxBuildsInFlight(64);
 			}
-		}
-
-		void Tick()
-		{
-			Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
-			FPlatformProcess::Sleep(0.002f);
-		}
-
-		bool IsIdle() const
-		{
-			return Manager->GetPendingGenerationCount() == 0 && Manager->GetPendingMeshingCount() == 0
-				&& Manager->GetAsyncGenerationInProgressCount() == 0 && Manager->GetAsyncMeshingInProgressCount() == 0
-				&& Manager->GetPendingMeshUploadCount() == 0 && Manager->GetSeamJobsInFlightCount() == 0;
 		}
 
 		/** Hold the bench view at a point and tick until the pipeline has been idle for 90 ticks (false past 120 s). */
@@ -157,15 +99,6 @@ namespace VoxelPlanetOrbitTestUtils
 			return IdleTicks >= 90;
 		}
 
-		void Stop()
-		{
-			Manager->SetBenchmarkView(false, FVector::ZeroVector);
-			Manager->Shutdown();
-			Owner->Destroy();
-			GEngine->DestroyWorldContext(World);
-			World->DestroyWorld(false);
-			Config->RemoveFromRoot();
-		}
 	};
 }
 
@@ -225,7 +158,7 @@ bool FVoxelPlanetCutoverDescentTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Settled above the cut-over"), W.SettleAt(At(Cutover + 2000.0)));
 	TestTrue(TEXT("Above the cut-over the window is suspended"), W.Manager->IsVoxelWindowSuspended());
 	TestEqual(TEXT("Above the cut-over no chunk is held"), W.Manager->GetLoadedChunkCount(), 0);
-	TestEqual(TEXT("Above the cut-over the renderer holds no chunk"), W.Renderer.Chunks.Num(), 0);
+	TestEqual(TEXT("Above the cut-over the renderer holds no chunk"), W.Renderer.ChunkMeshes.Num(), 0);
 	TestFalse(TEXT("The edited chunk unloaded"), W.Manager->IsChunkLoaded(EditedChunk));
 	TestTrue(TEXT("Its edit stays in the edit layer"), W.Manager->GetEditManager()->ChunkHasEdits(EditedChunk));
 	const FVoxelResidencySnapshot Up1 = W.Manager->GetResidencySnapshot();

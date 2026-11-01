@@ -3,11 +3,13 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelCPUDualContourMesher.h"
+#include "VoxelMeshingTestFixtures.h"
 #include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "QEFSolver.h"       // G81: the solve itself (VoxelMeshing/Private)
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -23,6 +25,8 @@
 
 namespace VoxelCrossingGradientTestUtils
 {
+	using namespace VoxelMeshingTestFixtures;
+
 	constexpr int32 ChunkSize = 32;
 	constexpr float VoxelSize = 100.0f;
 
@@ -94,41 +98,6 @@ namespace VoxelCrossingGradientTestUtils
 		}
 		return Request;
 	}
-
-	FVoxelMeshingConfig MakeConfig()
-	{
-		FVoxelMeshingConfig Config;
-		Config.IsoLevel = 0.5f;
-		Config.bGenerateUVs = true;
-		Config.bCalculateAO = false;
-		Config.QEFSVDThreshold = 0.1f;
-		return Config;
-	}
-
-	/** Sets voxel.Mesh.CrossingGradientNormals at console priority for a scope. */
-	struct FScopedCrossingGradient
-	{
-		IConsoleVariable* Var = nullptr;
-		int32 Previous = 1;
-
-		explicit FScopedCrossingGradient(int32 Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Mesh.CrossingGradientNormals"));
-			if (Var)
-			{
-				Previous = Var->GetInt();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-
-		~FScopedCrossingGradient()
-		{
-			if (Var)
-			{
-				Var->Set(Previous, ECVF_SetByConsole);
-			}
-		}
-	};
 
 	/**
 	 * Vertex normals against the plane's, over vertices more than a margin inside the chunk (no neighbour data here): the
@@ -221,10 +190,10 @@ bool FVoxelCrossingGradientPlanesTest::RunTest(const FString& Parameters)
 
 	FVoxelCPUDualContourMesher DCMesher;
 	DCMesher.Initialize();
-	DCMesher.SetConfig(MakeConfig());
+	DCMesher.SetConfig(MakeDCConfig());
 	FVoxelCPUMarchingCubesMesher MCMesher;
 	MCMesher.Initialize();
-	MCMesher.SetConfig(MakeConfig());
+	MCMesher.SetConfig(MakeDCConfig());
 	const TArray<FRampPlane> Planes = MakePlanes();
 	// [Mode][Mesher: 0 DC, 1 MC][LOD]
 	FPlaneNormalStats Stats[2][2][3];
@@ -238,7 +207,7 @@ bool FVoxelCrossingGradientPlanesTest::RunTest(const FString& Parameters)
 			FChunkMeshData Meshes[2][2];
 			for (int32 Mode = 0; Mode < 2; ++Mode)
 			{
-				FScopedCrossingGradient Scoped(Mode);
+				VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.CrossingGradientNormals"), Mode);
 				TestTrue(TEXT("DC meshing succeeds"), DCMesher.GenerateMeshCPU(Request, Meshes[Mode][0]));
 				TestTrue(TEXT("MC meshing succeeds"), MCMesher.GenerateMeshCPU(Request, Meshes[Mode][1]));
 				for (int32 Mesher = 0; Mesher < 2; ++Mesher)
@@ -292,31 +261,6 @@ bool FVoxelCrossingGradientPlanesTest::RunTest(const FString& Parameters)
 
 namespace VoxelCrossingGradientTestUtils
 {
-	/** Sets voxel.Mesh.VoxelLODCrossings at console priority for a scope. */
-	struct FScopedLODCrossings
-	{
-		IConsoleVariable* Var = nullptr;
-		int32 Previous = 1;
-
-		explicit FScopedLODCrossings(int32 Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Mesh.VoxelLODCrossings"));
-			if (Var)
-			{
-				Previous = Var->GetInt();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-
-		~FScopedLODCrossings()
-		{
-			if (Var)
-			{
-				Var->Set(Previous, ECVF_SetByConsole);
-			}
-		}
-	};
-
 	/**
 	 * Vertex distances from the plane (voxels, along its normal), over vertices more than a margin inside the chunk: the
 	 * mean and largest magnitude, and the band, the spread of the mean signed distance over eight bins of the vertex's
@@ -406,10 +350,10 @@ bool FVoxelLODCrossingPlanesTest::RunTest(const FString& Parameters)
 
 	FVoxelCPUDualContourMesher DCMesher;
 	DCMesher.Initialize();
-	DCMesher.SetConfig(MakeConfig());
+	DCMesher.SetConfig(MakeDCConfig());
 	FVoxelCPUMarchingCubesMesher MCMesher;
 	MCMesher.Initialize();
-	MCMesher.SetConfig(MakeConfig());
+	MCMesher.SetConfig(MakeDCConfig());
 	const TArray<FRampPlane> Planes = MakePlanes();
 	// [Mode][Mesher: 0 DC, 1 MC][LOD]
 	FPlanePositionStats Stats[2][2][3];
@@ -423,7 +367,7 @@ bool FVoxelLODCrossingPlanesTest::RunTest(const FString& Parameters)
 			FChunkMeshData Meshes[2][2];
 			for (int32 Mode = 0; Mode < 2; ++Mode)
 			{
-				FScopedLODCrossings Scoped(Mode);
+				VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.VoxelLODCrossings"), Mode);
 				TestTrue(TEXT("DC meshing succeeds"), DCMesher.GenerateMeshCPU(Request, Meshes[Mode][0]));
 				TestTrue(TEXT("MC meshing succeeds"), MCMesher.GenerateMeshCPU(Request, Meshes[Mode][1]));
 				for (int32 Mesher = 0; Mesher < 2; ++Mesher)

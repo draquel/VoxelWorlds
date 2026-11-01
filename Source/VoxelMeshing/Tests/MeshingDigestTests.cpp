@@ -3,7 +3,9 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelCPUDualContourMesher.h"
+#include "VoxelMeshingTestFixtures.h"
 #include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelMeshingTypes.h"
 #include "ChunkRenderData.h"
@@ -24,6 +26,8 @@
 
 namespace VoxelMeshingDigest
 {
+	using namespace VoxelMeshingTestFixtures;
+
 	constexpr int32 CS = 32;
 	constexpr float VoxelSize = 100.0f;
 
@@ -71,16 +75,6 @@ namespace VoxelMeshingDigest
 			}
 		}
 		return Data;
-	}
-
-	static FVoxelMeshingConfig MakeConfig()
-	{
-		FVoxelMeshingConfig Config;
-		Config.IsoLevel = 0.5f;
-		Config.bGenerateUVs = true;
-		Config.bCalculateAO = false;
-		Config.QEFSVDThreshold = 0.1f;
-		return Config;
 	}
 
 	/** Which neighbours a Full-domain request carries. */
@@ -235,28 +229,7 @@ namespace VoxelMeshingDigest
 			&& Same(A.UV1s, B.UV1s) && Same(A.Colors, B.Colors) && Same(A.Indices, B.Indices);
 	}
 
-	/** A cvar held at a value for a scope. */
-	struct FScopedCVar
-	{
-		IConsoleVariable* Var = nullptr;
-		int32 Saved = 0;
-		FScopedCVar(const TCHAR* Name, int32 Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(Name);
-			if (Var)
-			{
-				Saved = Var->GetInt();
-				Var->Set(Value, ECVF_SetByCode);
-			}
-		}
-		~FScopedCVar()
-		{
-			if (Var)
-			{
-				Var->Set(Saved, ECVF_SetByCode);
-			}
-		}
-	};
+	using FScopedCVar = VoxelTesting::FScopedCVar; // the one scoped cvar (code review CR2 row 17)
 
 	/** The digest's recorder: one line per case, and the uniform-against-mixed seam comparison. */
 	struct FDigest
@@ -271,9 +244,9 @@ namespace VoxelMeshingDigest
 		explicit FDigest(FAutomationTestBase& InTest) : Test(InTest)
 		{
 			DC.Initialize();
-			DC.SetConfig(MakeConfig());
+			DC.SetConfig(MakeDCConfig());
 			MC.Initialize();
-			MC.SetConfig(MakeConfig());
+			MC.SetConfig(MakeDCConfig());
 		}
 		~FDigest()
 		{

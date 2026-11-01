@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "Testing/VoxelTestChunkWorld.h"
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -33,81 +34,6 @@
 
 namespace VoxelCubicStreamingTestUtils
 {
-	/** A renderer that keeps the latest chunk mesh and merged seam bucket per coordinate. */
-	class FRecordingMeshRenderer : public IVoxelMeshRenderer
-	{
-	public:
-		TMap<FIntVector, FChunkMeshData> ChunkMeshes;
-		TMap<FIntVector, FChunkMeshData> SeamBuckets;
-		int32 ChunkSubmits = 0;
-		int32 SeamSubmits = 0;
-
-		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
-		virtual void Shutdown() override { bInitialized = false; }
-		virtual bool IsInitialized() const override { return bInitialized; }
-		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override
-		{
-			++ChunkSubmits;
-			ChunkMeshes.Add(ChunkCoord, MeshData);
-		}
-		virtual void RemoveChunk(const FIntVector& ChunkCoord) override { ChunkMeshes.Remove(ChunkCoord); }
-		virtual void ClearAllChunks() override { ChunkMeshes.Reset(); }
-		virtual void SetMaterial(UMaterialInterface* Material) override {}
-		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
-		virtual void UpdateMaterialParameters() override {}
-		virtual void UpdateSeamMeshFromCPU(const FIntVector& OwnerChunkCoord, uint8 SeamSlot, int32 LODLevel, FChunkMeshData&& MeshData, bool bCrossfade) override
-		{
-			++SeamSubmits;
-			if (MeshData.IsValid())
-			{
-				SeamBuckets.Add(OwnerChunkCoord, MoveTemp(MeshData));
-			}
-			else
-			{
-				SeamBuckets.Remove(OwnerChunkCoord);
-			}
-		}
-		virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 SeamSlot) override { SeamBuckets.Remove(OwnerChunkCoord); }
-		virtual void ClearAllSeamMeshes() override { SeamBuckets.Reset(); }
-		virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override { SeamBuckets.GetKeys(OutOwners); }
-		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return ChunkMeshes.Contains(ChunkCoord); }
-		virtual int32 GetLoadedChunkCount() const override { return ChunkMeshes.Num(); }
-		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override { ChunkMeshes.GetKeys(OutChunks); }
-		virtual int64 GetGPUMemoryUsage() const override { return 0; }
-		virtual int64 GetTotalVertexCount() const override { return 0; }
-		virtual int64 GetTotalTriangleCount() const override { return 0; }
-		virtual bool GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const override { return false; }
-		virtual FBox GetTotalBounds() const override { return FBox(ForceInit); }
-		virtual FString GetDebugStats() const override { return FString(); }
-		virtual FString GetRendererTypeName() const override { return TEXT("Recording (test)"); }
-
-		/** Drop everything held, as a recreated scene proxy does, and report it once through ConsumeLostRenderData. */
-		void SimulateProxyRecreated()
-		{
-			ChunkMeshes.GetKeys(LostChunks);
-			ChunkMeshes.Reset();
-			SeamBuckets.Reset();
-			bLost = true;
-		}
-
-		virtual bool ConsumeLostRenderData(TArray<FIntVector>& OutChunks) override
-		{
-			OutChunks.Reset();
-			if (!bLost)
-			{
-				return false;
-			}
-			bLost = false;
-			OutChunks = MoveTemp(LostChunks);
-			return true;
-		}
-
-	private:
-		bool bInitialized = false;
-		bool bLost = false;
-		TArray<FIntVector> LostChunks;
-	};
-
 	/** A unit face in global voxel units: (min corner of the unit square, Dir * 256 + MaterialID). */
 	using FUnitFace = FIntVector4;
 
@@ -173,7 +99,7 @@ namespace VoxelCubicStreamingTestUtils
 	}
 
 	/** Every quad the renderer holds (interiors and seam buckets) as unit faces in global voxel units. */
-	bool CollectRendered(const FRecordingMeshRenderer& Renderer, float VoxelSize, int32 N, TMap<FUnitFace, int32>& OutFaces)
+	bool CollectRendered(const VoxelTesting::FRecordingMeshRenderer& Renderer, float VoxelSize, int32 N, TMap<FUnitFace, int32>& OutFaces)
 	{
 		bool bOnGrid = true;
 		for (const TPair<FIntVector, FChunkMeshData>& Chunk : Renderer.ChunkMeshes)
@@ -188,22 +114,12 @@ namespace VoxelCubicStreamingTestUtils
 	}
 
 	/** A small cubic world (CPU generation, LOD forced off) streamed by a real chunk manager into the recording renderer. */
-	struct FCubicStreamingWorld
+	struct FCubicStreamingWorld : VoxelTesting::FTestChunkWorld
 	{
-		UWorld* World = nullptr;
-		UVoxelWorldConfiguration* Config = nullptr;
-		AActor* Owner = nullptr;
-		UVoxelChunkManager* Manager = nullptr;
-		FRecordingMeshRenderer Renderer;
 
 		void Start(const TCHAR* WorldName)
 		{
-			World = UWorld::CreateWorld(EWorldType::Game, false, WorldName);
-			FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
-			WorldContext.SetCurrentWorld(World);
-
-			Config = NewObject<UVoxelWorldConfiguration>();
-			Config->AddToRoot();
+			Create(WorldName);
 			Config->WorldMode = EWorldMode::InfinitePlane;
 			Config->MeshingMode = EMeshingMode::Cubic;
 			Config->bUseGreedyMeshing = true;
@@ -219,52 +135,18 @@ namespace VoxelCubicStreamingTestUtils
 			Config->NoiseParams.Seed = 4242;
 			Config->NoiseParams.Frequency = 0.002f;
 			Config->NoiseParams.Octaves = 3;
-			// Clamp the bands to the view distance as the world actor does.
-			for (FLODBand& Band : Config->LODBands)
-			{
-				Band.MaxDistance = FMath::Min(Band.MaxDistance, Config->ViewDistance);
-				Band.MinDistance = FMath::Min(Band.MinDistance, Config->ViewDistance);
-			}
-			Config->LODBands.RemoveAll([this](const FLODBand& Band) { return Band.MinDistance >= Config->ViewDistance; });
+			ClampLODBandsToViewDistance();
 
-			Owner = World->SpawnActor<AActor>();
-			Manager = NewObject<UVoxelChunkManager>(Owner);
-			Manager->RegisterComponent();
-			Renderer.Initialize(World, Config);
-			Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
+			StartManager();
 
 			// Stream from a fixed viewer standing on the terrain at the origin.
 			const float SurfaceZ = Manager->GetGeneratedSurfacePoint(FVector(0.0f, 0.0f, 0.0)).Z;
-			Manager->ResetBenchCounters();
-			Manager->SetBenchmarkView(true, FVector(0.0, 0.0, SurfaceZ + 200.0));
+			SetViewer(FVector(0.0, 0.0, SurfaceZ + 200.0));
 		}
 
 		/** Tick until the pipeline has been idle for 90 ticks; false if it does not settle within 90 s. */
-		bool Settle()
-		{
-			int32 IdleTicks = 0;
-			const double Deadline = FPlatformTime::Seconds() + 90.0;
-			while (IdleTicks < 90 && FPlatformTime::Seconds() < Deadline)
-			{
-				Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
-				const bool bIdle = Manager->GetPendingGenerationCount() == 0 && Manager->GetPendingMeshingCount() == 0
-					&& Manager->GetAsyncGenerationInProgressCount() == 0 && Manager->GetAsyncMeshingInProgressCount() == 0
-					&& Manager->GetPendingMeshUploadCount() == 0 && Manager->GetSeamJobsInFlightCount() == 0;
-				IdleTicks = bIdle ? IdleTicks + 1 : 0;
-				FPlatformProcess::Sleep(0.002f);
-			}
-			return IdleTicks >= 90;
-		}
+		bool Settle() { return FTestChunkWorld::Settle(90.0); }
 
-		void Stop()
-		{
-			Manager->SetBenchmarkView(false, FVector::ZeroVector);
-			Manager->Shutdown();
-			Owner->Destroy();
-			GEngine->DestroyWorldContext(World);
-			World->DestroyWorld(false);
-			Config->RemoveFromRoot();
-		}
 	};
 }
 
@@ -280,7 +162,7 @@ bool FVoxelCubicStreamingSeamPathTest::RunTest(const FString& Parameters)
 	Test.Start(TEXT("VoxelCubicStreamingTestWorld"));
 	UVoxelWorldConfiguration* Config = Test.Config;
 	UVoxelChunkManager* Manager = Test.Manager;
-	FRecordingMeshRenderer& Renderer = Test.Renderer;
+	VoxelTesting::FRecordingMeshRenderer& Renderer = Test.Renderer;
 	TestTrue(TEXT("The pipeline settled"), Test.Settle());
 
 	TArray<FIntVector> Loaded;

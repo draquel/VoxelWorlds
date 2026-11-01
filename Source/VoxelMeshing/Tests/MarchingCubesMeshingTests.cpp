@@ -7,6 +7,7 @@
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 
 // ==================== Helper Functions ====================
 
@@ -469,31 +470,6 @@ namespace MarchingCubesMeshingTestHelpers
 		return Request;
 	}
 
-	/** Sets voxel.Mesh.VoxelShadingNormals at console priority for a scope. */
-	struct FScopedMCVoxelShadingNormals
-	{
-		IConsoleVariable* Var = nullptr;
-		int32 Previous = 1;
-
-		explicit FScopedMCVoxelShadingNormals(int32 Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Mesh.VoxelShadingNormals"));
-			if (Var)
-			{
-				Previous = Var->GetInt();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-
-		~FScopedMCVoxelShadingNormals()
-		{
-			if (Var)
-			{
-				Var->Set(Previous, ECVF_SetByConsole);
-			}
-		}
-	};
-
 	/** Mean angle (degrees) between a mesh's vertex normals and Normal, over vertices more than Margin voxels inside. */
 	double MeanAngleInside(const FChunkMeshData& Mesh, const FVector3f& Normal, float VoxelSize, int32 ChunkSize, float Margin, int32& OutCount)
 	{
@@ -534,7 +510,7 @@ bool FMarchingCubesMeshingLODNormalsTest::RunTest(const FString& Parameters)
 	double Angle[2][3] = {};
 	for (int32 Mode = 0; Mode < 2; ++Mode)
 	{
-		FScopedMCVoxelShadingNormals Scoped(Mode);
+		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.VoxelShadingNormals"), Mode);
 		for (int32 LOD = 0; LOD < 3; ++LOD)
 		{
 			const FVoxelMeshingRequest Request = CreateSaturatedPlaneRequest(ChunkSize, LOD, Normal);

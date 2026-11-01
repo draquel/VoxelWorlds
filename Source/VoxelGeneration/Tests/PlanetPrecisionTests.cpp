@@ -12,6 +12,7 @@
 #include "VoxelPlanetNoise.h"
 #include "VoxelClassicNoiseControl.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "Misc/ScopeExit.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -448,31 +449,6 @@ bool FVoxelNoisePlanetHashNoPeriodTest::RunTest(const FString& Parameters)
 
 namespace VoxelPlanetSimplexContinuity
 {
-	/** Sets voxel.Noise.ContinuousSimplex (voxel.Planet.ContinuousSimplex before MP4) for a scope. */
-	struct FScopedKernel
-	{
-		IConsoleVariable* Var = nullptr;
-		int32 Previous = 1;
-
-		explicit FScopedKernel(int32 Value)
-			: Var(IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Noise.ContinuousSimplex")))
-		{
-			if (Var)
-			{
-				Previous = Var->GetInt();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-
-		~FScopedKernel()
-		{
-			if (Var)
-			{
-				Var->Set(Previous, ECVF_SetByConsole);
-			}
-		}
-	};
-
 	/** A point on one of the Simplex lattice's boundaries (noise space) and the boundary's unit normal. */
 	struct FBoundaryPoint
 	{
@@ -561,7 +537,7 @@ bool FVoxelNoiseSimplexContinuousTest::RunTest(const FString& Parameters)
 	FStepStats Stats[2][2]; // [kernel: classic, continuous][boundaries: any, through the origin]
 	for (int32 Kernel = 0; Kernel < 2; ++Kernel)
 	{
-		FScopedKernel Scoped(Kernel);
+		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Noise.ContinuousSimplex"), Kernel);
 		for (int32 Origin = 0; Origin < 2; ++Origin)
 		{
 			Stats[Kernel][Origin] = MeasureBoundaries(3000, Origin == 1, 1337);
@@ -590,7 +566,7 @@ bool FVoxelNoiseSimplexContinuousTest::RunTest(const FString& Parameters)
 	TArray<double> Values[2];
 	for (int32 Kernel = 0; Kernel < 2; ++Kernel)
 	{
-		FScopedKernel Scoped(Kernel);
+		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Noise.ContinuousSimplex"), Kernel);
 		for (const FVector& P : Points)
 		{
 			Values[Kernel].Add(FVoxelPlanetNoise::ReferenceSample(P, EVoxelNoiseType::Simplex, 7));
@@ -688,7 +664,7 @@ bool FVoxelPlanetFaceEdgeContinuityTest::RunTest(const FString& Parameters)
 		double Control[2] = { 0.0, 0.0 }; // the same probe at random directions off the edges
 		for (int32 Kernel = 0; Kernel < 2; ++Kernel)
 		{
-			FScopedKernel Scoped(Kernel);
+			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Noise.ContinuousSimplex"), Kernel);
 			FRandomStream Random(4310);
 			for (const FEdge& Edge : Edges)
 			{
@@ -737,7 +713,7 @@ bool FVoxelPlanetFaceEdgeContinuityTest::RunTest(const FString& Parameters)
 		// ground on L, 0.3-0.5 uu of height a step).
 		for (int32 Kernel = 0; Kernel < 2; ++Kernel)
 		{
-			FScopedKernel Scoped(Kernel);
+			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Noise.ContinuousSimplex"), Kernel);
 			FRandomStream Random(4311);
 			for (int32 i = 0; i < Edges.Num() * PointsPerEdge; ++i)
 			{
@@ -756,7 +732,7 @@ bool FVoxelPlanetFaceEdgeContinuityTest::RunTest(const FString& Parameters)
 		// for the terrain's own slope, not at all for a step (or the float resolution).
 		double Profile[4];
 		{
-			FScopedKernel Continuous(1);
+			VoxelTesting::FScopedCVar Continuous(TEXT("voxel.Noise.ContinuousSimplex"), 1);
 			for (int32 k = 0; k < 4; ++k)
 			{
 				const double D = Delta * FMath::Pow(10.0, k);

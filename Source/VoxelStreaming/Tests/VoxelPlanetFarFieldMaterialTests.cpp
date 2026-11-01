@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelPlanetFarField.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelBiomeConfiguration.h"
@@ -32,31 +33,6 @@
 
 namespace VoxelFarFieldMaterialTestUtils
 {
-	/** Sets voxel.World.FarFieldMaterialBlend for a scope. */
-	struct FScopedBlend
-	{
-		IConsoleVariable* Var = nullptr;
-		int32 Previous = 1;
-
-		explicit FScopedBlend(int32 Value)
-			: Var(IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.World.FarFieldMaterialBlend")))
-		{
-			if (Var)
-			{
-				Previous = Var->GetInt();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-
-		~FScopedBlend()
-		{
-			if (Var)
-			{
-				Var->Set(Previous, ECVF_SetByConsole);
-			}
-		}
-	};
-
 	/**
 	 * Review_Planet's size and terrain (R 250,000, the demo's noise, +-6,500) with the default biomes blending widely
 	 * (BiomeBlendWidth 0.5) and its sea: a far field and its surface for building single patches.
@@ -226,7 +202,7 @@ bool FFarFieldPlanetMaterialBlendTest::RunTest(const FString& Parameters)
 	int32 SeamsByMode[2] = { 0, 0 };
 	for (int32 Blend = 0; Blend < 2; ++Blend)
 	{
-		FScopedBlend Scoped(Blend);
+		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.World.FarFieldMaterialBlend"), Blend);
 		int32 Triangles = 0, MixedPrimary = 0, MixedSecondary = 0, BlendTriangles = 0, Weighted = 0, Vertices = 0;
 		int32 OldEncoding = 0, Checked = 0, WrongWeight = 0, Shared = 0, Seams = 0;
 		for (const FVector& Site : Sites)

@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelCPUDualContourMesher.h"
+#include "VoxelMeshingTestFixtures.h"
 #include "VoxelMeshingTypes.h"
 #include "ChunkRenderData.h"
 #include "VoxelData.h"
@@ -19,34 +20,7 @@
 
 namespace VoxelMixedTupleTestUtils
 {
-	constexpr int32 TestChunkSize = 32;
-	constexpr float TestVoxelSize = 100.0f;
-
-	static FVoxelMeshingConfig MakeConfig()
-	{
-		FVoxelMeshingConfig Config;
-		Config.IsoLevel = 0.5f;
-		Config.bGenerateUVs = true;
-		Config.bCalculateAO = false;
-		Config.QEFSVDThreshold = 0.1f;
-		return Config;
-	}
-
-	template <typename TFn>
-	static bool RunMesher(TFn&& Fn)
-	{
-		FVoxelCPUDualContourMesher Mesher;
-		Mesher.Initialize();
-		Mesher.SetConfig(MakeConfig());
-		const bool bOk = Fn(Mesher);
-		Mesher.Shutdown();
-		return bOk;
-	}
-
-	static FString PosKey(const FVector3f& P)
-	{
-		return BytesToHex(reinterpret_cast<const uint8*>(&P), sizeof(FVector3f));
-	}
+	using namespace VoxelMeshingTestFixtures;
 
 	/** All 27 meshes of a heterogeneous-LOD 2x2x2 lattice, with world combine offsets. */
 	struct FHeteroScene

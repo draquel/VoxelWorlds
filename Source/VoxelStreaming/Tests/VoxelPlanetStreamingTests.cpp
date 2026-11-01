@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "Testing/VoxelTestChunkWorld.h"
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -24,6 +25,7 @@
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelCubeSphere.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelChunkShell.h"
 #include "VoxelNeighborSliceExtraction.h"
 #include "VoxelEditManager.h"
@@ -47,56 +49,6 @@
 
 namespace VoxelPlanetStreamingTestUtils
 {
-	/** A renderer that keeps the latest chunk mesh and merged seam bucket per coordinate. */
-	class FRecordingMeshRenderer : public IVoxelMeshRenderer
-	{
-	public:
-		TMap<FIntVector, FChunkMeshData> ChunkMeshes;
-		TMap<FIntVector, int32> ChunkLODs;
-		TMap<FIntVector, FChunkMeshData> SeamBuckets;
-
-		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
-		virtual void Shutdown() override { bInitialized = false; }
-		virtual bool IsInitialized() const override { return bInitialized; }
-		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override
-		{
-			ChunkMeshes.Add(ChunkCoord, MeshData);
-			ChunkLODs.Add(ChunkCoord, LODLevel);
-		}
-		virtual void RemoveChunk(const FIntVector& ChunkCoord) override { ChunkMeshes.Remove(ChunkCoord); }
-		virtual void ClearAllChunks() override { ChunkMeshes.Reset(); }
-		virtual void SetMaterial(UMaterialInterface* Material) override {}
-		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
-		virtual void UpdateMaterialParameters() override {}
-		virtual void UpdateSeamMeshFromCPU(const FIntVector& OwnerChunkCoord, uint8 SeamSlot, int32 LODLevel, FChunkMeshData&& MeshData, bool bCrossfade) override
-		{
-			if (MeshData.IsValid())
-			{
-				SeamBuckets.Add(OwnerChunkCoord, MoveTemp(MeshData));
-			}
-			else
-			{
-				SeamBuckets.Remove(OwnerChunkCoord);
-			}
-		}
-		virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 SeamSlot) override { SeamBuckets.Remove(OwnerChunkCoord); }
-		virtual void ClearAllSeamMeshes() override { SeamBuckets.Reset(); }
-		virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override { SeamBuckets.GetKeys(OutOwners); }
-		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return ChunkMeshes.Contains(ChunkCoord); }
-		virtual int32 GetLoadedChunkCount() const override { return ChunkMeshes.Num(); }
-		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override { ChunkMeshes.GetKeys(OutChunks); }
-		virtual int64 GetGPUMemoryUsage() const override { return 0; }
-		virtual int64 GetTotalVertexCount() const override { return 0; }
-		virtual int64 GetTotalTriangleCount() const override { return 0; }
-		virtual bool GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const override { return false; }
-		virtual FBox GetTotalBounds() const override { return FBox(ForceInit); }
-		virtual FString GetDebugStats() const override { return FString(); }
-		virtual FString GetRendererTypeName() const override { return TEXT("Recording (test)"); }
-
-	private:
-		bool bInitialized = false;
-	};
-
 	constexpr float PlanetStreamRadius = 20000.0f;
 	constexpr int32 PlanetStreamChunkSize = 32;
 	constexpr float PlanetStreamVoxelSize = 50.0f;
@@ -106,13 +58,8 @@ namespace VoxelPlanetStreamingTestUtils
 	 * A small planet (radius 20,000) streamed by a real chunk manager into the recording renderer, or (StartPlane) a
 	 * plane with the same chunk footprint and LOD bands.
 	 */
-	struct FPlanetStreamingWorld
+	struct FPlanetStreamingWorld : VoxelTesting::FTestChunkWorld
 	{
-		UWorld* World = nullptr;
-		UVoxelWorldConfiguration* Config = nullptr;
-		AActor* Owner = nullptr;
-		UVoxelChunkManager* Manager = nullptr;
-		FRecordingMeshRenderer Renderer;
 		FVector Viewer = FVector::ZeroVector;
 		float VoxelSize = PlanetStreamVoxelSize;
 		float ChunkWorld = PlanetStreamChunkWorld;
@@ -122,7 +69,7 @@ namespace VoxelPlanetStreamingTestUtils
 
 		void Start(const TCHAR* WorldName, const FVector& ViewerDirection, float ViewerAltitude)
 		{
-			CreateWorld(WorldName);
+			Create(WorldName);
 			Config->WorldMode = EWorldMode::SphericalPlanet;
 			Config->WorldOrigin = FVector::ZeroVector;
 			Config->WorldRadius = PlanetStreamRadius;
@@ -155,8 +102,7 @@ namespace VoxelPlanetStreamingTestUtils
 			// Stream from a viewer above the surface along ViewerDirection.
 			const FVoxelTerrainSurfacePoint Surface = Manager->GetSurfacePointAt(ViewerDirection);
 			Viewer = Surface.Position + ViewerDirection * ViewerAltitude;
-			Manager->ResetBenchCounters();
-			Manager->SetBenchmarkView(true, Viewer);
+			SetViewer(Viewer);
 		}
 
 		/**
@@ -165,7 +111,7 @@ namespace VoxelPlanetStreamingTestUtils
 		 */
 		void StartPlane(const TCHAR* WorldName, float X, float Y, float ViewerAltitude)
 		{
-			CreateWorld(WorldName);
+			Create(WorldName);
 			VoxelSize = 100.0f;
 			ChunkWorld = 16 * VoxelSize;
 			Config->WorldMode = EWorldMode::InfinitePlane;
@@ -193,54 +139,9 @@ namespace VoxelPlanetStreamingTestUtils
 			StartManager();
 
 			Viewer = FVector(X, Y, Manager->GetGeneratedSurfacePoint(FVector(X, Y, 0.0)).Z + ViewerAltitude);
-			Manager->ResetBenchCounters();
-			Manager->SetBenchmarkView(true, Viewer);
+			SetViewer(Viewer);
 		}
 
-		void CreateWorld(const TCHAR* WorldName)
-		{
-			World = UWorld::CreateWorld(EWorldType::Game, false, WorldName);
-			FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
-			WorldContext.SetCurrentWorld(World);
-			Config = NewObject<UVoxelWorldConfiguration>();
-			Config->AddToRoot();
-		}
-
-		void StartManager()
-		{
-			Owner = World->SpawnActor<AActor>();
-			Manager = NewObject<UVoxelChunkManager>(Owner);
-			Manager->RegisterComponent();
-			Renderer.Initialize(World, Config);
-			Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
-		}
-
-		/** Tick until the pipeline has been idle for 90 ticks; false if it does not settle within 120 s. */
-		bool Settle()
-		{
-			int32 IdleTicks = 0;
-			const double Deadline = FPlatformTime::Seconds() + 120.0;
-			while (IdleTicks < 90 && FPlatformTime::Seconds() < Deadline)
-			{
-				Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
-				const bool bIdle = Manager->GetPendingGenerationCount() == 0 && Manager->GetPendingMeshingCount() == 0
-					&& Manager->GetAsyncGenerationInProgressCount() == 0 && Manager->GetAsyncMeshingInProgressCount() == 0
-					&& Manager->GetPendingMeshUploadCount() == 0 && Manager->GetSeamJobsInFlightCount() == 0;
-				IdleTicks = bIdle ? IdleTicks + 1 : 0;
-				FPlatformProcess::Sleep(0.002f);
-			}
-			return IdleTicks >= 90;
-		}
-
-		void Stop()
-		{
-			Manager->SetBenchmarkView(false, FVector::ZeroVector);
-			Manager->Shutdown();
-			Owner->Destroy();
-			GEngine->DestroyWorldContext(World);
-			World->DestroyWorld(false);
-			Config->RemoveFromRoot();
-		}
 	};
 
 	/** Quantized world position (1/100 uu), the weld key for the closed-surface check. */
@@ -1080,31 +981,6 @@ namespace VoxelPlanetStreamingTestUtils
 		return true;
 	}
 
-	/** Sets voxel.Mesh.VoxelShadingNormals at console priority for a scope (tests set cvars at console priority). */
-	struct FScopedVoxelShadingNormals
-	{
-		IConsoleVariable* Var = nullptr;
-		int32 Previous = 1;
-
-		explicit FScopedVoxelShadingNormals(int32 Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Mesh.VoxelShadingNormals"));
-			if (Var)
-			{
-				Previous = Var->GetInt();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-
-		~FScopedVoxelShadingNormals()
-		{
-			if (Var)
-			{
-				Var->Set(Previous, ECVF_SetByConsole);
-			}
-		}
-	};
-
 	/**
 	 * Streams one place with the normals before G44 (Dual Contouring) or G61 (Marching Cubes) (voxel.Mesh.VoxelShadingNormals
 	 * 0, and voxel.Mesh.VoxelLODCrossings 0: with G80's voxel crossings a strided Dual Contouring cell's normal sums the
@@ -1120,7 +996,7 @@ namespace VoxelPlanetStreamingTestUtils
 		FLODNormalStats Before, After;
 		for (int32 Mode = 0; Mode < 2; ++Mode)
 		{
-			FScopedVoxelShadingNormals Scoped(Mode);
+			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.VoxelShadingNormals"), Mode);
 			IConsoleVariable* Crossings = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Mesh.VoxelLODCrossings"));
 			const int32 PreviousCrossings = Crossings ? Crossings->GetInt() : 1;
 			if (Crossings)
@@ -1288,56 +1164,6 @@ bool FVoxelPlaneStreamingLODNormalsMCTest::RunTest(const FString& Parameters)
 
 namespace VoxelPlanetStreamingTestUtils
 {
-	/** Sets voxel.Mesh.ScaleClampedGradients at console priority for a scope. */
-	struct FScopedScaleClampedGradients
-	{
-		IConsoleVariable* Var = nullptr;
-		int32 Previous = 1;
-
-		explicit FScopedScaleClampedGradients(int32 Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Mesh.ScaleClampedGradients"));
-			if (Var)
-			{
-				Previous = Var->GetInt();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-
-		~FScopedScaleClampedGradients()
-		{
-			if (Var)
-			{
-				Var->Set(Previous, ECVF_SetByConsole);
-			}
-		}
-	};
-
-	/** Sets voxel.Mesh.CrossingGradientNormals at console priority for a scope. */
-	struct FScopedCrossingGradientNormals
-	{
-		IConsoleVariable* Var = nullptr;
-		int32 Previous = 1;
-
-		explicit FScopedCrossingGradientNormals(int32 Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Mesh.CrossingGradientNormals"));
-			if (Var)
-			{
-				Previous = Var->GetInt();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-
-		~FScopedCrossingGradientNormals()
-		{
-			if (Var)
-			{
-				Var->Set(Previous, ECVF_SetByConsole);
-			}
-		}
-	};
-
 	/** Triangles along each chunk face axis light like the interior ones at every LOD (within 3%), where both have 200. */
 	bool ChunkFacesMatch(const FLODNormalStats& Stats, FString& OutWhy)
 	{
@@ -1400,8 +1226,8 @@ bool FVoxelPlanetStreamingChunkFaceShadingTest::RunTest(const FString& Parameter
 		FLODNormalStats Before, After, Fit;
 		for (int32 Mode = 0; Mode < 3; ++Mode)
 		{
-			FScopedScaleClampedGradients Scoped(Mode == 0 ? 0 : 1);
-			FScopedCrossingGradientNormals ScopedFit(Mode == 2 ? 1 : 0);
+			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.ScaleClampedGradients"), Mode == 0 ? 0 : 1);
+			VoxelTesting::FScopedCVar ScopedFit(TEXT("voxel.Mesh.CrossingGradientNormals"), Mode == 2 ? 1 : 0);
 			FPlanetStreamingWorld World;
 			World.Relief = 400.0f;
 			World.Octaves = 2;
@@ -1454,7 +1280,7 @@ namespace VoxelPlanetStreamingTestUtils
 		FLODNormalStats Before, After;
 		for (int32 Mode = 0; Mode < 2; ++Mode)
 		{
-			FScopedCrossingGradientNormals Scoped(Mode);
+			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.CrossingGradientNormals"), Mode);
 			FPlanetStreamingWorld World;
 			World.Relief = Relief;
 			World.Octaves = Octaves;
@@ -1546,31 +1372,6 @@ bool FVoxelPlaneStreamingGradientBandsTest::RunTest(const FString& Parameters)
 
 namespace VoxelPlanetStreamingTestUtils
 {
-	/** Sets an int console variable at console priority for a scope. */
-	struct FScopedIntCVar
-	{
-		IConsoleVariable* Var = nullptr;
-		int32 Previous = 0;
-
-		FScopedIntCVar(const TCHAR* Name, int32 Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(Name);
-			if (Var)
-			{
-				Previous = Var->GetInt();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-
-		~FScopedIntCVar()
-		{
-			if (Var)
-			{
-				Var->Set(Previous, ECVF_SetByConsole);
-			}
-		}
-	};
-
 	/** What a move over far-compressed chunks cost the game thread, and what it left. */
 	struct FFarReadsResult
 	{
@@ -1616,9 +1417,9 @@ namespace VoxelPlanetStreamingTestUtils
 	FFarReadsResult RunFarReads(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
 		const FVector& Move, int32 SnapshotReads)
 	{
-		FScopedIntCVar Reads(TEXT("voxel.FarCompression.SnapshotReads"), SnapshotReads);
-		FScopedIntCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 5);
-		FScopedIntCVar Scans(TEXT("voxel.FarCompression.MaxScansPerTick"), 64);
+		VoxelTesting::FScopedCVar Reads(TEXT("voxel.FarCompression.SnapshotReads"), SnapshotReads);
+		VoxelTesting::FScopedCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 5);
+		VoxelTesting::FScopedCVar Scans(TEXT("voxel.FarCompression.MaxScansPerTick"), 64);
 		FFarReadsResult Result;
 		FPlanetStreamingWorld World;
 		Start(World);
@@ -1762,7 +1563,7 @@ namespace VoxelPlanetStreamingTestUtils
 	uint32 CollisionCookCrc(UVoxelChunkManager* Manager, const FIntVector& Coord, int32 LODLevel, bool bShells, int32& OutNeighbors,
 		int32& OutShells)
 	{
-		FScopedIntCVar Shells(TEXT("voxel.Collision.NeighborShells"), bShells ? 1 : 0);
+		VoxelTesting::FScopedCVar Shells(TEXT("voxel.Collision.NeighborShells"), bShells ? 1 : 0);
 		FVoxelMeshingRequest Request;
 		TSharedPtr<const TArray<FVoxelData>> Own;
 		TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>> Snapshots;
@@ -1810,7 +1611,7 @@ namespace VoxelPlanetStreamingTestUtils
 	/** Empty the snapshot and shell caches: the age sweep (every 64 ticks) with a maximum age of one tick. */
 	void EvictSnapshotCaches(FPlanetStreamingWorld& World)
 	{
-		FScopedIntCVar Age(TEXT("voxel.Snapshot.MaxAgeTicks"), 1);
+		VoxelTesting::FScopedCVar Age(TEXT("voxel.Snapshot.MaxAgeTicks"), 1);
 		for (int32 Tick = 0; Tick < 140; ++Tick)
 		{
 			World.Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
@@ -1824,13 +1625,13 @@ namespace VoxelPlanetStreamingTestUtils
 	 */
 	void RunCollisionShellsPlace(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start)
 	{
-		FScopedIntCVar Reads(TEXT("voxel.FarCompression.SnapshotReads"), 1);
-		FScopedIntCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 5);
-		FScopedIntCVar Scans(TEXT("voxel.FarCompression.MaxScansPerTick"), 64);
+		VoxelTesting::FScopedCVar Reads(TEXT("voxel.FarCompression.SnapshotReads"), 1);
+		VoxelTesting::FScopedCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 5);
+		VoxelTesting::FScopedCVar Scans(TEXT("voxel.FarCompression.MaxScansPerTick"), 64);
 		// The memory check compares the shells with whole snapshots as the cache held them for cooks, a copy of every
 		// resident neighbour; since G71 a resident chunk's snapshot shares its array and holds nothing of its own
 		// (Streaming.*.SharedResidentSnapshots tests that).
-		FScopedIntCVar ShareResident(TEXT("voxel.Snapshot.ShareResident"), 0);
+		VoxelTesting::FScopedCVar ShareResident(TEXT("voxel.Snapshot.ShareResident"), 0);
 		FPlanetStreamingWorld World;
 		Start(World);
 		Test.TestTrue(*FString::Printf(TEXT("%s: the pipeline settled"), Place), World.Settle());
@@ -1991,9 +1792,9 @@ namespace VoxelPlanetStreamingTestUtils
 	FSharedResidentResult RunSharedResident(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
 		const FVector& Move, int32 ShareResident)
 	{
-		FScopedIntCVar Share(TEXT("voxel.Snapshot.ShareResident"), ShareResident);
-		FScopedIntCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 5);
-		FScopedIntCVar Scans(TEXT("voxel.FarCompression.MaxScansPerTick"), 64);
+		VoxelTesting::FScopedCVar Share(TEXT("voxel.Snapshot.ShareResident"), ShareResident);
+		VoxelTesting::FScopedCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 5);
+		VoxelTesting::FScopedCVar Scans(TEXT("voxel.FarCompression.MaxScansPerTick"), 64);
 		VoxelResidencyStats::ResetSharedArrayClones();
 		FSharedResidentResult Result;
 		FPlanetStreamingWorld World;
@@ -2144,9 +1945,9 @@ namespace VoxelPlanetStreamingTestUtils
 	FUniformAtGenerationResult RunUniformAtGeneration(FAutomationTestBase& Test, const TCHAR* Place,
 		TFunctionRef<void(FPlanetStreamingWorld&)> Start, int32 Setting)
 	{
-		FScopedIntCVar AtGeneration(TEXT("voxel.FarCompression.UniformAtGeneration"), Setting);
+		VoxelTesting::FScopedCVar AtGeneration(TEXT("voxel.FarCompression.UniformAtGeneration"), Setting);
 		// The sweep would collapse them too, after its idle wait: hold it off so only generation does.
-		FScopedIntCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 1000000);
+		VoxelTesting::FScopedCVar Idle(TEXT("voxel.FarCompression.IdleFrames"), 1000000);
 		FUniformAtGenerationResult Result;
 		FPlanetStreamingWorld World;
 		int32 Ignored = 0;
@@ -2272,7 +2073,7 @@ namespace VoxelPlanetStreamingTestUtils
 	FMCSeamReadsResult RunMCSeamReads(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
 		const FVector& Move, int32 ReadInPlace)
 	{
-		FScopedIntCVar Reads(TEXT("voxel.Seam.MCReadInPlace"), ReadInPlace);
+		VoxelTesting::FScopedCVar Reads(TEXT("voxel.Seam.MCReadInPlace"), ReadInPlace);
 		FVoxelCPUMarchingCubesMesher::ResetSeamJobStats();
 		FMCSeamReadsResult Result;
 		FPlanetStreamingWorld World;
@@ -2549,7 +2350,7 @@ namespace VoxelPlanetStreamingTestUtils
 		FLODPositionStats Stats[2];
 		for (int32 Mode = 0; Mode < 2; ++Mode)
 		{
-			FScopedIntCVar Scoped(TEXT("voxel.Mesh.VoxelLODCrossings"), Mode);
+			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.VoxelLODCrossings"), Mode);
 			FPlanetStreamingWorld World;
 			World.Relief = Relief;
 			World.Octaves = Octaves;

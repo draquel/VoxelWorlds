@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelCPUDualContourMesher.h"
+#include "VoxelMeshingTestFixtures.h"
 #include "VoxelMeshingTypes.h"
 #include "ChunkRenderData.h"
 #include "VoxelData.h"
@@ -19,61 +20,7 @@
 
 namespace VoxelCornerSeamTestUtils
 {
-	constexpr int32 TestChunkSize = 32;
-	constexpr float TestVoxelSize = 100.0f;
-
-	static TArray<FVoxelData> FillVoxels(const FIntVector& ChunkOffsetVoxels,
-		TFunctionRef<bool(int32, int32, int32)> SolidFn)
-	{
-		TArray<FVoxelData> Data;
-		Data.SetNumUninitialized(TestChunkSize * TestChunkSize * TestChunkSize);
-		for (int32 Z = 0; Z < TestChunkSize; ++Z)
-		{
-			for (int32 Y = 0; Y < TestChunkSize; ++Y)
-			{
-				for (int32 X = 0; X < TestChunkSize; ++X)
-				{
-					const int32 Index = X + Y * TestChunkSize + Z * TestChunkSize * TestChunkSize;
-					const bool bSolid = SolidFn(X + ChunkOffsetVoxels.X, Y + ChunkOffsetVoxels.Y, Z + ChunkOffsetVoxels.Z);
-					Data[Index] = bSolid ? FVoxelData::Solid(1, 0) : FVoxelData::Air();
-				}
-			}
-		}
-		return Data;
-	}
-
-	/** FillVoxels wrapped as the shared immutable snapshot the seam requests carry. */
-	static TSharedPtr<const TArray<FVoxelData>> SharedVoxels(const FIntVector& ChunkOffsetVoxels,
-		TFunctionRef<bool(int32, int32, int32)> SolidFn)
-	{
-		return MakeShared<TArray<FVoxelData>>(FillVoxels(ChunkOffsetVoxels, SolidFn));
-	}
-
-	static FVoxelMeshingConfig MakeConfig()
-	{
-		FVoxelMeshingConfig Config;
-		Config.IsoLevel = 0.5f;
-		Config.bGenerateUVs = true;
-		Config.bCalculateAO = false;
-		Config.QEFSVDThreshold = 0.1f;
-		return Config;
-	}
-
-	template <typename TFn>
-	static bool RunMesher(TFn&& Fn)
-	{
-		FVoxelCPUDualContourMesher Mesher;
-		Mesher.Initialize();
-		Mesher.SetConfig(MakeConfig());
-		const bool bOk = Fn(Mesher);
-		Mesher.Shutdown();
-		return bOk;
-	}
-
-	static FString PosKey(const FVector3f& P)
-	{
-		return BytesToHex(reinterpret_cast<const uint8*>(&P), sizeof(FVector3f));
-	}
+	using namespace VoxelMeshingTestFixtures;
 
 	/** The 27 meshes of the 2x2x2 lattice, each with its combine offset (owner frame -> world). */
 	struct FLatticeScene

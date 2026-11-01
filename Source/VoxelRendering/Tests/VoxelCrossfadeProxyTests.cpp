@@ -5,6 +5,7 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "RHI.h"             // GUsingNullRHI: no scene proxy under -nullrhi, the test skips there
 #include "Materials/MaterialInterface.h"
 #include "VoxelCustomVFRenderer.h"
@@ -45,28 +46,8 @@ namespace VoxelCrossfadeProxyTest
 		return Mesh;
 	}
 
-	/** Sets a console variable for the test's lifetime, at console priority (a value typed in the editor's console outranks a code set). */
-	struct FScopedCVar
-	{
-		IConsoleVariable* Var = nullptr;
-		FString Previous;
-		FScopedCVar(const TCHAR* Name, const TCHAR* Value)
-		{
-			Var = IConsoleManager::Get().FindConsoleVariable(Name);
-			if (Var)
-			{
-				Previous = Var->GetString();
-				Var->Set(Value, ECVF_SetByConsole);
-			}
-		}
-		~FScopedCVar()
-		{
-			if (Var)
-			{
-				Var->Set(*Previous, ECVF_SetByConsole);
-			}
-		}
-	};
+	using FScopedCVar = VoxelTesting::FScopedCVar; // the one scoped cvar (code review CR2 row 17)
+
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCrossfadeSwapReachesProxyTest,

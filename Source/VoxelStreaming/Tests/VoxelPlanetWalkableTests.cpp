@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "CoreMinimal.h"
+#include "Testing/VoxelTestChunkWorld.h"
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -31,55 +32,15 @@
 
 namespace VoxelPlanetWalkableTestUtils
 {
-	/** A renderer that draws nothing (the chunk manager needs one to initialise). */
-	class FNullMeshRenderer : public IVoxelMeshRenderer
-	{
-	public:
-		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
-		virtual void Shutdown() override { bInitialized = false; }
-		virtual bool IsInitialized() const override { return bInitialized; }
-		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override {}
-		virtual void RemoveChunk(const FIntVector& ChunkCoord) override {}
-		virtual void ClearAllChunks() override {}
-		virtual void SetMaterial(UMaterialInterface* Material) override {}
-		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
-		virtual void UpdateMaterialParameters() override {}
-		virtual void UpdateSeamMeshFromCPU(const FIntVector& OwnerChunkCoord, uint8 SeamSlot, int32 LODLevel, FChunkMeshData&& MeshData, bool bCrossfade) override {}
-		virtual void RemoveSeamMesh(const FIntVector& OwnerChunkCoord, uint8 SeamSlot) override {}
-		virtual void ClearAllSeamMeshes() override {}
-		virtual void GetSeamMeshOwners(TArray<FIntVector>& OutOwners) const override {}
-		virtual bool IsChunkLoaded(const FIntVector& ChunkCoord) const override { return false; }
-		virtual int32 GetLoadedChunkCount() const override { return 0; }
-		virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const override {}
-		virtual int64 GetGPUMemoryUsage() const override { return 0; }
-		virtual int64 GetTotalVertexCount() const override { return 0; }
-		virtual int64 GetTotalTriangleCount() const override { return 0; }
-		virtual bool GetChunkBounds(const FIntVector& ChunkCoord, FBox& OutBounds) const override { return false; }
-		virtual FBox GetTotalBounds() const override { return FBox(ForceInit); }
-		virtual FString GetDebugStats() const override { return FString(); }
-		virtual FString GetRendererTypeName() const override { return TEXT("Null (test)"); }
-
-	private:
-		bool bInitialized = false;
-	};
-
 	/** A game world with a chunk manager on a small planet (or a plane), streaming nothing until ticked. */
-	struct FWalkableWorld
+	struct FWalkableWorld : VoxelTesting::FTestChunkWorld
 	{
-		UWorld* World = nullptr;
-		UVoxelWorldConfiguration* Config = nullptr;
-		AActor* Owner = nullptr;
-		UVoxelChunkManager* Manager = nullptr;
-		FNullMeshRenderer Renderer;
 
 		/** Make the world and a configuration; edit Config, then call Start. */
 		explicit FWalkableWorld(const TCHAR* WorldName, bool bPlanet)
 		{
-			World = UWorld::CreateWorld(EWorldType::Game, false, WorldName);
-			FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
-			WorldContext.SetCurrentWorld(World);
-			Config = NewObject<UVoxelWorldConfiguration>();
-			Config->AddToRoot();
+			Create(WorldName);
+			Renderer.bKeepMeshes = false; // nothing here reads a mesh
 			Config->WorldMode = bPlanet ? EWorldMode::SphericalPlanet : EWorldMode::InfinitePlane;
 			Config->WorldOrigin = FVector::ZeroVector;
 			Config->WorldRadius = 20000.0f;
@@ -106,28 +67,9 @@ namespace VoxelPlanetWalkableTestUtils
 
 		void Start()
 		{
-			Owner = World->SpawnActor<AActor>();
-			Manager = NewObject<UVoxelChunkManager>(Owner);
-			Manager->RegisterComponent();
-			Renderer.Initialize(World, Config);
-			Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
+			StartManager();
 		}
 
-		~FWalkableWorld()
-		{
-			if (Manager)
-			{
-				Manager->SetBenchmarkView(false, FVector::ZeroVector);
-				Manager->Shutdown();
-			}
-			if (Owner)
-			{
-				Owner->Destroy();
-			}
-			GEngine->DestroyWorldContext(World);
-			World->DestroyWorld(false);
-			Config->RemoveFromRoot();
-		}
 	};
 
 	/** Direction for a latitude and longitude in degrees (the planet's frame: +Z north, longitude from +X toward +Y). */

@@ -20,13 +20,13 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelCPUDualContourMesher.h"
+#include "VoxelMeshingTestFixtures.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
 
 namespace DualContourMaterialBorderTestHelpers
 {
-	constexpr int32 TestChunkSize = 32;
-	constexpr float TestVoxelSize = 100.0f;
+	using namespace VoxelMeshingTestFixtures;
 
 	// The two source materials meeting at the border plane X = 16 voxels.
 	// Deliberately non-adjacent IDs so interpolation striping (2..7) would be

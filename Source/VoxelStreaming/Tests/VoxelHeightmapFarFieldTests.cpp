@@ -57,7 +57,6 @@ namespace VoxelHeightmapFarFieldTestUtils
 	constexpr double UnloadDistance = 14400.0;
 
 	using VoxelFarFieldTestRig::FScopedCVar;
-	using VoxelFarFieldTestRig::FNullMeshRenderer;
 
 	/** The small plane's configuration (terrain +-800, chunks of 32 voxels of 50 uu, a sea at -200). Rooted. */
 	UVoxelWorldConfiguration* MakePlaneConfig(EMeshingMode Meshing = EMeshingMode::DualContouring)

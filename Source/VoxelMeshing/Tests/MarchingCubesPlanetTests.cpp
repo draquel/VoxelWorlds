@@ -15,6 +15,7 @@
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelCPUMarchingCubesMesher.h"
+#include "VoxelMeshingTestFixtures.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
@@ -23,6 +24,8 @@
 
 namespace MarchingCubesPlanetTestUtils
 {
+	using namespace VoxelMeshingTestFixtures;
+
 	constexpr int32 ChunkSize = 32;
 	constexpr float VoxelSize = 100.0f;
 	constexpr uint8 Grass = 1;
@@ -121,21 +124,11 @@ namespace MarchingCubesPlanetTestUtils
 		return Request;
 	}
 
-	FVoxelMeshingConfig MakeConfig(bool bUseTransvoxel)
-	{
-		FVoxelMeshingConfig Config;
-		Config.IsoLevel = 0.5f;
-		Config.bGenerateUVs = true;
-		Config.bCalculateAO = false;
-		Config.bUseTransvoxel = bUseTransvoxel;
-		return Config;
-	}
-
 	bool Mesh(const FVoxelMeshingRequest& Request, bool bUseTransvoxel, FChunkMeshData& OutMesh)
 	{
 		FVoxelCPUMarchingCubesMesher Mesher;
 		Mesher.Initialize();
-		Mesher.SetConfig(MakeConfig(bUseTransvoxel));
+		Mesher.SetConfig(MakeMCConfig(bUseTransvoxel));
 		FVoxelMeshingStats Stats;
 		const bool bOk = Mesher.GenerateMeshCPU(Request, OutMesh, Stats);
 		Mesher.Shutdown();
