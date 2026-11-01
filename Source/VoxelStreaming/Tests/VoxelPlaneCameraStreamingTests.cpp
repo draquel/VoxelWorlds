@@ -115,7 +115,7 @@ bool FVoxelPlaneDescentPrefetchTest::RunTest(const FString& Parameters)
 
 		// The site: over land (the surface's Z against the sea's).
 		const FVector2D Site(4000.0, -2500.0);
-		const double Ground = W.Manager->GetGeneratedSurfaceHeight(Site.X, Site.Y);
+		const double Ground = W.Manager->GetGeneratedSurfacePoint(FVector(Site.X, Site.Y, 0.0)).Z;
 		const double SurfaceZ = FMath::Max(Ground, static_cast<double>(W.Config->WaterLevel));
 		auto At = [&Site, SurfaceZ](double OverSurface) { return FVector(Site.X, Site.Y, SurfaceZ + OverSurface); };
 
@@ -244,10 +244,10 @@ bool FVoxelPlaneCameraAfterCutTest::RunTest(const FString& Parameters)
 		const double ChunkWorldSize = W.Config->GetChunkWorldSize();
 
 		const FVector2D Site(4000.0, -2500.0);
-		const double Ground = W.Manager->GetGeneratedSurfaceHeight(Site.X, Site.Y);
+		const double Ground = W.Manager->GetGeneratedSurfacePoint(FVector(Site.X, Site.Y, 0.0)).Z;
 		const FVector Start(Site.X, Site.Y, FMath::Max(Ground, static_cast<double>(W.Config->WaterLevel)) + 300.0);
 		const FVector2D FarSite = Site + FVector2D(10.0 * ChunkWorldSize, 0.0);
-		const double FarGround = W.Manager->GetGeneratedSurfaceHeight(FarSite.X, FarSite.Y);
+		const double FarGround = W.Manager->GetGeneratedSurfacePoint(FVector(FarSite.X, FarSite.Y, 0.0)).Z;
 		const FVector Destination(FarSite.X, FarSite.Y, FMath::Max(FarGround, static_cast<double>(W.Config->WaterLevel)) + 300.0);
 		const FIntVector DestinationGroundChunk = W.Manager->WorldToChunkCoord(FVector(FarSite.X, FarSite.Y, FarGround));
 

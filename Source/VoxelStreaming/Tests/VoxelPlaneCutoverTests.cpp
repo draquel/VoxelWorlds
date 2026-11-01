@@ -117,7 +117,7 @@ bool FVoxelPlaneCutoverTest::RunTest(const FString& Parameters)
 
 		// The site over land; altitudes over the terrain or the sea, whichever is higher.
 		const FVector2D Site(4000.0, -2500.0);
-		const double Ground = W.Manager->GetGeneratedSurfaceHeight(Site.X, Site.Y);
+		const double Ground = W.Manager->GetGeneratedSurfacePoint(FVector(Site.X, Site.Y, 0.0)).Z;
 		const double SurfaceZ = FMath::Max(Ground, static_cast<double>(W.Config->WaterLevel));
 		auto At = [&Site, SurfaceZ](double OverSurface) { return FVector(Site.X, Site.Y, SurfaceZ + OverSurface); };
 
@@ -214,7 +214,7 @@ bool FVoxelPlaneCutoverDescentStopTest::RunTest(const FString& Parameters)
 	W.StartManager();
 	MakeFarFieldSynchronous(W);
 	const FVector2D Site(4000.0, -2500.0);
-	const double SurfaceZ = FMath::Max(W.Manager->GetGeneratedSurfaceHeight(Site.X, Site.Y), static_cast<double>(W.Config->WaterLevel));
+	const double SurfaceZ = FMath::Max(W.Manager->GetGeneratedSurfacePoint(FVector(Site.X, Site.Y, 0.0)).Z, static_cast<double>(W.Config->WaterLevel));
 	auto At = [&Site, SurfaceZ](double OverSurface) { return FVector(Site.X, Site.Y, SurfaceZ + OverSurface); };
 	// The strategy learns of the far field from its first update's context: settle on the ground before reading the cut-over.
 	W.SetViewer(At(300.0));

@@ -234,7 +234,7 @@ namespace VoxelCubicStreamingTestUtils
 			Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
 
 			// Stream from a fixed viewer standing on the terrain at the origin.
-			const float SurfaceZ = Manager->GetGeneratedSurfaceHeight(0.0f, 0.0f);
+			const float SurfaceZ = Manager->GetGeneratedSurfacePoint(FVector(0.0f, 0.0f, 0.0)).Z;
 			Manager->ResetBenchCounters();
 			Manager->SetBenchmarkView(true, FVector(0.0, 0.0, SurfaceZ + 200.0));
 		}

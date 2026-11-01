@@ -148,7 +148,7 @@ namespace VoxelCubicGameplayTestUtils
 			Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
 
 			const FVector Viewer = Config->WorldOrigin;
-			const float SurfaceZ = Manager->GetGeneratedSurfaceHeight(Viewer.X, Viewer.Y);
+			const float SurfaceZ = Manager->GetGeneratedSurfacePoint(FVector(Viewer.X, Viewer.Y, 0.0)).Z;
 			Manager->ResetBenchCounters();
 			Manager->SetBenchmarkView(true, FVector(Viewer.X, Viewer.Y, SurfaceZ + 200.0));
 		}
@@ -252,7 +252,7 @@ bool FVoxelCubicBlockSurfaceGeneratedTest::RunTest(const FString& Parameters)
 	{
 		const double X = Origin.X + Rng.FRandRange(-1500.0f, 1500.0f);
 		const double Y = Origin.Y + Rng.FRandRange(-1500.0f, 1500.0f);
-		const float Generated = Manager->GetGeneratedSurfaceHeight(X, Y);
+		const float Generated = Manager->GetGeneratedSurfacePoint(FVector(X, Y, 0.0)).Z;
 		const FIntPoint Column = Test.ColumnOf(X, Y);
 		const int64 Guess = static_cast<int64>(FMath::FloorToDouble((Generated - Origin.Z) / V));
 		int64 TopLayer = 0;
@@ -264,10 +264,9 @@ bool FVoxelCubicBlockSurfaceGeneratedTest::RunTest(const FString& Parameters)
 		const float Expected = static_cast<float>(FVoxelBlockSurface::LayerTop(TopLayer, Origin.Z, V));
 		GeneratedOk += FMath::IsNearlyEqual(Generated, Expected, 0.01f) ? 1 : 0;
 
-		float Height = 0.0f, Slope = 0.0f;
-		FVector Normal;
-		uint8 Material = 0, Biome = 0;
-		const bool bLoaded = Manager->QueryEditMergedSurface(X, Y, Height, Normal, Slope, Material, Biome);
+		FVoxelSurfaceSample Hit;
+		const bool bLoaded = Manager->QueryEditMergedSurfacePoint(FVector(X, Y, 0.0), Hit);
+		const float Height = static_cast<float>(Hit.Position.Z);
 		const bool bEditMergedOk = bLoaded && FMath::IsNearlyEqual(Height, Expected, 0.01f);
 		EditMergedOk += bEditMergedOk ? 1 : 0;
 		if (!bEditMergedOk && Compared - EditMergedOk <= 5)
@@ -298,7 +297,7 @@ bool FVoxelCubicBlockSurfaceGeneratedTest::RunTest(const FString& Parameters)
 		"the block top at %d (by %.1f to %.1f uu); pad core %d of %d at SnapToBlockTop(target)"),
 		Compared, GeneratedOk, EditMergedOk, IsoBelowTop, LeastIsoGap, WorstIsoGap, InPadOk, InPad));
 	TestTrue(TEXT("Enough columns compared"), Compared >= 400);
-	TestEqual(TEXT("GetGeneratedSurfaceHeight is the streamed top face at every column"), GeneratedOk, Compared);
+	TestEqual(TEXT("GetGeneratedSurfacePoint is the streamed top face at every column"), GeneratedOk, Compared);
 	TestEqual(TEXT("QueryEditMergedSurface is the streamed top face at every column"), EditMergedOk, Compared);
 	TestTrue(TEXT("The isosurface lay under the block tops (the KC6 gap)"), IsoBelowTop > Compared / 4);
 	TestTrue(TEXT("Each block top lies above its column's isosurface, within a block"), LeastIsoGap > -0.01f && WorstIsoGap <= V + 0.01f);
@@ -336,10 +335,13 @@ bool FVoxelCubicBlockSurfaceEditMergedTest::RunTest(const FString& Parameters)
 
 	auto Query = [Manager](double X, double Y, float& OutHeight)
 	{
-		FVector Normal;
-		float Slope = 0.0f;
-		uint8 Material = 0, Biome = 0;
-		return Manager->QueryEditMergedSurface(X, Y, OutHeight, Normal, Slope, Material, Biome);
+		FVoxelSurfaceSample Hit;
+		if (!Manager->QueryEditMergedSurfacePoint(FVector(X, Y, 0.0), Hit))
+		{
+			return false;
+		}
+		OutHeight = static_cast<float>(Hit.Position.Z);
+		return true;
 	};
 
 	// Columns away from every tree (no tree block within the scanned window), so the edits below decide the surface.
@@ -456,20 +458,20 @@ bool FVoxelCubicBlockSurfaceSmoothUnchangedTest::RunTest(const FString& Paramete
 		const double X = Config->WorldOrigin.X + Rng.FRandRange(-1500.0f, 1500.0f);
 		const double Y = Config->WorldOrigin.Y + Rng.FRandRange(-1500.0f, 1500.0f);
 
-		// GetGeneratedSurfaceHeight: the world mode's height with the zones blended in, bit for bit.
+		// GetGeneratedSurfacePoint: the world mode's height with the zones blended in, bit for bit.
 		const float Natural = static_cast<float>(WM->GetSurfaceOnUpLine(FVector(X, Y, 0.0), Config->NoiseParams).Position.Z);
 		const float Expected = FVoxelTerrainConditioning::ApplyToHeight(X, Y, Natural, { Pad });
-		Generated += Manager->GetGeneratedSurfaceHeight(X, Y) == Expected ? 1 : 0;
+		Generated += Manager->GetGeneratedSurfacePoint(FVector(X, Y, 0.0)).Z == Expected ? 1 : 0;
 
-		// QueryEditMergedSurface: the column at (X, Y) from one chunk under the estimate to one above, interpolated
+		// QueryEditMergedSurfacePoint: the column at (X, Y) from one chunk under the estimate to one above, interpolated
 		// where the density crosses the threshold (FVoxelSurfaceQuery::ExtractSurfaceFromColumn), as before.
-		float Height = 0.0f, Slope = 0.0f;
-		FVector Normal;
-		uint8 Material = 0, Biome = 0;
-		if (!Manager->QueryEditMergedSurface(X, Y, Height, Normal, Slope, Material, Biome))
+		FVoxelSurfaceSample Hit;
+		if (!Manager->QueryEditMergedSurfacePoint(FVector(X, Y, 0.0), Hit))
 		{
 			continue;
 		}
+		const float Height = static_cast<float>(Hit.Position.Z);
+		const uint8 Material = Hit.MaterialID;
 		++Loaded;
 		const int32 Window = Config->ChunkSize;
 		const float BaseZ = Natural - Window * Config->VoxelSize;
@@ -484,9 +486,9 @@ bool FVoxelCubicBlockSurfaceSmoothUnchangedTest::RunTest(const FString& Paramete
 		EditMerged += bRef && Height == RefHeight && Material == RefMaterial ? 1 : 0;
 	}
 	AddInfo(FString::Printf(TEXT("generated %d / 300, edit-merged %d / %d as before"), Generated, EditMerged, Loaded));
-	TestEqual(TEXT("GetGeneratedSurfaceHeight unchanged in a smooth world"), Generated, 300);
+	TestEqual(TEXT("GetGeneratedSurfacePoint unchanged in a smooth world"), Generated, 300);
 	TestTrue(TEXT("Loaded columns sampled"), Loaded >= 200);
-	TestEqual(TEXT("QueryEditMergedSurface unchanged in a smooth world"), EditMerged, Loaded);
+	TestEqual(TEXT("QueryEditMergedSurfacePoint unchanged in a smooth world"), EditMerged, Loaded);
 
 	Test.Stop();
 	return true;

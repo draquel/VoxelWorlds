@@ -600,45 +600,6 @@ public:
 	bool IsChunkWaterSettled(const FIntVector& ChunkCoord) const;
 
 	/**
-	 * EDIT-AWARE surface query at a world X,Y (the near band for PCG decoration).
-	 *
-	 * Locates the surface from edit-merged voxel data of loaded chunks, so it reflects player
-	 * digging/building and hugs the actual voxelized surface (not the analytic generator height).
-	 * Returns false when no loaded chunk covers the surface there, so the caller can fall back to the
-	 * generator (FVoxelSurfaceQuery::SampleSurface) for the far band. Game thread only.
-	 *
-	 * @param WorldX,WorldY     Sample position (world space)
-	 * @param OutHeight         World Z of the surface
-	 * @param OutNormal         Surface normal (from the edit-merged density gradient; up-facing)
-	 * @param OutSlopeDegrees   Slope angle (0 = flat)
-	 * @param OutMaterialID     Surface material from the edit-merged voxel
-	 * @param OutBiomeID        Biome from the edit-merged voxel
-	 * @return true if a loaded edit-merged surface was found
-	 */
-	bool QueryEditMergedSurface(
-		double WorldX, double WorldY,
-		float& OutHeight, FVector& OutNormal, float& OutSlopeDegrees,
-		uint8& OutMaterialID, uint8& OutBiomeID) const;
-
-	/**
-	 * Analytic surface height at a world (X,Y): the continentalness-modulated base terrain PLUS any
-	 * terrain conditioning zones — matching what generation produces — WITHOUT requiring the chunk to be
-	 * loaded. This is the canonical FAR-BAND placement estimate (spawn / nav / POI seeding). For the near
-	 * band where a chunk is loaded and may hold player edits, prefer QueryEditMergedSurface.
-	 *
-	 * Unlike the raw IVoxelWorldMode::GetTerrainHeightAt, this accounts for both continentalness (via the
-	 * world mode's biome context) and conditioning-zone flattening, so the returned Z sits on the real
-	 * generated isosurface even far from the origin and inside POI/claim footprints.
-	 *
-	 * @param WorldX,WorldY Sample position (world space)
-	 * @return World Z of the generated terrain surface at (X,Y); 0 if the manager is not initialized
-	 *
-	 * Note: plain C++ (not a UFUNCTION) to keep double-precision world coordinates, matching the sibling
-	 * QueryEditMergedSurface. A float-param BlueprintCallable wrapper can be added if BP access is needed.
-	 */
-	float GetGeneratedSurfaceHeight(double WorldX, double WorldY) const;
-
-	/**
 	 * EDIT-AWARE surface on the local up-line through a position, in any world mode (spherical SP-A3): the form of
 	 * QueryEditMergedSurface that works on a planet. Heightmap modes run QueryEditMergedSurface at (X, Y) and return
 	 * Position (X, Y, Height). On a planet it starts from the analytic surface along the direction from the centre and
@@ -657,7 +618,7 @@ public:
 	/**
 	 * The surface ladder at a position, in any world mode (code review CR2, CM-21: the one entry over the three rungs):
 	 * the natural surface (the world mode's, no zones), the generated surface (the conditioning zones there applied, and
-	 * on a block world the top face of the block column's topmost block, as GetGeneratedSurfaceHeight gives it), or the
+	 * on a block world the top face of the block column's topmost block, as GetGeneratedSurfacePoint gives it), or the
 	 * edit-merged surface of the loaded voxels (QueryEditMergedSurfacePoint; false where none is loaded). The natural and
 	 * generated rungs sample the conditions through FVoxelSurfaceQuery::SampleSurfacePoint (the biome pipeline, no loaded
 	 * chunk needed) and always succeed once the manager is initialized. Game thread only.
@@ -671,9 +632,12 @@ public:
 
 	/**
 	 * The generated (analytic) surface point on the local up-line through a position, without loaded chunks (spherical
-	 * SP-A3): (X, Y, GetGeneratedSurfaceHeight) in heightmap modes, conditioning zones included; on a planet the terrain
-	 * along the direction from the centre with the planet zones there applied (GetGeneratedPlanetAltitude; SP-B10), as
-	 * the planet generator conditions it. GetSurfacePointAt is the world mode's natural surface, without zones.
+	 * SP-A3): in heightmap modes (X, Y) at the generated column's height (the continentalness-modulated base terrain with the
+	 * conditioning zones there, as generation produces it; on a block world the top of the block column's topmost block,
+	 * WM-C5), the canonical far-band placement estimate for spawn, navigation and POI seeding (the near band's edits are
+	 * QueryEditMergedSurfacePoint's); on a planet the terrain along the direction from the centre with the planet zones
+	 * there applied (SP-B10), as the planet generator conditions it. GetSurfacePointAt is the world mode's natural surface,
+	 * without zones. The one generated rung (code review CR2, CM-21).
 	 *
 	 * @param WorldPos Any position on the up-line
 	 * @return World position of the surface point (WorldPos before Initialize)
@@ -689,16 +653,6 @@ public:
 	 * @return The level
 	 */
 	double GetSurfaceOrSeaLevel(const FVector& WorldPos, bool& bOutSea) const;
-
-	/**
-	 * Planets (spherical SP-B10): the generated terrain's altitude along a direction, the world mode's natural altitude
-	 * with the planet conditioning zones there applied (FVoxelTerrainConditioning::ApplyToAltitude), exactly what
-	 * GenerateChunkSphericalPlanet blends. Game thread.
-	 *
-	 * @param Direction Unit direction from the planet centre
-	 * @return Altitude above the datum (0 when the world is not a planet)
-	 */
-	float GetGeneratedPlanetAltitude(const FVector& Direction) const;
 
 	// ==================== World Bounds and Local Frame (WM-A2) ====================
 	// The configured world mode's bounds and frame (IVoxelWorldMode), for Blueprint and for game plugins, which reach
@@ -765,7 +719,7 @@ public:
 	/**
 	 * The analytic terrain surface on the local up-line through a position, with its outward normal (spherical SP-A1):
 	 * the point at (X, Y) in heightmap modes, along the direction from the centre on a planet. No caves, conditioning
-	 * zones or edits (GetGeneratedSurfaceHeight and the edit-merged queries add those in heightmap modes).
+	 * zones or edits (GetGeneratedSurfacePoint and QueryEditMergedSurfacePoint add those in heightmap modes).
 	 *
 	 * @param WorldPos Any position on the up-line
 	 * @return The surface point, its normal and its altitude
@@ -775,7 +729,7 @@ public:
 
 	/**
 	 * Whether this world's walking surface is block tops (cubic meshing in a heightmap world mode; world modes review
-	 * WM-C5, KC6). There GetGeneratedSurfaceHeight, QueryEditMergedSurface and their point forms return the top face of
+	 * WM-C5, KC6). There GetGeneratedSurfacePoint and QueryEditMergedSurfacePoint return the top face of
 	 * the block column's topmost block, not the density isosurface up to a block under it, and anything placed on a pad or
 	 * the generated ground should stand on SnapToBlockTop of its height.
 	 *
@@ -2463,7 +2417,7 @@ private:
 
 	/**
 	 * The generated column height (GetTerrainHeightAt plus the conditioning zones there) at a sample point, as the heightmap
-	 * generators compute it for a voxel column. GetGeneratedSurfaceHeight returns it in smooth worlds.
+	 * generators compute it for a voxel column. GetGeneratedSurfacePoint's Z in smooth worlds.
 	 */
 	float GetGeneratedColumnHeight(double WorldX, double WorldY) const;
 

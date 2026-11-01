@@ -427,7 +427,7 @@ namespace VoxelEditRemeshTest
 		{
 			return W.Manager->GetSurfacePointAt(P).Position;
 		}
-		return FVector(P.X, P.Y, W.Manager->GetGeneratedSurfaceHeight(P.X, P.Y));
+		return FVector(P.X, P.Y, W.Manager->GetGeneratedSurfacePoint(FVector(P.X, P.Y, 0.0)).Z);
 	}
 
 	/** P with its two axes across local up (A, B) moved onto the nearest chunk boundaries. */

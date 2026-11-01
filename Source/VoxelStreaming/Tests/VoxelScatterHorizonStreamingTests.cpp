@@ -122,7 +122,7 @@ namespace VoxelScatterHorizonStreamingTestUtils
 		}
 		Test.AddInfo(FString::Printf(TEXT("rule %d: scatter horizon %.0f"), Rule, Scatter->GetScatterHorizon()));
 
-		auto At = [&W](double X) { return FVector(X, 0.0, W.Manager->GetGeneratedSurfaceHeight(X, 0.0) + 300.0); };
+		auto At = [&W](double X) { return FVector(X, 0.0, W.Manager->GetGeneratedSurfacePoint(FVector(X, 0.0, 0.0)).Z + 300.0); };
 		W.SetViewer(At(0.0));
 		R.bSettled = SettleWithScatter(W);
 		for (double X = 800.0; X <= 16000.0 && R.bSettled; X += 800.0)

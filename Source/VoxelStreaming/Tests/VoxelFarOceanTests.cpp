@@ -388,7 +388,7 @@ bool FVoxelFarOceanStreamingTest::RunTest(const FString& Parameters)
 	const float Edge = Config->IslandRadius + Config->IslandFalloffWidth;
 	for (const FVector2D& ViewXY : { FVector2D(0.0, 0.0), FVector2D(Edge - 800.0, 600.0) })
 	{
-		const float SurfaceZ = Manager->GetGeneratedSurfaceHeight(ViewXY.X, ViewXY.Y);
+		const float SurfaceZ = Manager->GetGeneratedSurfacePoint(FVector(ViewXY.X, ViewXY.Y, 0.0)).Z;
 		Manager->SetBenchmarkView(true, FVector(ViewXY.X, ViewXY.Y, FMath::Max(SurfaceZ, Config->WaterLevel) + 200.0));
 		TestTrue(FString::Printf(TEXT("Viewer (%.0f, %.0f): the pipeline settled"), ViewXY.X, ViewXY.Y), Settle());
 

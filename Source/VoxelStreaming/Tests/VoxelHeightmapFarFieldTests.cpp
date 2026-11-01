@@ -945,7 +945,7 @@ bool FFarFieldPlaneChunkManagerTest::RunTest(const FString& Parameters)
 			FarField->SetSynchronousBuilds(true);
 			FarField->SetMaxBuildsInFlight(256);
 			const FVector2D Site(4000.0, -2500.0);
-			const FVector Viewer(Site.X, Site.Y, W.Manager->GetGeneratedSurfaceHeight(Site.X, Site.Y) + 300.0);
+			const FVector Viewer(Site.X, Site.Y, W.Manager->GetGeneratedSurfacePoint(FVector(Site.X, Site.Y, 0.0)).Z + 300.0);
 			W.SetViewer(Viewer);
 			TestTrue(TEXT("Plane: the window settles"), W.Settle());
 			for (int32 Update = 0; Update < 200; ++Update)
@@ -977,7 +977,7 @@ bool FFarFieldPlaneChunkManagerTest::RunTest(const FString& Parameters)
 					// counts a sliver the water fill leaves dry), some drawn patch draws the sea at the column's centre:
 					// the band patch itself, or the covered parent that stands for it (a band patch under a covered parent
 					// keeps stale flags from the last update it was selected in, which is no defect).
-					const double Height = W.Manager->GetGeneratedSurfaceHeight(Centre.X, Centre.Y);
+					const double Height = W.Manager->GetGeneratedSurfacePoint(FVector(Centre.X, Centre.Y, 0.0)).Z;
 					const bool bRealSea = static_cast<double>(W.Config->WaterLevel) - Height > static_cast<double>(W.Config->VoxelSize);
 					const FVoxelPlanetFarField::FPatchState* DrawnThere = (!bTile && bRealSea)
 						? FarField->FindDrawnPatchAt(FVector(Centre.X, Centre.Y, 0.0), /*bTerrainOnly*/ false) : nullptr;
@@ -1312,7 +1312,7 @@ bool FFarFieldPlaneCameraAfterCutTest::RunTest(const FString& Parameters)
 		UVoxelChunkManager* Manager = W.Manager;
 
 		// The camera: a camera actor, the controller's view target (as vox.Orbit's camera is).
-		auto CameraAt = [Manager](const FVector2D& XY) { return FVector(XY.X, XY.Y, Manager->GetGeneratedSurfaceHeight(XY.X, XY.Y) + Altitude); };
+		auto CameraAt = [Manager](const FVector2D& XY) { return FVector(XY.X, XY.Y, Manager->GetGeneratedSurfacePoint(FVector(XY.X, XY.Y, 0.0)).Z + Altitude); };
 		APlayerController* PC = W.World->SpawnActor<APlayerController>();
 		ACameraActor* Camera = W.World->SpawnActor<ACameraActor>(CameraAt(SiteXY), FRotator::ZeroRotator);
 		FVoxelPlanetFarField* FarField = Manager->GetFarFieldMutable();

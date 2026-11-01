@@ -17,8 +17,8 @@
 // - On a streamed planet at the pole, 45 degrees, the equator and a cube corner, QueryEditMergedSurfacePoint finds the
 //   surface on the radial line through the queried direction, within a quarter voxel of the analytic surface, with its
 //   normal near the analytic one and the slope measured against local up; a dig lowers it along local up.
-// - On a plane it is QueryEditMergedSurface at (X, Y), bit for bit, and GetGeneratedSurfacePoint is
-//   (X, Y, GetGeneratedSurfaceHeight).
+// - On a plane it is the column query at (X, Y) under +Z (the one edit-merged query since code review CR2, CM-21), and
+//   GetGeneratedSurfacePoint is (X, Y, the generated column's height).
 // ---------------------------------------------------------------------------
 
 namespace VoxelPlanetSurfaceQueryTestUtils
@@ -140,7 +140,7 @@ bool FVoxelPlaneEditMergedSurfaceUnchangedTest::RunTest(const FString& Parameter
 	W.Config->WorldOrigin = FVector(12345.0, -6789.0, 0.0);
 	W.StartManager();
 	const FVector Origin = W.Config->WorldOrigin;
-	W.SetViewer(FVector(Origin.X, Origin.Y, W.Manager->GetGeneratedSurfaceHeight(Origin.X, Origin.Y) + 300.0));
+	W.SetViewer(FVector(Origin.X, Origin.Y, W.Manager->GetGeneratedSurfacePoint(FVector(Origin.X, Origin.Y, 0.0)).Z + 300.0));
 	if (!TestTrue(TEXT("Streaming settles"), W.Settle()))
 	{
 		W.Stop();
@@ -148,23 +148,19 @@ bool FVoxelPlaneEditMergedSurfaceUnchangedTest::RunTest(const FString& Parameter
 	}
 
 	FRandomStream Random(77);
-	int32 Found = 0, Identical = 0, Generated = 0, Ladder = 0;
+	int32 Found = 0, Column = 0, Ladder = 0;
 	constexpr int32 Points = 1000;
 	for (int32 i = 0; i < Points; ++i)
 	{
 		const double X = Origin.X + Random.FRandRange(-1500.0, 1500.0);
 		const double Y = Origin.Y + Random.FRandRange(-1500.0, 1500.0);
-		float Height = 0.0f, Slope = 0.0f;
-		FVector Normal;
-		uint8 Material = 0, Biome = 0;
-		const bool bOld = W.Manager->QueryEditMergedSurface(X, Y, Height, Normal, Slope, Material, Biome);
+		// The heightmap sample is the column's at (X, Y) under +Z, whatever the query position's Z (code review CR2, CM-21:
+		// the one edit-merged query, the column query's body).
 		FVoxelSurfaceSample Hit;
 		const bool bNew = W.Manager->QueryEditMergedSurfacePoint(FVector(X, Y, Random.FRandRange(-5000.0, 5000.0)), Hit);
 		Found += bNew ? 1 : 0;
-		const bool bSame = bOld == bNew && (!bOld || (static_cast<float>(Hit.Position.Z) == Height && Hit.Normal == Normal && Hit.SlopeDegrees == Slope
-			&& Hit.MaterialID == Material && Hit.BiomeID == Biome && Hit.Position == FVector(X, Y, Height) && Hit.Up == FVector::UpVector));
-		Identical += bSame ? 1 : 0;
-		Generated += W.Manager->GetGeneratedSurfacePoint(FVector(X, Y, 123.0)) == FVector(X, Y, W.Manager->GetGeneratedSurfaceHeight(X, Y)) ? 1 : 0;
+		Column += (!bNew || (Hit.Position.X == X && Hit.Position.Y == Y && Hit.Up == FVector::UpVector
+			&& Hit.Normal.Z >= 0.0 && Hit.SlopeDegrees >= 0.0f && Hit.SlopeDegrees <= 90.0f)) ? 1 : 0;
 
 		// The ladder's one entry (code review CR2, CM-21): each rung's height equals the entry it dispatches to (the natural
 		// and generated rungs sample through FVoxelSurfaceQuery, whose heightmap positions carry the sample's float X and Y).
@@ -177,10 +173,9 @@ bool FVoxelPlaneEditMergedSurfaceUnchangedTest::RunTest(const FString& Parameter
 			&& W.Manager->QuerySurfacePoint(At, EVoxelSurfaceLayer::EditMerged, Edited) == bNew
 			&& (!bNew || Edited.Position == Hit.Position)) ? 1 : 0;
 	}
-	AddInfo(FString::Printf(TEXT("%d points: %d found, %d identical to QueryEditMergedSurface, %d generated points identical"), Points, Found, Identical, Generated));
+	AddInfo(FString::Printf(TEXT("%d points: %d found, %d on their column with an up-facing normal"), Points, Found, Column));
 	TestTrue(TEXT("Most points have a loaded surface"), Found >= Points * 9 / 10);
-	TestEqual(TEXT("QueryEditMergedSurfacePoint equals QueryEditMergedSurface bit for bit"), Identical, Points);
-	TestEqual(TEXT("GetGeneratedSurfacePoint equals (X, Y, GetGeneratedSurfaceHeight)"), Generated, Points);
+	TestEqual(TEXT("Every edit-merged sample lies on its column at (X, Y) under +Z"), Column, Points);
 	TestEqual(TEXT("QuerySurfacePoint's three rungs equal the entries they dispatch to"), Ladder, Points);
 	W.Stop();
 	return true;
