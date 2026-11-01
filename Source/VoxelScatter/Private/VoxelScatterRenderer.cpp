@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelScatterRenderer.h"
+#include "VoxelScatter.h"
 #include "VoxelScatterManager.h"
 #include "VoxelBillboardMeshGenerator.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
@@ -11,8 +12,6 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "GameFramework/Actor.h"
 #include "HAL/IConsoleManager.h"
-
-DEFINE_LOG_CATEGORY_STATIC(LogVoxelScatterRenderer, Log, All);
 
 static TAutoConsoleVariable<float> CVarVoxelScatterHISMBatchSeconds(
 	TEXT("voxel.Scatter.HISMBatchSeconds"),
@@ -45,13 +44,13 @@ void UVoxelScatterRenderer::Initialize(UVoxelScatterManager* Manager, UWorld* Wo
 {
 	if (bIsInitialized)
 	{
-		UE_LOG(LogVoxelScatterRenderer, Warning, TEXT("ScatterRenderer already initialized"));
+		UE_LOG(LogVoxelScatter, Warning, TEXT("ScatterRenderer already initialized"));
 		return;
 	}
 
 	if (!Manager || !World)
 	{
-		UE_LOG(LogVoxelScatterRenderer, Error, TEXT("ScatterRenderer::Initialize - Invalid Manager or World"));
+		UE_LOG(LogVoxelScatter, Error, TEXT("ScatterRenderer::Initialize - Invalid Manager or World"));
 		return;
 	}
 
@@ -81,12 +80,12 @@ void UVoxelScatterRenderer::Initialize(UVoxelScatterManager* Manager, UWorld* Wo
 	}
 	else
 	{
-		UE_LOG(LogVoxelScatterRenderer, Error, TEXT("Failed to create container actor"));
+		UE_LOG(LogVoxelScatter, Error, TEXT("Failed to create container actor"));
 		return;
 	}
 
 	bIsInitialized = true;
-	UE_LOG(LogVoxelScatterRenderer, Log, TEXT("ScatterRenderer initialized"));
+	UE_LOG(LogVoxelScatter, Log, TEXT("ScatterRenderer initialized"));
 }
 
 void UVoxelScatterRenderer::Tick(const FVector& /*ViewerPosition*/, float /*DeltaTime*/)
@@ -141,7 +140,7 @@ void UVoxelScatterRenderer::Shutdown()
 	CachedWorld = nullptr;
 	bIsInitialized = false;
 
-	UE_LOG(LogVoxelScatterRenderer, Log, TEXT("ScatterRenderer shutdown (Added: %lld, Removed: %lld)"),
+	UE_LOG(LogVoxelScatter, Log, TEXT("ScatterRenderer shutdown (Added: %lld, Removed: %lld)"),
 		TotalInstancesAdded, TotalInstancesRemoved);
 }
 
@@ -195,7 +194,7 @@ void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, c
 			}
 		}
 
-		UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Chunk (%d,%d,%d): Queued %d instances for deferred addition (new chunk)"),
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Queued %d instances for deferred addition (new chunk)"),
 			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, ScatterData.SpawnPoints.Num());
 	}
 	else
@@ -286,7 +285,7 @@ void UVoxelScatterRenderer::AddSupplementalInstances(const FIntVector& ChunkCoor
 		}
 	}
 
-	UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Chunk (%d,%d,%d): Queued %d supplemental instances"),
+	UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Queued %d supplemental instances"),
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, NewScatterData.SpawnPoints.Num());
 }
 
@@ -515,7 +514,7 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::GetOrCreateHIS
 	// CrossBillboard types use runtime-generated meshes, so Mesh soft pointer is not set
 	if (Definition->MeshType != EScatterMeshType::CrossBillboard && Definition->Mesh.IsNull())
 	{
-		UE_LOG(LogVoxelScatterRenderer, Warning,
+		UE_LOG(LogVoxelScatter, Warning,
 			TEXT("Scatter type %d (%s): Mesh soft reference is null — cannot create HISM. "
 				 "Assign a static mesh in the ScatterConfiguration data asset."),
 			ScatterTypeID, *Definition->Name);
@@ -946,7 +945,7 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComp
 			Definition.BillboardWidth, Definition.BillboardHeight, UVMin, UVMax);
 		if (!Mesh)
 		{
-			UE_LOG(LogVoxelScatterRenderer, Warning, TEXT("Failed to create billboard mesh for scatter type: %s"), *Definition.Name);
+			UE_LOG(LogVoxelScatter, Warning, TEXT("Failed to create billboard mesh for scatter type: %s"), *Definition.Name);
 			return nullptr;
 		}
 	}
@@ -956,7 +955,7 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComp
 		Mesh = Definition.Mesh.LoadSynchronous();
 		if (!Mesh)
 		{
-			UE_LOG(LogVoxelScatterRenderer, Warning, TEXT("Failed to load mesh for scatter type: %s"), *Definition.Name);
+			UE_LOG(LogVoxelScatter, Warning, TEXT("Failed to load mesh for scatter type: %s"), *Definition.Name);
 			return nullptr;
 		}
 	}
@@ -975,7 +974,7 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComp
 
 	if (!HISM)
 	{
-		UE_LOG(LogVoxelScatterRenderer, Error, TEXT("Failed to create HISM component for: %s"), *Definition.Name);
+		UE_LOG(LogVoxelScatter, Error, TEXT("Failed to create HISM component for: %s"), *Definition.Name);
 		return nullptr;
 	}
 
@@ -1017,7 +1016,7 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComp
 		}
 		else
 		{
-			UE_LOG(LogVoxelScatterRenderer, Warning, TEXT("No billboard texture assigned for scatter type: %s (ID %d). "
+			UE_LOG(LogVoxelScatter, Warning, TEXT("No billboard texture assigned for scatter type: %s (ID %d). "
 				"Set BillboardTexture or BillboardAtlasTexture for proper rendering."),
 				*Definition.Name, Definition.ScatterID);
 
@@ -1033,7 +1032,7 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComp
 	// Register with world
 	HISM->RegisterComponent();
 
-	UE_LOG(LogVoxelScatterRenderer, Log, TEXT("Created HISM component for: %s (ID: %d, MeshType: %d)"),
+	UE_LOG(LogVoxelScatter, Log, TEXT("Created HISM component for: %s (ID: %d, MeshType: %d)"),
 		*Definition.Name, Definition.ScatterID, static_cast<int32>(Definition.MeshType));
 
 	return HISM;
@@ -1112,7 +1111,7 @@ void UVoxelScatterRenderer::ConfigureHISMComponent(UHierarchicalInstancedStaticM
 	// The static mesh should have LOD0, LOD1, etc. defined with screen size thresholds
 	// HISM will automatically switch between them based on distance and screen size
 
-	UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Configured HISM for %s: LODStart=%.0f, Cull=%.0f"),
+	UE_LOG(LogVoxelScatter, Verbose, TEXT("Configured HISM for %s: LODStart=%.0f, Cull=%.0f"),
 		*Definition.Name, Definition.LODStartDistance, Definition.CullDistance);
 }
 
@@ -1259,7 +1258,7 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 
 	if (PendingInstanceAdds.Num() > 0)
 	{
-		UE_LOG(LogVoxelScatterRenderer, Verbose, TEXT("Deferred instance adds: %d entries remaining (%d budget used)"),
+		UE_LOG(LogVoxelScatter, Verbose, TEXT("Deferred instance adds: %d entries remaining (%d budget used)"),
 			PendingInstanceAdds.Num(), MaxInstanceAddsPerFrame - InstanceBudget);
 	}
 }

@@ -170,7 +170,7 @@ namespace VoxelScatterCleanupTestUtils
 	/** Submit a chunk to the scatter manager as if its mesh just arrived. */
 	static void SubmitChunk(UVoxelScatterManager* Manager, const FIntVector& ChunkCoord)
 	{
-		Manager->OnChunkMeshDataReady(ChunkCoord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+		Manager->HandOffChunkVoxels(ChunkCoord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
 	}
 
 	/** Pump Update until Condition is met or timeout. Returns whether the condition was met. */
@@ -244,8 +244,8 @@ bool FVoxelScatterAsyncPipelineTest::RunTest(const FString& Parameters)
 
 // ---------------------------------------------------------------------------
 // Unload while the async task is in flight: the arriving result must be
-// discarded, not cached. Pre-fix this repopulated ScatterDataCache/
-// SurfaceDataCache for a chunk the world no longer tracks (trail in the void).
+// discarded, not cached. Pre-fix this repopulated SpawnCache/
+// SurfaceCache for a chunk the world no longer tracks (trail in the void).
 //
 // Deterministic interleave: Update() consumes results BEFORE launching new
 // tasks, so a task launched by Update N cannot be consumed until Update N+1 —
@@ -508,7 +508,7 @@ bool FVoxelScatterMaskFilterTest::RunTest(const FString& Parameters)
 // cached surface data (independent of whether any definition spawns there).
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterClassificationTest,
-	"VoxelWorlds.Scatter.Classification.WaterAndUndergroundFlags",
+	"VoxelWorlds.Scatter.Extraction.WaterAndUndergroundFlags",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FVoxelScatterClassificationTest::RunTest(const FString& Parameters)
@@ -526,7 +526,7 @@ bool FVoxelScatterClassificationTest::RunTest(const FString& Parameters)
 
 	for (const FCase& C : Cases)
 	{
-		Harness.Manager->OnChunkMeshDataReady(C.Coord, MakeFlaggedGrassChunk(C.bWater, C.bUnderground), TestChunkSize, TestVoxelSize);
+		Harness.Manager->HandOffChunkVoxels(C.Coord, MakeFlaggedGrassChunk(C.bWater, C.bUnderground), TestChunkSize, TestVoxelSize);
 	}
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
@@ -593,7 +593,7 @@ bool FVoxelScatterClassificationTest::RunTest(const FString& Parameters)
 // floors and poking up through the roof.
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterCoveredFloorTest,
-	"VoxelWorlds.Scatter.Classification.CoveredFloorIsUnderground",
+	"VoxelWorlds.Scatter.Extraction.CoveredFloorIsUnderground",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FVoxelScatterCoveredFloorTest::RunTest(const FString& Parameters)
@@ -603,7 +603,7 @@ bool FVoxelScatterCoveredFloorTest::RunTest(const FString& Parameters)
 	FScatterTestHarness Harness(2);
 	const FIntVector Coord(0, 0, 0);
 
-	Harness.Manager->OnChunkMeshDataReady(Coord, MakeCoveredCaveChunk(), TestChunkSize, TestVoxelSize);
+	Harness.Manager->HandOffChunkVoxels(Coord, MakeCoveredCaveChunk(), TestChunkSize, TestVoxelSize);
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
 	{
@@ -656,7 +656,7 @@ bool FVoxelScatterCoveredFloorTest::RunTest(const FString& Parameters)
 // poke up through the water. Uses config WaterLevel only (no world mode needed).
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterBelowWaterTest,
-	"VoxelWorlds.Scatter.Classification.BelowWaterLevelIsUnderwater",
+	"VoxelWorlds.Scatter.Extraction.BelowWaterLevelIsUnderwater",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FVoxelScatterBelowWaterTest::RunTest(const FString& Parameters)
@@ -669,7 +669,7 @@ bool FVoxelScatterBelowWaterTest::RunTest(const FString& Parameters)
 	Harness.Config->WaterLevel = 100000.0f;
 
 	const FIntVector Coord(0, 0, 0);
-	Harness.Manager->OnChunkMeshDataReady(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+	Harness.Manager->HandOffChunkVoxels(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
 	{
@@ -709,7 +709,7 @@ bool FVoxelScatterBelowWaterTest::RunTest(const FString& Parameters)
 // cross-chunk cave floors poking up through the terrain / water above.
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterCrossChunkCoverTest,
-	"VoxelWorlds.Scatter.Classification.CoveredByNeighborChunkIsUnderground",
+	"VoxelWorlds.Scatter.Extraction.CoveredByNeighborChunkIsUnderground",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FVoxelScatterCrossChunkCoverTest::RunTest(const FString& Parameters)
@@ -725,7 +725,7 @@ bool FVoxelScatterCrossChunkCoverTest::RunTest(const FString& Parameters)
 	Harness.Manager->SetWorldMode(&WorldMode);
 
 	const FIntVector Coord(0, 0, 0);
-	Harness.Manager->OnChunkMeshDataReady(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+	Harness.Manager->HandOffChunkVoxels(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
 	{
@@ -763,7 +763,7 @@ bool FVoxelScatterCrossChunkCoverTest::RunTest(const FString& Parameters)
 // height. Only a chunk entirely below the analytic surface is buried.
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterSurfaceChunkNotBuriedTest,
-	"VoxelWorlds.Scatter.Classification.SurfaceChunkNotBuriedByLocalHeight",
+	"VoxelWorlds.Scatter.Extraction.SurfaceChunkNotBuriedByLocalHeight",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FVoxelScatterSurfaceChunkNotBuriedTest::RunTest(const FString& Parameters)
@@ -778,7 +778,7 @@ bool FVoxelScatterSurfaceChunkNotBuriedTest::RunTest(const FString& Parameters)
 	Harness.Manager->SetWorldMode(&WorldMode);
 
 	const FIntVector Coord(0, 0, 0);
-	Harness.Manager->OnChunkMeshDataReady(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+	Harness.Manager->HandOffChunkVoxels(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
 	{
@@ -817,7 +817,7 @@ bool FVoxelScatterSurfaceChunkNotBuriedTest::RunTest(const FString& Parameters)
 // dropped. Guards the "mushrooms appear on the surface after an edit" report.
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterExposedFloorTest,
-	"VoxelWorlds.Scatter.Classification.ExposedFloorReclassifiesToSurface",
+	"VoxelWorlds.Scatter.Extraction.ExposedFloorReclassifiesToSurface",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FVoxelScatterExposedFloorTest::RunTest(const FString& Parameters)
@@ -847,7 +847,7 @@ bool FVoxelScatterExposedFloorTest::RunTest(const FString& Parameters)
 	}
 
 	const FIntVector Coord(0, 0, 0);
-	Harness.Manager->OnChunkMeshDataReady(Coord, Voxels, TestChunkSize, TestVoxelSize);
+	Harness.Manager->HandOffChunkVoxels(Coord, Voxels, TestChunkSize, TestVoxelSize);
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
 	{
@@ -953,7 +953,7 @@ bool FVoxelScatterExclusionBornBareTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Volume registered"), Harness.Manager->RegisterScatterExclusionVolume(Volume));
 
 	// Submit the chunk AFTER the volume exists — the fresh generation must come out bare
-	Harness.Manager->OnChunkMeshDataReady(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+	Harness.Manager->HandOffChunkVoxels(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
 
 	const bool bReady = PumpUntil(Harness.Manager, 15.0f, [&]()
 	{

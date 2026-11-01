@@ -7795,18 +7795,18 @@ void UVoxelChunkManager::HandOffChunkScatter(const FIntVector& ChunkCoord, FVoxe
 	{
 		TArray<FVoxelData> EditMergedVoxels = State.Descriptor.GetVoxelDataForRead();
 		EditManager->ApplyEditsToVoxelData(ChunkCoord, EditMergedVoxels);
-		ScatterManager->OnChunkMeshDataReady(ChunkCoord, EditMergedVoxels, State.Descriptor.ChunkSize, Configuration->VoxelSize);
+		ScatterManager->HandOffChunkVoxels(ChunkCoord, EditMergedVoxels, State.Descriptor.ChunkSize, Configuration->VoxelSize);
 	}
 	else if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0 && State.Descriptor.IsCompact())
 	{
 		// A far-compressed chunk hands scatter its snapshot (decoded on a worker, prefetched when the chunk was queued for
 		// its mesh) and stays compressed (G65).
 		const TSharedPtr<const TArray<FVoxelData>> Snapshot = GetVoxelSnapshot(ChunkCoord, State);
-		ScatterManager->OnChunkMeshDataReady(ChunkCoord, *Snapshot, State.Descriptor.ChunkSize, Configuration->VoxelSize);
+		ScatterManager->HandOffChunkVoxels(ChunkCoord, *Snapshot, State.Descriptor.ChunkSize, Configuration->VoxelSize);
 	}
 	else
 	{
-		ScatterManager->OnChunkMeshDataReady(ChunkCoord, State.Descriptor.GetVoxelDataForRead(), State.Descriptor.ChunkSize,
+		ScatterManager->HandOffChunkVoxels(ChunkCoord, State.Descriptor.GetVoxelDataForRead(), State.Descriptor.ChunkSize,
 			Configuration->VoxelSize);
 	}
 }

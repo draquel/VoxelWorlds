@@ -12,12 +12,12 @@ The scatter system places vegetation (trees, grass, rocks) on voxel terrain usin
 ```
 VoxelChunkManager
     │
-    ├── OnChunkMeshDataReady(ChunkCoord, VoxelData, ChunkSize, VoxelSize)
+    ├── HandOffChunkVoxels(ChunkCoord, VoxelData, ChunkSize, VoxelSize)
     │       │
     │       ▼
     │   VoxelScatterManager
     │       │
-    │       ├── ExtractSurfacePointsFromVoxelData() (cubic: ExtractSurfacePointsCubic, planet: ExtractSurfacePointsAlongUp)
+    │       ├── ExtractSurfacePointsByColumn() (cubic: ExtractSurfacePointsByBlockTop, planet: ExtractSurfacePointsByRay)
     │       │       Reads the chunk's (edit-merged) voxels directly: LOD-independent, never the mesh
     │       │
     │       ├── VoxelScatterPlacement (apply rules, generate spawn points)
@@ -51,7 +51,7 @@ public:
     const FScatterDefinition* GetScatterDefinition(int32 ScatterID) const;
 
     // Chunk hand-off (called by ChunkManager when a chunk's mesh is ready; reads the voxels, not the mesh)
-    void OnChunkMeshDataReady(const FIntVector& ChunkCoord, const TArray<FVoxelData>& VoxelData, int32 ChunkSize, float VoxelSize);
+    void HandOffChunkVoxels(const FIntVector& ChunkCoord, const TArray<FVoxelData>& VoxelData, int32 ChunkSize, float VoxelSize);
     void OnChunkUnloaded(const FIntVector& ChunkCoord);
 
     // Edit integration
@@ -214,7 +214,7 @@ Two extraction methods are available:
 The default path extracts surface points directly from the 32³ voxel data, which is **LOD-independent** — voxel data is always generated at full resolution regardless of the chunk's LOD level, producing identical scatter at any LOD.
 
 ```cpp
-void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
+void UVoxelScatterManager::ExtractSurfacePointsByColumn(
     const TArray<FVoxelData>& VoxelData,
     const FIntVector& ChunkCoord,
     const FVector& ChunkWorldOrigin,
@@ -268,7 +268,7 @@ void UVoxelScatterManager::ExtractSurfacePointsFromVoxelData(
 #### On a Planet: Radial Rays on the Cube-Sphere Grid (spherical Phase 4, SP-G1; world modes review G31)
 
 World-Z columns cross a planet's surface at a slant away from the poles and run along it at the equator, so on a
-planet `UVoxelScatterManager::ExtractSurfacePointsAlongUp` takes the column scan's columns to be the planet's **radial
+planet `UVoxelScatterManager::ExtractSurfacePointsByRay` takes the column scan's columns to be the planet's **radial
 lines**: one ray from the centre through the centre of each cell of the cube-sphere grid (`FVoxelCubeSphereGrid`,
 VoxelCore) whose cells at the face centres are the point spacing across (`CellsPerEdgeFor(PlanetRadius, Stride *
 VoxelSize)`). The grid is the same for every chunk, so neighbouring chunks sample one family of rays, and each chunk
@@ -322,7 +322,7 @@ got too few points; the staircase rounding also thinned the points inside a chun
 left the chunk needed G29's rules to decide whether the neighbour made its point. The rays need none of that.
 `voxel.Scatter.LineTopAudit` was deleted in CR1 (SCAT-29; `Scatter.Planet.LineTop.*` and `Planet.DensityPerArea` cover it).
 
-Heightmap worlds keep `ExtractSurfacePointsFromVoxelData` and the old expressions (`LocalUp` +Z, weight 1, the jitter
+Heightmap worlds keep `ExtractSurfacePointsByColumn` and the old expressions (`LocalUp` +Z, weight 1, the jitter
 call unchanged). `voxel.Scatter.Digest` logs the cached spawn points' counts and a CRC per type, to compare builds
 (extraction is deterministic; the retired GPU extractor's per-cell claim was not). Tests: `Scatter.Planet.AlongLocalUp`
 (points within 8 uu of the surface, instances' up within 0.01° of the radial), `Scatter.Planet.DensityPerArea`,
@@ -623,7 +623,7 @@ void UVoxelScatterManager::ClearScatterInRadius(const FVector& WorldPosition, fl
         ClearedVolumesPerChunk.FindOrAdd(ChunkCoord).Add(FClearedScatterVolume(WorldPosition, Radius));
 
         // Remove spawn points within radius, collecting the affected types
-        FChunkScatterData* ScatterData = ScatterDataCache.Find(ChunkCoord);
+        FChunkScatterData* ScatterData = SpawnCache.Find(ChunkCoord);
         for (int32 i = ScatterData->SpawnPoints.Num() - 1; i >= 0; --i)
         {
             if (FVector::DistSquared(ScatterData->SpawnPoints[i].Position, WorldPosition) <= Radius * Radius)
@@ -737,8 +737,8 @@ keeps the smooth three for the tests that ran on them).
 
 ### Memory
 
-- Surface data cached per chunk (`SurfaceDataCache`)
-- Scatter spawn points cached per chunk (`ScatterDataCache`)
+- Surface data cached per chunk (`SurfaceCache`)
+- Scatter spawn points cached per chunk (`SpawnCache`)
 - HISM components shared across chunks (one per scatter type and region)
 - Instance pool per HISM (`InstancePools`) — tracks free list and per-chunk indices
 - A pool grows to its peak; a HISM taking a batch whose pool outweighs its live instances is compacted (above). Pooled instances are not drawn, but each change to their HISM still processes them
@@ -848,9 +848,9 @@ Voxel data is **always 32³ at base VoxelSize** regardless of LOD level, so the 
 - **Supplemental passes**: Distance-based definitions still added when player approaches
 
 ### Key Files
-- `VoxelScatterManager.h`: `ExtractSurfacePointsFromVoxelData()` declaration, `FPendingScatterGeneration::ChunkVoxelData`
-- `VoxelScatterManager.cpp`: `ExtractSurfacePointsFromVoxelData()` implementation, integration in `LaunchAsyncScatterGeneration()`
-- `VoxelChunkManager.cpp`: Passes `VoxelData`, `ChunkSize`, `VoxelSize` via `OnChunkMeshDataReady()`
+- `VoxelScatterManager.h`: `ExtractSurfacePointsByColumn()` declaration, `FPendingScatterGeneration::ChunkVoxelData`
+- `VoxelScatterManager.cpp`: `ExtractSurfacePointsByColumn()` implementation, integration in `LaunchAsyncScatterGeneration()`
+- `VoxelChunkManager.cpp`: Passes `VoxelData`, `ChunkSize`, `VoxelSize` via `HandOffChunkVoxels()`
 
 ## Cubic Terrain Scatter (Phase 7E)
 
@@ -858,7 +858,7 @@ Cubic meshing mode uses specialized scatter behavior: block-face snapping, cross
 
 ### Block-Face Snap Placement
 
-When `MeshingMode == Cubic`, scatter uses `ExtractSurfacePointsCubic()` instead of the smooth-terrain voxel column scan:
+When `MeshingMode == Cubic`, scatter uses `ExtractSurfacePointsByBlockTop()` instead of the smooth-terrain voxel column scan:
 
 - One surface point per exposed top block face
 - Position at face center: `(X + 0.5) * VoxelSize, (Y + 0.5) * VoxelSize, (Z + 1) * VoxelSize`
@@ -1032,7 +1032,7 @@ for each voxel in canopy bounding box:
 | HISM | No | Yes (all distances) | Visual-only, best performance |
 | Both | Yes (near) | Yes (far) | Hybrid: edit nearby, visual far |
 
-In `OnChunkMeshDataReady()`, VoxelInjection scatter definitions are filtered based on TreeMode:
+In `HandOffChunkVoxels()`, VoxelInjection scatter definitions are filtered based on TreeMode:
 - **VoxelData**: Skip all VoxelInjection defs (trees already in terrain mesh)
 - **HISM**: Include VoxelInjection defs (rendered as HISM instances)
 - **Both**: Skip within `VoxelTreeMaxDistance`, include beyond
