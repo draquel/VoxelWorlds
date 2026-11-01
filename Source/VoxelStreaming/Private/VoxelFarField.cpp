@@ -1,6 +1,6 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
-#include "VoxelPlanetFarField.h"
+#include "VoxelFarField.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelPlanetOcean.h"
 #include "VoxelSurfaceQuery.h"
@@ -26,7 +26,7 @@ bool FVoxelFarFieldSurface::IsMaterialBlendEnabled()
 	return CVarFarFieldMaterialBlend.GetValueOnAnyThread() != 0;
 }
 
-namespace VoxelPlanetFarFieldPrivate
+namespace VoxelFarFieldPrivate
 {
 	/** The angle between two unit directions, precise for small angles (atan2 of the cross and dot products). */
 	double AngleBetween(const FVector& A, const FVector& B)
@@ -109,7 +109,7 @@ FVector FVoxelFarFieldPatchKey::GetDirection(double FU, double FV) const
 
 // ==================== FVoxelFarFieldSettings ====================
 
-int32 FVoxelFarFieldSettings::ComputeBandLevel(double InRadius, double InChunkWorldSize)
+int32 FVoxelFarFieldSettings::ComputeEdgeLevel(double InRadius, double InChunkWorldSize)
 {
 	if (InRadius <= 0.0 || InChunkWorldSize <= 0.0)
 	{
@@ -123,7 +123,7 @@ int32 FVoxelFarFieldSettings::ComputeBandLevel(double InRadius, double InChunkWo
 	return FMath::Clamp(FMath::FloorToInt32(FMath::Log2(Ratio)), 0, 27);
 }
 
-int32 FVoxelFarFieldSettings::ComputeHeightmapBandLevel(int32 InRootChunks)
+int32 FVoxelFarFieldSettings::ComputeHeightmapEdgeLevel(int32 InRootChunks)
 {
 	if (InRootChunks <= 1)
 	{
@@ -317,9 +317,9 @@ FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMix(const FVoxelFa
 	return SampleMaterialMix(Sample.Direction, Altitude, Continentalness);
 }
 
-// ==================== FVoxelPlanetFarField: statics ====================
+// ==================== FVoxelFarField: statics ====================
 
-bool FVoxelPlanetFarField::IsBelowHorizon(const FVector& Center, double OccluderRadius, const FVector& Camera, const FVector& CapDirection,
+bool FVoxelFarField::IsBelowHorizon(const FVector& Center, double OccluderRadius, const FVector& Camera, const FVector& CapDirection,
 	double CapAngle, double TopRadius)
 {
 	const FVector ToCamera = Camera - Center;
@@ -332,11 +332,11 @@ bool FVoxelPlanetFarField::IsBelowHorizon(const FVector& Center, double Occluder
 	// view for as much again past that.
 	const double CameraAngle = FMath::Acos(FMath::Clamp(OccluderRadius / CameraDistance, -1.0, 1.0));
 	const double TopAngle = TopRadius > OccluderRadius ? FMath::Acos(FMath::Clamp(OccluderRadius / TopRadius, -1.0, 1.0)) : 0.0;
-	const double Angle = VoxelPlanetFarFieldPrivate::AngleBetween(ToCamera / CameraDistance, CapDirection);
+	const double Angle = VoxelFarFieldPrivate::AngleBetween(ToCamera / CameraDistance, CapDirection);
 	return Angle - CapAngle > CameraAngle + TopAngle;
 }
 
-bool FVoxelPlanetFarField::ShouldDrawSea(double SeaRadius, double MaxSag, int32 MinSegments, int32 MaxSegments)
+bool FVoxelFarField::ShouldDrawSea(double SeaRadius, double MaxSag, int32 MinSegments, int32 MaxSegments)
 {
 	if (SeaRadius <= 0.0)
 	{
@@ -506,7 +506,7 @@ FVoxelFarFieldFootprint FVoxelFarFieldFrame::MakeFootprint(const FVoxelFarFieldP
 	for (int32 Corner = 0; Corner < 4; ++Corner)
 	{
 		const FVector CornerDirection = Key.GetDirection(Corner & 1, Corner >> 1);
-		Footprint.CapAngle = FMath::Max(Footprint.CapAngle, VoxelPlanetFarFieldPrivate::AngleBetween(Footprint.CapDirection, CornerDirection));
+		Footprint.CapAngle = FMath::Max(Footprint.CapAngle, VoxelFarFieldPrivate::AngleBetween(Footprint.CapDirection, CornerDirection));
 	}
 	return Footprint;
 }
@@ -552,7 +552,7 @@ bool FVoxelFarFieldFrame::Intersects(const FVoxelFarFieldFootprint& Footprint, c
 	{
 		return Region.Box.bIsValid && Footprint.Box.Intersect(Region.Box);
 	}
-	return Region.bCap && VoxelPlanetFarFieldPrivate::AngleBetween(Footprint.CapDirection, Region.Direction) <= Footprint.CapAngle + Region.AngularRadius;
+	return Region.bCap && VoxelFarFieldPrivate::AngleBetween(Footprint.CapDirection, Region.Direction) <= Footprint.CapAngle + Region.AngularRadius;
 }
 
 bool FVoxelFarFieldFrame::TakesZones(const FVoxelFarFieldFootprint& Footprint) const
@@ -593,9 +593,9 @@ double FVoxelFarFieldFrame::GroundDistanceMin(const FGround& Ground, const FVoxe
 {
 	if (Settings.bHeightmap)
 	{
-		return VoxelPlanetFarFieldPrivate::DistanceToBoxMin(Ground.XY, Footprint.Box);
+		return VoxelFarFieldPrivate::DistanceToBoxMin(Ground.XY, Footprint.Box);
 	}
-	const double Angle = VoxelPlanetFarFieldPrivate::AngleBetween(Ground.Direction, Footprint.CapDirection) - Footprint.CapAngle;
+	const double Angle = VoxelFarFieldPrivate::AngleBetween(Ground.Direction, Footprint.CapDirection) - Footprint.CapAngle;
 	return Ground.Radius * FMath::Max(Angle, 0.0);
 }
 
@@ -603,16 +603,16 @@ double FVoxelFarFieldFrame::GroundDistanceMax(const FGround& Ground, const FVoxe
 {
 	if (Settings.bHeightmap)
 	{
-		return VoxelPlanetFarFieldPrivate::DistanceToBoxMax(Ground.XY, Footprint.Box);
+		return VoxelFarFieldPrivate::DistanceToBoxMax(Ground.XY, Footprint.Box);
 	}
-	return Ground.Radius * (VoxelPlanetFarFieldPrivate::AngleBetween(Ground.Direction, Footprint.CapDirection) + Footprint.CapAngle);
+	return Ground.Radius * (VoxelFarFieldPrivate::AngleBetween(Ground.Direction, Footprint.CapDirection) + Footprint.CapAngle);
 }
 
 double FVoxelFarFieldFrame::CameraDistanceMin(const FVector& Camera, const FVoxelFarFieldFootprint& Footprint) const
 {
 	if (Settings.bHeightmap)
 	{
-		return VoxelPlanetFarFieldPrivate::DistanceToBoxMin(FVector2D(Camera.X, Camera.Y), Footprint.Box);
+		return VoxelFarFieldPrivate::DistanceToBoxMin(FVector2D(Camera.X, Camera.Y), Footprint.Box);
 	}
 	const FVector CapPoint = Settings.Center + Footprint.CapDirection * Settings.Radius;
 	return FMath::Max(FVector::Dist(Camera, CapPoint) - Footprint.CapAngle * Settings.Radius, 0.0);
@@ -629,7 +629,7 @@ bool FVoxelFarFieldFrame::IsCulled(const FVector& Camera, const FVoxelFarFieldFo
 		{
 			return true;
 		}
-		const FBox2D Bounds = VoxelPlanetFarFieldPrivate::BoundsBox(Settings.Bounds);
+		const FBox2D Bounds = VoxelFarFieldPrivate::BoundsBox(Settings.Bounds);
 		return Bounds.bIsValid && !Bounds.Intersect(Footprint.Box);
 	}
 	double Top = Settings.Radius + MaxAltitude;
@@ -637,7 +637,7 @@ bool FVoxelFarFieldFrame::IsCulled(const FVector& Camera, const FVoxelFarFieldFo
 	{
 		Top = FMath::Max(Top, Settings.SeaRadius);
 	}
-	return FVoxelPlanetFarField::IsBelowHorizon(Settings.Center, Settings.Radius + Settings.MinAltitude - Settings.Sink, Camera,
+	return FVoxelFarField::IsBelowHorizon(Settings.Center, Settings.Radius + Settings.MinAltitude - Settings.Sink, Camera,
 		Footprint.CapDirection, Footprint.CapAngle, Top);
 }
 
@@ -664,7 +664,7 @@ bool FVoxelFarFieldFrame::GetRootKeys(const FVector& Camera, TArray<FVoxelFarFie
 	{
 		Region = FBox2D(CameraXY - FVector2D(Settings.FarDistance), CameraXY + FVector2D(Settings.FarDistance));
 	}
-	const FBox2D Bounds = VoxelPlanetFarFieldPrivate::BoundsBox(Settings.Bounds);
+	const FBox2D Bounds = VoxelFarFieldPrivate::BoundsBox(Settings.Bounds);
 	if (Bounds.bIsValid)
 	{
 		if (Region.bIsValid)
@@ -755,10 +755,10 @@ FVoxelFarFieldPatchKey FVoxelFarFieldFrame::ChildKeyOf(const FVoxelFarFieldPatch
 	return FVoxelFarFieldPatchKey(Key.Face, ChildLevel, X, Y);
 }
 
-void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, const FVoxelFarFieldSurface& Surface,
+void FVoxelFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, const FVoxelFarFieldSurface& Surface,
 	const TArray<FVoxelConditioningZone>& Zones, const FVoxelFarFieldPatchKey& Key, FVoxelFarFieldPatchMesh& Out)
 {
-	using namespace VoxelPlanetFarFieldPrivate;
+	using namespace VoxelFarFieldPrivate;
 	const double StartTime = FPlatformTime::Seconds();
 
 	Out = FVoxelFarFieldPatchMesh();
@@ -768,7 +768,7 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 	const int32 Q = FMath::Max(Settings.PatchQuads, 2);
 	const int32 Row = Q + 1;
 	const double Sink = Settings.Sink;
-	const bool bBandLeaf = Key.Level >= Settings.BandLevel;
+	const bool bEdgeLeaf = Key.Level >= Settings.EdgeLevel;
 	// The surface frame (code review CR2, STREAM-18): a planet's sphere, or a heightmap world's plane (WM-MP1: the patch a
 	// tile of the XY plane, the surface the generated height, local up +Z, the "altitude" of a sample its world Z).
 	// Everything below reads the surface through it and never asks which it is.
@@ -890,13 +890,13 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 			CentreAltitudes[I + J * Q] = Altitude;
 			Out.MinAltitude = FMath::Min(Out.MinAltitude, static_cast<float>(Altitude));
 			Out.MaxAltitude = FMath::Max(Out.MaxAltitude, static_cast<float>(Altitude));
-			if (bBandLeaf)
+			if (bEdgeLeaf)
 			{
 				SurfaceChunks.Add(ChunkOf(MiddleSurface));
 			}
 		}
 	}
-	if (bBandLeaf)
+	if (bEdgeLeaf)
 	{
 		// Every vertex's chunk, and the chunks a vertex spacing away along each axis: a chunk the surface passes through
 		// between vertices is caught too, so a patch never hides over a chunk that is not drawn.
@@ -1296,27 +1296,27 @@ void FVoxelPlanetFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, co
 	Out.BuildMs = (FPlatformTime::Seconds() - StartTime) * 1000.0;
 }
 
-// ==================== FVoxelPlanetFarField ====================
+// ==================== FVoxelFarField ====================
 
-FVoxelPlanetFarField::FVoxelPlanetFarField() = default;
+FVoxelFarField::FVoxelFarField() = default;
 
-FVoxelPlanetFarField::~FVoxelPlanetFarField()
+FVoxelFarField::~FVoxelFarField()
 {
 	Reset();
 }
 
-void FVoxelPlanetFarField::Initialize(const FVoxelFarFieldSettings& InSettings, TSharedPtr<const FVoxelFarFieldSurface> InSurface)
+void FVoxelFarField::Initialize(const FVoxelFarFieldSettings& InSettings, TSharedPtr<const FVoxelFarFieldSurface> InSurface)
 {
 	Reset();
 	Settings = InSettings;
 	Settings.PatchQuads = FMath::Clamp(Settings.PatchQuads, 2, 64);
-	Settings.BandLevel = FMath::Clamp(Settings.BandLevel, 0, 27);
+	Settings.EdgeLevel = FMath::Clamp(Settings.EdgeLevel, 0, 27);
 	Settings.SkirtLevels = FMath::Clamp(Settings.SkirtLevels, 0, 5);
 	Frame = FVoxelFarFieldFrame(Settings);
 	Surface = MoveTemp(InSurface);
 }
 
-void FVoxelPlanetFarField::Reset()
+void FVoxelFarField::Reset()
 {
 	Patches.Reset();
 	Roots.Reset();
@@ -1333,19 +1333,19 @@ void FVoxelPlanetFarField::Reset()
 	Surface.Reset();
 }
 
-FVoxelPlanetFarField::FPatchState* FVoxelPlanetFarField::FindPatchMutable(uint64 PackedKey)
+FVoxelFarField::FPatchState* FVoxelFarField::FindPatchMutable(uint64 PackedKey)
 {
 	TUniquePtr<FPatchState>* Found = Patches.Find(PackedKey);
 	return Found ? Found->Get() : nullptr;
 }
 
-const FVoxelPlanetFarField::FPatchState* FVoxelPlanetFarField::FindPatch(uint64 PackedKey) const
+const FVoxelFarField::FPatchState* FVoxelFarField::FindPatch(uint64 PackedKey) const
 {
 	const TUniquePtr<FPatchState>* Found = Patches.Find(PackedKey);
 	return Found ? Found->Get() : nullptr;
 }
 
-FVoxelPlanetFarField::FPatchState& FVoxelPlanetFarField::GetOrAddPatch(const FVoxelFarFieldPatchKey& Key)
+FVoxelFarField::FPatchState& FVoxelFarField::GetOrAddPatch(const FVoxelFarFieldPatchKey& Key)
 {
 	TUniquePtr<FPatchState>& Slot = Patches.FindOrAdd(Key.Pack());
 	if (!Slot)
@@ -1357,7 +1357,7 @@ FVoxelPlanetFarField::FPatchState& FVoxelPlanetFarField::GetOrAddPatch(const FVo
 	return *Slot;
 }
 
-void FVoxelPlanetFarField::ForEachPatch(TFunctionRef<void(const FPatchState&)> VisitPatch) const
+void FVoxelFarField::ForEachPatch(TFunctionRef<void(const FPatchState&)> VisitPatch) const
 {
 	for (const TPair<uint64, TUniquePtr<FPatchState>>& Pair : Patches)
 	{
@@ -1365,12 +1365,12 @@ void FVoxelPlanetFarField::ForEachPatch(TFunctionRef<void(const FPatchState&)> V
 	}
 }
 
-const FVoxelPlanetFarField::FPatchState* FVoxelPlanetFarField::FindDrawnPatchAt(const FVector& WorldPoint, bool bTerrainOnly) const
+const FVoxelFarField::FPatchState* FVoxelFarField::FindDrawnPatchAt(const FVector& WorldPoint, bool bTerrainOnly) const
 {
 	return FindDrawnPatch(Frame.SampleAt(WorldPoint, /*bNormalize*/ false), bTerrainOnly);
 }
 
-const FVoxelPlanetFarField::FPatchState* FVoxelPlanetFarField::FindDrawnPatch(const FVoxelFarFieldSample& Sample, bool bTerrainOnly) const
+const FVoxelFarField::FPatchState* FVoxelFarField::FindDrawnPatch(const FVoxelFarFieldSample& Sample, bool bTerrainOnly) const
 {
 	const FVoxelFarFieldSample Lookup = Frame.Normalized(Sample);
 	FVoxelFarFieldPatchKey Key;
@@ -1397,7 +1397,7 @@ const FVoxelPlanetFarField::FPatchState* FVoxelPlanetFarField::FindDrawnPatch(co
 	}
 }
 
-void FVoxelPlanetFarField::ReleaseMesh(uint64 PackedKey)
+void FVoxelFarField::ReleaseMesh(uint64 PackedKey)
 {
 	if (FPatchState* Patch = FindPatchMutable(PackedKey))
 	{
@@ -1409,7 +1409,7 @@ void FVoxelPlanetFarField::ReleaseMesh(uint64 PackedKey)
 	}
 }
 
-void FVoxelPlanetFarField::InvalidateZone(const FVoxelConditioningZone& Zone)
+void FVoxelFarField::InvalidateZone(const FVoxelConditioningZone& Zone)
 {
 	const FVoxelFarFieldRegion Region = Frame.RegionOfZone(Zone);
 	if (!Region.IsValid())
@@ -1426,28 +1426,28 @@ void FVoxelPlanetFarField::InvalidateZone(const FVoxelConditioningZone& Zone)
 	}
 }
 
-double FVoxelPlanetFarField::GetGroundDistanceMin(const FPatchState& Patch) const
+double FVoxelFarField::GetGroundDistanceMin(const FPatchState& Patch) const
 {
 	return Frame.GroundDistanceMin(Ground, Patch);
 }
 
-double FVoxelPlanetFarField::GetGroundDistanceMax(const FPatchState& Patch) const
+double FVoxelFarField::GetGroundDistanceMax(const FPatchState& Patch) const
 {
 	return Frame.GroundDistanceMax(Ground, Patch);
 }
 
-bool FVoxelPlanetFarField::IsInBand(const FPatchState& Patch) const
+bool FVoxelFarField::IsEdgePatch(const FPatchState& Patch) const
 {
-	return View.BandRadius > 0.0 && GetGroundDistanceMin(Patch) < View.BandRadius * (Patch.bHasChildren ? 1.1 : 1.0);
+	return View.EdgeRadius > 0.0 && GetGroundDistanceMin(Patch) < View.EdgeRadius * (Patch.bHasChildren ? 1.1 : 1.0);
 }
 
-FIntVector FVoxelPlanetFarField::GetChunkOf(const FVector& WorldPoint) const
+FIntVector FVoxelFarField::GetChunkOf(const FVector& WorldPoint) const
 {
 	const FVector Local = (WorldPoint - Settings.GridOrigin) / FMath::Max(Settings.ChunkWorldSize, 1.0);
 	return FIntVector(FMath::FloorToInt32(Local.X), FMath::FloorToInt32(Local.Y), FMath::FloorToInt32(Local.Z));
 }
 
-bool FVoxelPlanetFarField::UpdateCovered(FPatchState& Patch)
+bool FVoxelFarField::UpdateCovered(FPatchState& Patch)
 {
 	if (View.ChunkStateVersion >= 0 && Patch.CoveredVersion == View.ChunkStateVersion)
 	{
@@ -1455,7 +1455,7 @@ bool FVoxelPlanetFarField::UpdateCovered(FPatchState& Patch)
 	}
 	if (!Patch.bBuilt && Patch.SampleChunks.Num() == 0 && Surface.IsValid())
 	{
-		// The lazy test for a band patch that is not built: the chunks at a 9 x 9 grid of its surface (spacing at most a
+		// The lazy test for an edge patch that is not built: the chunks at a 9 x 9 grid of its surface (spacing at most a
 		// quarter of a chunk), without zones.
 		const TArray<FVoxelConditioningZone> NoZones;
 		TSet<FIntVector> Chunks;
@@ -1495,18 +1495,18 @@ bool FVoxelPlanetFarField::UpdateCovered(FPatchState& Patch)
 	return bCovered;
 }
 
-bool FVoxelPlanetFarField::IsCulled(const FPatchState& Patch) const
+bool FVoxelFarField::IsCulled(const FPatchState& Patch) const
 {
 	return Frame.IsCulled(View.Camera, Patch, Patch.bBuilt ? Patch.MaxAltitude : Settings.MaxAltitude);
 }
 
-bool FVoxelPlanetFarField::WantsSplit(const FPatchState& Patch) const
+bool FVoxelFarField::WantsSplit(const FPatchState& Patch) const
 {
-	if (Patch.Key.Level >= Settings.BandLevel)
+	if (Patch.Key.Level >= Settings.EdgeLevel)
 	{
 		return false;
 	}
-	if (IsInBand(Patch))
+	if (IsEdgePatch(Patch))
 	{
 		return true;
 	}
@@ -1520,7 +1520,7 @@ bool FVoxelPlanetFarField::WantsSplit(const FPatchState& Patch) const
 	return Pixels > View.MaxScreenError * (Patch.bHasChildren ? 0.7 : 1.0);
 }
 
-void FVoxelPlanetFarField::RequestBuild(FPatchState& Patch)
+void FVoxelFarField::RequestBuild(FPatchState& Patch)
 {
 	if (Patch.bBuilding || (Patch.bResident && !Patch.bDirty))
 	{
@@ -1533,11 +1533,11 @@ void FVoxelPlanetFarField::RequestBuild(FPatchState& Patch)
 	Requests.Add({ Patch.Key.Pack(), (Patch.Key.Level == 0 ? 0.0 : 1.0e12) + Distance });
 }
 
-bool FVoxelPlanetFarField::IsLazy(FPatchState& Patch, const FPatchState& Parent)
+bool FVoxelFarField::IsLazy(FPatchState& Patch, const FPatchState& Parent)
 {
-	// A band patch with nothing to draw stands in without a mesh: every chunk under it drawn, no sea, and not near the
+	// An edge patch with nothing to draw stands in without a mesh: every chunk under it drawn, no sea, and not near the
 	// window's edge (those are built while covered, ready for when their chunks unload).
-	if (Patch.Key.Level < Settings.BandLevel || Patch.bResident)
+	if (Patch.Key.Level < Settings.EdgeLevel || Patch.bResident)
 	{
 		return false;
 	}
@@ -1545,7 +1545,7 @@ bool FVoxelPlanetFarField::IsLazy(FPatchState& Patch, const FPatchState& Parent)
 	FIntPoint Column;
 	if (bMayHaveSea && WaterTileQuery && Frame.GetColumn(Patch, Column))
 	{
-		// A heightmap column's water tile draws its sea: a covered band patch over one has nothing to draw, sea included,
+		// A heightmap column's water tile draws its sea: a covered edge patch over one has nothing to draw, sea included,
 		// so it can be lazy (otherwise, released once hidden, it was built again a few seconds later and its parent stood
 		// in over the window for the frames the build took, over and over while the viewer stood still).
 		bMayHaveSea = !WaterTileQuery(Column);
@@ -1565,29 +1565,29 @@ bool FVoxelPlanetFarField::IsLazy(FPatchState& Patch, const FPatchState& Parent)
 	return GetGroundDistanceMax(Patch) < View.PrebuildRadius && UpdateCovered(Patch);
 }
 
-bool FVoxelPlanetFarField::IsKeptBuilt(const FPatchState& Patch) const
+bool FVoxelFarField::IsKeptBuilt(const FPatchState& Patch) const
 {
-	// Roots (the fallback of last resort) and band patches near the window's edge (shown the moment their chunks unload).
+	// Roots (the fallback of last resort) and edge patches near the window's edge (shown the moment their chunks unload).
 	return Patch.Key.Level == 0
-		|| (Patch.Key.Level >= Settings.BandLevel && GetGroundDistanceMin(Patch) < View.BandRadius
+		|| (Patch.Key.Level >= Settings.EdgeLevel && GetGroundDistanceMin(Patch) < View.EdgeRadius
 			&& GetGroundDistanceMax(Patch) >= View.PrebuildRadius);
 }
 
-void FVoxelPlanetFarField::SetDrawn(FPatchState& Patch)
+void FVoxelFarField::SetDrawn(FPatchState& Patch)
 {
 	bool bTerrain = true;
-	if (Patch.Key.Level >= Settings.BandLevel && UpdateCovered(Patch) && Patch.CoveredSince >= 0.0
+	if (Patch.Key.Level >= Settings.EdgeLevel && UpdateCovered(Patch) && Patch.CoveredSince >= 0.0
 		&& View.Time - Patch.CoveredSince >= View.HideDelay)
 	{
 		bTerrain = false;
 	}
 	Patch.bDrawTerrain = bTerrain;
 	// On a heightmap world the water tiles draw the sea over the streamed columns (a planet has no tiles: the far field's
-	// sea is the only one), so a band patch's sea hides where its column's tile is drawn, and without a tile query with its
+	// sea is the only one), so an edge patch's sea hides where its column's tile is drawn, and without a tile query with its
 	// terrain (WM-MP1). The ring between the window's load and unload horizons holds chunks without tiles: its sea stays.
 	bool bSea = Settings.bSea && Patch.bHasSea;
 	FIntPoint Column;
-	if (bSea && Patch.Key.Level >= Settings.BandLevel && Frame.GetColumn(Patch, Column))
+	if (bSea && Patch.Key.Level >= Settings.EdgeLevel && Frame.GetColumn(Patch, Column))
 	{
 		bSea = WaterTileQuery ? !WaterTileQuery(Column) : bTerrain;
 	}
@@ -1598,7 +1598,7 @@ void FVoxelPlanetFarField::SetDrawn(FPatchState& Patch)
 	}
 }
 
-void FVoxelPlanetFarField::ClearDrawnSubtree(const FPatchState& Patch)
+void FVoxelFarField::ClearDrawnSubtree(const FPatchState& Patch)
 {
 	if (!Patch.bHasChildren)
 	{
@@ -1615,7 +1615,7 @@ void FVoxelPlanetFarField::ClearDrawnSubtree(const FPatchState& Patch)
 	}
 }
 
-void FVoxelPlanetFarField::ReleasePatch(FPatchState& Patch, FVoxelFarFieldChanges& OutChanges)
+void FVoxelFarField::ReleasePatch(FPatchState& Patch, FVoxelFarFieldChanges& OutChanges)
 {
 	if (!Patch.bResident)
 	{
@@ -1644,7 +1644,7 @@ void FVoxelPlanetFarField::ReleasePatch(FPatchState& Patch, FVoxelFarFieldChange
 	++TotalReleased;
 }
 
-void FVoxelPlanetFarField::PruneChildren(FPatchState& Patch, FVoxelFarFieldChanges& OutChanges)
+void FVoxelFarField::PruneChildren(FPatchState& Patch, FVoxelFarFieldChanges& OutChanges)
 {
 	if (!Patch.bHasChildren)
 	{
@@ -1666,7 +1666,7 @@ void FVoxelPlanetFarField::PruneChildren(FPatchState& Patch, FVoxelFarFieldChang
 	Patch.bHasChildren = false;
 }
 
-bool FVoxelPlanetFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutChanges)
+bool FVoxelFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutChanges)
 {
 	FPatchState* Patch = FindPatchMutable(PackedKey);
 	if (!Patch)
@@ -1691,11 +1691,11 @@ bool FVoxelPlanetFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutCha
 	// nothing (a stand-in would replace everything drawn under that ancestor, the horizon and the voxel window included).
 	// After a cut (a teleport) it may lie in full view: the ancestor stands in as before, or there would be a hole.
 	const bool bWaitsUndrawn = View.bAvoidStandIns && bCulledBefore && !bCameraCut;
-	// A band patch standing in without a mesh (its parent found it lazy this update: never built, or released while
+	// An edge patch standing in without a mesh (its parent found it lazy this update: never built, or released while
 	// covered) covers its area by drawing nothing; anything else unbuilt is built first.
 	if (Patch->bLazy)
 	{
-		++CoveredBandVisits;
+		++CoveredEdgeVisits;
 		// Near the window's edge it is wanted built for when its chunks unload (VP4): built meanwhile, still drawing nothing.
 		if (View.bAvoidStandIns && IsKeptBuilt(*Patch))
 		{
@@ -1733,7 +1733,7 @@ bool FVoxelPlanetFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutCha
 			Patch->bHasChildren = true;
 		}
 		bool bCovered = true;
-		const int64 CoveredBandVisitsBefore = CoveredBandVisits;
+		const int64 CoveredEdgeVisitsBefore = CoveredEdgeVisits;
 		for (int32 Index = 0; Index < 4; ++Index)
 		{
 			FPatchState* Child = FindPatchMutable(Patch->Key.GetChild(Index).Pack());
@@ -1751,9 +1751,9 @@ bool FVoxelPlanetFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutCha
 		}
 		// The subtree does not cover the area yet (builds in flight): this patch draws it, nothing under it does.
 		ClearDrawnSubtree(*Patch);
-		// Over band patches the voxel chunks cover, the stand-in shows through the voxel terrain wherever its chords rise
+		// Over edge patches the voxel chunks cover, the stand-in shows through the voxel terrain wherever its chords rise
 		// over it (VP4).
-		bStandInOverWindow = CoveredBandVisits > CoveredBandVisitsBefore;
+		bStandInOverWindow = CoveredEdgeVisits > CoveredEdgeVisitsBefore;
 	}
 	else
 	{
@@ -1762,9 +1762,9 @@ bool FVoxelPlanetFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutCha
 	if (Patch->bResident)
 	{
 		SetDrawn(*Patch);
-		if (Patch->Key.Level >= Settings.BandLevel && Patch->bCovered)
+		if (Patch->Key.Level >= Settings.EdgeLevel && Patch->bCovered)
 		{
-			++CoveredBandVisits;
+			++CoveredEdgeVisits;
 		}
 		if (bStandInOverWindow && Patch->bDrawTerrain)
 		{
@@ -1778,7 +1778,7 @@ bool FVoxelPlanetFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutCha
 	return bWaitsUndrawn;
 }
 
-void FVoxelPlanetFarField::UpdateRoots(FVoxelFarFieldChanges& OutChanges)
+void FVoxelFarField::UpdateRoots(FVoxelFarFieldChanges& OutChanges)
 {
 	TArray<FVoxelFarFieldPatchKey> Keys;
 	if (!Frame.GetRootKeys(View.Camera, Keys))
@@ -1809,19 +1809,19 @@ void FVoxelPlanetFarField::UpdateRoots(FVoxelFarFieldChanges& OutChanges)
 	Roots = MoveTemp(Wanted);
 }
 
-void FVoxelPlanetFarField::NoteUnready(FPatchState& Patch)
+void FVoxelFarField::NoteUnready(FPatchState& Patch)
 {
-	if (Patch.Key.Level < Settings.BandLevel)
+	if (Patch.Key.Level < Settings.EdgeLevel)
 	{
 		return;
 	}
 	if (UpdateCovered(Patch))
 	{
-		++UnreadyCoveredBand;
-		++CoveredBandVisits;
+		++UnreadyCoveredEdge;
+		++CoveredEdgeVisits;
 		return;
 	}
-	++UnreadyUncoveredBand;
+	++UnreadyUncoveredEdge;
 	if (bHasUndrawnChunk || !ChunkDrawn)
 	{
 		return;
@@ -1837,7 +1837,7 @@ void FVoxelPlanetFarField::NoteUnready(FPatchState& Patch)
 	}
 }
 
-void FVoxelPlanetFarField::ApplyBuild(FPatchState& Patch, const TSharedPtr<FVoxelFarFieldPatchMesh>& Mesh, FVoxelFarFieldChanges& OutChanges)
+void FVoxelFarField::ApplyBuild(FPatchState& Patch, const TSharedPtr<FVoxelFarFieldPatchMesh>& Mesh, FVoxelFarFieldChanges& OutChanges)
 {
 	if (Patch.Mesh.IsValid())
 	{
@@ -1871,7 +1871,7 @@ void FVoxelPlanetFarField::ApplyBuild(FPatchState& Patch, const TSharedPtr<FVoxe
 	TotalBuildMs += Mesh->BuildMs;
 }
 
-void FVoxelPlanetFarField::DrainBuilds(FVoxelFarFieldChanges& OutChanges)
+void FVoxelFarField::DrainBuilds(FVoxelFarFieldChanges& OutChanges)
 {
 	TArray<FBuildResult> Done;
 	{
@@ -1892,7 +1892,7 @@ void FVoxelPlanetFarField::DrainBuilds(FVoxelFarFieldChanges& OutChanges)
 	}
 }
 
-void FVoxelPlanetFarField::LaunchBuilds()
+void FVoxelFarField::LaunchBuilds()
 {
 	Requests.Sort([](const FBuildRequest& A, const FBuildRequest& B) { return A.Priority < B.Priority; });
 	int32 Slots = MaxBuildsInFlight - BuildsInFlight;
@@ -1941,7 +1941,7 @@ void FVoxelPlanetFarField::LaunchBuilds()
 	PendingBuildCount = Waiting;
 }
 
-void FVoxelPlanetFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef<bool(const FIntVector&)> IsChunkDrawn, FVoxelFarFieldChanges& OutChanges)
+void FVoxelFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef<bool(const FIntVector&)> IsChunkDrawn, FVoxelFarFieldChanges& OutChanges)
 {
 	OutChanges.Reset();
 	if (!Surface.IsValid())
@@ -1962,8 +1962,8 @@ void FVoxelPlanetFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef
 	bHasLastCamera = true;
 	StandInCount = 0;
 	StandInMinLevel = -1;
-	UnreadyCoveredBand = 0;
-	UnreadyUncoveredBand = 0;
+	UnreadyCoveredEdge = 0;
+	UnreadyUncoveredEdge = 0;
 	bHasUndrawnChunk = false;
 
 	DrainBuilds(OutChanges);
@@ -1971,8 +1971,8 @@ void FVoxelPlanetFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef
 	Requests.Reset();
 	UpdateRoots(OutChanges);
 
-	// Release the components of patches hidden a while (a parent under drawn children, a covered band patch inside the
-	// window): they build again when they are needed. Roots and band patches near the window's edge stay.
+	// Release the components of patches hidden a while (a parent under drawn children, a covered edge patch inside the
+	// window): they build again when they are needed. Roots and edge patches near the window's edge stay.
 	if (View.ReleaseDelay >= 0.0)
 	{
 		for (TPair<uint64, TUniquePtr<FPatchState>>& Pair : Patches)

@@ -38,7 +38,7 @@ class UVoxelCollisionManager;
 class UVoxelScatterManager;
 class UVoxelWaterPropagation;
 class FVoxelSeamRegistry;
-class FVoxelPlanetFarField;
+class FVoxelFarField;
 class UBoxComponent;
 class UProceduralMeshComponent;
 struct FIslandBowlParams;
@@ -272,8 +272,8 @@ struct VOXELSTREAMING_API FVoxelFarFieldStats
 	int32 DrawnTerrain = 0;
 	int32 DrawnSea = 0;
 
-	/** Band patches whose terrain is hidden because every voxel chunk under them is drawn (the hole) */
-	int32 HiddenBand = 0;
+	/** Edge patches whose terrain is hidden because every voxel chunk under them is drawn (the hole) */
+	int32 HiddenEdge = 0;
 
 	/** Builds waiting or in flight, builds in all, and their mean time on the build threads (ms) */
 	int32 BuildsPending = 0;
@@ -931,7 +931,7 @@ public:
 
 	/**
 	 * Whether this world draws its far field: the analytic surface beyond the voxel window, to the horizon and from orbit
-	 * (FVoxelPlanetFarField, decision D19; on a heightmap world a quadtree of root tiles over the plane, WM-MP1 / D36). Game
+	 * (FVoxelFarField, decision D19; on a heightmap world a quadtree of root tiles over the plane, WM-MP1 / D36). Game
 	 * worlds on a planet or a heightmap world with voxel.World.FarField on.
 	 *
 	 * @return True when the far field exists
@@ -940,9 +940,9 @@ public:
 	bool HasFarField() const { return FarField.IsValid(); }
 
 	/** The far field, mutable (tests: synchronous builds). */
-	FVoxelPlanetFarField* GetFarFieldMutable() { return FarField.Get(); }
+	FVoxelFarField* GetFarFieldMutable() { return FarField.Get(); }
 
-	/** Whether the far field draws the sea, in place of the ocean shell (at scale: FVoxelPlanetFarField::ShouldDrawSea). */
+	/** Whether the far field draws the sea, in place of the ocean shell (at scale: FVoxelFarField::ShouldDrawSea). */
 	bool DoesFarFieldDrawSea() const;
 
 /** A built patch's component (section 0 terrain, 1 sea, 2 the sea's underside), or null. */
@@ -1010,12 +1010,12 @@ public:
 	/** The tick function that runs TickAfterCameraUpdate after the camera managers (tests run it as a world tick would). */
 	FVoxelFarFieldCameraTickFunction& GetFarFieldCameraTickFunction() { return FarFieldCameraTick; }
 
-	// ==================== Orbit and back (spherical Phase 6, WM-BP10, D18) ====================
+	// ==================== The voxel window's cut-over (spherical Phase 6 WM-BP10, D18; every world mode since MP3) ====================
 
 	/**
-	 * Whether the voxel window is suspended: a planet's streaming viewer above the voxel cut-over
-	 * (UVoxelWorldConfiguration::PlanetVoxelCutoverAltitude, voxel.World.VoxelCutover), where every chunk unloads and the
-	 * far field alone draws the planet (IVoxelLODStrategy::IsWindowSuspended). It streams back below a fraction of it,
+	 * Whether the voxel window is suspended: the streaming viewer above the voxel cut-over
+	 * (UVoxelWorldConfiguration::VoxelCutoverAltitude, voxel.World.VoxelCutover), where every chunk unloads and the
+	 * far field alone draws the world (IVoxelLODStrategy::IsWindowSuspended). It streams back below a fraction of it,
 	 * fading in over the far field.
 	 *
 	 * @return True while suspended (always false off a planet)
@@ -1094,7 +1094,7 @@ public:
 	bool GetWaterTileColumn(const FVector& WorldPosition, TArray<int32>& OutWetChunkZ) const;
 
 	/**
-	 * Whether a chunk column (chunk X, Y) has a 2D water tile (heightmap worlds): the far field hides a band patch's sea
+	 * Whether a chunk column (chunk X, Y) has a 2D water tile (heightmap worlds): the far field hides an edge patch's sea
 	 * there (WM-MP1).
 	 *
 	 * @param Column Chunk X and Y
@@ -2723,10 +2723,10 @@ private:
 	/** Planets: move the world settings' KillZ below the planet when it would cut through it (spherical SP-F5). */
 	void ApplyPlanetKillZ();
 
-	// ==================== Planet Far Field (spherical Phase 6, WM-BP9) ====================
+	// ==================== The far field (spherical Phase 6 WM-BP9; every world mode since MP3) ====================
 
 	/** The far field's patches and their builds (pure; this component owns their mesh components) */
-	TUniquePtr<FVoxelPlanetFarField> FarField;
+	TUniquePtr<FVoxelFarField> FarField;
 
 	/**
 	 * One procedural mesh component per built patch, at the patch's origin (owned by this component's actor): section 0
@@ -2736,7 +2736,7 @@ private:
 	UPROPERTY(Transient)
 	TMap<uint64, TObjectPtr<UProceduralMeshComponent>> FarFieldComponents;
 
-	/** Patches this many levels coarser than the band level or finer get the sea's underside (seen only close by) */
+	/** Patches this many levels coarser than the edge level or finer get the sea's underside (seen only close by) */
 	static constexpr int32 FarFieldUndersideLevels = 4;
 
 	/** Vertices and indices each component holds (its memory estimate) */
@@ -2770,7 +2770,7 @@ private:
 	bool bFarFieldUndersideShown = false;
 
 	/**
-	 * Bumped whenever a chunk changes state or leaves: the far field recomputes which band patches the voxel chunks
+	 * Bumped whenever a chunk changes state or leaves: the far field recomputes which edge patches the voxel chunks
 	 * cover only when it moved.
 	 */
 	int64 ChunkStateVersion = 0;

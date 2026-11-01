@@ -22,7 +22,7 @@
 #include "Engine/World.h"
 #include "Async/Async.h"
 #include "Async/ParallelFor.h"
-#include "VoxelPlanetFarField.h"
+#include "VoxelFarField.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"

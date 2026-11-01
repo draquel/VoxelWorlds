@@ -57,7 +57,7 @@ namespace VerticalWindowTestHelpers
 		Config->NoiseParams.Frequency = 0.00005f;
 		Config->bEnableWaterLevel = true;
 		Config->WaterLevel = -1500.0f;
-		Config->bFarBandSurfaceSlabCulling = bSlab;
+		Config->bSurfaceSlabCulling = bSlab;
 		Config->bEnableFrustumCulling = false;
 		Config->IslandRadius = 1.0e6f;
 		Config->IslandFalloffWidth = 1000.0f;

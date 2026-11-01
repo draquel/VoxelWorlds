@@ -64,7 +64,7 @@ bool FDistanceBandSlabUsesWorldModeHeightTest::RunTest(const FString& Parameters
 	Config->BaseHeight = 0.0f;
 	Config->NoiseParams.Seed = 4242;
 	Config->NoiseParams.Frequency = 0.0002f;
-	Config->bFarBandSurfaceSlabCulling = true;
+	Config->bSurfaceSlabCulling = true;
 	Config->bEnableWaterLevel = false;
 	Config->BiomeConfiguration = Biome;
 

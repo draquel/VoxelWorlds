@@ -95,9 +95,9 @@ reaches the configured mode's bounds and frame through `UVoxelChunkManager` (`Vo
 or, on a planet, the sphere of `WaterRadius` (spherical SP-B8, SP-E1). Get it from `UVoxelChunkManager::GetSeaSurface`
 (`true` for the `WaterLevel + WorldOrigin.Z` plane game code uses) or `FVoxelSeaSurface::FromConfig`; never compare a Z
 with `WaterLevel` in new code. A planet's sea surface is the chunk manager's ocean shell (`FVoxelPlanetOcean`), or at scale the far field's sea
-sections (`FVoxelPlanetFarField`, spherical Phase 6; `UVoxelChunkManager::DoesFarFieldDrawSea`). Since the world modes
+sections (`FVoxelFarField`, spherical Phase 6; `UVoxelChunkManager::DoesFarFieldDrawSea`). Since the world modes
 review's MP3 the far field draws heightmap worlds too (root-tile quadtrees on the XY grid, the sea at `WaterLevel` beyond the
-water tiles, the voxel window suspended above `PlanetVoxelCutoverAltitude` only while a far field is on, in every mode
+water tiles, the voxel window suspended above `VoxelCutoverAltitude` only while a far field is on, in every mode
 since G78: `FDistanceBandLODStrategy::GetCutoverAltitude` is 0 without one); a planet's
 spawn point over the terrain is `UVoxelChunkManager::GetPlanetSpawnPosition`.
 

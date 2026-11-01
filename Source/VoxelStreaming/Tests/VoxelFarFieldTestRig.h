@@ -6,7 +6,7 @@
 #include "Testing/VoxelTestChunkWorld.h"
 #include "HAL/IConsoleManager.h"
 #include "Testing/VoxelTestScopedCVar.h"
-#include "VoxelPlanetFarField.h"
+#include "VoxelFarField.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelWorldModeFactory.h"
 #include "IVoxelWorldMode.h"
@@ -31,7 +31,7 @@ namespace VoxelFarFieldTestRig
 		TSharedPtr<IVoxelWorldMode> Mode;
 		TSharedPtr<const FVoxelFarFieldSurface> Surface;
 		FVoxelFarFieldSettings Settings;
-		FVoxelPlanetFarField FarField;
+		FVoxelFarField FarField;
 		const TArray<FVoxelConditioningZone> NoZones;
 
 		/** The voxel window the views describe: its load and unload distances */
@@ -79,7 +79,7 @@ namespace VoxelFarFieldTestRig
 			View.MaxScreenError = 4.0;
 			// The ground radius under the viewer on a planet (the analytic terrain along its direction); a plane has none.
 			View.GroundRadius = Frame().IsHeightmap() ? 0.0 : Settings.Radius + Altitude(FVoxelFarFieldSample::OfDirection((Viewer - Settings.Center).GetSafeNormal()));
-			View.BandRadius = UnloadDistance + 0.5 * UE_DOUBLE_SQRT_3 * Settings.ChunkWorldSize;
+			View.EdgeRadius = UnloadDistance + 0.5 * UE_DOUBLE_SQRT_3 * Settings.ChunkWorldSize;
 			View.PrebuildRadius = 0.75 * ViewDistance;
 			View.Time = 0.0;
 			View.HideDelay = 0.0;

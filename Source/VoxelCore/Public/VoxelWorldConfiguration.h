@@ -200,7 +200,7 @@ public:
 	 * the streaming viewer, in force only while the far field draws the world beyond the window (voxel.World.FarField).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "0"))
-	float PlanetVoxelCutoverAltitude = 0.0f;
+	float VoxelCutoverAltitude = 0.0f;
 
 	// ==================== Water Settings ====================
 
@@ -383,7 +383,7 @@ public:
 	 * beyond the first band only.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
-	bool bFarBandSurfaceSlabCulling = true;
+	bool bSurfaceSlabCulling = true;
 
 	/**
 	 * LOD refine (detail-increasing) hysteresis deadband, in chunk-width units. A chunk

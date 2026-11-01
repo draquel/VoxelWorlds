@@ -10,7 +10,7 @@
 #include "Materials/Material.h"
 #include "Testing/VoxelTestChunkWorld.h"
 #include "VoxelChunkManager.h"
-#include "VoxelPlanetFarField.h"
+#include "VoxelFarField.h"
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelWorldConfiguration.h"
@@ -52,13 +52,13 @@ namespace VoxelPlaneCutoverTestUtils
 		W.Config->bEnableWaterLevel = true;
 		W.Config->WaterLevel = -200.0f;
 		W.Config->WaterMeshMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
-		W.Config->PlanetVoxelCutoverAltitude = ViewDistance;
+		W.Config->VoxelCutoverAltitude = ViewDistance;
 	}
 
 	/** Synchronous far-field builds (the tests read its state right after an update). */
 	void MakeFarFieldSynchronous(VoxelTesting::FTestChunkWorld& W)
 	{
-		if (FVoxelPlanetFarField* FarField = W.Manager->GetFarFieldMutable())
+		if (FVoxelFarField* FarField = W.Manager->GetFarFieldMutable())
 		{
 			FarField->SetSynchronousBuilds(true);
 			FarField->SetMaxBuildsInFlight(64);
@@ -124,14 +124,14 @@ bool FVoxelPlaneCutoverTest::RunTest(const FString& Parameters)
 		const FVoxelFarFieldStats High = W.Manager->GetFarFieldStats();
 		AddInfo(FString::Printf(TEXT("%s: at %.0f over the surface: window %s, %d chunks, %d pending generations; far field %d patches drawn (%d hidden by the window)"),
 			Rule, 3.0 * ViewDistance, W.Manager->IsVoxelWindowSuspended() ? TEXT("suspended") : TEXT("active"), W.Manager->GetLoadedChunkCount(),
-			W.Manager->GetPendingGenerationCount(), High.DrawnPatches, High.HiddenBand));
+			W.Manager->GetPendingGenerationCount(), High.DrawnPatches, High.HiddenEdge));
 		if (bFarField)
 		{
 			TestTrue(*FString::Printf(TEXT("%s: suspended above the cut-over"), Rule), W.Manager->IsVoxelWindowSuspended());
 			TestEqual(*FString::Printf(TEXT("%s: every chunk unloaded"), Rule), W.Manager->GetLoadedChunkCount(), 0);
 			TestEqual(*FString::Printf(TEXT("%s: nothing queued"), Rule), W.Manager->GetPendingGenerationCount(), 0);
 			TestTrue(*FString::Printf(TEXT("%s: the far field draws"), Rule), High.DrawnPatches > 0);
-			TestEqual(*FString::Printf(TEXT("%s: the far field cuts no hole"), Rule), High.HiddenBand, 0);
+			TestEqual(*FString::Printf(TEXT("%s: the far field cuts no hole"), Rule), High.HiddenEdge, 0);
 			TestEqual(*FString::Printf(TEXT("%s: one suspension recorded"), Rule), W.Manager->GetCutoverTransitions().Num(), 1);
 
 			// Between the resume altitude and the cut-over: still suspended (hysteresis).

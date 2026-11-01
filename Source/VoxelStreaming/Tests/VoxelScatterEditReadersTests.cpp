@@ -579,16 +579,16 @@ bool FVoxelScatterEditReadersPlaneTest::RunTest(const FString& Parameters)
 				continue;
 			}
 			const FVector Min = W.Config->WorldOrigin + FVector(Chunk) * ChunkWorld;
-			int32 InBand = 0;
+			int32 InEdge = 0;
 			for (int32 Y = 0; Y < CS; ++Y)
 			for (int32 X = 0; X < CS; ++X)
 			{
 				const double H = W.Manager->GetGeneratedSurfacePoint(FVector(Min.X + (X + 0.5) * VS, Min.Y + (Y + 0.5) * VS, 0.0)).Z;
-				InBand += (H > Min.Z + 0.1 * VS && H <= Min.Z + 1.4 * VS) ? 1 : 0;
+				InEdge += (H > Min.Z + 0.1 * VS && H <= Min.Z + 1.4 * VS) ? 1 : 0;
 			}
-			if (InBand > Best)
+			if (InEdge > Best)
 			{
-				Best = InBand;
+				Best = InEdge;
 				OutChunk = Chunk;
 			}
 		}
