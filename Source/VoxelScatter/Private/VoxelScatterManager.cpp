@@ -32,9 +32,9 @@
 static TAutoConsoleVariable<int32> CVarVoxelScatterRegionChunks(
 	TEXT("voxel.Scatter.RegionChunks"),
 	-1,
-	TEXT("Chunks along the edge of a scatter HISM's region (world modes review G42): each scatter type gets one HISM per region.\n")
-	TEXT("-1 = 4 in every world mode (planets since G42, heightmap worlds since WM-MP5, D40); 0 = the render regions\n")
-	TEXT("(voxel.Render.RegionChunks; the behaviour before G42); N > 0 = regions of N chunks. Read when the scatter manager initializes."),
+	TEXT("Chunks along the edge of a scatter HISM's region: each scatter type gets one HISM per region.\n")
+	TEXT("-1 = 4 in every world mode; 0 = the render regions\n")
+	TEXT("(voxel.Render.RegionChunks); N > 0 = regions of N chunks. Read when the scatter manager initializes."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarVoxelScatterFirstExtractionAtHorizon(

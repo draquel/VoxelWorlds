@@ -194,7 +194,7 @@ public:
 	 * 0.85 of it (FDistanceBandLODStrategy::CutoverResumeFraction). 0 = three times the view distance
 	 * (FDistanceBandLODStrategy::DefaultCutoverViewDistances): from there the window's ground disk is a narrow cone under
 	 * the viewer, and a descent at 5,000 uu/s still has about 20 s to stream it back before landing (at the view distance
-	 * a 50 km planet's window was 5 s short). voxel.World.VoxelCutover overrides it.
+	 * a 50 km planet's window was 5 s short). voxel.Stream.VoxelCutover overrides it.
 	 *
 	 * Heightmap worlds too (world modes review WM-MP2, D38): the same altitude over the generated ground or the sea under
 	 * the streaming viewer, in force only while the far field draws the world beyond the window (voxel.World.FarField).
@@ -609,7 +609,7 @@ public:
 	 * held on the CPU until the GPU generator had a planet branch (SP-B3: it fell through to generic 3D noise, blobs
 	 * instead of a planet); since spherical Phase 2 the GPU generates the CPU's planet (SP-B4), locked by
 	 * VoxelWorlds.Generation.GPUvsCPUSphericalParity (WORLD_MODES_REVIEW_PLAN.md §16).
-	 * The chunk manager also honours -VoxelForceCPU and voxel.GPUGeneration.Enable on top of this.
+	 * The chunk manager also honours -VoxelForceCPU and voxel.Stream.GPUGeneration on top of this.
 	 *
 	 * @return True when the configuration allows GPU generation.
 	 */
@@ -666,7 +666,7 @@ public:
 	 * one map without editing it.
 	 *
 	 * Sources, in priority order: the -VoxelConfig=<ObjectPath> command-line switch (headless and
-	 * standalone runs), then the voxel.ConfigOverride console variable (set it in the editor before
+	 * standalone runs), then the voxel.World.ConfigOverride console variable (set it in the editor before
 	 * pressing Play). Read when a voxel world initializes, so a change applies to the next PIE session.
 	 *
 	 * @return Object path such as /Game/PluginTesting/Review/Review_Cubic, or empty.

@@ -196,7 +196,7 @@ public:
 	bool IsCutoverResumeHeld() const { return bCutoverResumeHeld; }
 
 	/**
-	 * The configured cut-over altitude (uu over the surface; 0 = never), whatever the far field: voxel.World.VoxelCutover
+	 * The configured cut-over altitude (uu over the surface; 0 = never), whatever the far field: voxel.Stream.VoxelCutover
 	 * when set (>= 0), else the configuration's VoxelCutoverAltitude, else DefaultCutoverViewDistances view distances.
 	 * GetCutoverAltitude is the one in force (this, gated by the far field; code review CR2, STREAM-19); the tests read
 	 * the configured value through this.

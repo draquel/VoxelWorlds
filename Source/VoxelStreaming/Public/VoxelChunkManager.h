@@ -1017,7 +1017,7 @@ public:
 
 	/**
 	 * Whether the voxel window is suspended: the streaming viewer above the voxel cut-over
-	 * (UVoxelWorldConfiguration::VoxelCutoverAltitude, voxel.World.VoxelCutover), where every chunk unloads and the
+	 * (UVoxelWorldConfiguration::VoxelCutoverAltitude, voxel.Stream.VoxelCutover), where every chunk unloads and the
 	 * far field alone draws the world (IVoxelLODStrategy::IsWindowSuspended). It streams back below a fraction of it,
 	 * fading in over the far field.
 	 *
@@ -2388,7 +2388,7 @@ private:
 	/** Non-owning alias to NoiseGenerator when GPU generation is active (for the poll-based readback API). */
 	FVoxelGPUNoiseGenerator* GPUGeneratorPtr = nullptr;
 
-	/** True when bUseGPUGeneration resolved on (config flag && !-VoxelForceCPU && voxel.GPUGeneration.Enable). */
+	/** True when bUseGPUGeneration resolved on (config flag && !-VoxelForceCPU && voxel.Stream.GPUGeneration). */
 	bool bUseGPUGenerationActive = false;
 
 	/** Analytic world mode matching the config's WorldMode (FVoxelWorldModeFactory::Create) */

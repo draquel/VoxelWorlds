@@ -74,7 +74,7 @@ void AVoxelWorldActor::InitializeVoxelWorld()
 		return;
 	}
 
-	// A runtime override (-VoxelConfig= or voxel.ConfigOverride) replaces the placed config, so a
+	// A runtime override (-VoxelConfig= or voxel.World.ConfigOverride) replaces the placed config, so a
 	// benchmark or review can switch world mode or meshing mode without editing the map. It is
 	// assigned to the property (not just used locally) because the rest of this actor reads it.
 	const FString OverridePath = UVoxelWorldConfiguration::GetOverridePath();

@@ -126,7 +126,7 @@ seam-closure and streaming tests, and GPU/CPU parity tests that exercise the rea
 
 ## Console Commands (selection)
 
-- `voxel.RemeshAll` — re-mesh all loaded chunks
+- `voxel.Mesh.RemeshAll` — re-mesh all loaded chunks
 - `voxel.Bench.Run` — streaming performance benchmark
 
 ---

@@ -227,14 +227,14 @@ bool FVoxelPlanetCutoverDescentTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Settled after the descent"), W.SettleAt(At(300.0)));
 	TestEqual(TEXT("Stopped, the streaming viewer is the camera"), W.Manager->GetStreamingViewerLead(), 0.0);
 
-	// voxel.World.VoxelCutover 0: never suspended.
-	IConsoleVariable* CutoverVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.World.VoxelCutover"));
+	// voxel.Stream.VoxelCutover 0: never suspended.
+	IConsoleVariable* CutoverVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.VoxelCutover"));
 	if (CutoverVar)
 	{
 		const float Saved = CutoverVar->GetFloat();
 		CutoverVar->Set(0.0f, ECVF_SetByCode);
 		TestTrue(TEXT("Settled high with the cut-over off"), W.SettleAt(At(3.0 * Cutover)));
-		TestFalse(TEXT("With voxel.World.VoxelCutover 0 the window is never suspended"), W.Manager->IsVoxelWindowSuspended());
+		TestFalse(TEXT("With voxel.Stream.VoxelCutover 0 the window is never suspended"), W.Manager->IsVoxelWindowSuspended());
 		TestTrue(TEXT("... and keeps its ground disk"), W.Manager->GetLoadedChunkCount() > 30);
 		CutoverVar->Set(Saved, ECVF_SetByCode);
 	}
@@ -251,7 +251,7 @@ bool FVoxelPlanetCutoverDescentTest::RunTest(const FString& Parameters)
  *   never resumes and holds no chunk;
  * - stopping at 0.92 C (under the cut-over, over the resume altitude) and held 3 s: under both rules it resumes during the
  *   descent and stays resumed (the camera under the cut-over keeps it), then settles with its ground disk;
- * - with the cut-over at 40,000 (voxel.World.VoxelCutover; the band between the resume altitude and the cut-over 6,000):
+ * - with the cut-over at 40,000 (voxel.Stream.VoxelCutover; the band between the resume altitude and the cut-over 6,000):
  *   a descent at 1,800 uu/s, whose lead (5,400) stays inside the band, resumes at the same camera altitude under both
  *   rules; one at 6,000 uu/s (lead 18,000) resumes with the camera over the cut-over under the old rule and at the
  *   cut-over under the guard.
@@ -265,7 +265,7 @@ bool FVoxelPlanetCutoverDescentStopTest::RunTest(const FString& Parameters)
 	using namespace VoxelPlanetOrbitTestUtils;
 
 	IConsoleVariable* GuardVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.World.CutoverResumeGuard"));
-	IConsoleVariable* CutoverVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.World.VoxelCutover"));
+	IConsoleVariable* CutoverVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.VoxelCutover"));
 	IConsoleVariable* LeadVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.DescentLead"));
 	TestNotNull(TEXT("voxel.World.CutoverResumeGuard exists"), GuardVar);
 	if (!GuardVar || !CutoverVar || !LeadVar)

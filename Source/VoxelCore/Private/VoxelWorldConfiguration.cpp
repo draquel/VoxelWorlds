@@ -12,7 +12,7 @@
 
 /** Editor-side half of UVoxelWorldConfiguration::GetOverridePath (the command line wins). */
 static TAutoConsoleVariable<FString> CVarVoxelConfigOverride(
-	TEXT("voxel.ConfigOverride"),
+	TEXT("voxel.World.ConfigOverride"),
 	TEXT(""),
 	TEXT("Object path of a UVoxelWorldConfiguration that replaces the voxel world actor's own on the next ")
 	TEXT("initialize (e.g. /Game/PluginTesting/Review/Review_Cubic). Empty = use the actor's config. ")
