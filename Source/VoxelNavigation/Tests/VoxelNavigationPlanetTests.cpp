@@ -55,7 +55,7 @@ bool FVoxelNavPlanetRegionFramesTest::RunTest(const FString& Parameters)
 	for (int32 i = 0; i < 200; ++i)
 	{
 		const FVector Up = i == 0 ? FVector(0, 0, 1) : Random.GetUnitVector();
-		const FVoxelPlanetNavFrame Frame = FVoxelPlanetNavFrame::Make(Center, Radius, Up);
+		const FVoxelNavFrame Frame = FVoxelNavFrame::MakePlanet(Center, Radius, Up);
 		BadAxes += (FMath::Abs(FVector::DotProduct(Frame.East, Frame.North)) < 1.0e-9 && FMath::Abs(FVector::DotProduct(Frame.East, Frame.Up)) < 1.0e-9
 			&& FMath::Abs(FVector::DotProduct(Frame.North, Frame.Up)) < 1.0e-9 && (FMath::Abs(Up.Z) > 0.9999 || Frame.North.Z > 0.0)) ? 0 : 1;
 
@@ -78,7 +78,7 @@ bool FVoxelNavPlanetRegionFramesTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("ToFrame and ToWorld invert"), BadRoundTrip, 0);
 	TestEqual(TEXT("Cells within 2% of their size 33 km out"), BadScale, 0);
 
-	const FVoxelPlanetNavFrame Frame = FVoxelPlanetNavFrame::Make(Center, Radius, FVector(1, 0, 0));
+	const FVoxelNavFrame Frame = FVoxelNavFrame::MakePlanet(Center, Radius, FVector(1, 0, 0));
 	FVector FramePoint;
 	TestFalse(TEXT("Past 60 degrees a point is outside the frame"), Frame.ToFrame(Center + FVector(0.3, 1.0, 0.0).GetSafeNormal() * Radius, FramePoint));
 	TestTrue(TEXT("The frame's centre is (0, 0) at its altitude"), Frame.ToFrame(Center + FVector(Radius + 250.0, 0, 0), FramePoint)

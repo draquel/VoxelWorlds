@@ -73,7 +73,6 @@ void UVoxelSurfaceNavigationSubsystem::Deinitialize()
 			ChunkMgr->GetEditManager()->OnChunkEdited.Remove(EditHandle);
 		}
 	}
-	Tiles.Reset();
 	Regions.Reset();
 	Super::Deinitialize();
 }
@@ -109,7 +108,7 @@ void UVoxelSurfaceNavigationSubsystem::Tick(float DeltaTime)
 		}
 	}
 
-	// Planets: expire temporary blocks and regions unused for a minute.
+	// Planets: expire temporary blocks and regions unused for a minute (a heightmap world's one region never expires).
 	if (TempSpheres.Num() > 0)
 	{
 		const double Now = GetWorld()->GetTimeSeconds();
@@ -120,7 +119,7 @@ void UVoxelSurfaceNavigationSubsystem::Tick(float DeltaTime)
 		const double Now = FPlatformTime::Seconds();
 		for (auto It = Regions.CreateIterator(); It; ++It)
 		{
-			if (It.Value() && Now - It.Value()->LastUsedSeconds > PlanetNavRegionLifetime)
+			if (It.Value() && It.Value()->Frame.ExpiresUnused() && Now - It.Value()->LastUsedSeconds > PlanetNavRegionLifetime)
 			{
 				CachedCells -= It.Value()->Cells;
 				It.RemoveCurrent();
@@ -252,7 +251,6 @@ void UVoxelSurfaceNavigationSubsystem::ApplyCVars()
 	}
 	if (CachedCellSize != Params.CellSize || CachedGridOrigin != Params.GridOrigin)
 	{
-		Tiles.Reset();
 		CachedCells = 0;
 		TempBlocks.Reset();
 		TempBlockedCells.Reset();
@@ -283,91 +281,7 @@ static FORCEINLINE int32 FloorDiv(int32 A, int32 B)
 	return (A >= 0) ? A / B : -((-A + B - 1) / B);
 }
 
-float UVoxelSurfaceNavigationSubsystem::SampleHeight(double WorldX, double WorldY)
-{
-	UVoxelChunkManager* ChunkMgr = ChunkManager.Get();
-	if (!ChunkMgr)
-	{
-		return 0.f;
-	}
-	float Height = 0.f;
-	FVector Normal;
-	float Slope = 0.f;
-	uint8 Material = 0, Biome = 0;
-	if (ChunkMgr->QueryEditMergedSurface(WorldX, WorldY, Height, Normal, Slope, Material, Biome))
-	{
-		return Height;
-	}
-	return ChunkMgr->GetGeneratedSurfaceHeight(WorldX, WorldY);
-}
 
-float UVoxelSurfaceNavigationSubsystem::HeightForCell(const FIntPoint& Cell)
-{
-	const FIntPoint TileKey(FloorDiv(Cell.X, TileSize), FloorDiv(Cell.Y, TileSize));
-	TUniquePtr<FNavTile>& Tile = Tiles.FindOrAdd(TileKey);
-	if (!Tile)
-	{
-		Tile = MakeUnique<FNavTile>();
-	}
-	const int32 LX = Cell.X - TileKey.X * TileSize;
-	const int32 LY = Cell.Y - TileKey.Y * TileSize;
-	const int32 Index = LY * TileSize + LX;
-	if (Tile->Sampled[Index])
-	{
-		return Tile->Heights[Index];
-	}
-	// Loaded or analytic? Ask the chunk manager which it used by probing the edit-merged query first.
-	const FVector2D Centre = CellCentre(Cell);
-	UVoxelChunkManager* ChunkMgr = ChunkManager.Get();
-	float Height = 0.f;
-	bool bLoaded = false;
-	if (ChunkMgr)
-	{
-		FVector Normal;
-		float Slope = 0.f;
-		uint8 Material = 0, Biome = 0;
-		bLoaded = ChunkMgr->QueryEditMergedSurface(Centre.X, Centre.Y, Height, Normal, Slope, Material, Biome);
-		if (!bLoaded)
-		{
-			Height = ChunkMgr->GetGeneratedSurfaceHeight(Centre.X, Centre.Y);
-		}
-	}
-	Tile->Heights[Index] = Height;
-	Tile->Sampled[Index] = true;
-	Tile->FromLoaded[Index] = bLoaded;
-	++CachedCells;
-	return Height;
-}
-
-bool UVoxelSurfaceNavigationSubsystem::IsCellBlocked(const FIntPoint& Cell) const
-{
-	if (TempBlockedCells.Contains(Cell))
-	{
-		return true;
-	}
-	// Outside the world is blocked, water on or off (WM-I2, KI9): past an island's R + falloff generation writes only
-	// a flat floor, which with water off would otherwise read as walkable ground.
-	if (const UVoxelChunkManager* ChunkMgr = ChunkManager.Get())
-	{
-		const FVector2D Centre = CellCentre(Cell);
-		if (!ChunkMgr->IsInsideWorld(Centre.X, Centre.Y))
-		{
-			return true;
-		}
-	}
-	if (BlockedBoxes.Num() > 0)
-	{
-		const FVector2D Centre = CellCentre(Cell);
-		for (const FBlockedBox& Box : BlockedBoxes)
-		{
-			if (Box.Box.IsInside(Centre))
-			{
-				return true;
-			}
-		}
-	}
-	return false;
-}
 
 // ---------------------------------------------------------------------------
 // Queries
@@ -383,38 +297,22 @@ bool UVoxelSurfaceNavigationSubsystem::FindPathWithStats(const FVector& From, co
 	}
 	ApplyCVars();
 	bool bOk = false;
-	if (bPlanet)
+	// The search runs in the frame of the region its start lies in (the identity on a heightmap world; on a planet the
+	// region's tangent frame, altitudes for heights and the sea as the altitude plane WaterRadius - PlanetRadius, exactly
+	// the sea sphere's depth along local up).
+	FRegionCache& Region = RegionFor(From);
+	FVector FrameFrom, FrameTo;
+	if (Region.Frame.ToFrame(From, FrameFrom) && Region.Frame.ToFrame(To, FrameTo))
 	{
-		// A planet: the search runs in the frame of the region its start lies in, altitudes for heights and the sea as
-		// the altitude plane WaterRadius - PlanetRadius (exactly the sea sphere's depth along local up).
-		FRegionCache& Region = RegionFor(From);
-		FVector FrameFrom, FrameTo;
-		if (Region.Frame.ToFrame(From, FrameFrom) && Region.Frame.ToFrame(To, FrameTo))
+		FVoxelSurfacePathfinder Pathfinder(ParamsIn(Region),
+			[this, &Region](double X, double Y) { return HeightForCell(Region, CellOf(FVector(X, Y, 0.0))); },
+			[this, &Region](const FIntPoint& Cell) { return IsCellBlocked(Region, Cell); });
+		TArray<FVector> FramePoints;
+		bOk = Pathfinder.FindPath(FrameFrom, FrameTo, FramePoints, &OutStats);
+		for (const FVector& FramePoint : FramePoints)
 		{
-			FVoxelSurfaceNavParams FrameParams = Params;
-			FrameParams.bHasWater = false;
-			FrameParams.Sea = FVoxelSeaSurface();
-			if (PlanetSea.bEnabled && PlanetSea.bRadial)
-			{
-				FrameParams.Sea = FVoxelSeaSurface::MakePlane(PlanetSea.Radius - PlanetRadius);
-			}
-			FVoxelSurfacePathfinder Pathfinder(FrameParams,
-				[this, &Region](double X, double Y) { return HeightForPlanetCell(Region, CellOf(FVector(X, Y, 0.0))); },
-				[this, &Region](const FIntPoint& Cell) { return IsPlanetCellBlocked(Region, Cell); });
-			TArray<FVector> FramePoints;
-			bOk = Pathfinder.FindPath(FrameFrom, FrameTo, FramePoints, &OutStats);
-			for (const FVector& FramePoint : FramePoints)
-			{
-				OutPoints.Add(Region.Frame.ToWorld(FramePoint));
-			}
+			OutPoints.Add(Region.Frame.ToWorld(FramePoint));
 		}
-	}
-	else
-	{
-		FVoxelSurfacePathfinder Pathfinder(Params,
-			[this](double X, double Y) { return HeightForCell(CellOf(FVector(X, Y, 0.0))); },
-			[this](const FIntPoint& Cell) { return IsCellBlocked(Cell); });
-		bOk = Pathfinder.FindPath(From, To, OutPoints, &OutStats);
 	}
 	LastStats = OutStats;
 	++SearchCount;
@@ -447,15 +345,10 @@ bool UVoxelSurfaceNavigationSubsystem::ProjectToSurface(const FVector& Location,
 		return false;
 	}
 	ApplyCVars();
-	if (bPlanet)
-	{
-		// Along local up: the edit-merged surface when loaded, the analytic one otherwise.
-		UVoxelChunkManager* ChunkMgr = ChunkManager.Get();
-		FVoxelSurfaceSample Sample;
-		OutOnSurface = ChunkMgr->QueryEditMergedSurfacePoint(Location, Sample) ? Sample.Position : ChunkMgr->GetGeneratedSurfacePoint(Location);
-		return true;
-	}
-	OutOnSurface = FVector(Location.X, Location.Y, SampleHeight(Location.X, Location.Y));
+	// Along local up: the edit-merged surface when loaded, the analytic one otherwise.
+	UVoxelChunkManager* ChunkMgr = ChunkManager.Get();
+	FVoxelSurfaceSample Sample;
+	OutOnSurface = ChunkMgr->QueryEditMergedSurfacePoint(Location, Sample) ? Sample.Position : ChunkMgr->GetGeneratedSurfacePoint(Location);
 	return true;
 }
 
@@ -466,30 +359,20 @@ bool UVoxelSurfaceNavigationSubsystem::IsWalkableAt(const FVector& Location)
 		return false;
 	}
 	ApplyCVars();
-	if (bPlanet)
-	{
-		FRegionCache& Region = RegionFor(Location);
-		FVector FramePoint;
-		if (!Region.Frame.ToFrame(Location, FramePoint))
-		{
-			return false;
-		}
-		const FIntPoint PlanetCell = CellOf(FramePoint);
-		if (IsPlanetCellBlocked(Region, PlanetCell))
-		{
-			return false;
-		}
-		const float Altitude = HeightForPlanetCell(Region, PlanetCell);
-		return !(PlanetSea.bEnabled && PlanetSea.bRadial && PlanetRadius + Altitude < PlanetSea.Radius - Params.MaxWadeDepth);
-	}
-	const FIntPoint Cell = CellOf(Location);
-	if (IsCellBlocked(Cell))
+	FRegionCache& Region = RegionFor(Location);
+	FVector FramePoint;
+	if (!Region.Frame.ToFrame(Location, FramePoint))
 	{
 		return false;
 	}
-	const float Height = HeightForCell(Cell);
+	const FIntPoint Cell = CellOf(FramePoint);
+	if (IsCellBlocked(Region, Cell))
+	{
+		return false;
+	}
+	const float Height = HeightForCell(Region, Cell);
 	const FVector2D Centre = CellCentre(Cell);
-	return !Params.IsUnderwater(Centre.X, Centre.Y, Height);
+	return !IsUnderwaterIn(Region, Centre.X, Centre.Y, Height);
 }
 
 int32 UVoxelSurfaceNavigationSubsystem::AddBlockedBox(const FBox& WorldBox)
@@ -515,8 +398,9 @@ void UVoxelSurfaceNavigationSubsystem::BlockCellsTemporarily(const FVector& Loca
 	}
 	ApplyCVars();
 	const double Expire = GetWorld()->GetTimeSeconds() + FMath::Max(Seconds, 0.1f);
-	if (bPlanet)
+	if (RegionFor(Location).Frame.BlocksInSpace())
 	{
+		// A planet: the block is a sphere about the point, tested against each cell's surface point.
 		TempSpheres.Add(FTempSphere{ Location, Radius, Expire });
 		return;
 	}
@@ -538,14 +422,8 @@ void UVoxelSurfaceNavigationSubsystem::BlockCellsTemporarily(const FVector& Loca
 
 void UVoxelSurfaceNavigationSubsystem::InvalidateAll()
 {
-	Tiles.Reset();
 	Regions.Reset();
 	CachedCells = 0;
-}
-
-void UVoxelSurfaceNavigationSubsystem::InvalidateCells(const FIntPoint& MinCell, const FIntPoint& MaxCell, bool bOnlyAnalytic)
-{
-	CachedCells -= InvalidateTileCells(Tiles, MinCell, MaxCell, bOnlyAnalytic);
 }
 
 int32 UVoxelSurfaceNavigationSubsystem::InvalidateTileCells(TMap<FIntPoint, TUniquePtr<FNavTile>>& InTiles, const FIntPoint& MinCell,
@@ -616,12 +494,7 @@ void UVoxelSurfaceNavigationSubsystem::InvalidateBox(const FBox& WorldBox)
 	{
 		return;
 	}
-	if (bPlanet)
-	{
-		InvalidatePlanetBox(WorldBox, false);
-		return;
-	}
-	InvalidateCells(CellOf(WorldBox.Min), CellOf(WorldBox.Max), false);
+	InvalidateBox(WorldBox, false);
 }
 
 void UVoxelSurfaceNavigationSubsystem::HandleChunkLoaded(FIntVector ChunkCoord)
@@ -634,12 +507,7 @@ void UVoxelSurfaceNavigationSubsystem::HandleChunkLoaded(FIntVector ChunkCoord)
 	}
 	// Cells over this chunk that were estimated analytically now have real (edit-merged) data.
 	const FBox Bounds = FVoxelCoordinates::ChunkToWorldBounds(ChunkCoord, Config->ChunkSize, Config->VoxelSize).ShiftBy(Config->WorldOrigin);
-	if (bPlanet)
-	{
-		InvalidatePlanetBox(Bounds, true);
-		return;
-	}
-	InvalidateCells(CellOf(Bounds.Min), CellOf(Bounds.Max), true);
+	InvalidateBox(Bounds, true);
 }
 
 void UVoxelSurfaceNavigationSubsystem::HandleChunkEdited(const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius)
@@ -660,30 +528,26 @@ void UVoxelSurfaceNavigationSubsystem::HandleChunkEdited(const FIntVector& Chunk
 			return;
 		}
 		const FBox Bounds = FVoxelCoordinates::ChunkToWorldBounds(ChunkCoord, Config->ChunkSize, Config->VoxelSize).ShiftBy(Config->WorldOrigin).ExpandBy(Params.CellSize);
-		if (bPlanet)
-		{
-			InvalidatePlanetBox(Bounds, false);
-			return;
-		}
-		InvalidateCells(CellOf(Bounds.Min), CellOf(Bounds.Max), false);
+		InvalidateBox(Bounds, false);
 		return;
 	}
 	const float Pad = EditRadius + Params.CellSize;
-	if (bPlanet)
-	{
-		InvalidatePlanetBox(FBox(EditCenter - FVector(Pad), EditCenter + FVector(Pad)), false);
-		return;
-	}
-	InvalidateCells(CellOf(EditCenter - FVector(Pad)), CellOf(EditCenter + FVector(Pad)), false);
+	InvalidateBox(FBox(EditCenter - FVector(Pad), EditCenter + FVector(Pad)), false);
 }
 
 // ---------------------------------------------------------------------------
 // Planets (spherical Phase 4, WM-SY11)
 // ---------------------------------------------------------------------------
 
-FVoxelPlanetNavFrame FVoxelPlanetNavFrame::Make(const FVector& InCenter, double InRadius, const FVector& Direction, const FIntPoint& InRegion)
+FVoxelNavFrame FVoxelNavFrame::MakeIdentity()
 {
-	FVoxelPlanetNavFrame Frame;
+	return FVoxelNavFrame();
+}
+
+FVoxelNavFrame FVoxelNavFrame::MakePlanet(const FVector& InCenter, double InRadius, const FVector& Direction, const FIntPoint& InRegion)
+{
+	FVoxelNavFrame Frame;
+	Frame.bIdentity = false;
 	Frame.Region = InRegion;
 	Frame.Center = InCenter;
 	Frame.Radius = FMath::Max(InRadius, 1.0);
@@ -692,8 +556,13 @@ FVoxelPlanetNavFrame FVoxelPlanetNavFrame::Make(const FVector& InCenter, double 
 	return Frame;
 }
 
-bool FVoxelPlanetNavFrame::ToFrame(const FVector& World, FVector& OutFramePoint) const
+bool FVoxelNavFrame::ToFrame(const FVector& World, FVector& OutFramePoint) const
 {
+	if (bIdentity)
+	{
+		OutFramePoint = World;
+		return true;
+	}
 	const FVector ToPoint = World - Center;
 	const double Distance = ToPoint.Size();
 	if (Distance < UE_KINDA_SMALL_NUMBER)
@@ -712,30 +581,99 @@ bool FVoxelPlanetNavFrame::ToFrame(const FVector& World, FVector& OutFramePoint)
 	return true;
 }
 
-FVector FVoxelPlanetNavFrame::DirectionAt(double X, double Y) const
+FVector FVoxelNavFrame::DirectionAt(double X, double Y) const
 {
+	if (bIdentity)
+	{
+		return FVector::UpVector;
+	}
 	return (Up * Radius + East * X + North * Y).GetSafeNormal();
 }
 
-FVector FVoxelPlanetNavFrame::ToWorld(const FVector& FramePoint) const
+FVector FVoxelNavFrame::ToWorld(const FVector& FramePoint) const
 {
+	if (bIdentity)
+	{
+		return FramePoint;
+	}
 	return Center + DirectionAt(FramePoint.X, FramePoint.Y) * (Radius + FramePoint.Z);
+}
+
+FVector FVoxelNavFrame::UpAt(const FVector& World) const
+{
+	if (bIdentity)
+	{
+		return FVector::UpVector;
+	}
+	return (World - Center).GetSafeNormal();
+}
+
+FBox2D FVoxelNavFrame::FootprintOf(const FBox& WorldBox) const
+{
+	if (bIdentity)
+	{
+		return FBox2D(FVector2D(WorldBox.Min.X, WorldBox.Min.Y), FVector2D(WorldBox.Max.X, WorldBox.Max.Y));
+	}
+	// The box's corners in the frame give a cell rectangle (its sides along up project inside it). Corners deep inside
+	// the planet are no surface any frame shows (their directions fan out over the whole sphere).
+	FBox2D Rect(ForceInit);
+	for (int32 Corner = 0; Corner < 8; ++Corner)
+	{
+		const FVector Point((Corner & 1) ? WorldBox.Max.X : WorldBox.Min.X, (Corner & 2) ? WorldBox.Max.Y : WorldBox.Min.Y,
+			(Corner & 4) ? WorldBox.Max.Z : WorldBox.Min.Z);
+		FVector FramePoint;
+		if (FVector::DistSquared(Point, Center) >= FMath::Square(0.5 * Radius) && ToFrame(Point, FramePoint))
+		{
+			Rect += FVector2D(FramePoint.X, FramePoint.Y);
+		}
+	}
+	return Rect;
 }
 
 UVoxelSurfaceNavigationSubsystem::FRegionCache& UVoxelSurfaceNavigationSubsystem::RegionFor(const FVector& World)
 {
-	const FIntPoint Region = RegionGrid.CellOfDirection((World - PlanetCenter).GetSafeNormal());
+	// The one place the kind of world is read: a heightmap world has one region, the identity frame's; a planet's are the
+	// cells of its region grid, each with the tangent frame at its centre.
+	const FIntPoint Region = bPlanet ? RegionGrid.CellOfDirection((World - PlanetCenter).GetSafeNormal()) : FIntPoint::ZeroValue;
 	TUniquePtr<FRegionCache>& Cache = Regions.FindOrAdd(Region);
 	if (!Cache)
 	{
 		Cache = MakeUnique<FRegionCache>();
-		Cache->Frame = FVoxelPlanetNavFrame::Make(PlanetCenter, PlanetRadius, RegionGrid.CellCentreDirection(Region), Region);
+		Cache->Frame = bPlanet
+			? FVoxelNavFrame::MakePlanet(PlanetCenter, PlanetRadius, RegionGrid.CellCentreDirection(Region), Region)
+			: FVoxelNavFrame::MakeIdentity();
 	}
 	Cache->LastUsedSeconds = FPlatformTime::Seconds();
 	return *Cache;
 }
 
-float UVoxelSurfaceNavigationSubsystem::HeightForPlanetCell(FRegionCache& Region, const FIntPoint& Cell)
+FVoxelSurfaceNavParams UVoxelSurfaceNavigationSubsystem::ParamsIn(const FRegionCache& Region) const
+{
+	if (Region.Frame.bIdentity)
+	{
+		return Params;
+	}
+	// A planet: altitudes for heights, the sea the altitude plane WaterRadius - PlanetRadius.
+	FVoxelSurfaceNavParams FrameParams = Params;
+	FrameParams.bHasWater = false;
+	FrameParams.Sea = FVoxelSeaSurface();
+	if (PlanetSea.bEnabled && PlanetSea.bRadial)
+	{
+		FrameParams.Sea = FVoxelSeaSurface::MakePlane(PlanetSea.Radius - PlanetRadius);
+	}
+	return FrameParams;
+}
+
+bool UVoxelSurfaceNavigationSubsystem::IsUnderwaterIn(const FRegionCache& Region, double X, double Y, float Height) const
+{
+	if (Region.Frame.bIdentity)
+	{
+		return Params.IsUnderwater(X, Y, Height);
+	}
+	return PlanetSea.bEnabled && PlanetSea.bRadial && PlanetRadius + Height < PlanetSea.Radius - Params.MaxWadeDepth;
+}
+
+float UVoxelSurfaceNavigationSubsystem::HeightForCell(FRegionCache& Region, const FIntPoint& Cell)
 {
 	const FIntPoint TileKey(FloorDiv(Cell.X, TileSize), FloorDiv(Cell.Y, TileSize));
 	TUniquePtr<FNavTile>& Tile = Region.Tiles.FindOrAdd(TileKey);
@@ -748,33 +686,67 @@ float UVoxelSurfaceNavigationSubsystem::HeightForPlanetCell(FRegionCache& Region
 	{
 		return Tile->Heights[Index];
 	}
-	// The surface along the cell centre's direction: edit-merged when its chunk is loaded, analytic otherwise.
+	// The surface on the cell centre's up-line (its direction on a planet): edit-merged when its chunk is loaded, analytic
+	// otherwise. On a heightmap world the frame's height is the world Z, on a planet the altitude.
 	const FVector2D Centre = CellCentre(Cell);
-	const FVector Probe = PlanetCenter + Region.Frame.DirectionAt(Centre.X, Centre.Y) * PlanetRadius;
-	float Altitude = 0.f;
+	const FVector Probe = Region.Frame.ToWorld(FVector(Centre.X, Centre.Y, 0.0));
+	float Height = 0.f;
 	bool bLoaded = false;
 	if (UVoxelChunkManager* ChunkMgr = ChunkManager.Get())
 	{
 		FVoxelSurfaceSample Sample;
 		bLoaded = ChunkMgr->QueryEditMergedSurfacePoint(Probe, Sample);
-		Altitude = bLoaded ? Sample.Altitude : ChunkMgr->GetAltitudeAt(ChunkMgr->GetGeneratedSurfacePoint(Probe));
+		if (Region.Frame.bIdentity)
+		{
+			Height = bLoaded ? static_cast<float>(Sample.Position.Z) : ChunkMgr->GetGeneratedSurfaceHeight(Centre.X, Centre.Y);
+		}
+		else
+		{
+			Height = bLoaded ? Sample.Altitude : ChunkMgr->GetAltitudeAt(ChunkMgr->GetGeneratedSurfacePoint(Probe));
+		}
 	}
-	Tile->Heights[Index] = Altitude;
+	Tile->Heights[Index] = Height;
 	Tile->Sampled[Index] = true;
 	Tile->FromLoaded[Index] = bLoaded;
 	++Region.Cells;
 	++CachedCells;
-	return Altitude;
+	return Height;
 }
 
-bool UVoxelSurfaceNavigationSubsystem::IsPlanetCellBlocked(FRegionCache& Region, const FIntPoint& Cell)
+bool UVoxelSurfaceNavigationSubsystem::IsCellBlocked(FRegionCache& Region, const FIntPoint& Cell)
 {
+	if (TempBlockedCells.Contains(Cell))
+	{
+		return true;
+	}
+	const FVector2D Centre = CellCentre(Cell);
+	if (!Region.Frame.BlocksInSpace())
+	{
+		// A heightmap world's cell is its footprint. Outside the world is blocked, water on or off (WM-I2, KI9): past an
+		// island's R + falloff generation writes only a flat floor, which with water off would otherwise read as walkable
+		// ground.
+		if (const UVoxelChunkManager* ChunkMgr = ChunkManager.Get())
+		{
+			if (!ChunkMgr->IsInsideWorld(Centre.X, Centre.Y))
+			{
+				return true;
+			}
+		}
+		for (const FBlockedBox& Box : BlockedBoxes)
+		{
+			if (Box.Box.IsInside(Centre))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+	// A planet's cell is its surface point: the temporary spheres and the boxes in space.
 	if (TempSpheres.Num() == 0 && BlockedBoxes.Num() == 0)
 	{
 		return false;
 	}
-	const FVector2D Centre = CellCentre(Cell);
-	const FVector Ground = Region.Frame.ToWorld(FVector(Centre.X, Centre.Y, HeightForPlanetCell(Region, Cell)));
+	const FVector Ground = Region.Frame.ToWorld(FVector(Centre.X, Centre.Y, HeightForCell(Region, Cell)));
 	for (const FTempSphere& Block : TempSpheres)
 	{
 		if (FVector::Dist(Ground, Block.Center) <= Block.Radius + Params.CellSize * 0.5f)
@@ -792,7 +764,7 @@ bool UVoxelSurfaceNavigationSubsystem::IsPlanetCellBlocked(FRegionCache& Region,
 	return false;
 }
 
-void UVoxelSurfaceNavigationSubsystem::InvalidatePlanetBox(const FBox& WorldBox, bool bOnlyAnalytic)
+void UVoxelSurfaceNavigationSubsystem::InvalidateBox(const FBox& WorldBox, bool bOnlyAnalytic)
 {
 	for (TPair<FIntPoint, TUniquePtr<FRegionCache>>& Pair : Regions)
 	{
@@ -801,19 +773,7 @@ void UVoxelSurfaceNavigationSubsystem::InvalidatePlanetBox(const FBox& WorldBox,
 		{
 			continue;
 		}
-		// The box's corners in the frame give a cell rectangle (its sides along up project inside it). Corners deep inside
-		// the planet are no surface any frame shows (their directions fan out over the whole sphere).
-		FBox2D Rect(ForceInit);
-		for (int32 Corner = 0; Corner < 8; ++Corner)
-		{
-			const FVector Point((Corner & 1) ? WorldBox.Max.X : WorldBox.Min.X, (Corner & 2) ? WorldBox.Max.Y : WorldBox.Min.Y,
-				(Corner & 4) ? WorldBox.Max.Z : WorldBox.Min.Z);
-			FVector FramePoint;
-			if (FVector::DistSquared(Point, PlanetCenter) >= FMath::Square(0.5 * PlanetRadius) && Region->Frame.ToFrame(Point, FramePoint))
-			{
-				Rect += FVector2D(FramePoint.X, FramePoint.Y);
-			}
-		}
+		const FBox2D Rect = Region->Frame.FootprintOf(WorldBox);
 		if (!Rect.bIsValid)
 		{
 			continue;
@@ -866,9 +826,10 @@ void UVoxelSurfaceNavigationSubsystem::DrawDebug()
 		}
 		const FColor Color = Path.Color.ToFColor(true);
 		// 40 uu above the ground along local up (radial on a planet).
-		auto Lift = [this](const FVector& Point)
+		const FVoxelNavFrame& Frame = RegionFor(Path.Points[0]).Frame;
+		auto Lift = [&Frame](const FVector& Point)
 		{
-			return Point + (bPlanet ? (Point - PlanetCenter).GetSafeNormal() : FVector::UpVector) * 40.0;
+			return Point + Frame.UpAt(Point) * 40.0;
 		};
 		for (int32 p = 0; p < Path.Points.Num(); ++p)
 		{
@@ -886,70 +847,42 @@ void UVoxelSurfaceNavigationSubsystem::DrawDebug()
 		return;
 	}
 	ApplyCVars();
-	if (bPlanet)
+	// The region frame's cells around the focus, drawn on the ground in the frame's orientation (the identity's on a
+	// heightmap world).
+	FRegionCache& Region = RegionFor(DebugFocus);
+	FVector FocusPoint;
+	if (!Region.Frame.ToFrame(DebugFocus, FocusPoint))
 	{
-		// The region frame's cells around the focus, drawn on the ground in the frame's orientation.
-		FRegionCache& Region = RegionFor(DebugFocus);
-		FVector FocusPoint;
-		if (!Region.Frame.ToFrame(DebugFocus, FocusPoint))
-		{
-			return;
-		}
-		const FIntPoint FocusCell = CellOf(FocusPoint);
-		const int32 PlanetR = FMath::Clamp(FMath::CeilToInt(DebugFocusRadius / Params.CellSize), 1, 24);
-		for (int32 DX = -PlanetR; DX <= PlanetR; ++DX)
-		{
-			for (int32 DY = -PlanetR; DY <= PlanetR; ++DY)
-			{
-				const FIntPoint Cell(FocusCell.X + DX, FocusCell.Y + DY);
-				const float Altitude = HeightForPlanetCell(Region, Cell);
-				const FVector2D C = CellCentre(Cell);
-				const FVector Ground = Region.Frame.ToWorld(FVector(C.X, C.Y, Altitude));
-				const FVector Up = (Ground - PlanetCenter).GetSafeNormal();
-				FColor Color = FColor::Yellow;
-				const FIntPoint TileKey(FloorDiv(Cell.X, TileSize), FloorDiv(Cell.Y, TileSize));
-				if (const TUniquePtr<FNavTile>* Tile = Region.Tiles.Find(TileKey))
-				{
-					const int32 Index = (Cell.Y - TileKey.Y * TileSize) * TileSize + (Cell.X - TileKey.X * TileSize);
-					Color = (*Tile && (*Tile)->FromLoaded[Index]) ? FColor::Green : FColor::Yellow;
-				}
-				if (IsPlanetCellBlocked(Region, Cell))
-				{
-					Color = FColor::Magenta;
-				}
-				else if (PlanetSea.bEnabled && PlanetSea.bRadial && PlanetRadius + Altitude < PlanetSea.Radius - Params.MaxWadeDepth)
-				{
-					Color = FColor::Red;
-				}
-				const FQuat Rotation = FRotationMatrix::MakeFromXZ(Region.Frame.East, Up).ToQuat();
-				DrawDebugBox(World, Ground + Up * 10.0, FVector(Params.CellSize * 0.45f, Params.CellSize * 0.45f, 2.f), Rotation, Color, false, 0.f, 0, 1.f);
-			}
-		}
 		return;
 	}
-	const FIntPoint Centre = CellOf(DebugFocus);
+	const FIntPoint FocusCell = CellOf(FocusPoint);
 	const int32 R = FMath::Clamp(FMath::CeilToInt(DebugFocusRadius / Params.CellSize), 1, 24);
 	for (int32 DX = -R; DX <= R; ++DX)
 	{
 		for (int32 DY = -R; DY <= R; ++DY)
 		{
-			const FIntPoint Cell(Centre.X + DX, Centre.Y + DY);
-			const float H = HeightForCell(Cell);
+			const FIntPoint Cell(FocusCell.X + DX, FocusCell.Y + DY);
+			const float H = HeightForCell(Region, Cell);
+			const FVector2D C = CellCentre(Cell);
+			const FVector Ground = Region.Frame.ToWorld(FVector(C.X, C.Y, H));
+			const FVector Up = Region.Frame.UpAt(Ground);
+			FColor Color = FColor::Yellow;
 			const FIntPoint TileKey(FloorDiv(Cell.X, TileSize), FloorDiv(Cell.Y, TileSize));
-			const TUniquePtr<FNavTile>* Tile = Tiles.Find(TileKey);
-			const int32 Index = (Cell.Y - TileKey.Y * TileSize) * TileSize + (Cell.X - TileKey.X * TileSize);
-			const bool bLoaded = Tile && *Tile && (*Tile)->FromLoaded[Index];
-			FColor Color = bLoaded ? FColor::Green : FColor::Yellow;
-			if (IsCellBlocked(Cell)) // blocked boxes, repath blocks, outside the world
+			if (const TUniquePtr<FNavTile>* Tile = Region.Tiles.Find(TileKey))
+			{
+				const int32 Index = (Cell.Y - TileKey.Y * TileSize) * TileSize + (Cell.X - TileKey.X * TileSize);
+				Color = (*Tile && (*Tile)->FromLoaded[Index]) ? FColor::Green : FColor::Yellow;
+			}
+			if (IsCellBlocked(Region, Cell)) // blocked boxes, repath blocks, outside the world
 			{
 				Color = FColor::Magenta;
 			}
-			else if (Params.IsUnderwater(CellCentre(Cell).X, CellCentre(Cell).Y, H))
+			else if (IsUnderwaterIn(Region, C.X, C.Y, H))
 			{
 				Color = FColor::Red;
 			}
-			const FVector2D C = CellCentre(Cell);
-			DrawDebugBox(World, FVector(C.X, C.Y, H + 10.f), FVector(Params.CellSize * 0.45f, Params.CellSize * 0.45f, 2.f), Color, false, 0.f, 0, 1.f);
+			const FQuat Rotation = FRotationMatrix::MakeFromXZ(Region.Frame.East, Up).ToQuat();
+			DrawDebugBox(World, Ground + Up * 10.0, FVector(Params.CellSize * 0.45f, Params.CellSize * 0.45f, 2.f), Rotation, Color, false, 0.f, 0, 1.f);
 		}
 	}
 #endif

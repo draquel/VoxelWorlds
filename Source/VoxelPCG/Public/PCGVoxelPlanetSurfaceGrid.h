@@ -22,16 +22,17 @@ struct VOXELPCG_API FPCGVoxelPlanetSurfaceCell
 
 /**
  * The Voxel Surface Sampler's grid on a planet (spherical Phase 4, SP-G2; WORLD_MODES_REVIEW_PLAN.md §18, WM-SY7): the
- * surface coordinate's cube faces cut into N x N cells of equal warped UV, N = ceil((pi / 2) * R / Spacing), so a cell
- * is at most Spacing across along the face's centre lines (the tangent warp keeps cell areas within 1.38x). The cells a
- * box can hold are gathered by a flood fill from the cells of the box's centre and corners, through UV neighbours and
- * across face edges, keeping each cell whose ray from the centre crosses the box between the shell's inner and outer
- * radii. Every direction belongs to one face, so no point is sampled twice. Pure and thread-safe.
+ * shared cube-sphere grid (FVoxelCubeSphereGrid, code review CR2 REND-17: the cells, their directions and their neighbours
+ * across face edges are its) at N = ceil((pi / 2) * R / Spacing) cells a face edge, so a cell is at most Spacing across
+ * along the face's centre lines (the tangent warp keeps cell areas within 1.38x). The cells a box can hold are gathered by
+ * a flood fill from the cells of the box's centre and corners, through the grid's neighbours, keeping each cell whose ray
+ * from the centre crosses the box between the shell's inner and outer radii. Every direction belongs to one face, so no
+ * point is sampled twice. Pure and thread-safe.
  */
 struct VOXELPCG_API FPCGVoxelPlanetSurfaceGrid
 {
 	/**
-	 * Cells along a face edge for a spacing.
+	 * Cells along a face edge for a spacing (FVoxelCubeSphereGrid::CellsPerEdgeFor).
 	 *
 	 * @param PlanetRadius Datum radius
 	 * @param Spacing Point spacing (uu)

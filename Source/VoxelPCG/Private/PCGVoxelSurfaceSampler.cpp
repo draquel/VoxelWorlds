@@ -212,11 +212,21 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 	// once here on the PCG execution thread, per the sampler's synchronous execution contract).
 	const FVoxelBiomeSnapshot BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(VoxelCtx.BiomeConfig);
 
+	// The sites the surface is sampled at (code review CR2, REND-17: one loop for the sphere and the plane): on a planet the
+	// cells of the cube-face grid at the spacing whose rays cross the bounds (spherical SP-G2), each queried along local up
+	// at its direction's datum point, seeded by (face, cell) and kept when its surface point lies inside the bounds; on a
+	// heightmap world the XY grid at the spacing snapped to a world-anchored grid, inside the world (no points past an
+	// island's R + falloff, where generation writes only a flat floor: world modes review WM-I2, KI9), seeded by (IX, IY).
+	struct FSite
+	{
+		FVector Query;
+		int32 Seed = 0;
+	};
+	TArray<FSite> Sites;
+	bool bClipToBounds = false; // a planet's cells are gathered by their rays; a heightmap's XY grid is already inside the bounds
+	bool bSiteXY = false;       // a heightmap point keeps the site's own (X, Y) under the sampled height
 	if (VoxelCtx.WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet)
 	{
-		// A planet (spherical SP-G2): the surface coordinate's cube-face grid at the spacing, each cell's surface point
-		// along local up (edit-merged near loaded chunks, the analytic surface beyond), kept when inside the bounds,
-		// rotated to local up, seeded by (face, cell).
 		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*VoxelCtx.WorldMode);
 		TArray<FPCGVoxelPlanetSurfaceCell> Cells;
 		if (!FPCGVoxelPlanetSurfaceGrid::GatherCells(Planet, Bounds, Settings->PointSpacing, MaxPoints, Cells))
@@ -226,39 +236,15 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 			return true;
 		}
 		const FSphericalPlanetParams& PlanetParams = Planet.GetPlanetParams();
-		// The conditioning zones over the bounds (POI pads, SP-B10): the far points stand on the generated ground.
-		TArray<FVoxelConditioningZone> PlanetZones;
-		if (VoxelCtx.ChunkManager)
-		{
-			VoxelCtx.ChunkManager->GatherConditioningZones(Bounds, PlanetZones);
-		}
-		Transforms.Reserve(Cells.Num());
-		Samples.Reserve(Cells.Num());
-		Seeds.Reserve(Cells.Num());
+		Sites.Reserve(Cells.Num());
 		for (const FPCGVoxelPlanetSurfaceCell& Cell : Cells)
 		{
-			const FVector Query = PlanetParams.PlanetCenter + Cell.Direction * PlanetParams.PlanetRadius;
-			FVoxelSurfaceSample Sample;
-			const bool bNear = Settings->bEditAwareNearby && VoxelCtx.ChunkManager
-				&& VoxelCtx.ChunkManager->QueryEditMergedSurfacePoint(Query, Sample);
-			if (!bNear)
-			{
-				Sample = FVoxelSurfaceQuery::SampleSurfacePoint(*VoxelCtx.WorldMode, Query, VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
-					BiomeSnapshot, VoxelCtx.Sea, &PlanetZones);
-			}
-			if (!Bounds.IsInsideOrOn(Sample.Position))
-			{
-				continue;
-			}
-			const FQuat Rotation = FRotationMatrix::MakeFromZ(Settings->bAlignToSurfaceNormal ? Sample.Normal : Sample.Up).ToQuat();
-			Transforms.Emplace(Rotation, Sample.Position);
-			Samples.Add(Sample);
-			Seeds.Add(PCGHelpers::ComputeSeed(Cell.Face, Cell.IU, Cell.IV));
+			Sites.Add({ PlanetParams.PlanetCenter + Cell.Direction * PlanetParams.PlanetRadius, PCGHelpers::ComputeSeed(Cell.Face, Cell.IU, Cell.IV) });
 		}
+		bClipToBounds = true;
 	}
 	else
 	{
-		// Grid stepping over the XY footprint, snapped to a world-anchored grid for determinism.
 		const float Spacing = Settings->PointSpacing;
 		const int32 MinX = FMath::CeilToInt(Bounds.Min.X / Spacing);
 		const int32 MaxX = FMath::FloorToInt(Bounds.Max.X / Spacing);
@@ -280,78 +266,62 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 				NumCells, MaxPoints));
 			return true;
 		}
-
-		Transforms.Reserve(NumCells);
-		Samples.Reserve(NumCells);
-		Seeds.Reserve(NumCells);
-
-		// The conditioning zones over the bounds (POI pads and their falloff rings): the far points stand on the generated
-		// ground, as the near band's loaded voxels do (world modes review G23).
-		TArray<FVoxelConditioningZone> Zones;
-		if (VoxelCtx.ChunkManager)
-		{
-			VoxelCtx.ChunkManager->GatherConditioningZones(Bounds, Zones);
-		}
-
+		Sites.Reserve(NumCells);
 		for (int32 IX = MinX; IX <= MaxX; ++IX)
 		{
 			const double WorldX = static_cast<double>(IX) * Spacing;
 			for (int32 IY = MinY; IY <= MaxY; ++IY)
 			{
 				const double WorldY = static_cast<double>(IY) * Spacing;
-
-				// No points past the world's edge (an island's R + falloff, where generation writes only a flat floor):
-				// world modes review WM-I2, KI9.
 				if (!VoxelCtx.WorldMode->IsInsideWorld(WorldX, WorldY))
 				{
 					continue;
 				}
-
-				// Hybrid surface source: edit-merged voxel data near loaded chunks (edit-aware + exact
-				// surface), the procedural generator beyond them (stream-independent reach).
-				FVoxelSurfaceSample Sample;
-				bool bGotNearBand = false;
-				if (Settings->bEditAwareNearby && VoxelCtx.ChunkManager)
-				{
-					float NearHeight = 0.0f;
-					FVector NearNormal = FVector::UpVector;
-					float NearSlope = 0.0f;
-					uint8 NearMaterial = 0;
-					uint8 NearBiome = 0;
-					if (VoxelCtx.ChunkManager->QueryEditMergedSurface(WorldX, WorldY, NearHeight, NearNormal, NearSlope, NearMaterial, NearBiome))
-					{
-						Sample.Position = FVector(WorldX, WorldY, NearHeight);
-						Sample.Normal = NearNormal;
-						Sample.SlopeDegrees = NearSlope;
-						Sample.MaterialID = NearMaterial;
-						Sample.BiomeID = NearBiome;
-						bGotNearBand = true;
-					}
-				}
-
-				if (!bGotNearBand)
-				{
-					Sample = FVoxelSurfaceQuery::SampleSurface(
-						*VoxelCtx.WorldMode,
-						static_cast<float>(WorldX), static_cast<float>(WorldY),
-						VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
-						BiomeSnapshot, VoxelCtx.WorldSeed,
-						VoxelCtx.bWaterEnabled, VoxelCtx.WaterLevel, &Zones);
-				}
-
-				const FVector Position(WorldX, WorldY, Sample.Position.Z);
-				const FQuat Rotation = Settings->bAlignToSurfaceNormal
-					? FRotationMatrix::MakeFromZ(Sample.Normal).ToQuat()
-					: FQuat::Identity;
-
-				Transforms.Emplace(Rotation, Position);
-				Samples.Add(Sample);
-				Seeds.Add(PCGHelpers::ComputeSeed(IX, IY));
+				Sites.Add({ FVector(WorldX, WorldY, 0.0), PCGHelpers::ComputeSeed(IX, IY) });
 			}
 		}
+		bSiteXY = true;
 		PCGE_LOG(Verbose, LogOnly, FText::Format(
 			LOCTEXT("Generated", "Voxel Surface Sampler: generated {0} points over [{1},{2}]x[{3},{4}]"),
-			Transforms.Num(), MinX, MaxX, MinY, MaxY));
+			Sites.Num(), MinX, MaxX, MinY, MaxY));
+	}
+
+	// The conditioning zones over the bounds (POI pads and their falloff rings, SP-B10): the far points stand on the
+	// generated ground, as the near band's loaded voxels do (world modes review G23).
+	TArray<FVoxelConditioningZone> Zones;
+	if (VoxelCtx.ChunkManager)
+	{
+		VoxelCtx.ChunkManager->GatherConditioningZones(Bounds, Zones);
+	}
+
+	Transforms.Reserve(Sites.Num());
+	Samples.Reserve(Sites.Num());
+	Seeds.Reserve(Sites.Num());
+	for (const FSite& Site : Sites)
+	{
+		// Hybrid surface source: edit-merged voxel data near loaded chunks (edit-aware + exact surface), the procedural
+		// generator beyond them (stream-independent reach), both along local up at the site.
+		FVoxelSurfaceSample Sample;
+		const bool bNear = Settings->bEditAwareNearby && VoxelCtx.ChunkManager
+			&& VoxelCtx.ChunkManager->QueryEditMergedSurfacePoint(Site.Query, Sample);
+		if (!bNear)
+		{
+			Sample = FVoxelSurfaceQuery::SampleSurfacePoint(*VoxelCtx.WorldMode, Site.Query, VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
+				BiomeSnapshot, VoxelCtx.Sea, &Zones);
+		}
+		if (bClipToBounds && !Bounds.IsInsideOrOn(Sample.Position))
+		{
+			continue;
+		}
+		// A heightmap point keeps the site's own (X, Y) under the sampled height and stands upright with no rotation; a
+		// planet's is the sampled point, rotated to local up.
+		const FVector Position = bSiteXY ? FVector(Site.Query.X, Site.Query.Y, Sample.Position.Z) : Sample.Position;
+		const FQuat Rotation = Settings->bAlignToSurfaceNormal
+			? FRotationMatrix::MakeFromZ(Sample.Normal).ToQuat()
+			: (bSiteXY ? FQuat::Identity : FRotationMatrix::MakeFromZ(Sample.Up).ToQuat());
+		Transforms.Emplace(Rotation, Position);
+		Samples.Add(Sample);
+		Seeds.Add(Site.Seed);
 	}
 
 	const int32 NumPoints = Transforms.Num();
