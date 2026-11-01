@@ -56,6 +56,7 @@
 #include "Components/BoxComponent.h"
 #include "UObject/UObjectIterator.h"
 #include "Engine/World.h"
+#include "GameFramework/WorldSettings.h"
 #include "Engine/Engine.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
@@ -292,6 +293,25 @@ static FAutoConsoleCommandWithWorld GVoxelFarFieldStatsCmd(
 			if (It->GetWorld() && It->GetWorld()->IsGameWorld())
 			{
 				UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.FarFieldStats: %s"), *It->GetFarFieldDebugString());
+			}
+		}
+	}));
+
+static FAutoConsoleCommandWithWorld GVoxelWorldStatsCmd(
+	TEXT("voxel.World.Stats"),
+	TEXT("Log the voxel world's report for every live chunk manager: the world's bounds and sea (a planet's radius, shell, orbit radius and ocean shell; a heightmap world's mode, bounds, terrain Z and far ocean), the voxel window's reach from the streaming viewer with the far field, and the cut-over and descent prefetch. vox.Planet / vox.World print the same lines and add the pawn's."),
+	FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld*)
+	{
+		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
+		{
+			if (It->GetWorld() && It->GetWorld()->IsGameWorld())
+			{
+				TArray<FString> Lines;
+				It->GetWorldReport(FVoxelWorldReportNotes(), Lines);
+				for (const FString& Line : Lines)
+				{
+					UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.Stats: %s"), *Line);
+				}
 			}
 		}
 	}));
@@ -6069,6 +6089,110 @@ void UVoxelChunkManager::GetBenchLoadedByLayer(TMap<int32, int32>& OutByLayer) c
 	{
 		++OutByLayer.FindOrAdd(ChunkCoord.Z);
 	}
+}
+
+double UVoxelChunkManager::GetSurfaceOrSeaLevel(const FVector& WorldPos, bool& bOutSea) const
+{
+	bOutSea = false;
+	const FVoxelSeaSurface Sea = GetSeaSurface();
+	if (GetWorldBounds().Shape != EVoxelWorldBoundsShape::Shell)
+	{
+		// A heightmap world (WM-MP11): the generated ground's Z at (X, Y), or the sea plane where higher.
+		const double Ground = GetGeneratedSurfaceHeight(WorldPos.X, WorldPos.Y);
+		bOutSea = Sea.bEnabled && !Sea.bRadial && Sea.PlaneZ > Ground;
+		return bOutSea ? Sea.PlaneZ : Ground;
+	}
+	const FVector Centre = GetWorldBounds().Center;
+	const double Ground = FVector::Dist(GetGeneratedSurfacePoint(WorldPos), Centre);
+	bOutSea = Sea.bEnabled && Sea.bRadial && Sea.Radius > Ground;
+	return bOutSea ? Sea.Radius : Ground;
+}
+
+void UVoxelChunkManager::GetWorldReport(const FVoxelWorldReportNotes& Notes, TArray<FString>& OutLines) const
+{
+	OutLines.Reset();
+	if (!Configuration)
+	{
+		return;
+	}
+	const FVoxelWorldBounds Bounds = GetWorldBounds();
+	const FVoxelSeaSurface Sea = GetSeaSurface();
+	const AWorldSettings* Settings = GetWorld() ? GetWorld()->GetWorldSettings() : nullptr;
+	const bool bPlanet = Bounds.Shape == EVoxelWorldBoundsShape::Shell;
+	if (bPlanet)
+	{
+		OutLines.Add(FString::Printf(
+			TEXT("centre %s, radius %.0f, shell %.0f to %.0f, sea %s, KillZ %.0f, orbit radius %.0f (%.2f R over the datum), ocean shell %s"),
+			*Bounds.Center.ToCompactString(), Configuration->WorldRadius, Bounds.InnerRadius, Bounds.OuterRadius,
+			Sea.bEnabled ? *FString::Printf(TEXT("radius %.0f"), Sea.Radius) : TEXT("off"), Settings ? Settings->KillZ : 0.f,
+			Bounds.OrbitRadius, (Bounds.OrbitRadius - Configuration->WorldRadius) / FMath::Max(1.0, static_cast<double>(Configuration->WorldRadius)),
+			HasPlanetOcean() ? (IsPlanetOceanUndersideShown() ? TEXT("drawn (from under the sea)") : TEXT("drawn"))
+				: (DoesFarFieldDrawSea() ? TEXT("none (the far field draws the sea)") : TEXT("none"))));
+	}
+	else
+	{
+		const TCHAR* Shape = Bounds.Shape == EVoxelWorldBoundsShape::Circle ? TEXT("circle") : (Bounds.Shape == EVoxelWorldBoundsShape::Rectangle ? TEXT("rectangle")
+			: (Bounds.Shape == EVoxelWorldBoundsShape::Unbounded ? TEXT("unbounded") : TEXT("shell")));
+		OutLines.Add(FString::Printf(
+			TEXT("%s world (%s), bounds %s centre %s half extent (%.0f, %.0f) outer radius %.0f, terrain Z %.0f to %.0f, sea %s, KillZ %.0f, far ocean %s"),
+			*UEnum::GetDisplayValueAsText(Configuration->WorldMode).ToString(), *UEnum::GetDisplayValueAsText(Configuration->MeshingMode).ToString(), Shape,
+			*Bounds.Center.ToCompactString(), Bounds.HalfExtent.X, Bounds.HalfExtent.Y, Bounds.OuterRadius, Bounds.MinZ, Bounds.MaxZ,
+			Sea.bEnabled ? *FString::Printf(TEXT("at Z %.0f"), Sea.PlaneZ) : TEXT("off"), Settings ? Settings->KillZ : 0.f,
+			HasFarOcean() ? *GetFarOceanDebugString() : TEXT("none")));
+	}
+
+	// The voxel window's reach from the streaming viewer, and the far field (spherical Phase 6, WM-BP2; WM-MP1, WM-MP11).
+	const FVoxelResidencySnapshot Residency = GetResidencySnapshot();
+	FString ByLOD;
+	for (int32 LOD = 0; LOD < Residency.ByLOD.Num(); ++LOD)
+	{
+		ByLOD += FString::Printf(TEXT("%s%d"), LOD == 0 ? TEXT("") : TEXT("/"), Residency.ByLOD[LOD]);
+	}
+	int32 LowLayer = 0, HighLayer = 0;
+	bool bFirst = true;
+	for (const TPair<int32, int32>& Layer : Residency.ByLayer)
+	{
+		LowLayer = bFirst ? Layer.Key : FMath::Min(LowLayer, Layer.Key);
+		HighLayer = bFirst ? Layer.Key : FMath::Max(HighLayer, Layer.Key);
+		bFirst = false;
+	}
+	const FVoxelFarFieldStats Far = GetFarFieldStats();
+	if (bPlanet)
+	{
+		OutLines.Add(FString::Printf(
+			TEXT("streaming viewer at altitude %.0f%s; voxel window %d chunks (%d ready, LOD %s), radial layers %d to %d, ")
+			TEXT("reach %.0f (from the ground point under the viewer %.0f), chunk altitudes %.0f to %.0f, view distance %.0f; far field %s"),
+			Residency.ViewerAltitude, *Notes.Viewer, Residency.Tracked, Residency.Ready,
+			ByLOD.IsEmpty() ? TEXT("-") : *ByLOD, LowLayer, HighLayer, Residency.MaxDistance, Residency.MaxGroundDistance,
+			Residency.MinChunkAltitude, Residency.MaxChunkAltitude, Configuration->ViewDistance,
+			Far.bActive ? *FString::Printf(TEXT("%d of %d patches drawn (terrain %d, sea %d), %d hidden by the voxel window, %d builds pending, %lld built (%.2f ms each), %.2f ms, %.1f MB%s"),
+				Far.DrawnPatches, Far.Patches, Far.DrawnTerrain, Far.DrawnSea, Far.HiddenBand, Far.BuildsPending,
+				Far.TotalBuilt, Far.BuildMsMean, Far.UpdateMs, Far.MemoryMB, Far.bDrawsSea ? TEXT(", with the sea") : TEXT(""))
+				: TEXT("none (voxel.World.FarField 0: nothing is drawn past the voxel window but the sea)")));
+	}
+	else
+	{
+		OutLines.Add(FString::Printf(
+			TEXT("streaming viewer %s at Z %.0f%s; voxel window %d chunks (%d ready, LOD %s), chunk layers %d to %d, reach %.0f (%.0f along the ground), ")
+			TEXT("chunk Z %.0f to %.0f, view distance %.0f; far field %s"),
+			*Residency.Viewer.ToCompactString(), Residency.Viewer.Z, *Notes.Viewer, Residency.Tracked, Residency.Ready,
+			ByLOD.IsEmpty() ? TEXT("-") : *ByLOD, LowLayer, HighLayer, Residency.MaxDistance, Residency.MaxGroundDistance,
+			Residency.MinChunkAltitude, Residency.MaxChunkAltitude, Configuration->ViewDistance,
+			Far.bActive ? *FString::Printf(TEXT("%d of %d patches drawn (terrain %d, sea %d), %d hidden by the voxel window, %d builds pending, %lld built (%.2f ms each), %.2f ms, %.1f MB%s; %s"),
+				Far.DrawnPatches, Far.Patches, Far.DrawnTerrain, Far.DrawnSea, Far.HiddenBand, Far.BuildsPending,
+				Far.TotalBuilt, Far.BuildMsMean, Far.UpdateMs, Far.MemoryMB, Far.bDrawsSea ? TEXT(", with the sea") : TEXT(""),
+				*GetFarFieldDebugString())
+				: TEXT("none (voxel.World.FarField 0: nothing is drawn past the voxel window)")));
+	}
+
+	// Orbit and back (spherical Phase 6, WM-BP10; on heightmap worlds WM-MP2): the cut-over and the descent prefetch.
+	OutLines.Add(FString::Printf(
+		TEXT("voxel window %s: the streaming viewer %.0f over the terrain or sea under it (cut-over %s), %.0f under the camera (the descent prefetch)%s"),
+		Residency.bWindowSuspended ? (bPlanet ? TEXT("SUSPENDED (the far field draws the planet)") : TEXT("SUSPENDED (the far field draws the world)")) : TEXT("active"),
+		Residency.ViewerSurfaceAltitude,
+		Residency.CutoverAltitude > 0.0 ? *FString::Printf(TEXT("%.0f, resumes below %.0f"), Residency.CutoverAltitude, Residency.CutoverResumeAltitude)
+			: (bPlanet ? TEXT("off: no far field (G78)") : TEXT("off: no far field")),
+		Residency.StreamingLead, *Notes.Cutover));
 }
 
 FVoxelResidencySnapshot UVoxelChunkManager::GetResidencySnapshot() const
