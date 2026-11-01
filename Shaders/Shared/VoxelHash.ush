@@ -1,7 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 //
 // The one integer hash mix generation shares (code review CR2, CORE-21), the twin of VoxelHash.h bit for bit: 32-bit
-// wrapping multiplies, xors and shifts only. The noise lattice (PlanetNoise.ush), the ore Rarity (BiomeMaterial.ush)
+// wrapping multiplies, xors and shifts only. The noise lattice (VoxelNoise.ush), the ore Rarity (BiomeMaterial.ush)
 // and the biome blend dither (BiomeMaterial.ush) call it.
 
 #pragma once

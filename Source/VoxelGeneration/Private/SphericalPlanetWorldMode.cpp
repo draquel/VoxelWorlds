@@ -7,7 +7,7 @@
 #include "VoxelGeneration.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelTerrainConditioning.h"
-#include "VoxelPlanetNoise.h"
+#include "VoxelNoise.h"
 #include "VoxelBiomeSnapshot.h"
 
 #include <atomic>
@@ -265,7 +265,7 @@ float FSphericalPlanetWorldMode::SampleSphericalNoise(
 {
 	// The full 3D point on the datum sphere: no hemisphere mirror, no seam, feature size in world units (SP-B1). Planet
 	// noise (WM-BP5, D22): the point split in double per octave, a hashed lattice with no period.
-	return FVoxelPlanetNoise::FBM3D(GetNoiseSamplePoint(Direction, PlanetRadius), NoiseParams);
+	return FVoxelNoise::FBM3D(GetNoiseSamplePoint(Direction, PlanetRadius), NoiseParams);
 }
 
 FWorldModeTerrainParams FSphericalPlanetWorldMode::ComputeEffectiveTerrainParams(
@@ -282,7 +282,7 @@ FWorldModeTerrainParams FSphericalPlanetWorldMode::ComputeEffectiveTerrainParams
 	FWorldModeTerrainParams Effective = BaseParams;
 	if (BiomeSnapshot && BiomeSnapshot->bEnableContinentalness)
 	{
-		OutContinentalness = FVoxelPlanetNoise::FBM3D(GetNoiseSamplePoint(Direction, PlanetRadius),
+		OutContinentalness = FVoxelNoise::FBM3D(GetNoiseSamplePoint(Direction, PlanetRadius),
 			GetContinentalnessNoiseParams(NoiseParams.Seed, *BiomeSnapshot));
 		float HeightOffset = 0.0f;
 		float HeightScaleMult = 1.0f;
@@ -295,15 +295,15 @@ FWorldModeTerrainParams FSphericalPlanetWorldMode::ComputeEffectiveTerrainParams
 
 FVoxelNoiseParams FSphericalPlanetWorldMode::GetContinentalnessNoiseParams(int32 WorldSeed, const FVoxelBiomeSnapshot& BiomeSnapshot)
 {
-	return FVoxelPlanetNoise::MakeFieldParams(WorldSeed + BiomeSnapshot.ContinentalnessSeedOffset, BiomeSnapshot.ContinentalnessNoiseFrequency);
+	return FVoxelNoise::MakeFieldParams(WorldSeed + BiomeSnapshot.ContinentalnessSeedOffset, BiomeSnapshot.ContinentalnessNoiseFrequency);
 }
 
 void FSphericalPlanetWorldMode::SampleClimate(const FVector& Direction, double PlanetRadius, const FVoxelNoiseParams& TemperatureParams,
 	const FVoxelNoiseParams& MoistureParams, float& OutTemperature, float& OutMoisture)
 {
 	const FVector SamplePoint = GetNoiseSamplePoint(Direction, PlanetRadius);
-	OutTemperature = FVoxelPlanetNoise::FBM3D(SamplePoint, TemperatureParams);
-	OutMoisture = FVoxelPlanetNoise::FBM3D(SamplePoint, MoistureParams);
+	OutTemperature = FVoxelNoise::FBM3D(SamplePoint, TemperatureParams);
+	OutMoisture = FVoxelNoise::FBM3D(SamplePoint, MoistureParams);
 }
 
 FVector FSphericalPlanetWorldMode::ScaleAltitudeRelative(const FVector& PlanetRelativePos, double PlanetRadius, float VerticalScale)

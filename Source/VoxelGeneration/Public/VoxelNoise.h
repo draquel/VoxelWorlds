@@ -21,10 +21,10 @@ struct VOXELGENERATION_API FVoxelNoiseSplit
 };
 
 /**
- * The terrain noise (spherical Phase 6, WM-BP5, decision D22; every world mode since the world modes review's MP4, decision
- * D39): the noise every field samples (terrain, continentalness, temperature, moisture, caves and ores), on the CPU and, bit
- * for bit in its algebra, on the GPU (PlanetNoise.ush). The name is from spherical Phase 6, when planets alone had it;
- * FVoxelCPUNoiseGenerator::FBM3D, the heightmap entry point, has come through here since MP4 (GenerationVersion 3).
+ * The terrain noise of every world mode: the noise every field samples (terrain, continentalness, temperature, moisture,
+ * caves and ores), on the CPU and, bit for bit in its algebra, on the GPU (VoxelNoise.ush). FVoxelCPUNoiseGenerator::FBM3D,
+ * the heightmap entry point, comes through here (planets since spherical Phase 6, WM-BP5, D22; heightmap worlds since the
+ * world modes review's MP4, D39, GenerationVersion 3; named FVoxelPlanetNoise until CR3, CORE-28).
  *
  * Two things differ from the classic table noise heightmap worlds sampled before MP4 (the tests' VoxelClassicNoiseControl::ClassicFBM3D):
  *
@@ -46,9 +46,9 @@ struct VOXELGENERATION_API FVoxelNoiseSplit
  * The octave loop (frequencies multiplied in float, amplitudes, normalisation) is FVoxelCPUNoiseGenerator::FBM3D's.
  *
  * Thread safety: stateless, any thread.
- * @see WORLD_MODES_REVIEW_PLAN.md §20.1 (WM-BP5, D22), Shaders/Private/PlanetNoise.ush
+ * @see WORLD_MODES_REVIEW_PLAN.md §20.1 (WM-BP5, D22), Shaders/Private/VoxelNoise.ush
  */
-class VOXELGENERATION_API FVoxelPlanetNoise
+class VOXELGENERATION_API FVoxelNoise
 {
 public:
 	/** Most octaves a field has (FVoxelNoiseParams::Octaves' ClampMax). */
@@ -114,10 +114,11 @@ public:
 	static int32 OctaveFrequencies(const FVoxelNoiseParams& Params, float* OutFrequencies);
 
 	/**
-	 * fBm at a position, each octave split at the point itself (the CPU planet paths: generation, the surface function,
-	 * the surface queries, the map).
+	 * fBm at a position, each octave split at the point itself (the CPU paths: generation, the surface function, the
+	 * surface queries, the map).
 	 *
-	 * @param Position Sample position in uu, relative to the planet centre (double)
+	 * @param Position Sample position in uu (double): relative to the planet centre on a planet, the world position on a
+	 *                 heightmap world
 	 * @param Params Noise parameters
 	 * @return Noise in about [-1, 1]
 	 */
@@ -125,7 +126,7 @@ public:
 
 	/**
 	 * fBm at Origin + Offset: Origin split per octave (SplitOctaves), Offset scaled by each octave's frequency in float.
-	 * The GPU's form (PlanetFBM3D), on the CPU for parity and tests.
+	 * The GPU's form (NoiseFBM3D), on the CPU for parity and tests.
 	 *
 	 * @param Origin Origin in uu (double)
 	 * @param Offset The sample's offset from Origin in uu (float; within a chunk or so)

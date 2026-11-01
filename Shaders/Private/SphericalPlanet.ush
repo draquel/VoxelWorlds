@@ -5,7 +5,7 @@
 // per-voxel pipeline of FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet, in the same order, so GPU and CPU planets
 // match (VoxelWorlds.Generation.GPUvsCPUSphericalParity). Any change here must be mirrored there.
 //
-// Include AFTER the generation globals (GenerateVoxelDensity.usf), BiomeMaterial.ush, PlanetNoise.ush and the shared
+// Include AFTER the generation globals (GenerateVoxelDensity.usf), BiomeMaterial.ush, VoxelNoise.ush and the shared
 // helpers MakePlanetVoxelFrame / GpuContinentalnessCurves / GpuCaveCarve (caves along local up): this file reads the
 // Planet*, Cave*, biome, ore and water globals.
 //
@@ -124,7 +124,7 @@ float PlanetOreVeinNoise(uint OreIdx, float3 D, int WorldSeed)
     const int Base = OreNoiseOrigin + (int)OreIdx * 3;
     const float4 Streak = NoiseOrigins[Base * 2]; // [direction, 1 - 1 / StreakStretch] (factor 0 for a blob)
     const float3 Offset = D - Streak.xyz * (dot(D, Streak.xyz) * Streak.w);
-    const float NoiseValue = PlanetFBM3D(Base + 1, Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, WorldSeed + SeedOffset, 2, o1.x, 1.0f, 2.0f, 0.5f);
+    const float NoiseValue = NoiseFBM3D(Base + 1, Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, WorldSeed + SeedOffset, 2, o1.x, 1.0f, 2.0f, 0.5f);
     return (NoiseValue + 1.0f) * 0.5f;
 }
 
@@ -189,10 +189,10 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     if (ContinentalnessEnabled != 0)
     {
         Continentalness = GpuContinentalnessCurves(
-            PlanetFBM3D(ContinentNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, ContinentalnessSeed, 2, ContinentalnessFrequency, 1.0f, 2.0f, 0.5f),
+            NoiseFBM3D(ContinentNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, ContinentalnessSeed, 2, ContinentalnessFrequency, 1.0f, 2.0f, 0.5f),
             EffectiveBaseHeight, EffectiveHeightScale);
     }
-    const float TerrainNoise = PlanetFBM3D(TerrainNoiseOrigin, SurfaceOffset,
+    const float TerrainNoise = NoiseFBM3D(TerrainNoiseOrigin, SurfaceOffset,
         NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseAmplitude, NoiseLacunarity, NoisePersistence);
     float TerrainAltitude = EffectiveBaseHeight + TerrainNoise * EffectiveHeightScale * 0.5f;
 
@@ -216,8 +216,8 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     if (BiomeCount > 0)
     {
         // Temperature and moisture on the datum sphere, like the terrain (SP-B1)
-        const float Temperature = PlanetFBM3D(TemperatureNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0f, 2.0f, 0.5f);
-        const float Moisture = PlanetFBM3D(MoistureNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0f, 2.0f, 0.5f);
+        const float Temperature = NoiseFBM3D(TemperatureNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0f, 2.0f, 0.5f);
+        const float Moisture = NoiseFBM3D(MoistureNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0f, 2.0f, 0.5f);
         const BiomeBlendResult Blend = SampleGpuBiomeBlend(Temperature, Moisture, Continentalness);
         const GpuBiome Dominant = LoadGpuBiome(Blend.Indices[0]);
         OutBiomeID = Dominant.BiomeID;

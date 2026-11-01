@@ -97,7 +97,7 @@
 // Smoothstep at a voxel's offset 0..3 in its 4-voxel lattice cell, in 32nds: 3t^2 - 2t^3 at t = 0, 1/4, 1/2, 3/4.
 #define VOXELGEN_BLEND_DITHER_FAR_WEIGHT { 0u, 5u, 16u, 27u }
 
-// ==================== The Simplex kernel (FVoxelPlanetNoise, PlanetNoise.ush) ====================
+// ==================== The Simplex kernel (FVoxelNoise, VoxelNoise.ush) ====================
 
 // The twelve gradient vectors; V(x, y, z) is each side's vector constructor.
 #define VOXELGEN_SIMPLEX_GRAD3(V) { \

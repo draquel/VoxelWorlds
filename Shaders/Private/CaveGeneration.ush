@@ -42,7 +42,7 @@ float CheeseCarveFromNoise(float Noise, float Threshold, float CarveFalloff, flo
     return CarveDensity * CarveStrength;
 }
 
-// The cave noise itself is sampled by GenerateVoxelDensity.usf (HeightmapCaveLayerCarve / PlanetCaveLayerCarve: PlanetFBM3D
+// The cave noise itself is sampled by GenerateVoxelDensity.usf (HeightmapCaveLayerCarve / PlanetCaveLayerCarve: NoiseFBM3D
 // at the layer's per-chunk origin + the voxel's offset, MP4); the functions here turn the noise into a carve.
 
 /**

@@ -35,7 +35,7 @@ struct VOXELGENERATION_API FVoxelWorldModeFactory
 	 * 2: G18, the GPU heightmap caves apply the cave configuration's biome overrides and underwater minimum depth as the
 	 *    CPU does (GPU InfinitePlane and IslandBowl worlds stop carving caves under the sea and in biomes scaled to 0).
 	 * 3: world modes review MP4 (WM-MP6, WM-MP7, decision D39): heightmap worlds sample the planet's noise
-	 *    (FVoxelPlanetNoise: a hashed lattice with no 256-unit period, split-origin sampling, the continuous Simplex
+	 *    (FVoxelNoise: a hashed lattice with no 256-unit period, split-origin sampling, the continuous Simplex
 	 *    kernel) in every field, and their ores take the planet's streak map and Rarity hash; every heightmap world's
 	 *    terrain changes once. A planet's terrain does not change, but this version is in every fingerprint, so planet
 	 *    saves from before are refused too.
@@ -50,7 +50,7 @@ struct VOXELGENERATION_API FVoxelWorldModeFactory
 	 * planet's map tiles, explored tiles, map overlays and surface NPC ids key on the surface coordinate.
 	 * 4: spherical Phase 5 (decision D16): planet generation applies conditioning zones (POI pads, SP-B10), and POIs,
 	 * their claims, campsites and dungeons are placed on planets (dungeon records keyed by cube-sphere cell).
-	 * 5: spherical Phase 6 (decisions D21, D22): the planet noise (FVoxelPlanetNoise: a hashed lattice with no period,
+	 * 5: spherical Phase 6 (decisions D21, D22): the planet noise (FVoxelNoise: a hashed lattice with no period,
 	 * split-origin sampling) for every planet field, caves and ores relative to the planet centre, and the SDF in double.
 	 * 6: G43 (decision D27): the planet Simplex noise's corner kernel is continuous at the simplex boundaries, so every
 	 * planet field (terrain, continentalness, climate, caves, ores) moves slightly and the steps along the cube sphere's

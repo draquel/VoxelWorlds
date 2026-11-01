@@ -11,7 +11,7 @@
 
 // ==================== Infinite Plane Mode ====================
 
-// The terrain height noise itself is sampled by GenerateVoxelDensity.usf (PlanetFBM3D at the chunk's terrain origin +
+// The terrain height noise itself is sampled by GenerateVoxelDensity.usf (NoiseFBM3D at the chunk's terrain origin +
 // the voxel's offset in the plane, MP4); what follows turns it into a height and a signed distance.
 
 /**

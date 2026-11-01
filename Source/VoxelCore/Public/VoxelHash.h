@@ -6,7 +6,7 @@
 
 /**
  * The one integer hash mix generation shares (code review CR2, CORE-21), the twin of VoxelHash.ush bit for bit: 32-bit
- * wrapping multiplies, xors and shifts only. The noise lattice (FVoxelPlanetNoise), the ore Rarity
+ * wrapping multiplies, xors and shifts only. The noise lattice (FVoxelNoise), the ore Rarity
  * (FVoxelCPUNoiseGenerator::OreRarityHash) and the biome blend dither (FVoxelBiomeBlendDither) call it.
  */
 namespace VoxelHash

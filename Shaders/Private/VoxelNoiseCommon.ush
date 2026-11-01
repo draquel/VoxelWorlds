@@ -3,7 +3,7 @@
 /**
  * Common utilities for voxel noise generation shaders: the noise type enum and the density / voxel packing helpers.
  * The classic table noise (the permutation table, Perlin3D / Simplex3D / Cellular3D / Voronoi3D, FBM3D and its
- * wrappers) was deleted in CR1 (CORE-03): generation samples PlanetNoise.ush in every world mode since MP4.
+ * wrappers) was deleted in CR1 (CORE-03): generation samples VoxelNoise.ush in every world mode since MP4.
  */
 
 #pragma once

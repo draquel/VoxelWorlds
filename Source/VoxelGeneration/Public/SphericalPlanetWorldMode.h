@@ -426,7 +426,7 @@ public:
 	 *
 	 * @param Direction Unit direction from the planet centre
 	 * @param PlanetRadius Datum radius
-	 * @param TemperatureParams Temperature field (FVoxelPlanetNoise::MakeFieldParams)
+	 * @param TemperatureParams Temperature field (FVoxelNoise::MakeFieldParams)
 	 * @param MoistureParams Moisture field
 	 * @param OutTemperature Temperature in about [-1, 1]
 	 * @param OutMoisture Moisture in about [-1, 1]
