@@ -24,21 +24,15 @@ bool FVoxelPlanetNoise::IsContinuousSimplex()
 
 namespace VoxelPlanetNoiseDetail
 {
-	// Gradient vectors for Simplex noise (FVoxelCPUNoiseGenerator's set)
-	constexpr int32 Grad3[12][3] = {
-		{1,1,0}, {-1,1,0}, {1,-1,0}, {-1,-1,0},
-		{1,0,1}, {-1,0,1}, {1,0,-1}, {-1,0,-1},
-		{0,1,1}, {0,-1,1}, {0,1,-1}, {0,-1,-1}
-	};
+	// The Simplex kernel's table and constants, shared with PlanetNoise.ush (VoxelGenerationShared.ush).
+#define VOXELGEN_GRAD3_ROW(X, Y, Z) { X, Y, Z }
+	constexpr int32 Grad3[12][3] = VOXELGEN_SIMPLEX_GRAD3(VOXELGEN_GRAD3_ROW);
+#undef VOXELGEN_GRAD3_ROW
 
-	constexpr float SkewF3 = 1.0f / 3.0f;
-	constexpr float UnskewG3 = 1.0f / 6.0f;
+	constexpr float SkewF3 = VOXELGEN_SIMPLEX_SKEW_F3;
+	constexpr float UnskewG3 = VOXELGEN_SIMPLEX_UNSKEW_G3;
 
-	/** The hash as a float in [0, 1): its top 24 bits. */
-	FORCEINLINE float Unit(uint32 H)
-	{
-		return static_cast<float>(H >> 8) * (1.0f / 16777216.0f);
-	}
+	using VoxelHash::Unit;
 
 	FORCEINLINE double UnitD(uint32 H)
 	{
@@ -105,15 +99,15 @@ namespace VoxelPlanetNoiseDetail
 		const int32* G = Grad3[Hash % 12u];
 		if (bContinuous)
 		{
-			const T V = T(0.5) - X * X - Y * Y - Z * Z;
+			const T V = T(VOXELGEN_SIMPLEX_CONTINUOUS_RADIUS2) - X * X - Y * Y - Z * Z;
 			if (V <= T(0))
 			{
 				return T(0);
 			}
-			const T W = V * V * ((V + T(0.4)) * V + T(0.06));
+			const T W = V * V * ((V + T(VOXELGEN_SIMPLEX_CONTINUOUS_B)) * V + T(VOXELGEN_SIMPLEX_CONTINUOUS_C));
 			return W * (T(G[0]) * X + T(G[1]) * Y + T(G[2]) * Z);
 		}
-		T R = T(0.6) - X * X - Y * Y - Z * Z;
+		T R = T(VOXELGEN_SIMPLEX_CLASSIC_RADIUS2) - X * X - Y * Y - Z * Z;
 		if (R < T(0))
 		{
 			return T(0);
@@ -125,7 +119,7 @@ namespace VoxelPlanetNoiseDetail
 	/** The corner sum's scale: 32 for the classic kernel; 33.25 gives the continuous one the same spread. */
 	FORCEINLINE float SimplexScale(bool bContinuous)
 	{
-		return bContinuous ? 33.25f : 32.0f;
+		return bContinuous ? VOXELGEN_SIMPLEX_SCALE_CONTINUOUS : VOXELGEN_SIMPLEX_SCALE_CLASSIC;
 	}
 }
 

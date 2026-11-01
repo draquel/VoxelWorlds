@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelGenerationShared.ush"
 
 /**
  * Where a biome blend's material pick is made: a voxel's key on the world's voxel grid and the world seed. The key is the
@@ -42,7 +43,7 @@ struct VOXELCORE_API FVoxelBiomeBlendDither
 	static constexpr int32 LatticeShift = 2;
 
 	/** Added to the world seed, so the dither is not correlated with other hashes of it. */
-	static constexpr int32 SeedOffset = 0x5D1A3;
+	static constexpr int32 SeedOffset = VOXELGEN_BLEND_DITHER_SEED_OFFSET;
 
 	/** The raw value noise's CDF at b * 2^23 (b = 0..256), in 2^-24 units; Equalise interpolates it. */
 	static const uint32 Cdf[257];

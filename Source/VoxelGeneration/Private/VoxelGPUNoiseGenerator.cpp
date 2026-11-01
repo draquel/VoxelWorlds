@@ -23,6 +23,8 @@
 
 // ==================== Compute Shader Declaration ====================
 
+static_assert(VOXELGEN_MAX_GPU_CAVE_LAYERS == 4, "the cave layer parameters below are int4 / float4: one lane per layer");
+
 class FGenerateVoxelDensityCS : public FGlobalShader
 {
 public:
@@ -47,7 +49,7 @@ public:
 		SHADER_PARAMETER(float, BaseHeight)
 		// Cave parameters — packed into vectors (4 layers → .xyzw components)
 		SHADER_PARAMETER(int32, CaveEnabled)
-		SHADER_PARAMETER(int32, CaveLayerCount)
+		SHADER_PARAMETER(int32, CaveLayerCount)            // at most VOXELGEN_MAX_GPU_CAVE_LAYERS: one lane of each int4 / float4 below per layer
 		SHADER_PARAMETER(FIntVector4, CaveLayerType)        // int4: layer types
 		SHADER_PARAMETER(FIntVector4, CaveLayerSeed)        // int4: primary seeds
 		SHADER_PARAMETER(FIntVector4, CaveLayerSeed2)       // int4: secondary seeds
@@ -815,7 +817,7 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 			int32 LayerIdx = 0;
 			for (const FCaveLayerConfig& Layer : CaveConfig->CaveLayers)
 			{
-				if (!Layer.bEnabled || LayerIdx >= 4)
+				if (!Layer.bEnabled || LayerIdx >= VOXELGEN_MAX_GPU_CAVE_LAYERS)
 				{
 					continue;
 				}

@@ -9,14 +9,6 @@
 
 #include "VoxelNoiseCommon.ush"
 
-// Maximum number of cave layers supported on GPU
-#define MAX_GPU_CAVE_LAYERS 4
-
-// Cave type enum (must match ECaveType)
-#define CAVE_TYPE_CHEESE 0
-#define CAVE_TYPE_SPAGHETTI 1
-#define CAVE_TYPE_NOODLE 2
-
 /**
  * Sample cheese cave density at a position.
  * Carves where single noise field exceeds threshold.

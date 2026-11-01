@@ -15,11 +15,6 @@
 #include "/Plugin/VoxelWorlds/Private/WorldModeSDF.ush"
 #include "/Plugin/VoxelWorlds/Private/CaveGeneration.ush"
 
-// Voxel metadata flag bits — match FVoxelData::VOXEL_FLAG_* (stored in the high nibble of Metadata).
-#define VOXEL_FLAG_WATER 0x01u
-#define VOXEL_FLAG_CAVE 0x02u
-#define VOXEL_FLAG_UNDERGROUND 0x04u
-
 // ==================== Shader Parameters ====================
 
 // Chunk world position (origin of this chunk)
@@ -220,7 +215,7 @@ float GpuContinentalnessCurves(float ContinentalnessNoise, inout float InOutBase
  */
 float GpuApplyContinentalness(float3 Offset2D, inout float InOutBaseHeight, inout float InOutHeightScale)
 {
-    const float ContinentalnessNoise = PlanetFBM3D(ContinentNoiseOrigin, Offset2D, NOISE_TYPE_SIMPLEX, ContinentalnessSeed, 2,
+    const float ContinentalnessNoise = PlanetFBM3D(ContinentNoiseOrigin, Offset2D, VOXELGEN_NOISE_TYPE_SIMPLEX, ContinentalnessSeed, 2,
         ContinentalnessFrequency, 1.0f, 2.0f, 0.5f);
     return GpuContinentalnessCurves(ContinentalnessNoise, InOutBaseHeight, InOutHeightScale);
 }
@@ -239,13 +234,13 @@ float HeightmapCaveLayerCarve(int ci, float3 VoxelOffset)
     const float3 Offset = float3(VoxelOffset.x, VoxelOffset.y, VoxelOffset.z * CaveLayerVerticalScale[ci]);
     const int Base = CaveNoiseOrigin[ci];
     const int Octaves = CaveLayerOctaves[ci];
-    const float Noise1 = PlanetFBM3D(Base, Offset, NOISE_TYPE_SIMPLEX, CaveLayerSeed[ci], Octaves, CaveLayerFrequency[ci], 1.0f,
+    const float Noise1 = PlanetFBM3D(Base, Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, CaveLayerSeed[ci], Octaves, CaveLayerFrequency[ci], 1.0f,
         CaveLayerLacunarity[ci], CaveLayerPersistence[ci]);
-    if (CaveLayerType[ci] == CAVE_TYPE_CHEESE)
+    if (CaveLayerType[ci] == VOXELGEN_CAVE_TYPE_CHEESE)
     {
         return CheeseCarveFromNoise(Noise1, CaveLayerThreshold[ci], CaveLayerCarveFalloff[ci], CaveLayerCarveStrength[ci]);
     }
-    const float Noise2 = PlanetFBM3D(Base + clamp(Octaves, 1, 16), Offset, NOISE_TYPE_SIMPLEX, CaveLayerSeed2[ci], Octaves,
+    const float Noise2 = PlanetFBM3D(Base + clamp(Octaves, 1, 16), Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, CaveLayerSeed2[ci], Octaves,
         CaveLayerFrequency2[ci], 1.0f, CaveLayerLacunarity[ci], CaveLayerPersistence[ci]);
     return TunnelCarveFromNoise(Noise1, Noise2, CaveLayerThreshold[ci], CaveLayerCarveFalloff[ci], CaveLayerCarveStrength[ci]);
 }
@@ -266,13 +261,13 @@ float PlanetCaveLayerCarve(int ci, PlanetVoxelFrame F)
     const float3 Offset = F.DeltaDir * (PlanetRadius + PlanetAnchorAltitude * VS) + F.Dir * (F.DeltaR * VS);
     const int Base = CaveNoiseOrigin[ci];
     const int Octaves = CaveLayerOctaves[ci];
-    const float Noise1 = PlanetFBM3D(Base, Offset, NOISE_TYPE_SIMPLEX, CaveLayerSeed[ci], Octaves, CaveLayerFrequency[ci], 1.0f,
+    const float Noise1 = PlanetFBM3D(Base, Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, CaveLayerSeed[ci], Octaves, CaveLayerFrequency[ci], 1.0f,
         CaveLayerLacunarity[ci], CaveLayerPersistence[ci]);
-    if (CaveLayerType[ci] == CAVE_TYPE_CHEESE)
+    if (CaveLayerType[ci] == VOXELGEN_CAVE_TYPE_CHEESE)
     {
         return CheeseCarveFromNoise(Noise1, CaveLayerThreshold[ci], CaveLayerCarveFalloff[ci], CaveLayerCarveStrength[ci]);
     }
-    const float Noise2 = PlanetFBM3D(Base + clamp(Octaves, 1, 16), Offset, NOISE_TYPE_SIMPLEX, CaveLayerSeed2[ci], Octaves,
+    const float Noise2 = PlanetFBM3D(Base + clamp(Octaves, 1, 16), Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, CaveLayerSeed2[ci], Octaves,
         CaveLayerFrequency2[ci], 1.0f, CaveLayerLacunarity[ci], CaveLayerPersistence[ci]);
     return TunnelCarveFromNoise(Noise1, Noise2, CaveLayerThreshold[ci], CaveLayerCarveFalloff[ci], CaveLayerCarveStrength[ci]);
 }
@@ -427,7 +422,7 @@ void MainCS(
 
     // Branch based on world mode. InfinitePlane and IslandBowl share the heightmap path (both apply
     // continentalness -> height); IslandBowl additionally applies its edge falloff below.
-    if (WorldMode == WORLD_MODE_INFINITE_PLANE || WorldMode == WORLD_MODE_ISLAND_BOWL)
+    if (WorldMode == VOXELGEN_WORLD_MODE_INFINITE_PLANE || WorldMode == VOXELGEN_WORLD_MODE_ISLAND_BOWL)
     {
         // The 2D fields (terrain, continentalness, climate) sample (X, Y, 0): their origins are the corner's (X, Y, 0).
         const float3 Offset2D = float3(VoxelOffset.x, VoxelOffset.y, 0.0f);
@@ -451,7 +446,7 @@ void MainCS(
             NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseAmplitude, NoiseLacunarity, NoisePersistence);
         float TerrainHeight = NoiseToTerrainHeight(TerrainNoise, SeaLevel, EffectiveHeightScale, EffectiveBaseHeight);
         // IslandBowl: fade the (continentalness-modulated) height toward EdgeHeight at the world edge.
-        if (WorldMode == WORLD_MODE_ISLAND_BOWL)
+        if (WorldMode == VOXELGEN_WORLD_MODE_ISLAND_BOWL)
         {
             TerrainHeight = ApplyIslandFalloffToHeight(WorldPos.x, WorldPos.y, TerrainHeight);
         }
@@ -472,8 +467,8 @@ void MainCS(
         if (BiomeCount > 0)
         {
             // Temperature and moisture at (X, Y, 0): the chunk's climate origins + the voxel's offset in the plane
-            const float Temperature = PlanetFBM3D(TemperatureNoiseOrigin, Offset2D, NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0f, 2.0f, 0.5f);
-            const float Moisture = PlanetFBM3D(MoistureNoiseOrigin, Offset2D, NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0f, 2.0f, 0.5f);
+            const float Temperature = PlanetFBM3D(TemperatureNoiseOrigin, Offset2D, VOXELGEN_NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0f, 2.0f, 0.5f);
+            const float Moisture = PlanetFBM3D(MoistureNoiseOrigin, Offset2D, VOXELGEN_NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0f, 2.0f, 0.5f);
             Blend = SampleGpuBiomeBlend(Temperature, Moisture, ContinentalnessValue);
             const GpuBiome Dominant = LoadGpuBiome(Blend.Indices[0]);
             BiomeID = Dominant.BiomeID;
@@ -533,10 +528,10 @@ void MainCS(
         // ApplyWaterFillPass + ApplyUndergroundClassificationPass run after readback and refine these.
         if (PreCaveDensity >= 127u && Density < 127u)
         {
-            Metadata = Metadata | ((VOXEL_FLAG_CAVE | VOXEL_FLAG_UNDERGROUND) << 4);
+            Metadata = Metadata | ((VOXELGEN_FLAG_CAVE | VOXELGEN_FLAG_UNDERGROUND) << 4);
         }
     }
-    else if (WorldMode == WORLD_MODE_SPHERICAL_PLANET)
+    else if (WorldMode == VOXELGEN_WORLD_MODE_SPHERICAL_PLANET)
     {
         // A planet: the radial height along the direction from the centre, materials by altitude, caves along local up
         // (SphericalPlanet.ush, the GPU twin of FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet; spherical SP-B4).

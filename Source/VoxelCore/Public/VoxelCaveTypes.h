@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelGenerationShared.ush"
 #include "VoxelCaveTypes.generated.h"
 
 /**
@@ -21,6 +22,11 @@ enum class ECaveType : uint8
 	/** Thin, narrow passages created by tight dual-noise intersection */
 	Noodle
 };
+
+// The GPU reads the same integers (VoxelGenerationShared.ush).
+static_assert(static_cast<int32>(ECaveType::Cheese) == VOXELGEN_CAVE_TYPE_CHEESE, "ECaveType and the shader disagree");
+static_assert(static_cast<int32>(ECaveType::Spaghetti) == VOXELGEN_CAVE_TYPE_SPAGHETTI, "ECaveType and the shader disagree");
+static_assert(static_cast<int32>(ECaveType::Noodle) == VOXELGEN_CAVE_TYPE_NOODLE, "ECaveType and the shader disagree");
 
 /**
  * Configuration for a single cave generation layer.

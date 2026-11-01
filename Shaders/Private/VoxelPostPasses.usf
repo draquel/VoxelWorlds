@@ -18,19 +18,13 @@
 
 #include "/Engine/Public/Platform.ush"
 #include "/Plugin/VoxelWorlds/Private/PlanetFrame.ush"
+#include "/Plugin/VoxelWorlds/Shared/VoxelGenerationShared.ush"
 
-// Voxel metadata flag bits — match FVoxelData::VOXEL_FLAG_* (stored in the high nibble of Metadata).
-#define VOXEL_FLAG_WATER 0x01u
-#define VOXEL_FLAG_CAVE 0x02u
-#define VOXEL_FLAG_UNDERGROUND 0x04u
-
-// Packed-word bit positions of the flag nibble (metadata byte 3, flags in its high nibble).
-#define PACKED_WATER_BIT (VOXEL_FLAG_WATER << 28)
-#define PACKED_CAVE_BIT (VOXEL_FLAG_CAVE << 28)
-#define PACKED_UNDERGROUND_BIT (VOXEL_FLAG_UNDERGROUND << 28)
-
-// FVoxelData::IsSolid — density byte >= VOXEL_SURFACE_THRESHOLD (127)
-#define VOXEL_SURFACE_THRESHOLD 127u
+// Packed-word bit positions of the flag nibble (metadata byte 3, flags in its high nibble; the bits are FVoxelData's,
+// VoxelGenerationShared.ush).
+#define PACKED_WATER_BIT (VOXELGEN_FLAG_WATER << 28)
+#define PACKED_CAVE_BIT (VOXELGEN_FLAG_CAVE << 28)
+#define PACKED_UNDERGROUND_BIT (VOXELGEN_FLAG_UNDERGROUND << 28)
 
 uint ChunkSize;
 float VoxelSize;          // Base voxel size — the CPU passes intentionally use Request.VoxelSize, not the LOD-effective size
@@ -62,7 +56,7 @@ uint LinearIndex(uint X, uint Y, uint Z)
 
 bool IsSolid(uint Packed)
 {
-    return ((Packed >> 8) & 0xFFu) >= VOXEL_SURFACE_THRESHOLD;
+    return ((Packed >> 8) & 0xFFu) >= VOXELGEN_SURFACE_THRESHOLD;
 }
 
 // FVoxelSeaSurface::IsBelow for a planet's sea sphere, in the chunk's frame.

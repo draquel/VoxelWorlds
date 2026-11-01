@@ -9,11 +9,6 @@
 
 #include "VoxelNoiseCommon.ush"
 
-// World mode enum (must match EWorldMode in C++)
-#define WORLD_MODE_INFINITE_PLANE 0
-#define WORLD_MODE_SPHERICAL_PLANET 1
-#define WORLD_MODE_ISLAND_BOWL 2
-
 // ==================== Infinite Plane Mode ====================
 
 // The terrain height noise itself is sampled by GenerateVoxelDensity.usf (PlanetFBM3D at the chunk's terrain origin +
