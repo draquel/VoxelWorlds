@@ -134,7 +134,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 
 	// The vertical window comes from the terrain in heightmap worlds (D8, WM-S1): every column streams its own surface
 	// slab, sampled from the world mode (WM-A3) so it follows the height generation produces, islands included (KI5).
-	// Near the viewer the viewer's layer ± NearWindowLayers is added (GetColumnWindow).
+	// Near the viewer the viewer's layer ± NearLayers is added (GetColumnLayerRange).
 	bSurfaceSlabCulling = WorldConfig->bSurfaceSlabCulling && IsHeightmapWorld();
 	ColumnSurfaceCache.Reset();
 	if (bSurfaceSlabCulling)
@@ -229,7 +229,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Planet window: %s; horizon along the ground from the viewer's ground point; the viewer's altitude ±%d chunks within %.0f uu, up to the top of the surface slab there (or the sea), none above it"),
 			bPlanetSlab ? *FString::Printf(TEXT("per-chunk surface slab ±%.1f chunks (%d cells a face edge)"), SlabSlackChunks, PlanetSlabGrid.GetCellsPerEdge())
 				: TEXT("the whole shell (slab culling off)"),
-			NearWindowLayers, (LODBands.Num() > 0) ? LODBands[0].MaxDistance + 2.0f * ChunkWorldSize : 0.0f);
+			NearLayers, (LODBands.Num() > 0) ? LODBands[0].MaxDistance + 2.0f * ChunkWorldSize : 0.0f);
 
 		// The voxel cut-over (WM-BP10): over the surface under the viewer, the sea where it lies above the terrain.
 		CutoverConfigured = WorldConfig->VoxelCutoverAltitude > 0.0f ? WorldConfig->VoxelCutoverAltitude
@@ -241,18 +241,18 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	}
 
 	// The near window (heightmap worlds): band 0's outer edge plus two chunk widths, measured horizontally.
-	NearWindowRadius = (LODBands.Num() > 0) ? LODBands[0].MaxDistance + 2.0f * ChunkWorldSize : 0.0f;
+	NearLayersRadius = (LODBands.Num() > 0) ? LODBands[0].MaxDistance + 2.0f * ChunkWorldSize : 0.0f;
 	if (PlanetWorldMode)
 	{
-		// The near disk's cone (GetPlanetNearBandCeiling), at its widest: along the ground at the shell's inner radius.
+		// The near disk's cone (GetPlanetNearLayersCeiling), at its widest: along the ground at the shell's inner radius.
 		const double InnerRadius = FMath::Max(ShellWindowInnerRadius, static_cast<double>(ChunkWorldSize));
 		const double HalfDiagonal = 0.5 * ChunkWorldSize * UE_DOUBLE_SQRT_3;
-		PlanetNearBandAngle = FMath::Min(UE_DOUBLE_PI, NearWindowRadius / InnerRadius + FMath::Asin(FMath::Min(1.0, HalfDiagonal / InnerRadius)));
+		PlanetNearBandAngle = FMath::Min(UE_DOUBLE_PI, NearLayersRadius / InnerRadius + FMath::Asin(FMath::Min(1.0, HalfDiagonal / InnerRadius)));
 	}
 	if (IsHeightmapWorld())
 	{
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Vertical window from the terrain: the viewer's layer ±%d within %.0f uu, horizon measured horizontally"),
-			NearWindowLayers, NearWindowRadius);
+			NearLayers, NearLayersRadius);
 	}
 
 	bIsInitialized = true;
@@ -466,7 +466,7 @@ TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 bool FDistanceBandLODStrategy::IsChunkInWindow(const FIntVector& ChunkCoord, const FLODQueryContext& Context, EWindowUse Use) const
 {
 	return IsHeightmapWorld()
-		? GetColumnWindow(ChunkCoord.X, ChunkCoord.Y, Context, Use).Contains(ChunkCoord.Z)
+		? GetColumnLayerRange(ChunkCoord.X, ChunkCoord.Y, Context, Use).Contains(ChunkCoord.Z)
 		: IsInPlanetWindow(ChunkCoord, Context, Use);
 }
 
@@ -508,12 +508,12 @@ void FDistanceBandLODStrategy::ForEachWindowCandidate(const FLODQueryContext& Co
 			const int32 ColumnY = ViewerChunk.Y + Y;
 
 			// The horizon is horizontal, so a whole column is in range or not.
-			if (GetHorizonDistance(ChunkCoordToWorldCenter(FIntVector(ColumnX, ColumnY, 0)), Context.ViewerPosition) > MaxViewDistance)
+			if (GetStreamingHorizon(ChunkCoordToWorldCenter(FIntVector(ColumnX, ColumnY, 0)), Context.ViewerPosition) > MaxViewDistance)
 			{
 				continue;
 			}
 
-			const FColumnWindow Window = GetColumnWindow(ColumnX, ColumnY, Context, EWindowUse::Load);
+			const FColumnLayerRange Window = GetColumnLayerRange(ColumnX, ColumnY, Context, EWindowUse::Load);
 			Window.ForEachLayer([&](int32 Z)
 			{
 				const FIntVector ChunkCoord(ColumnX, ColumnY, Z);
@@ -572,7 +572,7 @@ void FDistanceBandLODStrategy::GetChunksToUnload(
 		// Beyond the unload horizon; outside the keep window (heightmap worlds: the column's slab, or the height range
 		// near the viewer; a planet: the chunk's slab, or the shell below it near the viewer, WM-BP8); or culled by the
 		// world mode, regardless of distance.
-		const bool bUnload = GetHorizonDistance(ChunkCenter, Context.ViewerPosition) > UnloadDistance
+		const bool bUnload = GetStreamingHorizon(ChunkCenter, Context.ViewerPosition) > UnloadDistance
 			|| !IsChunkInWindow(ChunkCoord, Context, EWindowUse::Keep)
 			|| ShouldCullIslandBoundary(ChunkCoord, Context)
 			|| ShouldCullBeyondHorizon(ChunkCoord, Context);
@@ -611,7 +611,7 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 		Info += FString::Printf(TEXT("  Terrain Culling: Height=[%.0f - %.0f]\n"),
 			TerrainMinHeight, TerrainMaxHeight);
 		Info += FString::Printf(TEXT("  Vertical Window: %s, + viewer layer ±%d within %.0f uu (horizon measured horizontally)\n"),
-			bSurfaceSlabCulling ? TEXT("surface slab ±1.5 chunks") : TEXT("whole height range"), NearWindowLayers, NearWindowRadius);
+			bSurfaceSlabCulling ? TEXT("surface slab ±1.5 chunks") : TEXT("whole height range"), NearLayers, NearLayersRadius);
 	}
 	if (WorldMode == EWorldMode::IslandBowl && IslandTotalExtentX > 0.0f)
 	{
@@ -628,11 +628,11 @@ FString FDistanceBandLODStrategy::GetDebugInfo() const
 			PlanetRadius, InnerRadius, OuterRadius);
 		Info += FString::Printf(TEXT("  Window: %s in radius [%.0f - %.0f], + the viewer's altitude ±%d chunks within %.0f uu; horizon along the ground from the viewer's ground point; + %.0f for peaks\n"),
 			bPlanetSlab ? TEXT("each chunk's surface slab ±1.5 chunks") : TEXT("the whole shell"),
-			ShellWindowInnerRadius, ShellWindowOuterRadius, NearWindowLayers, NearWindowRadius,
-			GetPlanetHorizonDistance(PlanetRadius, 0.0, PlanetMaxTerrainHeight));
+			ShellWindowInnerRadius, ShellWindowOuterRadius, NearLayers, NearLayersRadius,
+			GetVisibilityHorizon(PlanetRadius, 0.0, PlanetMaxTerrainHeight));
 		Info += FString::Printf(TEXT("  Near band: %s (viewer %.0f over the datum, the band up to %.0f)\n"),
 			IsPlanetNearBandActive(CachedViewerPosition) ? TEXT("on") : TEXT("off, above the surface slab"),
-			FVector::Dist(CachedViewerPosition, PlanetCenter) - PlanetRadius, GetPlanetNearBandCeiling(CachedViewerPosition));
+			FVector::Dist(CachedViewerPosition, PlanetCenter) - PlanetRadius, GetPlanetNearLayersCeiling(CachedViewerPosition));
 		Info += FString::Printf(TEXT("  Slab caches: %d cells, %d chunks\n"), PlanetCellSurfaceCache.Num(), PlanetChunkSlabCache.Num());
 		Info += FString::Printf(TEXT("  Voxel cut-over: %s (the camera under the cut-over: %s); viewer %.0f over it, camera %.0f, window %s\n"),
 			bCutoverAllowed
@@ -714,7 +714,7 @@ void FDistanceBandLODStrategy::SetLODBands(const TArray<FLODBand>& InBands)
 	});
 
 	// The near window follows band 0 (see Initialize).
-	NearWindowRadius = (LODBands.Num() > 0) ? LODBands[0].MaxDistance + 2.0f * BaseChunkSize * VoxelSize : 0.0f;
+	NearLayersRadius = (LODBands.Num() > 0) ? LODBands[0].MaxDistance + 2.0f * BaseChunkSize * VoxelSize : 0.0f;
 
 	// Note: MaxViewDistance is set from Configuration->ViewDistance during Initialize()
 	// and should not be overridden here. Call SetViewDistance() if needed.
@@ -744,7 +744,7 @@ float FDistanceBandLODStrategy::GetDistanceToViewer(
 	return FVector::Distance(Position, Context.ViewerPosition);
 }
 
-float FDistanceBandLODStrategy::GetHorizonDistance(const FVector& ChunkCenter, const FVector& ViewerPosition) const
+float FDistanceBandLODStrategy::GetStreamingHorizon(const FVector& ChunkCenter, const FVector& ViewerPosition) const
 {
 	// Heightmap worlds: a cylinder. The column's window decides its vertical extent (D8), so the viewer's altitude
 	// never takes the ground out of range; with a 3D horizon a viewer 40,000 uu up would load no terrain at all.
@@ -929,7 +929,7 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 		return;
 	}
 
-	// Enumerate every chunk the strategy keeps within the load horizon: each column's keep window (GetColumnWindow),
+	// Enumerate every chunk the strategy keeps within the load horizon: each column's keep window (GetColumnLayerRange),
 	// which contains its load window, without the other world-mode culls. The resulting map is a superset of the chunks
 	// that will actually be meshed, so every meshed chunk has a balanced entry, including chunks the near window loaded
 	// at an earlier viewer layer; culled chunks are harmless extras.
@@ -972,12 +972,12 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 		{
 			const int32 ColumnX = ViewerChunk.X + X;
 			const int32 ColumnY = ViewerChunk.Y + Y;
-			if (GetHorizonDistance(ChunkCoordToWorldCenter(FIntVector(ColumnX, ColumnY, 0)), Context.ViewerPosition) > MaxViewDistance)
+			if (GetStreamingHorizon(ChunkCoordToWorldCenter(FIntVector(ColumnX, ColumnY, 0)), Context.ViewerPosition) > MaxViewDistance)
 			{
 				continue;
 			}
 
-			GetColumnWindow(ColumnX, ColumnY, Context, EWindowUse::Keep).ForEachLayer([&](int32 Z)
+			GetColumnLayerRange(ColumnX, ColumnY, Context, EWindowUse::Keep).ForEachLayer([&](int32 Z)
 			{
 				const FIntVector ChunkCoord(ColumnX, ColumnY, Z);
 				AddRaw(ChunkCoord, ChunkCoordToWorldCenter(ChunkCoord));
@@ -1107,13 +1107,13 @@ float FDistanceBandLODStrategy::CalculatePriority(
 	return Priority;
 }
 
-FDistanceBandLODStrategy::FColumnWindow FDistanceBandLODStrategy::GetColumnWindow(
+FDistanceBandLODStrategy::FColumnLayerRange FDistanceBandLODStrategy::GetColumnLayerRange(
 	int32 ChunkX,
 	int32 ChunkY,
 	const FLODQueryContext& Context,
 	EWindowUse Use) const
 {
-	FColumnWindow Window;
+	FColumnLayerRange Window;
 	const FIntVector ViewerChunk = WorldPosToChunkCoord(Context.ViewerPosition);
 
 	if (!IsHeightmapWorld())
@@ -1135,7 +1135,7 @@ FDistanceBandLODStrategy::FColumnWindow FDistanceBandLODStrategy::GetColumnWindo
 		Context.WorldOrigin.X + (ChunkX + 0.5) * ChunkWorldSize,
 		Context.WorldOrigin.Y + (ChunkY + 0.5) * ChunkWorldSize);
 	const double HorizontalDistance = FVector2D::Distance(ColumnCentre, FVector2D(Context.ViewerPosition.X, Context.ViewerPosition.Y));
-	const bool bNear = HorizontalDistance <= NearWindowRadius;
+	const bool bNear = HorizontalDistance <= NearLayersRadius;
 
 	// Keep, near the viewer: the whole height range, whatever the viewer's layer. A viewer moving up or down a layer
 	// (walking across a layer boundary, flying up) unloads nothing it loaded nearby.
@@ -1162,23 +1162,23 @@ FDistanceBandLODStrategy::FColumnWindow FDistanceBandLODStrategy::GetColumnWindo
 		Window.SlabMaxZ = BoundsMaxZ;
 	}
 
-	// Load, near the viewer: also the viewer's own layer ± NearWindowLayers, for caves, dungeons and digging below or
+	// Load, near the viewer: also the viewer's own layer ± NearLayers, for caves, dungeons and digging below or
 	// above the surface. The viewer's altitude only adds layers here; the slab keeps the ground.
 	if (bNear)
 	{
-		Window.NearMinZ = FMath::Max(ViewerChunk.Z - NearWindowLayers, BoundsMinZ);
-		Window.NearMaxZ = FMath::Min(ViewerChunk.Z + NearWindowLayers, BoundsMaxZ);
+		Window.NearMinZ = FMath::Max(ViewerChunk.Z - NearLayers, BoundsMinZ);
+		Window.NearMaxZ = FMath::Min(ViewerChunk.Z + NearLayers, BoundsMaxZ);
 	}
 	return Window;
 }
 
-void FDistanceBandLODStrategy::GetPlanetShellWindow(int32 ChunkX, int32 ChunkY, const FLODQueryContext& Context, FColumnWindow& OutWindow) const
+void FDistanceBandLODStrategy::GetPlanetShellWindow(int32 ChunkX, int32 ChunkY, const FLODQueryContext& Context, FColumnLayerRange& OutWindow) const
 {
 	GetShellCrossing(2, ChunkX, ChunkY, ShellWindowInnerRadius, ShellWindowOuterRadius, Context.WorldOrigin, OutWindow);
 }
 
 void FDistanceBandLODStrategy::GetShellCrossing(int32 Axis, int32 ColumnA, int32 ColumnB, double InnerRadius, double OuterRadius,
-	const FVector& WorldOrigin, FColumnWindow& OutWindow) const
+	const FVector& WorldOrigin, FColumnLayerRange& OutWindow) const
 {
 	// The column's footprint relative to the line along Axis through the centre: its nearest and farthest points bound
 	// the distance Rho from that line of every point in the column.
@@ -1265,9 +1265,9 @@ bool FDistanceBandLODStrategy::IsInPlanetWindow(const FIntVector& ChunkCoord, co
 
 	// Off its slab, near the viewer along the ground: caves, dungeons and digging under the surface, and the chunks around
 	// a viewer near the ground or the sea (the spawn's terrain wait and the settle hold wait for them to cook), as a
-	// heightmap world streams the viewer's layer +- NearWindowLayers within its height bounds.
+	// heightmap world streams the viewer's layer +- NearLayers within its height bounds.
 	const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
-	if (GetPlanetGroundDistance(PlanetCenter, GetPlanetGroundRadius(Context.ViewerPosition), Context.ViewerPosition, ChunkCenter) > NearWindowRadius)
+	if (GetPlanetGroundDistance(PlanetCenter, GetPlanetGroundRadius(Context.ViewerPosition), Context.ViewerPosition, ChunkCenter) > NearLayersRadius)
 	{
 		return false;
 	}
@@ -1280,12 +1280,12 @@ bool FDistanceBandLODStrategy::IsInPlanetWindow(const FIntVector& ChunkCoord, co
 	// its slab is air. A descending viewer streamed a new layer of them every second, taking the generation its ground disk
 	// needed; one on the ground kept a layer of them loaded around it, which a descent loaded in its last second.
 	const double ViewerAltitude = FVector::Dist(Context.ViewerPosition, PlanetCenter) - PlanetRadius;
-	const double Ceiling = GetPlanetNearBandCeiling(Context.ViewerPosition);
+	const double Ceiling = GetPlanetNearLayersCeiling(Context.ViewerPosition);
 	if (ViewerAltitude > Ceiling)
 	{
 		return false;
 	}
-	const double Reach = NearWindowLayers * static_cast<double>(BaseChunkSize) * VoxelSize;
+	const double Reach = NearLayers * static_cast<double>(BaseChunkSize) * VoxelSize;
 	return Chunk.AltitudeMax >= ViewerAltitude - Reach && Chunk.AltitudeMin <= FMath::Min(ViewerAltitude + Reach, Ceiling);
 }
 
@@ -1412,7 +1412,7 @@ FFloatInterval FDistanceBandLODStrategy::GetPlanetSurfaceEnvelope(const FVector&
 	return Envelope;
 }
 
-double FDistanceBandLODStrategy::GetPlanetNearBandCeiling(const FVector& ViewerPosition) const
+double FDistanceBandLODStrategy::GetPlanetNearLayersCeiling(const FVector& ViewerPosition) const
 {
 	const double ShellTop = ShellWindowOuterRadius - PlanetRadius;
 	if (!PlanetWorldMode || !bPlanetSlab || !PlanetSlabGrid.IsValid())
@@ -1434,7 +1434,7 @@ double FDistanceBandLODStrategy::GetPlanetNearBandCeiling(const FVector& ViewerP
 
 bool FDistanceBandLODStrategy::IsPlanetNearBandActive(const FVector& ViewerPosition) const
 {
-	return FVector::Dist(ViewerPosition, PlanetCenter) - PlanetRadius <= GetPlanetNearBandCeiling(ViewerPosition);
+	return FVector::Dist(ViewerPosition, PlanetCenter) - PlanetRadius <= GetPlanetNearLayersCeiling(ViewerPosition);
 }
 
 void FDistanceBandLODStrategy::ForEachPlanetCandidate(const FLODQueryContext& Context, EWindowUse Use,
@@ -1494,7 +1494,7 @@ void FDistanceBandLODStrategy::ForEachPlanetCandidate(const FLODQueryContext& Co
 		{
 			for (int32 IB = ToLayer(BoxMin[AxisB], AxisB); IB <= ToLayer(BoxMax[AxisB], AxisB); ++IB)
 			{
-				FColumnWindow Crossing;
+				FColumnLayerRange Crossing;
 				GetShellCrossing(Axis, IA, IB, R0, R1, CachedWorldOrigin, Crossing);
 				auto VisitRange = [&](int32 Lo, int32 Hi)
 				{
@@ -1530,18 +1530,18 @@ void FDistanceBandLODStrategy::ForEachPlanetCandidate(const FLODQueryContext& Co
 	}
 	Enumerate(LoadAngle, EnvelopeLo, EnvelopeHi);
 
-	// The near window, off the slab near the viewer (IsInPlanetWindow): Load, the viewer's altitude ± NearWindowLayers up
+	// The near window, off the slab near the viewer (IsInPlanetWindow): Load, the viewer's altitude ± NearLayers up
 	// to the band's ceiling, none above it (G52); Keep, the shell within the unload distance.
-	const double NearCeiling = (Use == EWindowUse::Load) ? GetPlanetNearBandCeiling(Context.ViewerPosition) : TNumericLimits<double>::Max();
-	if (bPlanetSlab && NearWindowRadius > 0.0f && ViewerRadius - PlanetRadius <= NearCeiling)
+	const double NearCeiling = (Use == EWindowUse::Load) ? GetPlanetNearLayersCeiling(Context.ViewerPosition) : TNumericLimits<double>::Max();
+	if (bPlanetSlab && NearLayersRadius > 0.0f && ViewerRadius - PlanetRadius <= NearCeiling)
 	{
 		const double ViewerAltitude = ViewerRadius - PlanetRadius;
-		const double Reach = (Use == EWindowUse::Load) ? NearWindowLayers * ChunkWorldSize : GetUnloadDistance();
+		const double Reach = (Use == EWindowUse::Load) ? NearLayers * ChunkWorldSize : GetUnloadDistance();
 		const double NearLo = FMath::Max(ShellLo, ViewerAltitude - Reach);
 		const double NearHi = FMath::Min3(ShellHi, ViewerAltitude + Reach, NearCeiling);
 		if (NearLo <= NearHi)
 		{
-			Enumerate(FMath::Min(UE_DOUBLE_PI, NearWindowRadius / GroundRadius + ChunkAngle), NearLo, NearHi);
+			Enumerate(FMath::Min(UE_DOUBLE_PI, NearLayersRadius / GroundRadius + ChunkAngle), NearLo, NearHi);
 		}
 	}
 }
@@ -1576,7 +1576,7 @@ void FDistanceBandLODStrategy::GetColumnSurfaceRange(int32 ChunkX, int32 ChunkY,
 	}
 
 	// The configured world mode's surface over the chunk footprint (a 5-point sample in heightmap modes, continentalness
-	// included, as generation produces it). The slack GetColumnWindow applies covers variation between the samples.
+	// included, as generation produces it). The slack GetColumnLayerRange applies covers variation between the samples.
 	// Generation params are immutable per world, so memoize for the strategy's lifetime.
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
 	const FVector2D MinXY(WorldOrigin.X + ChunkX * ChunkWorldSize, WorldOrigin.Y + ChunkY * ChunkWorldSize);
@@ -1648,11 +1648,11 @@ bool FDistanceBandLODStrategy::ShouldCullBeyondHorizon(
 	{
 		return false;
 	}
-	const double Horizon = GetPlanetHorizonDistance(PlanetRadius, ViewerAltitude, PlanetMaxTerrainHeight);
+	const double Horizon = GetVisibilityHorizon(PlanetRadius, ViewerAltitude, PlanetMaxTerrainHeight);
 	return FVector::Dist(Context.ViewerPosition, ChunkCenter) - ChunkHalfDiagonal > Horizon;
 }
 
-double FDistanceBandLODStrategy::GetPlanetHorizonDistance(double PlanetRadius, double ViewerAltitude, double MaxTerrainHeight)
+double FDistanceBandLODStrategy::GetVisibilityHorizon(double PlanetRadius, double ViewerAltitude, double MaxTerrainHeight)
 {
 	const double Viewer = FMath::Max(0.0, ViewerAltitude);
 	const double Peaks = FMath::Max(0.0, MaxTerrainHeight);

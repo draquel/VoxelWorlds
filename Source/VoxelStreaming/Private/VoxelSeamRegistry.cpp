@@ -261,13 +261,13 @@ void FVoxelSeamRegistry::Reset()
 	IntervalRejectedDepartedOwner = 0;
 	// NextResidencyEpoch is intentionally NOT reset: an in-flight result from before the reset must
 	// never match a residency handed out after it.
-	NearScheduleWindow.Reset();
-	FarScheduleWindow.Reset();
+	NearScheduleLatency.Reset();
+	FarScheduleLatency.Reset();
 	NearScanWindow.Reset();
 	FarScanWindow.Reset();
 	NearEndToEndWindow.Reset();
 	NearReadyToDoneWindow.Reset();
-	NearPostScheduleWindow.Reset();
+	NearPostScheduleLatency.Reset();
 	NearQueueWindow.Reset();
 	NearAsyncWindow.Reset();
 	NearWorkerWindow.Reset();
@@ -280,7 +280,7 @@ double FVoxelSeamRegistry::Now() const
 	return ClockOverride ? ClockOverride() : FPlatformTime::Seconds();
 }
 
-void FVoxelSeamRegistry::FLatencyWindow::Add(float Ms)
+void FVoxelSeamRegistry::FLatencySample::Add(float Ms)
 {
 	if (Samples.Num() < Capacity)
 	{
@@ -294,7 +294,7 @@ void FVoxelSeamRegistry::FLatencyWindow::Add(float Ms)
 	Count = FMath::Min(Count + 1, Capacity);
 }
 
-void FVoxelSeamRegistry::FLatencyWindow::Percentiles(float& OutP50, float& OutP95, float& OutMax) const
+void FVoxelSeamRegistry::FLatencySample::Percentiles(float& OutP50, float& OutP95, float& OutMax) const
 {
 	OutP50 = OutP95 = OutMax = 0.0f;
 	if (Count == 0)
@@ -343,7 +343,7 @@ void FVoxelSeamRegistry::RecordSeamCompleted(double DirtiedAtSeconds, double Rea
 	}
 	if (ScheduledAtSeconds > 0.0)
 	{
-		NearPostScheduleWindow.Add(static_cast<float>((CompletedAt - ScheduledAtSeconds) * 1000.0));
+		NearPostScheduleLatency.Add(static_cast<float>((CompletedAt - ScheduledAtSeconds) * 1000.0));
 		if (DispatchedAtSeconds > 0.0)
 		{
 			NearQueueWindow.Add(static_cast<float>((DispatchedAtSeconds - ScheduledAtSeconds) * 1000.0));
@@ -380,10 +380,10 @@ FVoxelSeamLatencyStats FVoxelSeamRegistry::TakeLatencyStats(const FIntVector& Vi
 	IntervalRescheduledWithin1s = IntervalDroppedInFlight = IntervalDroppedParticipant = 0;
 	IntervalRejectedDepartedOwner = 0;
 
-	S.NearScheduleN = NearScheduleWindow.Count;
-	NearScheduleWindow.Percentiles(S.NearScheduleP50Ms, S.NearScheduleP95Ms, S.NearScheduleMaxMs);
-	S.FarScheduleN = FarScheduleWindow.Count;
-	FarScheduleWindow.Percentiles(S.FarScheduleP50Ms, S.FarScheduleP95Ms, S.FarScheduleMaxMs);
+	S.NearScheduleN = NearScheduleLatency.Count;
+	NearScheduleLatency.Percentiles(S.NearScheduleP50Ms, S.NearScheduleP95Ms, S.NearScheduleMaxMs);
+	S.FarScheduleN = FarScheduleLatency.Count;
+	FarScheduleLatency.Percentiles(S.FarScheduleP50Ms, S.FarScheduleP95Ms, S.FarScheduleMaxMs);
 	S.NearScanN = NearScanWindow.Count;
 	NearScanWindow.Percentiles(S.NearScanP50Ms, S.NearScanP95Ms, S.NearScanMaxMs);
 	S.FarScanN = FarScanWindow.Count;
@@ -392,8 +392,8 @@ FVoxelSeamLatencyStats FVoxelSeamRegistry::TakeLatencyStats(const FIntVector& Vi
 	NearReadyToDoneWindow.Percentiles(S.NearReadyToDoneP50Ms, S.NearReadyToDoneP95Ms, S.NearReadyToDoneMaxMs);
 	S.NearEndToEndN = NearEndToEndWindow.Count;
 	NearEndToEndWindow.Percentiles(S.NearEndToEndP50Ms, S.NearEndToEndP95Ms, S.NearEndToEndMaxMs);
-	S.NearPostScheduleN = NearPostScheduleWindow.Count;
-	NearPostScheduleWindow.Percentiles(S.NearPostScheduleP50Ms, S.NearPostScheduleP95Ms, S.NearPostScheduleMaxMs);
+	S.NearPostScheduleN = NearPostScheduleLatency.Count;
+	NearPostScheduleLatency.Percentiles(S.NearPostScheduleP50Ms, S.NearPostScheduleP95Ms, S.NearPostScheduleMaxMs);
 	S.NearQueueN = NearQueueWindow.Count;
 	NearQueueWindow.Percentiles(S.NearQueueP50Ms, S.NearQueueP95Ms, S.NearQueueMaxMs);
 	S.NearAsyncN = NearAsyncWindow.Count;
@@ -703,7 +703,7 @@ int32 FVoxelSeamRegistry::ScheduleReadySeams(const FIntVector& ViewerChunk, int3
 			const bool bNear = IsNearViewer(Key.Owner, ViewerChunk, NearChunkRadius);
 			// Total wait since first dirtied (includes any time spent waiting for a participant).
 			const float WaitMs = static_cast<float>((ScheduledAt - Seam->DirtiedAtSeconds) * 1000.0);
-			(bNear ? NearScheduleWindow : FarScheduleWindow).Add(WaitMs);
+			(bNear ? NearScheduleLatency : FarScheduleLatency).Add(WaitMs);
 			// Pure scan wait: from the moment the seam was buildable. Guard against a missing
 			// ready stamp (it is set on the same dirty call that made the seam schedulable).
 			const double From = (Seam->ReadyAtSeconds > 0.0) ? FMath::Max(Seam->DirtiedAtSeconds, Seam->ReadyAtSeconds) : Seam->DirtiedAtSeconds;

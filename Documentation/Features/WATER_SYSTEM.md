@@ -244,7 +244,7 @@ Every plane test works in world space, the water pull and the edit-driven flood 
 consumers used `WaterLevel + WorldOrigin.Z` until 2026-10-23). On a planet it is the sphere; since spherical Phase 4 the
 map and the PCG sampler read it too.
 
-**The ocean shell (SP-E2).** A planet's sea surface is the chunk manager's `FVoxelPlanetOcean`: a cube sphere at
+**The sea sphere (SP-E2).** A planet's sea surface is the chunk manager's `FVoxelPlanetOcean`: a cube sphere at
 `WaterRadius` on the surface coordinate's tangent warp, its resolution set so no quad sags more than 8 uu under the
 sphere (32 to 160 quads along a face edge; 160 on the 250,000 uu review planet, 153,600 quads), UVs in voxels along
 each face (as the tiles count voxels), the water material id in UV1, drawn with `WaterMeshMaterial`. Two sections: the
@@ -467,7 +467,7 @@ FMaterialRelevance WaterMaterialRelevance;
 |----------|------|---------|-------------|
 | `bEnableWaterLevel` | bool | false | Master toggle for the water system |
 | `WaterLevel` | float | 0.0 | Water surface Z height (InfinitePlane/IslandBowl modes) |
-| `WaterRadius` | float | 100000.0 | Water sphere radius (SphericalPlanet mode): the sea for generation and gameplay, and the ocean shell's radius |
+| `WaterRadius` | float | 100000.0 | Water sphere radius (SphericalPlanet mode): the sea for generation and gameplay, and the sea sphere's radius |
 | `WaterMeshMaterial` | UMaterialInterface* | nullptr | Material for water tile rendering (should be translucent or Single Layer Water) |
 
 ### Material Requirements

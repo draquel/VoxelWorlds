@@ -227,7 +227,7 @@ public:
 	 * @param ViewerPosition Viewer position, world space
 	 * @return Distance compared against the horizons, world units
 	 */
-	virtual float GetHorizonDistance(const FVector& ChunkCenter, const FVector& ViewerPosition) const
+	virtual float GetStreamingHorizon(const FVector& ChunkCenter, const FVector& ViewerPosition) const
 	{
 		return static_cast<float>(FVector::Dist(ChunkCenter, ViewerPosition));
 	}

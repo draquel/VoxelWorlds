@@ -103,13 +103,13 @@ public:
 	void ForceStreamingUpdate();
 
 	/**
-	 * Get the recommended spawn position for spherical planet mode: PlanetSpawnAltitude over the terrain along the
-	 * PlanetSpawnLocation direction (UVoxelChunkManager::GetPlanetSpawnPosition), or over the datum before the world starts.
-	 * Only valid when WorldMode == SphericalPlanet.
-	 * @return World position (WorldOrigin in other modes)
+	 * Get the recommended spawn position (UVoxelChunkManager::GetSpawnPosition): on a planet PlanetSpawnAltitude over the
+	 * terrain along the PlanetSpawnLocation direction, or over the datum before the world starts; in the heightmap modes
+	 * the configuration's WorldOrigin. GetPlanetSpawnPosition until CR3 (CM-22).
+	 * @return World position
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel")
-	FVector GetPlanetSpawnPosition() const;
+	FVector GetSpawnPosition() const;
 
 	/**
 	 * The configuration the world runs on: the Configuration asset (or its runtime override), else the one made from this

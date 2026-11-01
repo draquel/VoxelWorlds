@@ -382,7 +382,7 @@ covers the shell at every latitude. The GPU generator has a planet branch (Phase
 `Generation.GPUvsCPUSphericalParity`), so planets follow `bUseGPUGeneration` like the other modes. **Walkable since
 2026-10-17** (Phase 3, review plan §17): gravity points at the centre (the character movement component sets the
 engine's custom gravity direction on every move), movement, camera and spawn work in the gravity frame, every water
-consumer asks one sea (`FVoxelSeaSurface`), and the chunk manager draws the ocean shell. **Its systems since
+consumer asks one sea (`FVoxelSeaSurface`), and the chunk manager draws the sea sphere. **Its systems since
 2026-10-17** (Phase 4, review plan §18): scatter, PCG, the map, navigation, NPC AI and the NPC spawner, world items and
 placing, the edit brush, the clock and the sky work in the local frame ("Systems on a planet", below). **Its places
 since 2026-10-17** (Phase 5, review plan §19): conditioning zones are caps on the datum sphere, POIs place on the cube
@@ -494,14 +494,14 @@ Planets are precise up to a radius of about 1,000 km (10^8 uu, `Review_Planet_L`
 | Collision | Chunk-local trimeshes placed by a double transform ([TRAVERSAL_LIMITS.md](../Research/TRAVERSAL_LIMITS.md) #5) |
 
 The far field (WM-BP9, review plan §20.5) keeps the rule: its patches sit at their own origins with float offsets of the
-patch's size, and at scale its sea patches replace the ocean shell, whose vertices were floats of size R (G40, fixed).
+patch's size, and at scale its sea patches replace the sea sphere, whose vertices were floats of size R (G40, fixed).
 Past about 1,000 km the relief clamps (D24) and the streaming window (WM-BP8) set the limits, not precision. `WorldOrigin`
 still plays two roles, the planet's centre (generation, gravity, the surface coordinate) and the chunk grid's origin
 (chunk keys, saves, the edit layer); a centre far from the world origin is as precise as one at it.
 
 ### Spawn Position
 
-`UVoxelChunkManager::GetPlanetSpawnPosition()` (SP-B11) puts `PlanetSpawnAltitude` over the terrain along the configured
+`UVoxelChunkManager::GetSpawnPosition()` (SP-B11) puts `PlanetSpawnAltitude` over the terrain along the configured
 direction (`GetSurfacePointAt`). The character spawns by direction (SP-F4): `FVCVoxelNavigationHelper::FindSpawnablePosition`
 takes the terrain along the direction from the centre to the requested position, or, when that is under the sea, the
 nearest land on rings of directions one chunk of arc apart (`PlanetTest`'s PlayerStart is over the north pole, which is
@@ -552,7 +552,7 @@ A planet streams by chunk (`FDistanceBandLODStrategy::IsInPlanetWindow`, spheric
 - Both dungeon representations play on a planet as on the plane (voxel-carved ones since G24's fix, review plan §19.8).
   A voxel-carved dungeon's walls on a planet step by up to √3/2 voxel (the stamp writes air and solid, not graded
   densities)
-- Water: one sea for every consumer (`FVoxelSeaSurface`, `WaterRadius`). On a small planet the ocean shell is a sphere,
+- Water: one sea for every consumer (`FVoxelSeaSurface`, `WaterRadius`). On a small planet the sea sphere is a sphere,
   so it also shows inside dry caves below sea level; at scale (from about R 3.3 x 10^5, where the shell would sag past
   8 uu) the far field draws the sea over the cells whose analytic terrain lies near or under it instead
 - The sun has no axial tilt: the poles sit in a low sun all day (decision D12)
@@ -607,7 +607,7 @@ the heightmap modes every planet feature that is not tied to the sphere. One cod
 | The frame of a teleport | A second streaming pass for the frame's camera after a cut of more than a chunk (`voxel.Stream.CameraCutUpdate`) | The same, and the far field's second update (F4.3) | MP1 (WM-MP4) |
 | Precision far from the origin | Render regions and scatter regions (`voxel.Render.RegionChunks` 16, `voxel.Scatter.RegionChunks`): no float of the world's size | The same | MP2 (WM-MP5, D40) |
 | Noise | `FVoxelNoise` / `VoxelNoise.ush` for every field: a hashed split-origin lattice (no period) and the continuous Simplex kernel (`voxel.Noise.ContinuousSimplex`); `GenerationVersion` 3 | The same (`PlanetGenerationVersion` 6) | MP4 (WM-MP6, WM-MP7, D39) |
-| The near band | Clipped to the terrain's height bounds (D8): a climbing viewer loads no air above them, measured, nothing to cap | Capped at the surface slab's top (G52) | MP1 (WM-MP8, no change) |
+| The near layers | Clipped to the terrain's height bounds (D8): a climbing viewer loads no air above them, measured, nothing to cap | Capped at the surface slab's top (G52) | MP1 (WM-MP8, no change) |
 | The world map at scale | The marker cap, the tile-redraw throttle and `voxel.Map.ExploreAllMaxTiles` | The same | MP1 (WM-MP9) |
 | The first spawn over the sea | The ring search, then a coarse spiral over the generated surface (`FindPlaneSpawnPointAtScale`) | `FindPlanetSpawnPointAtScale` | MP1 (WM-MP10) |
 | Altitude QA tooling | `vox.FlyTo`, `vox.Orbit` (a look-down camera over a point), `vox.World`, the bench's `climb=X:Y[:Alt]` and `descend=X:Y:Alt` | `vox.Planet`, `climb=Lat:Lon`, `descend=Lat:Lon:Alt` | MP3 (WM-MP11) |

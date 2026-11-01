@@ -94,12 +94,12 @@ reaches the configured mode's bounds and frame through `UVoxelChunkManager` (`Vo
 "Is this under the water" is always `FVoxelSeaSurface` (VoxelCore): `IsBelow` / `GetDepth` against the `WaterLevel` plane
 or, on a planet, the sphere of `WaterRadius` (spherical SP-B8, SP-E1). Get it from `UVoxelChunkManager::GetSeaSurface`
 (`true` for the `WaterLevel + WorldOrigin.Z` plane game code uses) or `FVoxelSeaSurface::FromConfig`; never compare a Z
-with `WaterLevel` in new code. A planet's sea surface is the chunk manager's ocean shell (`FVoxelPlanetOcean`), or at scale the far field's sea
+with `WaterLevel` in new code. A planet's sea surface is the chunk manager's sea sphere (`FVoxelPlanetOcean`), or at scale the far field's sea
 sections (`FVoxelFarField`, spherical Phase 6; `UVoxelChunkManager::DoesFarFieldDrawSea`). Since the world modes
 review's MP3 the far field draws heightmap worlds too (root-tile quadtrees on the XY grid, the sea at `WaterLevel` beyond the
 water tiles, the voxel window suspended above `VoxelCutoverAltitude` only while a far field is on, in every mode
 since G78: `FDistanceBandLODStrategy::GetCutoverAltitude` is 0 without one); a planet's
-spawn point over the terrain is `UVoxelChunkManager::GetPlanetSpawnPosition`.
+spawn point over the terrain is `UVoxelChunkManager::GetSpawnPosition`.
 
 Surface queries go along local up (spherical Phase 4, SP-A3): `UVoxelChunkManager::QueryEditMergedSurfacePoint` (the
 edit-merged surface on the up-line through a position; heightmaps: `QueryEditMergedSurface`), `GetGeneratedSurfacePoint`
@@ -146,7 +146,7 @@ GPU's heightmap branch samples it at the chunk's origin corner; the classic tabl
 A planet streams by chunk (spherical Phase 6, WM-BP8; `Features/LOD_SYSTEM.md`): `FDistanceBandLODStrategy::IsInPlanetWindow`
 keeps each chunk's surface slab (the analytic altitude range over the cube-sphere cells its corners span, ± 1.5 chunks)
 and, near the viewer, the viewer's altitude ± 2 chunks in the shell; its horizon is the distance along the ground from the
-viewer's ground point (`GetHorizonDistance`). Never clip a planet's window to the viewer's Z or measure its horizon in 3D
+viewer's ground point (`GetStreamingHorizon`). Never clip a planet's window to the viewer's Z or measure its horizon in 3D
 from the viewer: both lost the ground under a climbing viewer (the planet's G13). LOD bands stay 3D from the viewer.
 
 Any per-chunk state `UVoxelScatterManager` keeps is dropped in `OnChunkUnloaded`, both caches included, so a chunk that

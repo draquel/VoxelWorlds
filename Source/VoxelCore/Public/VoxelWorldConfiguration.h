@@ -648,7 +648,7 @@ public:
 	/**
 	 * Get the spawn position for spherical planet mode over the datum (no terrain: the configuration has no world mode).
 	 * Returns WorldOrigin + SpawnDirection * (WorldRadius + PlanetSpawnAltitude). For the point over the terrain use
-	 * UVoxelChunkManager::GetPlanetSpawnPosition (spherical SP-B11).
+	 * UVoxelChunkManager::GetSpawnPosition (spherical SP-B11).
 	 *
 	 * PlanetSpawnLocation values:
 	 *   0 = +X (Equator East)

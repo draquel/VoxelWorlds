@@ -462,7 +462,7 @@ FVector2f FVoxelFarFieldFrame::FSeaUV::At(const FVoxelFarFieldSample& Sample, in
 
 FVoxelFarFieldFrame::FSeaUV FVoxelFarFieldFrame::MakeSeaUV(const FVoxelFarFieldPatchKey& Key) const
 {
-	// UV0 counts voxels of arc along the face as the ocean shell's does, less a whole number of Period per patch: the
+	// UV0 counts voxels of arc along the face as the sea sphere's does, less a whole number of Period per patch: the
 	// pattern continues across patches and the floats stay small at any radius. On a heightmap world (WM-MP1) it is world
 	// X and Y over the voxel size as the tiles' and the far ocean's (one seamless pattern across the three).
 	FSeaUV UV;
@@ -1177,7 +1177,7 @@ void FVoxelFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, const FV
 		{
 			const uint32 QuadKey = QuadKeys[I + J * Q];
 			// Corners A (i, j), B (i+1, j), D (i+1, j+1), C (i, j+1) run counter-clockwise seen from outside (T x B = N); UE's
-			// front faces take them as (A, D, B), (A, C, D), as the ocean shell's quads do.
+			// front faces take them as (A, D, B), (A, C, D), as the sea sphere's quads do.
 			const int32 A = GetVertex(I, J, QuadKey);
 			const int32 B = GetVertex(I + 1, J, QuadKey);
 			const int32 Cc = GetVertex(I, J + 1, QuadKey);

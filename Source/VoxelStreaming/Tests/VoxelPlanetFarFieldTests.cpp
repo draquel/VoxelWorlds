@@ -38,7 +38,7 @@
 // - MatchesSurface: every surface vertex of a patch at its analytic altitude minus the sink, at levels from a face's
 //   quarter to the band; one material per triangle; normals outward; offsets of the patch's size; skirts under their
 //   edges; the sea at the sea radius within the sag reported.
-// - ChunkManager: on a big planet the far field draws the sea instead of the ocean shell, has a component per built patch
+// - ChunkManager: on a big planet the far field draws the sea instead of the sea sphere, has a component per built patch
 //   and shows what it draws; voxel.World.FarField 0 brings the shell back; a small planet keeps its shell.
 // ---------------------------------------------------------------------------
 
@@ -922,10 +922,10 @@ bool FFarFieldPlanetMatchesSurfaceTest::RunTest(const FString& Parameters)
 }
 
 /**
- * WM-BP9 in a chunk manager: a game world on a planet of R 1e6 (the ocean shell would sag past its budget) draws its far
- * field with the sea in it and no ocean shell, has a component per built patch with the drawn sections shown, and
+ * WM-BP9 in a chunk manager: a game world on a planet of R 1e6 (the sea sphere would sag past its budget) draws its far
+ * field with the sea in it and no sea sphere, has a component per built patch with the drawn sections shown, and
  * reports its figures; voxel.World.FarField 0 drops it and brings the shell back. A small planet (R 20,000) keeps its
- * ocean shell beside its far field.
+ * sea sphere beside its far field.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlanetChunkManagerTest,
 	"VoxelWorlds.FarField.Planet.ChunkManager",
@@ -976,7 +976,7 @@ bool FFarFieldPlanetChunkManagerTest::RunTest(const FString& Parameters)
 		const FString Prefix(Name);
 		TestTrue(*FString::Printf(TEXT("%s: a planet in a game world has a far field"), *Prefix), Manager->HasFarField());
 		TestEqual(*FString::Printf(TEXT("%s: the far field draws the sea only at scale"), *Prefix), Manager->DoesFarFieldDrawSea(), bExpectFarFieldSea);
-		TestEqual(*FString::Printf(TEXT("%s: the ocean shell draws it otherwise"), *Prefix), Manager->HasPlanetOcean(), !bExpectFarFieldSea);
+		TestEqual(*FString::Printf(TEXT("%s: the sea sphere draws it otherwise"), *Prefix), Manager->HasPlanetOcean(), !bExpectFarFieldSea);
 		if (FVoxelFarField* FarField = Manager->GetFarFieldMutable())
 		{
 			FarField->SetSynchronousBuilds(true);
@@ -1026,12 +1026,12 @@ bool FFarFieldPlanetChunkManagerTest::RunTest(const FString& Parameters)
 			}
 		}
 
-		// voxel.World.FarField 0 (a development switch, code review CR1 D-CR13): no far field, the ocean shell as with
+		// voxel.World.FarField 0 (a development switch, code review CR1 D-CR13): no far field, the sea sphere as with
 		// it on (a small planet's shell, a big planet no sea); and back.
 		Manager->SetFarFieldEnabled(false);
 		TestFalse(*FString::Printf(TEXT("%s: off, no far field"), *Prefix), Manager->HasFarField());
 		TestEqual(*FString::Printf(TEXT("%s: off, its components are gone"), *Prefix), Manager->GetFarFieldComponentCount(), 0);
-		TestEqual(*FString::Printf(TEXT("%s: off, the ocean shell as with the far field on"), *Prefix), Manager->HasPlanetOcean(), !bExpectFarFieldSea);
+		TestEqual(*FString::Printf(TEXT("%s: off, the sea sphere as with the far field on"), *Prefix), Manager->HasPlanetOcean(), !bExpectFarFieldSea);
 		Manager->SetFarFieldEnabled(true);
 		TestTrue(*FString::Printf(TEXT("%s: on again"), *Prefix), Manager->HasFarField());
 		TestEqual(*FString::Printf(TEXT("%s: on again, the sea as before"), *Prefix), Manager->HasPlanetOcean(), !bExpectFarFieldSea);

@@ -936,7 +936,7 @@ bool FFarFieldPlaneChunkManagerTest::RunTest(const FString& Parameters)
 		W.StartManager();
 		TestTrue(TEXT("Plane: a plane in a game world has a far field"), W.Manager->HasFarField());
 		TestTrue(TEXT("Plane: the far field draws the sea"), W.Manager->DoesFarFieldDrawSea());
-		TestFalse(TEXT("Plane: no ocean shell"), W.Manager->HasPlanetOcean());
+		TestFalse(TEXT("Plane: no sea sphere"), W.Manager->HasPlanetOcean());
 		if (FVoxelFarField* FarField = W.Manager->GetFarFieldMutable())
 		{
 			TestTrue(TEXT("Plane: a heightmap far field"), FarField->GetSettings().bHeightmap);

@@ -126,7 +126,7 @@ public:
      *  bands: horizontal in heightmap worlds (see "The Vertical Window"). The chunk manager's queue
      *  eviction, stale-cull, edit pins and residency audit all use it, so nothing disagrees with the
      *  strategy's own unload rule (KI11 in WORLD_MODES_REVIEW_PLAN.md). */
-    virtual float GetHorizonDistance(const FVector& ChunkCenter, const FVector& ViewerPosition) const;
+    virtual float GetStreamingHorizon(const FVector& ChunkCenter, const FVector& ViewerPosition) const;
     
     // ==================== Lifecycle ====================
     
@@ -414,7 +414,7 @@ float FDistanceBandLODStrategy::GetDistanceToViewer(FVector Position, const FLOD
 
 // Whether in range at all: the load and unload horizons. Horizontal in heightmap worlds, where each
 // column's vertical extent is its window; along the ground on a planet, where each chunk's slab is.
-float FDistanceBandLODStrategy::GetHorizonDistance(const FVector& ChunkCenter, const FVector& ViewerPosition) const
+float FDistanceBandLODStrategy::GetStreamingHorizon(const FVector& ChunkCenter, const FVector& ViewerPosition) const
 {
     if (IsHeightmapWorld())
     {
@@ -470,12 +470,12 @@ The LOD strategy includes mode-specific culling optimizations that skip chunks g
 
 Heightmap worlds take their vertical streaming range from the terrain, not from the viewer's altitude (decision D8
 in [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §8, work item WM-S1). Each chunk column has its own window
-of layers (`FDistanceBandLODStrategy::GetColumnWindow`):
+of layers (`FDistanceBandLODStrategy::GetColumnLayerRange`):
 
 | Part | Layers | Where |
 |------|--------|-------|
 | Surface slab | The world mode's surface over the column's footprint (`IVoxelWorldMode::GetSurfaceRange`, five height samples), ± 1.5 chunks, extended up to the water plane | Every column within the horizon, at every distance |
-| Near window | The viewer's own layer ± 2 (`NearWindowLayers`) | Columns within band 0's `MaxDistance` + two chunk widths, horizontally (`GetNearWindowRadius`: 16,600 uu on the demo) |
+| Near window | The viewer's own layer ± 2 (`NearLayers`) | Columns within band 0's `MaxDistance` + two chunk widths, horizontally (`GetNearLayersRadius`: 16,600 uu on the demo) |
 | Height bounds | Both parts are clipped to the world mode's `GetTerrainHeightBounds` ± one chunk | Everywhere |
 
 So every column streams its own ground whatever the viewer's altitude: a viewer flying 7,200 uu up or a camera
@@ -528,7 +528,7 @@ water there. The far ocean draws the sea past what streams now (WORLD_MODES.md, 
 A planet streams by chunk, with the heightmap rules of D8 on a sphere (spherical Phase 6, WM-BP8;
 WORLD_MODES_REVIEW_PLAN.md §20.4). `FDistanceBandLODStrategy::IsInPlanetWindow` decides each chunk:
 
-- **The horizon, along the ground** (`GetHorizonDistance` → `GetPlanetGroundDistance`): the arc between the viewer's
+- **The horizon, along the ground** (`GetStreamingHorizon` → `GetPlanetGroundDistance`): the arc between the viewer's
   direction from the planet centre and the chunk centre's, on the sphere through the viewer's ground point (the analytic
   terrain under the viewer, `GetPlanetGroundRadius`, one sample when the viewer moves). A cone around the viewer's
   up-line, as a heightmap world's horizon is a cylinder: a chunk loads within the view distance of it and unloads past it
@@ -542,14 +542,14 @@ WORLD_MODES_REVIEW_PLAN.md §20.4). `FDistanceBandLODStrategy::IsInPlanetWindow`
   on the datum sphere (`CellsPerEdgeFor(R, chunk size)`: 82 a face edge on a 2.5 km planet, 32,725 on a 1,000 km one), and
   a cell's range is five terrain samples, its corners and its centre, as a heightmap column's five heights. Cells and
   chunks are memoized (each cache starts over past a million entries).
-- **Near the viewer** (within `GetNearWindowRadius` along the ground, band 0 + two chunks): off its slab a chunk also
-  loads within the viewer's altitude ± `NearWindowLayers` chunk widths, inside the shell, up to the band's ceiling (none
+- **Near the viewer** (within `GetNearLayersRadius` along the ground, band 0 + two chunks): off its slab a chunk also
+  loads within the viewer's altitude ± `NearLayers` chunk widths, inside the shell, up to the band's ceiling (none
   for a viewer above it), and stays while it is within the unload distance of the viewer (3D), so a viewer changing
   altitude unloads nothing near it. As a heightmap world streams the viewer's layer ± 2 within its height bounds: caves,
   dungeons and digging below the slab, and the chunks around a viewer near the ground or at the sea's surface (a flyer
   skimming the ground, a swimmer), whose terrain waits and settle hold need them cooked. Edits off the window are pinned
   by the chunk manager.
-- **The near band's ceiling** (`GetPlanetNearBandCeiling`, G52): the top of the slab over the near disk, the highest
+- **The near layers' ceiling** (`GetPlanetNearLayersCeiling`, G52): the top of the slab over the near disk, the highest
   surface the near chunks' cells hold (`GetPlanetSurfaceEnvelope` over the near radius's widest angle, at the shell's
   inner radius, plus half a chunk diagonal; memoized by the viewer's cell) + `SlabSlackChunks`, or the sea's surface +
   `SlabSlackChunks` where that is higher. A chunk off its slab wholly above it lies above its own slab too: air. So the
@@ -560,13 +560,13 @@ WORLD_MODES_REVIEW_PLAN.md §20.4). `FDistanceBandLODStrategy::IsInPlanetWindow`
   unloads nothing.
 - **The cull** (`ShouldCullBeyondHorizon`, SP-C2), a superset of the window: a chunk wholly inside the shell's inner
   radius or outside its outer one, or whose nearest point lies beyond the horizon, the sum of the two tangent distances to
-  the datum sphere, `sqrt(2Rh + h^2) + sqrt(2RH + H^2)` (`GetPlanetHorizonDistance`; R the radius, h the viewer's altitude,
+  the datum sphere, `sqrt(2Rh + h^2) + sqrt(2RH + H^2)` (`GetVisibilityHorizon`; R the radius, h the viewer's altitude,
   H the terrain's top: a peak shows over the horizon from that far). A viewer inside the planet's lowest terrain is not
   culled.
 
 With `bSurfaceSlabCulling` off the window is the whole shell inside the cone (fine on a thin shell; with km-scale
 relief that is tens of thousands of chunks). The LOD band is the chunk's 3D distance from the viewer, so a high viewer's
-ground disk sits at the coarsest band. Planets draw their sea with the ocean shell, not voxel water tiles, so a sea
+ground disk sits at the coarsest band. Planets draw their sea with the sea sphere, not voxel water tiles, so a sea
 column's slab is its seabed's (heightmap slabs reach up to the water plane).
 
 **Candidates** (`ForEachPlanetCandidate`): the chunk columns along the grid axis closest to the viewer's up, inside the
@@ -644,10 +644,10 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   after a teleport onto a face the camera never saw its root stands in at once (F4.2,
   `voxel.World.FarFieldBuildAllRoots`, 1; before, a root was built once some of its face came into view and the first
   update there drew no far field).
-- **The sea**, at scale: where the ocean shell would sag past its budget (`ShouldDrawSea`: from about R 3.3 x 10^5) each
+- **The sea**, at scale: where the sea sphere would sag past its budget (`ShouldDrawSea`: from about R 3.3 x 10^5) each
   patch draws a sea section over the cells near or under the sea, 8 x 8 cells a patch, over the voxel window too (a
   planet has no voxel water tiles), with an underside near the window shown from under the sea. The small planet keeps
-  its ocean shell.
+  its sea sphere.
 - **On a heightmap world** (world modes review WM-MP1, decisions D36 and D37; WORLD_MODES_REVIEW_PLAN.md §23.10) the same
   class runs with a heightmap frame: the key's face is `FVoxelFarFieldPatchKey::HeightmapFace` and its X and Y are signed
   cell indices of one quadtree over the XY plane whose level-0 cells are **root tiles** of `voxel.World.FarFieldRootChunks`
@@ -679,7 +679,7 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   camera could starve behind thousands of far ones: found on the plane, the planet's six roots and horizon hid it).
 
 `voxel.World.FarField 0` drops the far field, a development switch (code review CR1, D-CR13: nothing is drawn past the
-voxel window but a small planet's ocean shell or an island's open sea and seabed); `voxel.World.FarFieldStats`, `vox.Planet` / `vox.World` and the bench's `FarFieldMs`, `FarFieldPatchN`,
+voxel window but a small planet's sea sphere or an island's open sea and seabed); `voxel.World.FarFieldStats`, `vox.Planet` / `vox.World` and the bench's `FarFieldMs`, `FarFieldPatchN`,
 `FarFieldMB`, `FarFieldBuiltN` and `FarFieldStandInN` (stand-ins over edge patches the chunks cover, VP4) report it;
 `voxel.World.FarFieldTrace 1` logs every update with such a stand-in and why.
 
@@ -746,17 +746,17 @@ Load and unload use the same pieces:
 
 ```cpp
 // GetVisibleChunks / GetChunksToLoad: per column within the load horizon, the layers of its window
-for each column with GetHorizonDistance(column centre) <= ViewDistance:   // horizontal in heightmap worlds
-    GetColumnWindow(X, Y, Context, EWindowUse::Load).ForEachLayer(Z):
+for each column with GetStreamingHorizon(column centre) <= ViewDistance:   // horizontal in heightmap worlds
+    GetColumnLayerRange(X, Y, Context, EWindowUse::Load).ForEachLayer(Z):
         skip if ShouldCullIslandBoundary(...) || ShouldCullBeyondHorizon(...)
         request (X, Y, Z) at its balanced LOD
 
 // A planet streams by chunk instead (WM-BP8): the candidates of ForEachPlanetCandidate, each kept by
-// GetHorizonDistance (along the ground) <= ViewDistance && IsInPlanetWindow(..., EWindowUse::Load)
+// GetStreamingHorizon (along the ground) <= ViewDistance && IsInPlanetWindow(..., EWindowUse::Load)
 
 // GetChunksToUnload: every loaded chunk that is out of range, farthest first
-if (GetHorizonDistance(ChunkCenter, Viewer) > ViewDistance * UnloadDistanceMultiplier ||
-    !GetColumnWindow(X, Y, Context, EWindowUse::Keep).Contains(Z) ||   // heightmap worlds
+if (GetStreamingHorizon(ChunkCenter, Viewer) > ViewDistance * UnloadDistanceMultiplier ||
+    !GetColumnLayerRange(X, Y, Context, EWindowUse::Keep).Contains(Z) ||   // heightmap worlds
     !IsInPlanetWindow(ChunkCoord, Context, EWindowUse::Keep) ||          // a planet
     ShouldCullIslandBoundary(...) || ShouldCullBeyondHorizon(...))
 {

@@ -119,7 +119,7 @@ namespace IslandCullProbe
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FIslandCullCentreProbeTest,
-	"VoxelWorlds.Review.Island.CullCentreProbe",
+	"VoxelWorlds.LOD.Island.CullMatchesGeneration",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FIslandCullCentreProbeTest::RunTest(const FString& Parameters)

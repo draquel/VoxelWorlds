@@ -42,7 +42,7 @@ struct VOXELCORE_API FLODQueryContext
 	/**
 	 * A far field draws the world beyond the voxel window (UVoxelChunkManager::HasFarField). A heightmap world's voxel
 	 * cut-over (world modes review WM-MP2, D38) applies only with one: above it the window would otherwise leave the sky.
-	 * Planets suspend their window either way (the ocean shell at least draws the sea).
+	 * Planets suspend their window either way (the sea sphere at least draws the sea).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOD")
 	bool bFarFieldActive = false;

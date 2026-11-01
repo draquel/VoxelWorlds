@@ -98,7 +98,7 @@ namespace IslandProbe
  * Zones: inside IslandRadius, the falloff band, and the generated ring beyond R+F.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FIslandReviewHeightProbeTest,
-	"VoxelWorlds.Review.Island.HeightProbe",
+	"VoxelWorlds.Generation.Island.HeightProbe",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FIslandReviewHeightProbeTest::RunTest(const FString& Parameters)

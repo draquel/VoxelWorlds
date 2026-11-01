@@ -123,7 +123,7 @@ static TAutoConsoleVariable<int32> CVarPlanetOcean(
 	}),
 	ECVF_Default);
 
-// A planet's far field (spherical Phase 6, WM-BP9): on or off, for every live chunk manager (A/B against the ocean shell
+// A planet's far field (spherical Phase 6, WM-BP9): on or off, for every live chunk manager (A/B against the sea sphere
 // alone, which is what a planet drew beyond its voxel window before P6.4).
 static TAutoConsoleVariable<int32> CVarFarField(
 	TEXT("voxel.World.FarField"),
@@ -131,9 +131,9 @@ static TAutoConsoleVariable<int32> CVarFarField(
 	TEXT("The far field: the analytic surface drawn beyond the voxel window to the horizon (FVoxelFarField). On a planet six\n")
 	TEXT("cube-face quadtrees; on a heightmap world (world modes review WM-MP1) a quadtree of root tiles over the XY plane out to\n")
 	TEXT("voxel.World.FarFieldDistance, with the sea at WaterLevel (an island's far ocean draws its open sea and seabed past the box).\n")
-	TEXT("  1 = drawn (default); at scale a planet's patches also draw the sea in place of the ocean shell\n")
+	TEXT("  1 = drawn (default); at scale a planet's patches also draw the sea in place of the sea sphere\n")
 	TEXT("  0 = off, a development switch (code review CR1, D-CR13): nothing is drawn past the voxel window but a small planet's\n")
-	TEXT("  ocean shell or an island's open sea and seabed"),
+	TEXT("  sea sphere or an island's open sea and seabed"),
 	FConsoleVariableDelegate::CreateLambda([](IConsoleVariable* Var)
 	{
 		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
@@ -299,7 +299,7 @@ static FAutoConsoleCommandWithWorld GVoxelFarFieldStatsCmd(
 
 static FAutoConsoleCommandWithWorld GVoxelWorldStatsCmd(
 	TEXT("voxel.World.Stats"),
-	TEXT("Log the voxel world's report for every live chunk manager: the world's bounds and sea (a planet's radius, shell, orbit radius and ocean shell; a heightmap world's mode, bounds, terrain Z and far ocean), the voxel window's reach from the streaming viewer with the far field, and the cut-over and descent prefetch. vox.Planet / vox.World print the same lines and add the pawn's."),
+	TEXT("Log the voxel world's report for every live chunk manager: the world's bounds and sea (a planet's radius, shell, orbit radius and sea sphere; a heightmap world's mode, bounds, terrain Z and far ocean), the voxel window's reach from the streaming viewer with the far field, and the cut-over and descent prefetch. vox.Planet / vox.World print the same lines and add the pawn's."),
 	FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld*)
 	{
 		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
@@ -2585,7 +2585,7 @@ int32 UVoxelChunkManager::AuditResidency(FString& OutReport) const
 	auto DistanceToViewer = [this, ChunkWorldSize](const FIntVector& Coord)
 	{
 		const FVector Center = Configuration->WorldOrigin + FVector(Coord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
-		return LODStrategy ? LODStrategy->GetHorizonDistance(Center, CurrentViewerPosition) : static_cast<float>(FVector::Dist(Center, CurrentViewerPosition));
+		return LODStrategy ? LODStrategy->GetStreamingHorizon(Center, CurrentViewerPosition) : static_cast<float>(FVector::Dist(Center, CurrentViewerPosition));
 	};
 	auto ListFarthest = [&](TArray<TPair<float, FIntVector>>& Entries, const TCHAR* Label, TFunctionRef<FString(const FIntVector&)> Extra, FString& Out)
 	{
@@ -3190,7 +3190,7 @@ void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 				}
 				const FVector ChunkCenter = Configuration->WorldOrigin
 					+ FVector(Coord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
-				const float PinCandidateDistance = LODStrategy->GetHorizonDistance(ChunkCenter, Context.ViewerPosition);
+				const float PinCandidateDistance = LODStrategy->GetStreamingHorizon(ChunkCenter, Context.ViewerPosition);
 				if (PinCandidateDistance > PinDistance)
 				{
 					continue; // Too far — re-pins automatically when the viewer returns.
@@ -3268,7 +3268,7 @@ void UVoxelChunkManager::UpdateUnloadDecisions(const FLODQueryContext& Context)
 		{
 			const FVector ChunkCenter = Configuration->WorldOrigin
 				+ FVector(ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
-			if (LODStrategy->GetHorizonDistance(ChunkCenter, Context.ViewerPosition) <= EditPinDistance)
+			if (LODStrategy->GetStreamingHorizon(ChunkCenter, Context.ViewerPosition) <= EditPinDistance)
 			{
 				return false;
 			}
@@ -3602,7 +3602,7 @@ int32 UVoxelChunkManager::FellVoxelTree(const FVoxelTreeInstance& Tree, bool bKe
 	return Removed;
 }
 
-FVector UVoxelChunkManager::GetPlanetSpawnPosition() const
+FVector UVoxelChunkManager::GetSpawnPosition() const
 {
 	if (!Configuration)
 	{
@@ -4246,7 +4246,7 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 		FSphericalPlanetWorldMode::GetDisplacementBounds(Planet.GetTerrainParams(), &Planet.GetBiomeSnapshot(), MinAltitude, MaxAltitude);
 		Settings.MinAltitude = FMath::Max(MinAltitude, -Params.MaxTerrainDepth);
 		Settings.MaxAltitude = FMath::Min(MaxAltitude, Params.MaxTerrainHeight);
-		// The sea is the far field's only at scale, where the ocean shell would sag past its budget (G40); the small planet
+		// The sea is the far field's only at scale, where the sea sphere would sag past its budget (G40); the small planet
 		// keeps its shell.
 		const FVoxelPlanetOceanSettings OceanDefaults;
 		Settings.bSea = Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial
@@ -4674,7 +4674,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	{
 		ApplyVisibility(Key);
 	}
-	// The sea's undersides show only while the viewer is inside the sea radius (as the ocean shell's).
+	// The sea's undersides show only while the viewer is inside the sea radius (as the sea sphere's).
 	UpdateUnderside(bUnderSea, bFarFieldUndersideShown, [&](bool)
 	{
 		for (const TPair<uint64, TObjectPtr<UProceduralMeshComponent>>& Pair : FarFieldComponents)
@@ -5824,7 +5824,7 @@ bool UVoxelChunkManager::IsChunkBeyondUnloadDistance(const FIntVector& ChunkCoor
 	const FBox Bounds = FVoxelCoordinates::ChunkToWorldBounds(
 		ChunkCoord, Configuration->ChunkSize, Configuration->VoxelSize);
 	const FVector ChunkCenter = Bounds.GetCenter() + Configuration->WorldOrigin;
-	return LODStrategy->GetHorizonDistance(ChunkCenter, CurrentViewerPosition) > UnloadDist;
+	return LODStrategy->GetStreamingHorizon(ChunkCenter, CurrentViewerPosition) > UnloadDist;
 }
 
 void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
@@ -6179,7 +6179,7 @@ FVoxelResidencySnapshot UVoxelChunkManager::GetResidencySnapshot() const
 	{
 		if (LODStrategy)
 		{
-			return LODStrategy->GetHorizonDistance(ChunkCentre, Out.Viewer);
+			return LODStrategy->GetStreamingHorizon(ChunkCentre, Out.Viewer);
 		}
 		return bPlanet ? FVector::Dist(ChunkCentre, Centre + (Out.Viewer - Centre).GetSafeNormal() * Radius) : FVector::Dist2D(ChunkCentre, Out.Viewer);
 	};
@@ -10031,7 +10031,7 @@ int32 UVoxelChunkManager::ReprioritizeQueues(const FLODQueryContext& Context)
 		const float DistSq = FVector::DistSquared(ChunkCenter, ViewerPosition);
 		// In range by the strategy's horizon (horizontal in heightmap worlds), not 3D: a viewer high above the terrain
 		// would otherwise evict the ground it just requested.
-		const float HorizonDistance = LODStrategy ? LODStrategy->GetHorizonDistance(ChunkCenter, ViewerPosition) : FMath::Sqrt(DistSq);
+		const float HorizonDistance = LODStrategy ? LODStrategy->GetStreamingHorizon(ChunkCenter, ViewerPosition) : FMath::Sqrt(DistSq);
 
 		if (bWindowSuspended || FMath::Square(HorizonDistance) > EvictDistanceSq)
 		{

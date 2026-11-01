@@ -24,7 +24,7 @@
 // ---------------------------------------------------------------------------
 // The VoxelWorlds side of a walkable planet (WORLD_MODES_REVIEW_PLAN.md §17; SPHERICAL_PLANET_REQUIREMENTS.md SP-E2,
 // SP-B11, SP-E1, SP-F5, SP-C4):
-// - The ocean shell's geometry (on the sphere within its sag budget, outward top and inward underside, no cracks at the
+// - The sea sphere's geometry (on the sphere within its sag budget, outward top and inward underside, no cracks at the
 //   cube's edges) and the chunk manager's component (built on a planet with water, its underside shown only from inside).
 // - The planet spawn position over the terrain, the sea queries, KillZ under the planet.
 // - The collision lead's samples: the heightmap's points exactly with up +Z, along local down and the tangent on a planet.
@@ -82,15 +82,15 @@ namespace VoxelPlanetWalkableTestUtils
 }
 
 /**
- * SP-E2: the ocean shell's geometry. Every vertex on the sphere, every quad's diagonal within the sag budget, normals
+ * SP-E2: the sea sphere's geometry. Every vertex on the sphere, every quad's diagonal within the sag budget, normals
  * radial, top triangles facing out and the underside's facing in, and every vertex on a face's border shared by the
  * neighbouring face (the cube's edges and corners close).
  */
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetOceanShellTest,
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetSeaSphereTest,
 	"VoxelWorlds.Streaming.Planet.OceanShell",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FPlanetOceanShellTest::RunTest(const FString& Parameters)
+bool FPlanetSeaSphereTest::RunTest(const FString& Parameters)
 {
 	// Resolution: the review planet's sea (249,500) takes the most quads; a 1 km planet fewer; the budget holds.
 	const int32 Big = FVoxelPlanetOcean::ChooseSegments(249500.0, 8.0, 32, 160);
@@ -203,7 +203,7 @@ bool FPlanetOceanShellTest::RunTest(const FString& Parameters)
 }
 
 /**
- * SP-E2: a planet with water and a water material gets the ocean shell, its underside shown only while the viewer is
+ * SP-E2: a planet with water and a water material gets the sea sphere, its underside shown only while the viewer is
  * inside the sea radius; a plane gets none.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetOceanComponentTest,
@@ -257,7 +257,7 @@ bool FPlanetOceanComponentTest::RunTest(const FString& Parameters)
 		FWalkableWorld Plane(TEXT("PlaneOceanComponentWorld"), /*bPlanet=*/false);
 		Plane.Config->WaterMeshMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
 		Plane.Start();
-		TestFalse(TEXT("A plane has no ocean shell (its water tiles draw the sea)"), Plane.Manager->HasPlanetOcean());
+		TestFalse(TEXT("A plane has no sea sphere (its water tiles draw the sea)"), Plane.Manager->HasPlanetOcean());
 	}
 	return true;
 }
@@ -282,7 +282,7 @@ bool FPlanetSpawnPositionTest::RunTest(const FString& Parameters)
 		for (int32 Location = 0; Location < 4; ++Location)
 		{
 			Planet.Config->PlanetSpawnLocation = Location;
-			const FVector Spawn = Planet.Manager->GetPlanetSpawnPosition();
+			const FVector Spawn = Planet.Manager->GetSpawnPosition();
 			const FVoxelTerrainSurfacePoint Surface = Planet.Manager->GetSurfacePointAt(Spawn);
 			WorstAltitude = FMath::Max(WorstAltitude, FMath::Abs(FVector::Dist(Spawn, Surface.Position) - 250.0));
 			WorstDirection = FMath::Max(WorstDirection, (Spawn.GetSafeNormal() - Directions[Location]).Size());
@@ -300,7 +300,7 @@ bool FPlanetSpawnPositionTest::RunTest(const FString& Parameters)
 		FWalkableWorld Plane(TEXT("PlaneSpawnPositionWorld"), /*bPlanet=*/false);
 		Plane.Config->WorldOrigin = FVector(12345.0, 54321.0, 0.0);
 		Plane.Start();
-		TestTrue(TEXT("A plane returns its origin"), Plane.Manager->GetPlanetSpawnPosition().Equals(Plane.Config->WorldOrigin));
+		TestTrue(TEXT("A plane returns its origin"), Plane.Manager->GetSpawnPosition().Equals(Plane.Config->WorldOrigin));
 	}
 	return true;
 }

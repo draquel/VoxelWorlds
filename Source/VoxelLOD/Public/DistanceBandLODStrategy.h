@@ -115,13 +115,13 @@ public:
 
 	/**
 	 * Horizontal distance in heightmap worlds (InfinitePlane, IslandBowl): the horizons are a cylinder, and each column's
-	 * vertical extent is its window (GetColumnWindow), so the viewer's altitude never removes the ground (D8). On a
+	 * vertical extent is its window (GetColumnLayerRange), so the viewer's altitude never removes the ground (D8). On a
 	 * planet the distance along the ground from the viewer's ground point (GetPlanetGroundDistance, spherical Phase 6,
 	 * WM-BP8): the horizons are a cone around the viewer's up-line, and each chunk's radial extent is its window
 	 * (IsInPlanetWindow), so a climbing viewer keeps its ground disk. LOD levels use 3D distance in every mode
 	 * (GetDistanceToViewer).
 	 */
-	virtual float GetHorizonDistance(const FVector& ChunkCenter, const FVector& ViewerPosition) const override;
+	virtual float GetStreamingHorizon(const FVector& ChunkCenter, const FVector& ViewerPosition) const override;
 
 	/**
 	 * The distance along the ground between a viewer and a point on a planet (spherical Phase 6, WM-BP8): the arc, on the
@@ -227,20 +227,20 @@ public:
 	virtual void SetFarFieldActive(bool bActive) override { bCutoverAllowed = bActive; }
 
 	/** The viewer's layer ± this many layers is streamed in columns near the viewer (heightmap worlds, D8). */
-	static constexpr int32 NearWindowLayers = 2;
+	static constexpr int32 NearLayers = 2;
 
 	/**
-	 * Columns within this horizontal distance of the viewer add the viewer's layer ± NearWindowLayers to their surface
+	 * Columns within this horizontal distance of the viewer add the viewer's layer ± NearLayers to their surface
 	 * slab: the first LOD band's outer edge plus two chunk widths (the margin keeps the extra layers from churning while
 	 * the viewer wanders around the band edge). Within it they keep everything loaded in the height range, so a viewer
 	 * moving up or down a layer unloads nothing nearby.
 	 */
-	float GetNearWindowRadius() const { return NearWindowRadius; }
+	float GetNearLayersRadius() const { return NearLayersRadius; }
 
 	/**
-	 * Planets: the near band's ceiling (IsInPlanetWindow's Load: the viewer's altitude ± NearWindowLayers near it; G52,
+	 * Planets: the near layers' ceiling (IsInPlanetWindow's Load: the viewer's altitude ± NearLayers near it; G52,
 	 * WORLD_MODES_REVIEW_PLAN.md §20.7), as an altitude over the datum: the top of the surface slab over the near disk (the
-	 * analytic surface's highest point within GetNearWindowRadius along the ground, margins included, + SlabSlackChunks),
+	 * analytic surface's highest point within GetNearLayersRadius along the ground, margins included, + SlabSlackChunks),
 	 * or the sea's surface + SlabSlackChunks where that is higher. A chunk off its slab wholly above it lies above its own
 	 * slab too, so it holds air (edits are pinned by the chunk manager): the band reaches no higher, and a viewer above it
 	 * takes none. A descending viewer used to stream a new layer of such chunks every second from 100 km up, and one on the
@@ -251,26 +251,26 @@ public:
 	 * @param ViewerPosition Viewer position
 	 * @return Altitude over the datum (uu)
 	 */
-	double GetPlanetNearBandCeiling(const FVector& ViewerPosition) const;
+	double GetPlanetNearLayersCeiling(const FVector& ViewerPosition) const;
 
 	/**
-	 * Planets: whether a viewer here takes the near band (its altitude over the datum is not above
-	 * GetPlanetNearBandCeiling). The keep window does not change with it: what the band loaded stays within the unload
+	 * Planets: whether a viewer here takes the near layers (its altitude over the datum is not above
+	 * GetPlanetNearLayersCeiling). The keep window does not change with it: what the band loaded stays within the unload
 	 * distance.
 	 * @param ViewerPosition Viewer position
-	 * @return True when the near band streams around this viewer
+	 * @return True when the near layers stream around this viewer
 	 */
 	bool IsPlanetNearBandActive(const FVector& ViewerPosition) const;
 
 	/**
 	 * One column's vertical window, as absolute chunk layers (a range is empty when Min > Max). Heightmap worlds (D8):
-	 * the column's surface slab (Slab*), plus the viewer's layer ± NearWindowLayers in a column near the viewer (Near*);
+	 * the column's surface slab (Slab*), plus the viewer's layer ± NearLayers in a column near the viewer (Near*);
 	 * both clipped to the terrain's height bounds. Planet (SP-C1): the column's crossings of the terrain shell
 	 * (GetPlanetShellWindow), the one above the planet centre in Slab* and the one below in Near* (or one range when
 	 * they meet); a planet streams by chunk, not by column (IsInPlanetWindow), and only enumerates candidates by
 	 * crossings like these.
 	 */
-	struct FColumnWindow
+	struct FColumnLayerRange
 	{
 		int32 SlabMinZ = 0;
 		int32 SlabMaxZ = -1;
@@ -300,14 +300,14 @@ public:
 		}
 	};
 
-	/** Which window GetColumnWindow builds. */
+	/** Which window GetColumnLayerRange builds. */
 	enum class EWindowUse : uint8
 	{
-		/** Chunks to stream in: the slab, plus the viewer's layer ± NearWindowLayers within GetNearWindowRadius. */
+		/** Chunks to stream in: the slab, plus the viewer's layer ± NearLayers within GetNearLayersRadius. */
 		Load,
 		/**
 		 * Chunks to keep (the unload rule, and the balanced-LOD cache's volume): the slab, plus the whole height range
-		 * within GetNearWindowRadius. Wider than Load vertically, so nothing the near window loaded unloads when the
+		 * within GetNearLayersRadius. Wider than Load vertically, so nothing the near window loaded unloads when the
 		 * viewer changes layer; the same radius, so the extra layers unload as soon as their column leaves it.
 		 */
 		Keep,
@@ -329,7 +329,7 @@ protected:
 	/**
 	 * LOD distance from the viewer to a position: 3D in every world mode, so deep and high chunks fall into farther
 	 * bands and compress (world modes review WM-S2; islands measured 2D until then, KI13). Whether a chunk is in range
-	 * at all is GetHorizonDistance.
+	 * at all is GetStreamingHorizon.
 	 */
 	float GetDistanceToViewer(
 		const FVector& Position,
@@ -347,12 +347,12 @@ protected:
 	 * @param Use Load (stream in) or Keep (retain)
 	 * @return The column's window, absolute layers
 	 */
-	FColumnWindow GetColumnWindow(int32 ChunkX, int32 ChunkY, const FLODQueryContext& Context, EWindowUse Use) const;
+	FColumnLayerRange GetColumnLayerRange(int32 ChunkX, int32 ChunkY, const FLODQueryContext& Context, EWindowUse Use) const;
 
 	/**
 	 * Whether a chunk is in the voxel window, in any world mode (code review CR2, STREAM-21: the one predicate over the
 	 * heightmap column's layer range and the planet chunk's predicate): on a heightmap world its column's window
-	 * (GetColumnWindow) holds its layer; on a planet IsInPlanetWindow.
+	 * (GetColumnLayerRange) holds its layer; on a planet IsInPlanetWindow.
 	 *
 	 * @param ChunkCoord The chunk
 	 * @param Context The query context
@@ -383,7 +383,7 @@ protected:
 	 * @param Context Query context (world origin)
 	 * @param OutWindow Receives the crossings: above the centre in Slab*, below it in Near* (or one range in Slab*)
 	 */
-	void GetPlanetShellWindow(int32 ChunkX, int32 ChunkY, const FLODQueryContext& Context, FColumnWindow& OutWindow) const;
+	void GetPlanetShellWindow(int32 ChunkX, int32 ChunkY, const FLODQueryContext& Context, FColumnLayerRange& OutWindow) const;
 
 	/**
 	 * A column of chunks along a grid axis, crossing a spherical shell around the planet centre: the layers along Axis
@@ -398,7 +398,7 @@ protected:
 	 * @param OutWindow Receives the crossings: on the centre's positive side in Slab*, the negative in Near* (or one range)
 	 */
 	void GetShellCrossing(int32 Axis, int32 ColumnA, int32 ColumnB, double InnerRadius, double OuterRadius,
-		const FVector& WorldOrigin, FColumnWindow& OutWindow) const;
+		const FVector& WorldOrigin, FColumnLayerRange& OutWindow) const;
 
 	/**
 	 * Whether a planet chunk is in the window for this viewer, apart from the horizon distance (spherical Phase 6, WM-BP8;
@@ -407,10 +407,10 @@ protected:
 	 *   bounds + ShellSlackChunks);
 	 * - and its radial extent meets its slab (GetPlanetChunkSlab: the analytic surface's altitude range over the cap it
 	 *   subtends ± SlabSlackChunks; with slab culling off, the whole shell);
-	 * - or, within GetNearWindowRadius of the viewer along the ground: Load, the viewer's altitude ± NearWindowLayers chunk
-	 *   widths up to GetPlanetNearBandCeiling, and nothing for a viewer above it (G52: above the slab the band is air);
+	 * - or, within GetNearLayersRadius of the viewer along the ground: Load, the viewer's altitude ± NearLayers chunk
+	 *   widths up to GetPlanetNearLayersCeiling, and nothing for a viewer above it (G52: above the slab the band is air);
 	 *   Keep, anything in the shell within the unload distance of the viewer (3D). As a heightmap world's near window
-	 *   streams the viewer's layer ± NearWindowLayers within its height bounds: caves and digging below the slab, and the
+	 *   streams the viewer's layer ± NearLayers within its height bounds: caves and digging below the slab, and the
 	 *   chunks around a viewer near it (a flyer near the ground, a pawn at the sea's surface), whose terrain waits need
 	 *   them cooked.
 	 * Edits off the window are pinned by the chunk manager.
@@ -452,7 +452,7 @@ protected:
 	/**
 	 * Calls Visit once for every chunk that may be in the planet's window for this viewer (WM-BP8): the chunks crossing the
 	 * spherical shell of the window's altitude envelope inside the cone of the load horizon around the viewer's up-line,
-	 * plus the near window's cone and envelope (for Load up to GetPlanetNearBandCeiling). A superset: the caller applies
+	 * plus the near window's cone and envelope (for Load up to GetPlanetNearLayersCeiling). A superset: the caller applies
 	 * IsInPlanetWindow and the horizon. Columns run along the grid axis closest to the viewer's up, so each crosses the
 	 * envelope steeply.
 	 * @param Context Query context (viewer position, world origin)
@@ -576,7 +576,7 @@ protected:
 
 	/**
 	 * Check if chunk should be culled for Spherical Planet mode: wholly inside the shell window's inner radius or outside
-	 * its outer one, or past the horizon (GetPlanetHorizonDistance, SP-C2).
+	 * its outer one, or past the horizon (GetVisibilityHorizon, SP-C2).
 	 * Returns true if chunk should be CULLED (not rendered).
 	 */
 	bool ShouldCullBeyondHorizon(
@@ -593,7 +593,7 @@ public:
 	 * @param MaxTerrainHeight The terrain's highest point above the datum H (the shell's top)
 	 * @return Distance (uu) past which no terrain shows
 	 */
-	static double GetPlanetHorizonDistance(double PlanetRadius, double ViewerAltitude, double MaxTerrainHeight);
+	static double GetVisibilityHorizon(double PlanetRadius, double ViewerAltitude, double MaxTerrainHeight);
 
 protected:
 
@@ -666,8 +666,8 @@ protected:
 	/** Maximum view distance for chunk loading (from Configuration->ViewDistance) */
 	float MaxViewDistance = 0.0f;
 
-	/** See GetNearWindowRadius. Set in Initialize from the first LOD band; 0 without bands. */
-	float NearWindowRadius = 0.0f;
+	/** See GetNearLayersRadius. Set in Initialize from the first LOD band; 0 without bands. */
+	float NearLayersRadius = 0.0f;
 
 	// ==================== Heightmap Terrain Bounds ====================
 
@@ -688,7 +688,7 @@ protected:
 
 	/**
 	 * When enabled (config bSurfaceSlabCulling, heightmap worlds), every column streams the chunks around its OWN
-	 * surface (± SlabSlackChunks, up to the water plane) at every distance, plus the viewer's layer ± NearWindowLayers
+	 * surface (± SlabSlackChunks, up to the water plane) at every distance, plus the viewer's layer ± NearLayers
 	 * near the viewer (D8, WM-S1). The global height range loads 8 layers per column everywhere (demo geometry), which
 	 * is what makes long view distances explode; cave interiors and edits deeper than the slab load only near the viewer
 	 * (edits are also pinned by the chunk manager). Off: every column streams the whole height range.
@@ -791,12 +791,12 @@ protected:
 	/** A long flight keeps adding cells and chunks; past this many entries a cache starts over (about 20-30 MB each). */
 	static constexpr int32 PlanetSlabCacheLimit = 1000000;
 
-	/** GetPlanetSurfaceEnvelope's memos: the load disk's (ForEachPlanetCandidate) and the near disk's (GetPlanetNearBandCeiling). */
+	/** GetPlanetSurfaceEnvelope's memos: the load disk's (ForEachPlanetCandidate) and the near disk's (GetPlanetNearLayersCeiling). */
 	mutable FSurfaceEnvelopeMemo LoadEnvelopeMemo;
 	mutable FSurfaceEnvelopeMemo NearEnvelopeMemo;
 
 	/**
-	 * The near disk's angular radius for GetPlanetNearBandCeiling: GetNearWindowRadius along the ground at the shell's inner
+	 * The near disk's angular radius for GetPlanetNearLayersCeiling: GetNearLayersRadius along the ground at the shell's inner
 	 * radius (the lowest ground point, so the widest angle any viewer's near disk subtends), plus the angle half a chunk's
 	 * diagonal subtends there (a near chunk's slab reads the cells its corners span). Set in Initialize.
 	 */
