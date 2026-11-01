@@ -8,6 +8,7 @@
 #include "CoreMinimal.h"
 
 class UVoxelChunkManager;
+class UWorld;
 class APawn;
 
 /** Shape of the path the benchmark viewer flies during the traverse phase. */
@@ -105,6 +106,18 @@ struct FVoxelBenchConfig
 
 	/** Free-form build label recorded in the report (the sweep script passes the VoxelWorlds commit). */
 	FString BuildLabel;
+
+	/**
+	 * Read voxel.Bench.Run's arguments into a config (the forms the command's help lists): the positional tag, velocity and
+	 * distance, and dir=, start=, route=, orbit=, gc=, climb=, descend=, follow=, warmup=, catchup=, build=. The routes on
+	 * the world (a great circle, a climb, a descent, a start without Z) are resolved with the manager's generated surface;
+	 * without a start the player's view is the start, else the manager's owner.
+	 * @param Args       The command's arguments
+	 * @param Manager    The world's chunk manager
+	 * @param World      The game world (its first player controller's view is the default start)
+	 * @param OutConfig  The config, StartPosition resolved
+	 */
+	static void ParseArgs(const TArray<FString>& Args, UVoxelChunkManager& Manager, UWorld& World, FVoxelBenchConfig& OutConfig);
 };
 
 /**

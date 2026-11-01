@@ -126,6 +126,75 @@ enum class EVoxelRemeshReason : uint8
 };
 
 /**
+ * What the streaming bench counts inside the chunk manager's pipeline: re-mesh churn by reason, seam meshes applied,
+ * how long and how far chunks wait to unload (FVoxelStreamingBenchmark reads them through the manager's GetBench*
+ * getters). The manager increments them where the work happens and resets them at a run's start (ResetBenchCounters).
+ */
+struct FVoxelStreamingCounters
+{
+	/**
+	 * Re-mesh churn: mesh jobs launched for chunks that already had a mesh. Counted at launch, not when a
+	 * chunk enters the meshing queue: the legacy whole-chunk path re-queues a chunk waiting for its
+	 * neighbours every frame, and counting insertions reported those waits as re-meshes (G5, KC14).
+	 */
+	int64 RemeshCount = 0;
+
+	/** Re-mesh thrash attributed by source (see EVoxelRemeshReason). */
+	int64 RemeshByReason[static_cast<int32>(EVoxelRemeshReason::Count)] = {};
+
+	/** Seam meshes applied during the active benchmark (UVoxelChunkManager::GetBenchSeamJobsCompleted). */
+	int64 SeamJobsCompleted = 0;
+
+	/**
+	 * Chunks with a mesh submitted since they were loaded (to detect re-mesh churn): filled at every mesh submission,
+	 * emptied of a chunk when its state is removed. Kept outside a benchmark too, so a run counts the re-meshes of
+	 * chunks meshed before it started (G14: a bench started after a slower, cold PIE start had meshed fewer of them and
+	 * counted about twice as many LOD re-meshes). `voxel.Bench.CountPreBenchMeshes` 0 empties it at the run's start.
+	 */
+	TSet<FIntVector> EverMeshed;
+
+	/**
+	 * Why each queued chunk is waiting to mesh, recorded by AddToMeshingQueue while a benchmark runs and read
+	 * when its job launches. The first reason wins: a deferral re-queue (Other) does not hide the LOD change
+	 * or neighbour update that queued the chunk.
+	 */
+	TMap<FIntVector, EVoxelRemeshReason> QueuedRemeshReason;
+
+	/** Unload-lag: per-chunk enqueue time + accumulated dwell (enqueue -> actual unload) stats. */
+	TMap<FIntVector, double> UnloadEnqueueTimeSeconds;
+	double UnloadLagSumMs = 0.0;
+	double UnloadLagMaxMs = 0.0;
+	int64 UnloadLagCount = 0;
+
+	/** Unload distance: viewer-to-chunk distance at the moment of actual unload (uu) — how far
+	 *  past the active radius chunks survive (the "lazy deletion" decision, distance form). */
+	double UnloadDistSumUU = 0.0;
+	double UnloadDistMaxUU = 0.0;
+
+	/**
+	 * Start a run's counts over.
+	 * @param bKeepEverMeshed  Keep the chunks meshed before the run (voxel.Bench.CountPreBenchMeshes, G14)
+	 */
+	void Reset(bool bKeepEverMeshed)
+	{
+		RemeshCount = 0;
+		for (int64& C : RemeshByReason) { C = 0; }
+		SeamJobsCompleted = 0;
+		UnloadLagSumMs = 0.0;
+		UnloadLagMaxMs = 0.0;
+		UnloadLagCount = 0;
+		UnloadDistSumUU = 0.0;
+		UnloadDistMaxUU = 0.0;
+		UnloadEnqueueTimeSeconds.Reset();
+		if (!bKeepEverMeshed)
+		{
+			EverMeshed.Reset();
+		}
+		QueuedRemeshReason.Reset();
+	}
+};
+
+/**
  * Voxel Chunk Manager Component.
  *
  * Main streaming coordinator for voxel terrain. Manages the lifecycle of
@@ -1459,11 +1528,11 @@ public:
 	int32 GetPendingMeshUploadCount() const { return PendingMeshQueue.Num(); }
 
 	/** Thrash: chunks re-queued for meshing after they already had a mesh. */
-	int64 GetBenchRemeshCount() const { return BenchRemeshCount; }
-	int64 GetBenchRemeshByReason(EVoxelRemeshReason Reason) const { return BenchRemeshByReason[static_cast<int32>(Reason)]; }
+	int64 GetBenchRemeshCount() const { return BenchCounters.RemeshCount; }
+	int64 GetBenchRemeshByReason(EVoxelRemeshReason Reason) const { return BenchCounters.RemeshByReason[static_cast<int32>(Reason)]; }
 
 	/** Seam meshes applied (submitted to the renderer) since the benchmark started. */
-	int64 GetBenchSeamJobsCompleted() const { return BenchSeamJobsCompleted; }
+	int64 GetBenchSeamJobsCompleted() const { return BenchCounters.SeamJobsCompleted; }
 
 	/**
 	 * Far-compression encodes this session: fresh encodes started (async or sync), async results
@@ -1480,17 +1549,17 @@ public:
 	/** Unload-lag (enqueue -> actual unload), in milliseconds. */
 	void GetBenchUnloadLagStats(double& OutMeanMs, double& OutMaxMs, int64& OutCount) const
 	{
-		OutCount = BenchUnloadLagCount;
-		OutMeanMs = (BenchUnloadLagCount > 0) ? (BenchUnloadLagSumMs / static_cast<double>(BenchUnloadLagCount)) : 0.0;
-		OutMaxMs = BenchUnloadLagMaxMs;
+		OutCount = BenchCounters.UnloadLagCount;
+		OutMeanMs = (BenchCounters.UnloadLagCount > 0) ? (BenchCounters.UnloadLagSumMs / static_cast<double>(BenchCounters.UnloadLagCount)) : 0.0;
+		OutMaxMs = BenchCounters.UnloadLagMaxMs;
 	}
 
 	/** Unload distance (viewer -> chunk at actual unload), in world units — the "lazy deletion"
 	 *  decision in distance form (how far past the active radius chunks linger before deletion). */
 	void GetBenchUnloadDistStats(double& OutMeanUU, double& OutMaxUU) const
 	{
-		OutMeanUU = (BenchUnloadLagCount > 0) ? (BenchUnloadDistSumUU / static_cast<double>(BenchUnloadLagCount)) : 0.0;
-		OutMaxUU = BenchUnloadDistMaxUU;
+		OutMeanUU = (BenchCounters.UnloadLagCount > 0) ? (BenchCounters.UnloadDistSumUU / static_cast<double>(BenchCounters.UnloadLagCount)) : 0.0;
+		OutMaxUU = BenchCounters.UnloadDistMaxUU;
 	}
 
 	/**
@@ -2794,45 +2863,9 @@ private:
 	bool bBenchmarkViewActive = false;
 	FVector BenchmarkViewPosition = FVector::ZeroVector;
 
-	/**
-	 * Re-mesh churn: mesh jobs launched for chunks that already had a mesh. Counted at launch, not when a
-	 * chunk enters the meshing queue: the legacy whole-chunk path re-queues a chunk waiting for its
-	 * neighbours every frame, and counting insertions reported those waits as re-meshes (G5, KC14).
-	 */
-	int64 BenchRemeshCount = 0;
-
-	/** Re-mesh thrash attributed by source (see EVoxelRemeshReason). */
-	int64 BenchRemeshByReason[static_cast<int32>(EVoxelRemeshReason::Count)] = {};
-
-	/** Seam meshes applied during the active benchmark (see GetBenchSeamJobsCompleted). */
-	int64 BenchSeamJobsCompleted = 0;
-
-	/**
-	 * Chunks with a mesh submitted since they were loaded (to detect re-mesh churn): filled at every mesh submission,
-	 * emptied of a chunk when its state is removed. Kept outside a benchmark too, so a run counts the re-meshes of
-	 * chunks meshed before it started (G14: a bench started after a slower, cold PIE start had meshed fewer of them and
-	 * counted about twice as many LOD re-meshes). `voxel.Bench.CountPreBenchMeshes` 0 empties it at the run's start.
-	 */
-	TSet<FIntVector> BenchEverMeshed;
-
-	/**
-	 * Why each queued chunk is waiting to mesh, recorded by AddToMeshingQueue while a benchmark runs and read
-	 * when its job launches. The first reason wins: a deferral re-queue (Other) does not hide the LOD change
-	 * or neighbour update that queued the chunk.
-	 */
-	TMap<FIntVector, EVoxelRemeshReason> BenchQueuedRemeshReason;
-
 	/** Active benchmark run, ticked from TickComponent; reset when it finishes. */
 	TUniquePtr<FVoxelStreamingBenchmark> ActiveBenchmark;
 
-	/** Unload-lag: per-chunk enqueue time + accumulated dwell (enqueue -> actual unload) stats. */
-	TMap<FIntVector, double> UnloadEnqueueTimeSeconds;
-	double BenchUnloadLagSumMs = 0.0;
-	double BenchUnloadLagMaxMs = 0.0;
-	int64 BenchUnloadLagCount = 0;
-
-	/** Unload distance: viewer-to-chunk distance at the moment of actual unload (uu) — how far
-	 *  past the active radius chunks survive (the "lazy deletion" decision, distance form). */
-	double BenchUnloadDistSumUU = 0.0;
-	double BenchUnloadDistMaxUU = 0.0;
+	/** What the bench counts inside the pipeline (FVoxelStreamingCounters; ResetBenchCounters at a run's start) */
+	FVoxelStreamingCounters BenchCounters;
 };
