@@ -11,7 +11,7 @@
 // interior-domain chunk meshes are bit-identical by construction (same functions, same values).
 //
 // Reading the participants (world modes review G63): each frame's request reads its own volume and its neighbours' in
-// place from the job's snapshots (FVoxelMeshingRequest::VolumeViews), as the planes, strips and corner the frame used to
+// place from the job's snapshots (FVoxelMeshingRequest::NeighbourSnapshotViews), as the planes, strips and corner the frame used to
 // copy would hold them. Copying them cost a face job two whole volumes, an edge job four and a corner job eight (with
 // the planes), to mesh one cell layer; voxel.Seam.MCReadInPlace 0 copies them as before, voxel.Seam.MCStats times the
 // stages.
@@ -380,7 +380,7 @@ static void InitFrameRequest(FVoxelMeshingRequest& R, const FIntVector& Coord, i
 	R.LocalUp = LocalUp;
 	if (bInPlace)
 	{
-		R.VolumeViews[13] = Volume.GetData();
+		R.NeighbourSnapshotViews[13] = Volume.GetData();
 	}
 	else
 	{
@@ -398,7 +398,7 @@ static void InitFrameRequest(FVoxelMeshingRequest& R, const FIntVector& Coord, i
 /** Read the neighbour at (DX, DY, DZ) in place from its snapshot (G63): the voxels FillFacePlanes, FillEdgeStrip and FillCorner copy. */
 static void SetNeighbourView(FVoxelMeshingRequest& R, int32 DX, int32 DY, int32 DZ, const TArray<FVoxelData>& Src)
 {
-	R.VolumeViews[FVoxelMeshingRequest::VolumeViewIndex(DX, DY, DZ)] = Src.GetData();
+	R.NeighbourSnapshotViews[FVoxelMeshingRequest::VolumeViewIndex(DX, DY, DZ)] = Src.GetData();
 }
 
 /** Translate a vertex range into the owner's local frame. */

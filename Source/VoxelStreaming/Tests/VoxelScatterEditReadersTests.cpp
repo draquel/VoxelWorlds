@@ -94,7 +94,7 @@ namespace VoxelScatterEditReadersTest
 		TArray<UVoxelScatterManager::FFreshExtractionComparison> Stale;
 		UVoxelChunkManager* Manager = W.Manager;
 		const UVoxelScatterManager::FFreshExtractionStats Stats = W.Manager->GetScatterManager()->CompareWithFreshExtraction(
-			[Manager](const FIntVector& Coord) { return Manager->GetEditMergedSnapshot(Coord); }, Stale);
+			[Manager](const FIntVector& Coord) { return Manager->GetVoxelSnapshot(Coord); }, Stale);
 		if (OutStats)
 		{
 			*OutStats = Stats;
@@ -123,7 +123,7 @@ namespace VoxelScatterEditReadersTest
 				continue;
 			}
 			const FVector Pos = ChunkMin + (FVector(X, Y, Z) + FVector(0.5)) * VS;
-			Count += Edits->ApplyEdit(Pos, NewVoxel(W.Manager->GetEditMergedVoxelAtWorldPosition(Pos)), EEditMode::Set) ? 1 : 0;
+			Count += Edits->ApplyEdit(Pos, NewVoxel(W.Manager->GetVoxelAt(Pos)), EEditMode::Set) ? 1 : 0;
 		}
 		Edits->EndEditOperation();
 		Edits->SetEditSource(Previous);

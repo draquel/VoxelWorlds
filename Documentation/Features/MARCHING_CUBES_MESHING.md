@@ -82,7 +82,7 @@ Both use the same neighbor data system (face slices, edge strips, corner voxels)
 
 **MC seam jobs** (`VoxelCPUMarchingCubesSeams.cpp`, seam ownership P3) mesh each participant's boundary band through the
 same `ProcessCubeLOD`, ribbon and geomorph code as a chunk. Each participant frame reads the participants' snapshots in
-place (`FVoxelMeshingRequest::VolumeViews`): at every read, the voxel a copied face plane, edge strip or corner would hold.
+place (`FVoxelMeshingRequest::NeighbourSnapshotViews`): at every read, the voxel a copied face plane, edge strip or corner would hold.
 Before G63 every frame copied its whole volume and gathered its neighbours' planes, strips and corners, 95% of a seam
 job's time. `voxel.Seam.MCReadInPlace 0` restores the copies for A/B, and `voxel.Seam.MCStats` times the stages. See
 `WORLD_MODES_REVIEW_PLAN.md` §20.29.

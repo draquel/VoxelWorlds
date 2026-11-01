@@ -57,7 +57,7 @@ namespace VoxelWaterPullOrderTestUtils
 		TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>> Voxels;
 		for (const FIntVector& Coord : Loaded)
 		{
-			if (TSharedPtr<const TArray<FVoxelData>> Snapshot = W.Manager->GetEditMergedSnapshot(Coord))
+			if (TSharedPtr<const TArray<FVoxelData>> Snapshot = W.Manager->GetVoxelSnapshot(Coord))
 			{
 				Voxels.Add(Coord, Snapshot);
 			}

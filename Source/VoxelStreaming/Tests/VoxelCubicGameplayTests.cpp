@@ -137,7 +137,7 @@ namespace VoxelCubicGameplayTestUtils
 				{
 					return false; // an unloaded chunk in the window: no reference here
 				}
-				const FVoxelData Voxel = bEditMerged ? Manager->GetEditMergedVoxelAtWorldPosition(P) : Manager->GetVoxelAtWorldPosition(P);
+				const FVoxelData Voxel = bEditMerged ? Manager->GetVoxelAt(P) : Manager->GetGeneratedVoxelAt(P);
 				if (Voxel.IsSolid() && !bAbove)
 				{
 					OutLayer = K;
@@ -291,8 +291,8 @@ bool FVoxelCubicBlockSurfaceEditMergedTest::RunTest(const FString& Parameters)
 		bool bTreeNear = false;
 		for (int64 K = TopLayer - 2; K <= TopLayer + 16 && !bTreeNear; ++K)
 		{
-			const uint8 M = Manager->GetVoxelAtWorldPosition(Test.VoxelCentre(Column.X, Column.Y, K)).MaterialID;
-			bTreeNear = (M == Leaf || M == Trunk) && Manager->GetVoxelAtWorldPosition(Test.VoxelCentre(Column.X, Column.Y, K)).IsSolid();
+			const uint8 M = Manager->GetGeneratedVoxelAt(Test.VoxelCentre(Column.X, Column.Y, K)).MaterialID;
+			bTreeNear = (M == Leaf || M == Trunk) && Manager->GetGeneratedVoxelAt(Test.VoxelCentre(Column.X, Column.Y, K)).IsSolid();
 		}
 		if (bTreeNear)
 		{
@@ -308,7 +308,7 @@ bool FVoxelCubicBlockSurfaceEditMergedTest::RunTest(const FString& Parameters)
 			{
 				const FVector P = Test.VoxelCentre(Column.X, Column.Y, K);
 				const FIntVector Chunk = FVoxelCoordinates::WorldToChunk(P - Origin, Test.Config->ChunkSize, V);
-				const FVoxelData Voxel = Manager->GetEditMergedVoxelAtWorldPosition(P);
+				const FVoxelData Voxel = Manager->GetVoxelAt(P);
 				Layers += FString::Printf(TEXT(" %lld:%d/%d%s%s"), K, Voxel.Density, Voxel.MaterialID, Manager->HasChunkVoxelData(Chunk) ? TEXT("") : TEXT("(nodata)"),
 					Manager->IsChunkLoaded(Chunk) ? TEXT("") : TEXT("(unloaded)"));
 			}
@@ -408,7 +408,7 @@ bool FVoxelCubicBlockSurfaceSmoothUnchangedTest::RunTest(const FString& Paramete
 		TArray<FVoxelData> Column;
 		for (int32 i = 0; i < 2 * Window + 1; ++i)
 		{
-			Column.Add(Manager->GetEditMergedVoxelAtWorldPosition(FVector(X, Y, BaseZ + i * Config->VoxelSize)));
+			Column.Add(Manager->GetVoxelAt(FVector(X, Y, BaseZ + i * Config->VoxelSize)));
 		}
 		float RefHeight = 0.0f;
 		uint8 RefMaterial = 0, RefBiome = 0;
@@ -507,7 +507,7 @@ bool FVoxelCubicVoxelTreesFindAndFellTest::RunTest(const FString& Parameters)
 		FVoxelTreeInstance None;
 		const FIntVector Under = ToFell->Tree.BaseVoxel - FIntVector(0, 0, 2);
 		TestFalse(TEXT("The ground under a tree is no trunk"), Manager->FindVoxelTreeAt(Manager->GlobalVoxelToWorldCentre(Under), None));
-		if (Leaf && Manager->GetEditMergedVoxelAtWorldPosition(Manager->GlobalVoxelToWorldCentre(Leaf->GlobalVoxel)).MaterialID == Leaf->MaterialID)
+		if (Leaf && Manager->GetVoxelAt(Manager->GlobalVoxelToWorldCentre(Leaf->GlobalVoxel)).MaterialID == Leaf->MaterialID)
 		{
 			TestFalse(TEXT("A leaf block is no trunk"), Manager->FindVoxelTreeAt(Manager->GlobalVoxelToWorldCentre(Leaf->GlobalVoxel), None));
 		}
@@ -543,7 +543,7 @@ bool FVoxelCubicVoxelTreesFindAndFellTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Fell: only the stump is left"), After.Num(), Stump);
 		for (const FVoxelTreeVoxel& B : Before)
 		{
-			const FVoxelData Voxel = Manager->GetEditMergedVoxelAtWorldPosition(Manager->GlobalVoxelToWorldCentre(B.GlobalVoxel));
+			const FVoxelData Voxel = Manager->GetVoxelAt(Manager->GlobalVoxelToWorldCentre(B.GlobalVoxel));
 			const bool bStump = B.bTrunk && B.GlobalVoxel.Z == ToFell->Tree.BaseVoxel.Z;
 			if (bStump != Voxel.IsSolid())
 			{
@@ -553,7 +553,7 @@ bool FVoxelCubicVoxelTreesFindAndFellTest::RunTest(const FString& Parameters)
 		int32 OthersIntact = 0;
 		for (const TPair<FIntVector, int32>& Other : OtherTrunks)
 		{
-			const FVoxelData Voxel = Manager->GetEditMergedVoxelAtWorldPosition(Manager->GlobalVoxelToWorldCentre(Other.Key));
+			const FVoxelData Voxel = Manager->GetVoxelAt(Manager->GlobalVoxelToWorldCentre(Other.Key));
 			OthersIntact += Voxel.IsSolid() && Voxel.MaterialID == Other.Value ? 1 : 0;
 		}
 		TestEqual(TEXT("Fell: every other tree's trunk is intact"), OthersIntact, OtherTrunks.Num());

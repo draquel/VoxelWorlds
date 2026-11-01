@@ -195,7 +195,7 @@ bool FVoxelCubicStreamingSeamPathTest::RunTest(const FString& Parameters)
 	int32 OnSharedPlanes = 0;
 	for (const FIntVector& Coord : Loaded)
 	{
-		TSharedPtr<const TArray<FVoxelData>> Own = Manager->GetEditMergedSnapshot(Coord);
+		TSharedPtr<const TArray<FVoxelData>> Own = Manager->GetVoxelSnapshot(Coord);
 		if (!TestTrue(TEXT("Loaded chunk has voxels"), Own.IsValid() && Own->Num() == N * N * N))
 		{
 			continue;
@@ -216,7 +216,7 @@ bool FVoxelCubicStreamingSeamPathTest::RunTest(const FString& Parameters)
 				{
 					continue;
 				}
-				TSharedPtr<const TArray<FVoxelData>> Neighbor = Manager->GetEditMergedSnapshot(NCoord);
+				TSharedPtr<const TArray<FVoxelData>> Neighbor = Manager->GetVoxelSnapshot(NCoord);
 				if (!Neighbor.IsValid())
 				{
 					continue;

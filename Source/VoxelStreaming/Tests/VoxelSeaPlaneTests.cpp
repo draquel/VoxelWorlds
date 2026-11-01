@@ -59,7 +59,7 @@ bool FVoxelOneSeaPlaneTest::RunTest(const FString& Parameters)
 		TSet<FIntVector2> WetColumns;
 		for (const FIntVector& Coord : Loaded)
 		{
-			const TSharedPtr<const TArray<FVoxelData>> Voxels = W.Manager->GetEditMergedSnapshot(Coord);
+			const TSharedPtr<const TArray<FVoxelData>> Voxels = W.Manager->GetVoxelSnapshot(Coord);
 			if (!Voxels.IsValid() || Voxels->Num() != CS * CS * CS)
 			{
 				continue;

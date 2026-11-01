@@ -5,16 +5,16 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
-#include "VoxelChunkShell.h"
+#include "VoxelFaceSlabs.h"
 #include "Math/RandomStream.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelChunkShellExtractTest,
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelFaceSlabsExtractTest,
 	"VoxelWorlds.Compression.ChunkShell.Extract",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FVoxelChunkShellExtractTest::RunTest(const FString& Parameters)
+bool FVoxelFaceSlabsExtractTest::RunTest(const FString& Parameters)
 {
 	// Random voxels (every field), so a voxel read from the wrong slab or plane shows.
 	for (const int32 CS : { 8, 16, 64 })
@@ -29,8 +29,8 @@ bool FVoxelChunkShellExtractTest::RunTest(const FString& Parameters)
 		}
 		for (const int32 Depth : { 1, 2, 3, 5, CS / 2, CS })
 		{
-			FVoxelChunkShell Shell;
-			TestTrue(FString::Printf(TEXT("CS %d depth %d: extracted"), CS, Depth), FVoxelChunkShell::Extract(Full, CS, Depth, Shell));
+			FVoxelFaceSlabs Shell;
+			TestTrue(FString::Printf(TEXT("CS %d depth %d: extracted"), CS, Depth), FVoxelFaceSlabs::Extract(Full, CS, Depth, Shell));
 			TestEqual(FString::Printf(TEXT("CS %d depth %d: size"), CS, Depth), Shell.Slabs.Num(), 6 * Depth * CS * CS);
 			int32 Held = 0, Wrong = 0, HeldWrongly = 0;
 			for (int32 Z = 0; Z < CS; ++Z)
@@ -68,8 +68,8 @@ bool FVoxelChunkShellExtractTest::RunTest(const FString& Parameters)
 	{
 		TArray<FVoxelData> Short;
 		Short.Init(FVoxelData::Air(), 100);
-		FVoxelChunkShell Shell;
-		TestFalse(TEXT("wrong size refused"), FVoxelChunkShell::Extract(Short, 8, 1, Shell));
+		FVoxelFaceSlabs Shell;
+		TestFalse(TEXT("wrong size refused"), FVoxelFaceSlabs::Extract(Short, 8, 1, Shell));
 		TestEqual(TEXT("wrong size leaves it empty"), Shell.Slabs.Num(), 0);
 		TestTrue(TEXT("an empty shell reads air"), Shell.Get(0, 0, 0).Density == FVoxelData::Air().Density);
 	}
@@ -77,8 +77,8 @@ bool FVoxelChunkShellExtractTest::RunTest(const FString& Parameters)
 	// A uniform chunk's shell is its value everywhere it holds; the memory is the faces only.
 	{
 		const FVoxelData Rock = FVoxelData::Solid(7);
-		FVoxelChunkShell Shell;
-		FVoxelChunkShell::FillUniform(Rock, 64, 1, Shell);
+		FVoxelFaceSlabs Shell;
+		FVoxelFaceSlabs::FillUniform(Rock, 64, 1, Shell);
 		TestEqual(TEXT("uniform: size"), Shell.Slabs.Num(), 6 * 64 * 64);
 		TestTrue(TEXT("uniform: a corner"), Shell.Get(63, 63, 63).MaterialID == 7 && Shell.Get(63, 63, 63).Density == Rock.Density);
 		TestTrue(TEXT("uniform: a face"), Shell.Get(0, 30, 20).MaterialID == 7);

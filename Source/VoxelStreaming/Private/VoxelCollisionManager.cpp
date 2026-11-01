@@ -610,7 +610,7 @@ int32 UVoxelCollisionManager::OnChunkVoxelDataAvailable(const FIntVector& ChunkC
 		//   that opens the rock there re-cooks the chunk (MarkNeighborsDirtyForEdit), so a buried wall is never exposed.
 		if (!bFetchedArrived)
 		{
-			Arrived = ChunkManager->GetEditMergedSnapshot(ChunkCoord);
+			Arrived = ChunkManager->GetVoxelSnapshot(ChunkCoord);
 			bFetchedArrived = true;
 		}
 		if (Arrived.IsValid())
@@ -619,7 +619,7 @@ int32 UVoxelCollisionManager::OnChunkVoxelDataAvailable(const FIntVector& ChunkC
 			const ESlab Other = VoxelCollisionNeighbors::ClassifySlab(*Arrived, ChunkSize, FIntVector::ZeroValue - Offset, OtherDepth);
 			if (Other != ESlab::Mixed)
 			{
-				const TSharedPtr<const TArray<FVoxelData>> OwnVoxels = ChunkManager->GetEditMergedSnapshot(NeighborCoord);
+				const TSharedPtr<const TArray<FVoxelData>> OwnVoxels = ChunkManager->GetVoxelSnapshot(NeighborCoord);
 				const ESlab Own = OwnVoxels.IsValid() ? VoxelCollisionNeighbors::ClassifySlab(*OwnVoxels, ChunkSize, Offset, OwnDepth) : ESlab::Mixed;
 				if (Own == Other)
 				{
@@ -1052,7 +1052,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	TSharedPtr<const TArray<FVoxelData>> SharedVoxels;
 	TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>> NeighborSnapshots;
 	// The neighbours' boundary shells when voxel.Collision.NeighborShells is on (G69); NeighborSnapshots is then empty.
-	TMap<FIntVector, TSharedPtr<const FVoxelChunkShell>> NeighborShells;
+	TMap<FIntVector, TSharedPtr<const FVoxelFaceSlabs>> NeighborShells;
 	uint32 MissingNeighborMask = 0;
 	// Far-compressed chunks' snapshots may still be decoding on workers (G65): the cook's worker waits for them.
 	TArray<UE::Tasks::FTask> SnapshotDecodes;
@@ -1120,13 +1120,13 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 			// a time, so this avoids a TMap find per voxel (mirrors the game-thread path).
 			FIntVector MemoCoord(INT32_MAX, INT32_MAX, INT32_MAX);
 			const TArray<FVoxelData>* MemoArr = nullptr;
-			const FVoxelChunkShell* MemoShell = nullptr;
+			const FVoxelFaceSlabs* MemoShell = nullptr;
 			auto GetNeighborVoxel = [CS, &NeighborSnapshots, &NeighborShells, &MemoCoord, &MemoArr, &MemoShell](const FIntVector& NCoord,
 				int32 X, int32 Y, int32 Z) -> FVoxelData
 			{
 				if (NCoord != MemoCoord)
 				{
-					const TSharedPtr<const FVoxelChunkShell>* FoundShell = NeighborShells.Find(NCoord);
+					const TSharedPtr<const FVoxelFaceSlabs>* FoundShell = NeighborShells.Find(NCoord);
 					MemoShell = FoundShell ? FoundShell->Get() : nullptr;
 					const TSharedPtr<const TArray<FVoxelData>>* Found = MemoShell ? nullptr : NeighborSnapshots.Find(NCoord);
 					MemoArr = Found ? Found->Get() : nullptr;

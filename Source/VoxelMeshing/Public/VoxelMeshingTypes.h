@@ -245,9 +245,9 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	 * would: face planes NeighborPlaneDepth deep (clamped past it), edges and corners one voxel. Null = not held. Read only
 	 * by the CPU Marching Cubes mesher; not a UPROPERTY: a view valid for the call that sets it.
 	 */
-	const FVoxelData* VolumeViews[27] = {};
+	const FVoxelData* NeighbourSnapshotViews[27] = {};
 
-	/** VolumeViews index of the neighbour at (DX, DY, DZ), each in {-1, 0, 1}; 13 = the chunk itself. */
+	/** NeighbourSnapshotViews index of the neighbour at (DX, DY, DZ), each in {-1, 0, 1}; 13 = the chunk itself. */
 	static FORCEINLINE int32 VolumeViewIndex(int32 DX, int32 DY, int32 DZ)
 	{
 		return (DX + 1) + (DY + 1) * 3 + (DZ + 1) * 9;

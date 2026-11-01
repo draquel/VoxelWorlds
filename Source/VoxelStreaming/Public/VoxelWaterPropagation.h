@@ -207,7 +207,7 @@ private:
 	bool IsBelowSea(const FIntVector& Key) const;
 
 	/**
-	 * Read a voxel edit-merged (UVoxelChunkManager::GetEditMergedVoxelAtWorldPosition).
+	 * Read a voxel edit-merged (UVoxelChunkManager::GetVoxelAt).
 	 *
 	 * @param Key Global voxel key
 	 * @param OutVoxel Receives the voxel

@@ -86,12 +86,12 @@ namespace VoxelWaterPropagationTest
 
 	FVoxelData Merged(const VoxelTesting::FTestChunkWorld& W, const FIntVector& Key)
 	{
-		return W.Manager->GetEditMergedVoxelAtWorldPosition(CenterOf(W, Key));
+		return W.Manager->GetVoxelAt(CenterOf(W, Key));
 	}
 
 	FVoxelData Generated(const VoxelTesting::FTestChunkWorld& W, const FIntVector& Key)
 	{
-		return W.Manager->GetVoxelAtWorldPosition(CenterOf(W, Key));
+		return W.Manager->GetGeneratedVoxelAt(CenterOf(W, Key));
 	}
 
 	bool HasData(const VoxelTesting::FTestChunkWorld& W, const FIntVector& Key)
