@@ -16,9 +16,9 @@ DEFINE_LOG_CATEGORY_STATIC(LogVoxelEdit, Log, All);
 static TAutoConsoleVariable<float> CVarVoxelEditUndoHistoryMB(
 	TEXT("voxel.Edit.UndoHistoryMB"),
 	32.0f,
-	TEXT("Memory budget of the edit manager's undo and redo history, in MB (world modes review G68): past it the oldest ")
+	TEXT("Memory budget of the edit manager's undo and redo history, in MB: past it the oldest ")
 	TEXT("operations are dropped, down to the newest, which is always kept. 0 = no budget (the 100-operation limit only). ")
-	TEXT("An operation records 112 bytes per voxel it changed (G60): a player brush of radius 8 voxels about 0.25 MB."),
+	TEXT("An operation records 112 bytes per voxel it changed: a player brush of radius 8 voxels about 0.25 MB."),
 	ECVF_Default);
 
 // File format version for binary serialization

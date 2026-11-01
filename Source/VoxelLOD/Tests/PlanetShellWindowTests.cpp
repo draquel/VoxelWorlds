@@ -1062,7 +1062,7 @@ bool FPlanetGroundHorizonTest::RunTest(const FString& Parameters)
  * viewer (the view distance by default) the window is empty: no candidate, every loaded chunk to unload. Between the
  * resume altitude (0.85 of it) and the cut-over a suspended window stays suspended and an active one active
  * (hysteresis); under it the ground disk is back whole. Over open sea the cut-over is measured over the sea, not the
- * seabed (a flyer skimming the waves keeps its window). voxel.World.VoxelCutover overrides it (0: never). On the small
+ * seabed (a flyer skimming the waves keeps its window). voxel.Stream.VoxelCutover overrides it (0: never). On the small
  * planet and the 1,000 km one at the four sites.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetCutoverTest,
@@ -1180,18 +1180,18 @@ bool FPlanetCutoverTest::RunTest(const FString& Parameters)
 			SeaConfig->RemoveFromRoot();
 		}
 
-		// voxel.World.VoxelCutover: an override, and 0 for never.
-		if (IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.World.VoxelCutover")))
+		// voxel.Stream.VoxelCutover: an override, and 0 for never.
+		if (IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.VoxelCutover")))
 		{
 			const float Saved = Var->GetFloat();
 			const FVector Up = GetSites()[1].Up;
 			const FVector Ground = Terrain.SurfacePoint(Up);
 			Var->Set(0.0f, ECVF_SetByCode);
 			Strategy.Update(MakeContext(Ground + Up * (10.0 * Cutover)), 1.0f / 60.0f);
-			TestFalse(*FString::Printf(TEXT("%s: voxel.World.VoxelCutover 0 never suspends"), Case.Name), Strategy.IsWindowSuspended());
+			TestFalse(*FString::Printf(TEXT("%s: voxel.Stream.VoxelCutover 0 never suspends"), Case.Name), Strategy.IsWindowSuspended());
 			Var->Set(5000.0f, ECVF_SetByCode);
 			Strategy.Update(MakeContext(Ground + Up * 6000.0), 1.0f / 60.0f);
-			TestTrue(*FString::Printf(TEXT("%s: voxel.World.VoxelCutover 5000 suspends at 6,000 up"), Case.Name), Strategy.IsWindowSuspended());
+			TestTrue(*FString::Printf(TEXT("%s: voxel.Stream.VoxelCutover 5000 suspends at 6,000 up"), Case.Name), Strategy.IsWindowSuspended());
 			Var->Set(Saved, ECVF_SetByCode);
 		}
 		Config->RemoveFromRoot();

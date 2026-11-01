@@ -129,10 +129,10 @@ static TAutoConsoleVariable<int32> CVarFarField(
 	TEXT("voxel.World.FarField"),
 	1,
 	TEXT("The far field: the analytic surface drawn beyond the voxel window to the horizon (FVoxelFarField). On a planet six\n")
-	TEXT("cube-face quadtrees; on a heightmap world (world modes review WM-MP1) a quadtree of root tiles over the XY plane out to\n")
+	TEXT("cube-face quadtrees; on a heightmap world a quadtree of root tiles over the XY plane out to\n")
 	TEXT("voxel.World.FarFieldDistance, with the sea at WaterLevel (an island's far ocean draws its open sea and seabed past the box).\n")
 	TEXT("  1 = drawn (default); at scale a planet's patches also draw the sea in place of the sea sphere\n")
-	TEXT("  0 = off, a development switch (code review CR1, D-CR13): nothing is drawn past the voxel window but a small planet's\n")
+	TEXT("  0 = off, a development switch: nothing is drawn past the voxel window but a small planet's\n")
 	TEXT("  sea sphere or an island's open sea and seabed"),
 	FConsoleVariableDelegate::CreateLambda([](IConsoleVariable* Var)
 	{
@@ -156,7 +156,7 @@ static TAutoConsoleVariable<float> CVarFarFieldError(
 static TAutoConsoleVariable<float> CVarFarFieldHeightmapError(
 	TEXT("voxel.World.FarFieldHeightmapError"),
 	4.0f,
-	TEXT("Heightmap worlds (world modes review WM-MP1): the far field's screen-space error budget (pixels) in place of\n")
+	TEXT("Heightmap worlds: the far field's screen-space error budget (pixels) in place of\n")
 	TEXT("voxel.World.FarFieldError (default 4; a plane has no horizon, so at 2 px VoxelDemo's far field held about 1,500\n")
 	TEXT("patches and 300 MB from the ground, a planet's a tenth of that). <= 0 = voxel.World.FarFieldError."),
 	ECVF_Default);
@@ -177,16 +177,16 @@ static TAutoConsoleVariable<int32> CVarFarFieldMaxBuilds(
 static TAutoConsoleVariable<int32> CVarFarFieldRootChunks(
 	TEXT("voxel.World.FarFieldRootChunks"),
 	0,
-	TEXT("Heightmap worlds (world modes review WM-MP1, D36): chunks along a far-field root tile's edge, a power of two from 4 to\n")
+	TEXT("Heightmap worlds: chunks along a far-field root tile's edge, a power of two from 4 to\n")
 	TEXT("4096. 0 (default) = about a quarter of the far distance (or an island's half extent) in chunks, rounded to a power of two\n")
-	TEXT("(64 with 6,400 uu chunks and the 2,000,000 uu default: 409,600 uu tiles, a few rows of roots about the camera). Band\n")
+	TEXT("(64 with 6,400 uu chunks and the 2,000,000 uu default: 409,600 uu tiles, a few rows of roots about the camera). Edge\n")
 	TEXT("patches are one chunk column. Read when the far field is built (voxel.World.FarField 0 then 1 rebuilds it)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarFarFieldDistance(
 	TEXT("voxel.World.FarFieldDistance"),
 	2000000.0f,
-	TEXT("Heightmap worlds (world modes review WM-MP1): how far from the camera the far field draws (uu; default 2,000,000, the\n")
+	TEXT("Heightmap worlds: how far from the camera the far field draws (uu; default 2,000,000, the\n")
 	TEXT("island far ocean's reach). Root tiles exist within it and patches past it are culled; a bounded world (an island) also\n")
 	TEXT("stops at its bounds. 0 = no limit on a bounded world, the tile under the camera alone on a plane. Read when the far\n")
 	TEXT("field is built."),
@@ -263,7 +263,7 @@ static TAutoConsoleVariable<int32> CVarStreamCameraCutUpdate(
 static TAutoConsoleVariable<int32> CVarFarFieldTrace(
 	TEXT("voxel.World.FarFieldTrace"),
 	0,
-	TEXT("Every world mode with a far field (visual polish VP4): log every far-field update with a stand-in over the voxel window (a coarser patch drawn\n")
+	TEXT("Every world mode with a far field: log every far-field update with a stand-in over the voxel window (a coarser patch drawn\n")
 	TEXT("because a patch under it was not ready, over edge patches the chunks cover): the frame, the stand-ins and the coarsest's\n")
 	TEXT("level, the edge patches not ready (covered by drawn chunks or not) and a chunk not drawn under one, with its state.\n")
 	TEXT("0 = off (default)."),
@@ -272,8 +272,8 @@ static TAutoConsoleVariable<int32> CVarFarFieldTrace(
 static TAutoConsoleVariable<float> CVarStreamDescentLead(
 	TEXT("voxel.Stream.DescentLead"),
 	3.0f,
-	TEXT("Seconds ahead of a descending camera the streaming viewer goes along local down (the descent prefetch, spherical\n")
-	TEXT("Phase 6 WM-BP10; every world mode since world modes review WM-MP3): the voxel window resumes from the cut-over and\n")
+	TEXT("Seconds ahead of a descending camera the streaming viewer goes along local down (the descent prefetch, in every\n")
+	TEXT("world mode): the voxel window resumes from the cut-over and\n")
 	TEXT("refines its LOD before the camera gets there. 0 = off (the streaming viewer is the camera)."),
 	ECVF_Default);
 
@@ -363,7 +363,7 @@ static FAutoConsoleCommandWithWorld GVoxelFarOceanStatsCmd(
 	}));
 
 static TAutoConsoleVariable<int32> CVarGPUGenerationEnable(
-	TEXT("voxel.GPUGeneration.Enable"),
+	TEXT("voxel.Stream.GPUGeneration"),
 	1,
 	TEXT("Master enable for GPU terrain generation. 1 = use bUseGPUGeneration from config; 0 = force CPU generation."),
 	ECVF_Default);
@@ -1356,7 +1356,7 @@ void UVoxelChunkManager::Initialize(
 	const bool bForceCPU = FParse::Param(FCommandLine::Get(), TEXT("VoxelForceCPU"));
 
 	// Select the voxel data generator. bUseGPUGeneration was historically a dead flag — this is where it
-	// becomes real. The runtime cvar voxel.GPUGeneration.Enable can force CPU without an editor restart.
+	// becomes real. The runtime cvar voxel.Stream.GPUGeneration can force CPU without an editor restart.
 	// Every world mode generates on the GPU when allowed: planets too since spherical Phase 2 (SP-B4).
 	const bool bUseGPUGen = Configuration->ShouldUseGPUGeneration() && !bForceCPU
 		&& CVarGPUGenerationEnable.GetValueOnGameThread() != 0;
@@ -9289,12 +9289,12 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
 			static_cast<int32>(Config.PathType), Config.FollowTerrainAltitude);
 	}));
 
-// Console: voxel.RemeshAll
+// Console: voxel.Mesh.RemeshAll
 // Re-mesh every currently-loaded chunk IN PLACE (marks them dirty without changing LOD), so a live
-// mesher CVar change (e.g. voxel.MCBoundaryMorphWidth) takes effect immediately while the LOD rings /
+// mesher CVar change (e.g. voxel.Mesh.MCBoundaryMorphWidth) takes effect immediately while the LOD rings /
 // seams stay exactly where they are. Handy for A/B-ing meshing changes while detached and flying.
 static FAutoConsoleCommandWithWorldAndArgs GVoxelRemeshAllCmd(
-	TEXT("voxel.RemeshAll"),
+	TEXT("voxel.Mesh.RemeshAll"),
 	TEXT("Re-mesh all loaded voxel chunks in place (apply a live mesher CVar change without moving LOD)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
@@ -9312,7 +9312,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelRemeshAllCmd(
 		}
 		if (!TargetWorld)
 		{
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.RemeshAll: no PIE/Game world found (start PIE first)"));
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Mesh.RemeshAll: no PIE/Game world found (start PIE first)"));
 			return;
 		}
 
@@ -9330,7 +9330,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelRemeshAllCmd(
 			}
 			TotalDirtied += Loaded.Num();
 		}
-		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.RemeshAll: re-meshing %d chunk(s) across %d manager(s)"), TotalDirtied, Managers);
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Mesh.RemeshAll: re-meshing %d chunk(s) across %d manager(s)"), TotalDirtied, Managers);
 	}));
 
 // Console: voxel.Scatter.Stats [hism|reset]
@@ -9421,7 +9421,7 @@ namespace VoxelEditAuditHelpers
 // points with a vox.TP to each and writes Saved/VoxelAudit/EditAudit_<world>_<time>.csv.
 static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterEditAuditCmd(
 	TEXT("voxel.Scatter.EditAudit"),
-	TEXT("Compare every cached scatter chunk's surface points with a fresh extraction now (world modes review G33: stale ")
+	TEXT("Compare every cached scatter chunk's surface points with a fresh extraction now (stale ")
 	TEXT("scatter next to a system edit). Optional arg: max chunk lines to log."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
@@ -9645,13 +9645,13 @@ static void RunDebugSystemEdit(const TArray<FString>& InArgs, UWorld* World, boo
 static FAutoConsoleCommandWithWorldAndArgs GVoxelEditSystemCmd(
 	TEXT("voxel.Edit.System"),
 	TEXT("Debug: a system edit (as a POI terraform) with a sphere brush. Args: <x y z | pawn> radius [dig|fill] [none|edge|corner]. Logs the edited chunks ")
-	TEXT("and the chunks whose scatter reads them (world modes review G33)."),
+	TEXT("and the chunks whose scatter reads them."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World) { RunDebugSystemEdit(Args, World, false); }));
 
 static FAutoConsoleCommandWithWorldAndArgs GVoxelEditSystemLayersCmd(
 	TEXT("voxel.Edit.SystemLayers"),
 	TEXT("Debug: a system edit of the min-face layers of the chunk holding a point. Args: <x y z | pawn> [dig|fill] [axes=xyz] [depth=1]. ")
-	TEXT("Logs the chunks whose scatter reads it (world modes review G33)."),
+	TEXT("Logs the chunks whose scatter reads it."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World) { RunDebugSystemEdit(Args, World, true); }));
 
 // Console: voxel.Edit.MeshWork [reset]
@@ -9663,7 +9663,7 @@ static TMap<TWeakObjectPtr<UVoxelChunkManager>, TPair<UVoxelChunkManager::FMeshW
 
 static FAutoConsoleCommandWithWorldAndArgs GVoxelEditMeshWorkCmd(
 	TEXT("voxel.Edit.MeshWork"),
-	TEXT("Log the meshing work since the last 'voxel.Edit.MeshWork reset' (world modes review G56): chunk meshes and seam jobs ")
+	TEXT("Log the meshing work since the last 'voxel.Edit.MeshWork reset': chunk meshes and seam jobs ")
 	TEXT("with their worker time, and what edits asked of the meshing pipeline. Arg: reset."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
@@ -9777,7 +9777,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 // G77: the water tiles against the generated surface (UVoxelChunkManager::AuditWaterTiles).
 static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterTileAuditCmd(
 	TEXT("voxel.Water.TileAudit"),
-	TEXT("G77: audit the 2D water tiles against the generated surface: voxel columns under the water plane that no tile marks ")
+	TEXT("Audit the 2D water tiles against the generated surface: voxel columns under the water plane that no tile marks ")
 	TEXT("wet, the worst chunk columns with their chunks (residency, edits, settled, LOD, the stored and the rebuilt mask). ")
 	TEXT("Args: [maxList=8] [chunkX chunkY: a chunk column to detail]."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
@@ -9803,7 +9803,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterTileAuditCmd(
 // G77 diagnostics: mark every water tile dirty so its mesh is generated and sent to the renderer again.
 static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterResendTilesCmd(
 	TEXT("voxel.Water.ResendTiles"),
-	TEXT("G77: send every 2D water tile's mesh to the renderer again (every tile marked dirty)."),
+	TEXT("Send every 2D water tile's mesh to the renderer again (every tile marked dirty)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		UWorld* TargetWorld = VoxelEditAuditHelpers::FindGameWorld(World);
@@ -9916,7 +9916,7 @@ static FAutoConsoleCommand GVoxelFarCompressionDecodesCmd(
 // and the last that read it, its age and reads, the chunk's distance and state) and the session's counters.
 static FAutoConsoleCommand GVoxelSnapshotStatsCmd(
 	TEXT("voxel.Snapshot.Stats"),
-	TEXT("Log the seam snapshot cache's contents and session counters (G69). 'reset' clears the counters."),
+	TEXT("Log the voxel snapshot cache's contents and session counters. 'reset' clears the counters."),
 	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
 	{
 		const bool bReset = Args.Num() > 0 && Args[0].Equals(TEXT("reset"), ESearchCase::IgnoreCase);

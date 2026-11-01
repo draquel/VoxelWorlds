@@ -95,9 +95,9 @@ static TAutoConsoleVariable<int32> CVarVoxelMaterialTileVariation(
 static TAutoConsoleVariable<float> CVarVoxelMaterialMacroVariation(
 	TEXT("voxel.Material.MacroVariation"),
 	0.3f,
-	TEXT("Large-scale brightness variation of the smooth terrain (visual polish VP2-O2; MPC_VoxelMaterial's MacroVariation,\n")
+	TEXT("Large-scale brightness variation of the smooth terrain (MPC_VoxelMaterial's MacroVariation,\n")
 	TEXT("read by MF_TriplanarSampleAlbedoRoughness): the albedo is scaled by 1 +- this at most, by noise about 13 and 41\n")
-	TEXT("tiles across. Default 0.3; 0 = none, as before."),
+	TEXT("tiles across. Default 0.3; 0 = none."),
 	ECVF_Default);
 
 namespace

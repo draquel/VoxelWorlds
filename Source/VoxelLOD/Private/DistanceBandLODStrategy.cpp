@@ -14,7 +14,7 @@
 // Spherical Phase 6, WM-BP10 (D18): the voxel cut-over altitude over the surface under the viewer, above which a planet's
 // voxel window unloads and the far field alone draws the planet.
 static TAutoConsoleVariable<float> CVarVoxelCutover(
-	TEXT("voxel.World.VoxelCutover"),
+	TEXT("voxel.Stream.VoxelCutover"),
 	-1.0f,
 	TEXT("The voxel cut-over altitude (uu over the terrain or sea under the streaming viewer), in every world mode with a far\n")
 	TEXT("field. Above it the voxel window unloads and the far field alone draws the world; below 0.85 of it the window streams back. -1 = the configuration's\n")
@@ -192,7 +192,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		HeightmapSeaZ = WorldConfig->bEnableWaterLevel ? static_cast<double>(WorldConfig->WaterLevel) : TNumericLimits<double>::Lowest();
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Voxel cut-over (with a far field): %.0f uu over the surface under the viewer (resumes below %.0f)%s"),
 			CutoverConfigured, CutoverConfigured * CutoverResumeFraction,
-			CVarVoxelCutover.GetValueOnAnyThread() >= 0.0f ? TEXT(" (voxel.World.VoxelCutover)") : TEXT(""));
+			CVarVoxelCutover.GetValueOnAnyThread() >= 0.0f ? TEXT(" (voxel.Stream.VoxelCutover)") : TEXT(""));
 	}
 	if (WorldMode == EWorldMode::SphericalPlanet)
 	{
@@ -237,7 +237,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		PlanetSeaRadius = WorldConfig->bEnableWaterLevel ? static_cast<double>(WorldConfig->WaterRadius) : 0.0;
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Voxel cut-over (with a far field): %.0f uu over the surface under the viewer (resumes below %.0f)%s"),
 			GetConfiguredCutoverAltitude(), GetConfiguredCutoverAltitude() * CutoverResumeFraction,
-			CVarVoxelCutover.GetValueOnAnyThread() >= 0.0f ? TEXT(" (voxel.World.VoxelCutover)") : TEXT(""));
+			CVarVoxelCutover.GetValueOnAnyThread() >= 0.0f ? TEXT(" (voxel.Stream.VoxelCutover)") : TEXT(""));
 	}
 
 	// The near window (heightmap worlds): band 0's outer edge plus two chunk widths, measured horizontally.

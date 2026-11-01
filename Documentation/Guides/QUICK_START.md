@@ -48,7 +48,7 @@ Meshing mode is chosen via `EMeshingMode` on the configuration (Cubic / Marching
 
 ## Useful console commands & cvars
 
-- `voxel.RemeshAll` — re-mesh all loaded chunks (use after toggling meshing/LOD options).
+- `voxel.Mesh.RemeshAll` — re-mesh all loaded chunks (use after toggling meshing/LOD options).
 - `voxel.Bench.Run` — run the streaming performance benchmark (see
   [Research/STREAMING_PERFORMANCE.md](../Research/STREAMING_PERFORMANCE.md)).
 - `voxel.VertexColorDebugMode 0|1|2` — visualize vertex AO / material / biome encoding

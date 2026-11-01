@@ -18,7 +18,7 @@
 // re-meshed when its own or a neighbour's LOD changes), so it needs no vertex-format or shader
 // change on the CPU path. See Documentation/GEOMORPH_IMPLEMENTATION_PLAN.md.
 TAutoConsoleVariable<float> CVarMCBoundaryMorphWidth(
-	TEXT("voxel.MCBoundaryMorphWidth"),
+	TEXT("voxel.Mesh.MCBoundaryMorphWidth"),
 	2.0f,
 	TEXT("MC LOD-seam geomorph ramp width, in coarse cells. Larger = gentler ramp, more fine detail traded."),
 	ECVF_Default);

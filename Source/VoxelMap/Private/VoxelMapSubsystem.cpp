@@ -60,7 +60,7 @@ static TAutoConsoleVariable<float> CVarMapDetailBudgetMB(
 	32.0f,
 	TEXT("MB of full-resolution map tile images kept, least recently used dropped first (their tiles keep the overview ")
 	TEXT("and are drawn again in detail when the minimap or a zoomed-in world map asks). 0 = unlimited: every tile keeps ")
-	TEXT("its detail image, as before WM-E2. 32 MB holds 2,048 ")
+	TEXT("its detail image. 32 MB holds 2,048 ")
 	TEXT("tiles of 64 x 64: the minimap's area and a world map zoomed in twice."),
 	FConsoleVariableDelegate::CreateStatic(&ApplyMapBudgetsToAll),
 	ECVF_Default);
@@ -77,9 +77,9 @@ static TAutoConsoleVariable<float> CVarMapOverviewBudgetMB(
 static TAutoConsoleVariable<int32> CVarMapExploreAllMaxTiles(
 	TEXT("voxel.Map.ExploreAllMaxTiles"),
 	1000000,
-	TEXT("voxel.Map.ExploreAll marks at most this many tiles explored, nearest the pawn first (spherical Phase 6, WM-BP11: a ")
-	TEXT("planet's atlas is 6 N^2 tiles: 40,000 on a 2.5 km planet, 16 million at 50 km, 6.4 billion at 1,000 km; every world ")
-	TEXT("mode since world modes review WM-MP9: a plane's are unbounded)."),
+	TEXT("voxel.Map.ExploreAll marks at most this many tiles explored, nearest the pawn first, in every world mode (a ")
+	TEXT("planet's atlas is 6 N^2 tiles: 40,000 on a 2.5 km planet, 16 million at 50 km, 6.4 billion at 1,000 km; ")
+	TEXT("a plane's are unbounded)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarMapEditRefreshMaxTiles(

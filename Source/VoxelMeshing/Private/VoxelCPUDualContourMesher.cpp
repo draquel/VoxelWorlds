@@ -41,7 +41,7 @@ TAutoConsoleVariable<int32> CVarVoxelLODCrossings(
 	TEXT("LOD-seam geomorph toward the coarse cells' crossings; 0 = interpolated between the samples a stride apart, as before ")
 	TEXT("(generated density saturates a voxel either side of the surface, so the crossing snaps toward the edge's middle by ")
 	TEXT("where the surface crosses the strided grid: terraces a stride apart at LOD 1 and 2, ribs in their shadows under a low ")
-	TEXT("sun). Interior meshes and seam jobs alike; set it before chunks mesh (voxel.RemeshAll after a change)."),
+	TEXT("sun). Interior meshes and seam jobs alike; set it before chunks mesh (voxel.Mesh.RemeshAll after a change)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarDCQEFSolve(
@@ -53,7 +53,7 @@ static TAutoConsoleVariable<int32> CVarDCQEFSolve(
 	TEXT("back toward the mass point only part of the way when it lay within a cell of the cell), and each rotation zeroed ")
 	TEXT("its pivot above the diagonal only (wrong eigenpairs: a vertex a voxel or more off the surface where a cell's normals ")
 	TEXT("were nearly parallel, more at LOD 1 and 2). Interior meshes and seam jobs alike; set it before chunks mesh ")
-	TEXT("(voxel.RemeshAll after a change)."),
+	TEXT("(voxel.Mesh.RemeshAll after a change)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarDCScaleClampedGradients(

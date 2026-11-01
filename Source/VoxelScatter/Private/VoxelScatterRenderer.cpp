@@ -16,21 +16,21 @@
 static TAutoConsoleVariable<float> CVarVoxelScatterHISMBatchSeconds(
 	TEXT("voxel.Scatter.HISMBatchSeconds"),
 	0.1f,
-	TEXT("Scatter HISM writes (world modes review G42): a HISM takes the instance changes held for it at most this often\n")
+	TEXT("Scatter HISM writes: a HISM takes the instance changes held for it at most this often\n")
 	TEXT("(seconds), and not while its cluster tree builds; releases zero-scale each instance where it stands. 0 = write every\n")
-	TEXT("change to its HISM at once, releases parked at the HISM's origin (the behaviour before G42)."),
+	TEXT("change to its HISM at once, releases parked at the HISM's origin."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarVoxelScatterHISMMaxHoldSeconds(
 	TEXT("voxel.Scatter.HISMMaxHoldSeconds"),
 	0.5f,
-	TEXT("Scatter HISM writes (world modes review G42): the longest a HISM's held changes wait for its cluster tree build (seconds)."),
+	TEXT("Scatter HISM writes: the longest a HISM's held changes wait for its cluster tree build (seconds)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarVoxelScatterHISMCompactMinPooled(
 	TEXT("voxel.Scatter.HISMCompactMinPooled"),
 	1024,
-	TEXT("Scatter HISM writes (world modes review G42): a HISM taking a batch whose pooled (released, zero-scaled) instances are at\n")
+	TEXT("Scatter HISM writes: a HISM taking a batch whose pooled (released, zero-scaled) instances are at\n")
 	TEXT("least this many and outnumber its live ones is rewritten with its live instances only. 0 = never (pools only grow)."),
 	ECVF_Default);
 

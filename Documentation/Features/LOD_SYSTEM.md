@@ -690,7 +690,7 @@ viewer, all of it in the coarsest band. So a planet's window empties above a cut
 way down (spherical Phase 6, WM-BP10, decision D18; WORLD_MODES_REVIEW_PLAN.md §20.6). A plane's or an island's window
 does the same since the world modes review's MP3 (WM-MP2, decision D38): the altitude is measured over the generated
 ground under the streaming viewer or the sea where higher, `VoxelCutoverAltitude` and the three-view-distance
-default, `voxel.World.VoxelCutover` and G49's guard apply as on a planet, a suspended heightmap window returns no column
+default, `voxel.Stream.VoxelCutover` and G49's guard apply as on a planet, a suspended heightmap window returns no column
 (`GetVisibleChunks`, the balanced LOD cache) and unloads every chunk, and the cut-over is in force only while the chunk
 manager has a far field (`FLODQueryContext::bFarFieldActive`): without one `GetCutoverAltitude` is 0 (the configured
 altitude stays readable as `GetPlanetCutoverAltitude`) and the window keeps its ground disk at any altitude (D8), since
@@ -703,7 +703,7 @@ the planet; now it keeps the window, and `vox.Planet` reports "cut-over off: no 
   is higher (`GetViewerSurfaceAltitude`: a flyer skimming a deep sea keeps its window). Above
   `UVoxelWorldConfiguration::VoxelCutoverAltitude` (0: three view distances, `DefaultCutoverViewDistances`:
   120,000 uu on the review planets) the window is suspended; it resumes below `CutoverResumeFraction` (0.85) of it, so a flyer hovering at the cut-over does
-  not churn. `voxel.World.VoxelCutover` overrides it (-1: the configuration's; 0: never, the window keeping its ground
+  not churn. `voxel.Stream.VoxelCutover` overrides it (-1: the configuration's; 0: never, the window keeping its ground
   disk at any altitude as WM-BP8 made it). A suspended window resumes only with the camera under the cut-over as well
   (`FLODQueryContext::ViewerLead` gives the strategy the camera's altitude; G49, `voxel.World.CutoverResumeGuard`, 0 =
   the streaming viewer alone decides, the rule before): the descent prefetch below can bring a resume forward to the

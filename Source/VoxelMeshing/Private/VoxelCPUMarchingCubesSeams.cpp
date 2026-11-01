@@ -172,8 +172,8 @@ namespace VoxelMCSeamStats
 // Console: voxel.Seam.MCStats [reset]
 static FAutoConsoleCommand GVoxelMCSeamStatsCmd(
 	TEXT("voxel.Seam.MCStats"),
-	TEXT("Log the Marching Cubes seam jobs' worker time since the last reset, by job type and by stage (world modes review ")
-	TEXT("G63: setup, fill, band, ribbon, translate, teardown). 'reset' clears the counters."),
+	TEXT("Log the Marching Cubes seam jobs' worker time since the last reset, by job type and by stage ")
+	TEXT("(setup, fill, band, ribbon, translate, teardown). 'reset' clears the counters."),
 	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
 	{
 		if (Args.Num() > 0 && Args[0].Equals(TEXT("reset"), ESearchCase::IgnoreCase))

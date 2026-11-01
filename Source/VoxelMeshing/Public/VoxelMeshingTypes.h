@@ -222,7 +222,7 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	EVoxelMeshCellDomain MeshCellDomain = EVoxelMeshCellDomain::WholeChunk;
 
 	/**
-	 * MC seam jobs only (P3): overrides voxel.MCBoundaryMorphWidth (units: coarse cells) for
+	 * MC seam jobs only (P3): overrides voxel.Mesh.MCBoundaryMorphWidth (units: coarse cells) for
 	 * the boundary geomorph. Seam-band cells morph with a ramp that reaches ZERO exactly at
 	 * the band's inner edge — a wider ramp would move vertices shared with the
 	 * unmorphed interior mesh and crack the junction. <= 0 uses the cvar (whole-chunk meshing).
