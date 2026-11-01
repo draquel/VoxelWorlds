@@ -163,7 +163,7 @@ TSharedPtr<const FVoxelFarFieldSurface> FVoxelFarFieldSurface::Make(const UVoxel
 	}
 	TSharedPtr<FVoxelFarFieldSurface> Surface = MakeShared<FVoxelFarFieldSurface>();
 	Surface->WorldMode = InWorldMode;
-	Surface->NoiseParams = Config.NoiseParams;
+	Surface->NoiseParams = Config.GetNoiseParams();
 	if (Config.bEnableBiomes)
 	{
 		Surface->Biomes = FVoxelBiomeSnapshot::FromConfig(Config.BiomeConfiguration);
@@ -173,7 +173,7 @@ TSharedPtr<const FVoxelFarFieldSurface> FVoxelFarFieldSurface::Make(const UVoxel
 	// A heightmap world (WM-MP1): the generated height at (X, Y), the climate from the terrain's seed, the block top in a
 	// cubic world (WM-C5: the walking surface up to a block over the isosurface).
 	Surface->bHeightmap = Mode != EWorldMode::SphericalPlanet;
-	Surface->WorldSeed = Config.NoiseParams.Seed;
+	Surface->WorldSeed = Config.GetNoiseParams().Seed;
 	Surface->bWater = Config.bEnableWaterLevel;
 	Surface->WaterLevel = Config.WaterLevel;
 	Surface->bBlockSurface = Surface->bHeightmap && FVoxelBlockSurface::UsesBlockSurface(Config);

@@ -100,7 +100,7 @@ namespace
 		}
 
 		Out.WorldMode = WorldMode;
-		Out.NoiseParams = Config->NoiseParams;
+		Out.NoiseParams = Config->GetNoiseParams();
 		Out.WorldSeed = Config->WorldSeed;
 		Out.VoxelSize = Config->VoxelSize;
 		Out.bWaterEnabled = Config->bEnableWaterLevel;

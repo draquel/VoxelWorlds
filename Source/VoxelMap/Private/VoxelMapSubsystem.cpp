@@ -346,7 +346,7 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 		return false;
 	}
 
-	CachedNoiseParams = Config->NoiseParams;
+	CachedNoiseParams = Config->GetNoiseParams();
 	CachedChunkSize = Config->ChunkSize;
 	CachedVoxelSize = Config->VoxelSize;
 	CachedWorldOrigin = Config->WorldOrigin;

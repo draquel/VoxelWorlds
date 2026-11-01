@@ -200,9 +200,10 @@ struct VOXELCORE_API FVoxelTerrainSurfacePoint
 /**
  * What generated a world, recorded with its save so a save is never loaded into a different world (world modes review
  * WM-A4, finding KI7; spherical requirement SP-G9). The save key holds the map and the seed; this holds the rest that
- * decides where terrain, edits and records are: the world mode, the mode's shape params, the voxel grid and the
- * generation version. Built by FVoxelWorldModeFactory::MakeFingerprint; read through
- * UVoxelChunkManager::GetWorldFingerprint.
+ * decides where terrain, edits and records are: the world mode, the mode's shape params, the voxel grid, the meshing
+ * mode, the noise seed in use and the generation version (Shape), and what the save's records key on (Content: the POI
+ * catalog's type order; code review CR2, D-CR20). Built by FVoxelWorldModeFactory::MakeFingerprint; read through
+ * UVoxelChunkManager::GetWorldFingerprint, Content added by the save subsystem.
  */
 USTRUCT(BlueprintType)
 struct VOXELCORE_API FVoxelWorldFingerprint
@@ -214,11 +215,20 @@ struct VOXELCORE_API FVoxelWorldFingerprint
 	EWorldMode WorldMode = EWorldMode::InfinitePlane;
 
 	/**
-	 * The mode's shape params (island extent, falloff, centre and edge height; planet radius, shell and centre) and the
-	 * voxel grid (voxel size, chunk size, world origin), as "Name=Value" pairs joined by ';'. Compared as text.
+	 * The mode's shape params (island extent, falloff, centre and edge height; planet radius, shell and centre), the
+	 * voxel grid (voxel size, chunk size, world origin), the meshing mode and the noise seed in use
+	 * (UVoxelWorldConfiguration::GetNoiseParams), as "Name=Value" pairs joined by ';'. Compared as text.
 	 */
 	UPROPERTY(BlueprintReadOnly, Category = "Voxel|World")
 	FString Shape;
+
+	/**
+	 * What the save's records key on beyond the terrain, as "Name=Value" pairs joined by ';' (the POI catalog's type order
+	 * as "POITypes=A,B,C", which keys the dungeon records; code review CR2, D-CR20). Filled by the save subsystem, empty
+	 * from the chunk manager; compared as text.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Voxel|World")
+	FString Content;
 
 	/**
 	 * Version of the generation code that produced the terrain (FVoxelWorldModeFactory::GenerationVersion). 0 means
@@ -232,7 +242,7 @@ struct VOXELCORE_API FVoxelWorldFingerprint
 
 	/**
 	 * @param Other Fingerprint to compare with
-	 * @return True when the world mode, the shape and the generation version are all equal
+	 * @return True when the world mode, the shape, the content and the generation version are all equal
 	 */
 	bool Matches(const FVoxelWorldFingerprint& Other) const;
 
@@ -245,6 +255,6 @@ struct VOXELCORE_API FVoxelWorldFingerprint
 	 */
 	FString DescribeDifferences(const FVoxelWorldFingerprint& Other) const;
 
-	/** @return "<WorldMode> [<Shape>] gen <GenerationVersion>" */
+	/** @return "<WorldMode> [<Shape>] gen <GenerationVersion>", then " {<Content>}" when there is content */
 	FString ToString() const;
 };

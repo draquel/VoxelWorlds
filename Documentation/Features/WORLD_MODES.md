@@ -350,7 +350,8 @@ Each has a work item in WORLD_MODES_REVIEW_PLAN.md §14.2.
   pan stop at the bounds, markers show only inside, the PCG sampler skips points outside, and navigation blocks every
   cell outside, water on or off (KI9). Scatter and surface NPCs already stopped at the coast.
 - ~~**A changed island shape loads the old save**~~ Fixed by WM-A4 (2026-10-15): the save records the world's
-  fingerprint (mode, shape, voxel grid, generation version), and a save from a different radius is refused, kept on disk,
+  fingerprint (mode, shape, voxel grid, generation version; since CR2 row 16 the meshing mode and the noise seed in use, and
+  the POI catalog's type order as its content), and a save from a different radius is refused, kept on disk,
   and the world starts fresh (KI7).
 - ~~**Spawn off the island with water off**~~ Fixed by WM-I3 (2026-10-15): the spawn search only accepts points inside
   the bounds, and a start outside searches from a chunk inside the edge (KI8).

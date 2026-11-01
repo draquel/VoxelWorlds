@@ -175,7 +175,8 @@ namespace VoxelWorldFingerprintPrivate
 
 bool FVoxelWorldFingerprint::Matches(const FVoxelWorldFingerprint& Other) const
 {
-	return WorldMode == Other.WorldMode && GenerationVersion == Other.GenerationVersion && Shape.Equals(Other.Shape, ESearchCase::CaseSensitive);
+	return WorldMode == Other.WorldMode && GenerationVersion == Other.GenerationVersion && Shape.Equals(Other.Shape, ESearchCase::CaseSensitive)
+		&& Content.Equals(Other.Content, ESearchCase::CaseSensitive);
 }
 
 FString FVoxelWorldFingerprint::DescribeDifferences(const FVoxelWorldFingerprint& Other) const
@@ -189,16 +190,21 @@ FString FVoxelWorldFingerprint::DescribeDifferences(const FVoxelWorldFingerprint
 	{
 		Clauses.Add(FString::Printf(TEXT("generation version %d vs %d"), GenerationVersion, Other.GenerationVersion));
 	}
-	if (!Shape.Equals(Other.Shape, ESearchCase::CaseSensitive))
+	// Name the params that differ; a param only one side has shows as missing on the other. The shape and the content are
+	// both "Name=Value" lists.
+	auto DescribeTerms = [&Clauses](const FString& Mine, const FString& Theirs)
 	{
-		// Name the params that differ; a param only one side has shows as missing on the other.
-		const TArray<TPair<FString, FString>> Mine = VoxelWorldFingerprintPrivate::SplitShape(Shape);
-		const TArray<TPair<FString, FString>> Theirs = VoxelWorldFingerprintPrivate::SplitShape(Other.Shape);
+		if (Mine.Equals(Theirs, ESearchCase::CaseSensitive))
+		{
+			return;
+		}
+		const TArray<TPair<FString, FString>> MyTerms = VoxelWorldFingerprintPrivate::SplitShape(Mine);
+		const TArray<TPair<FString, FString>> TheirTerms = VoxelWorldFingerprintPrivate::SplitShape(Theirs);
 		TSet<FString> Seen;
-		for (const TPair<FString, FString>& Param : Mine)
+		for (const TPair<FString, FString>& Param : MyTerms)
 		{
 			Seen.Add(Param.Key);
-			const TPair<FString, FString>* Match = Theirs.FindByPredicate([&Param](const TPair<FString, FString>& P) { return P.Key == Param.Key; });
+			const TPair<FString, FString>* Match = TheirTerms.FindByPredicate([&Param](const TPair<FString, FString>& P) { return P.Key == Param.Key; });
 			if (!Match)
 			{
 				Clauses.Add(FString::Printf(TEXT("%s=%s vs missing"), *Param.Key, *Param.Value));
@@ -208,18 +214,21 @@ FString FVoxelWorldFingerprint::DescribeDifferences(const FVoxelWorldFingerprint
 				Clauses.Add(FString::Printf(TEXT("%s=%s vs %s"), *Param.Key, *Param.Value, *Match->Value));
 			}
 		}
-		for (const TPair<FString, FString>& Param : Theirs)
+		for (const TPair<FString, FString>& Param : TheirTerms)
 		{
 			if (!Seen.Contains(Param.Key))
 			{
 				Clauses.Add(FString::Printf(TEXT("%s missing vs %s"), *Param.Key, *Param.Value));
 			}
 		}
-	}
+	};
+	DescribeTerms(Shape, Other.Shape);
+	DescribeTerms(Content, Other.Content);
 	return FString::Join(Clauses, TEXT("; "));
 }
 
 FString FVoxelWorldFingerprint::ToString() const
 {
-	return FString::Printf(TEXT("%s [%s] gen %d"), *VoxelWorldFingerprintPrivate::WorldModeName(WorldMode), *Shape, GenerationVersion);
+	return FString::Printf(TEXT("%s [%s] gen %d%s"), *VoxelWorldFingerprintPrivate::WorldModeName(WorldMode), *Shape, GenerationVersion,
+		Content.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" {%s}"), *Content));
 }

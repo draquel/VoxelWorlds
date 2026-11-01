@@ -133,6 +133,10 @@ FVoxelWorldFingerprint FVoxelWorldModeFactory::MakeFingerprint(const UVoxelWorld
 	Params.Add(TEXT("VoxelSize=") + Num(Config.VoxelSize));
 	Params.Add(FString::Printf(TEXT("ChunkSize=%d"), Config.ChunkSize));
 	Params.Add(TEXT("WorldOrigin=") + Vec3(Config.WorldOrigin));
+	// The meshing mode (a cubic and a smooth configuration of one map and seed shared a save key) and the noise seed in use
+	// (WorldSeed when the noise seed is 0; code review CR2, D-CR19 / D-CR20).
+	Params.Add(TEXT("MeshingMode=") + StaticEnum<EMeshingMode>()->GetNameStringByValue(static_cast<int64>(Config.MeshingMode)));
+	Params.Add(FString::Printf(TEXT("NoiseSeed=%d"), Config.GetNoiseParams().Seed));
 
 	FVoxelWorldFingerprint Fingerprint;
 	Fingerprint.WorldMode = Config.WorldMode;
