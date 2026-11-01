@@ -85,16 +85,7 @@ namespace
 			return Out;
 		}
 
-		UVoxelChunkManager* ChunkMgr = nullptr;
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			ChunkMgr = It->FindComponentByClass<UVoxelChunkManager>();
-			if (ChunkMgr && ChunkMgr->IsInitialized())
-			{
-				break;
-			}
-			ChunkMgr = nullptr;
-		}
+		UVoxelChunkManager* ChunkMgr = UVoxelChunkManager::Find(World);
 
 		if (!ChunkMgr)
 		{

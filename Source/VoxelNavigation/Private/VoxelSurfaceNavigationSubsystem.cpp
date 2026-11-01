@@ -165,13 +165,10 @@ UVoxelChunkManager* UVoxelSurfaceNavigationSubsystem::ResolveChunkManager()
 	{
 		return nullptr;
 	}
-	for (TActorIterator<AActor> It(World); It; ++It)
+	if (UVoxelChunkManager* Found = UVoxelChunkManager::Find(World, /*bRequireInitialized*/ false))
 	{
-		if (UVoxelChunkManager* Found = It->FindComponentByClass<UVoxelChunkManager>())
-		{
-			SetChunkManager(Found);
-			return Found;
-		}
+		SetChunkManager(Found);
+		return Found;
 	}
 	return nullptr;
 }

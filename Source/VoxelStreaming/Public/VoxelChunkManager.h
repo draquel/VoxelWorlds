@@ -364,6 +364,23 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
 	bool IsInitialized() const { return bIsInitialized; }
 
+	// ==================== Finding the manager ====================
+
+	/**
+	 * The world's chunk manager: the first UVoxelChunkManager component on any actor of World, the one finder every
+	 * system uses (code review CR2: CM-02, VCP-23, POI-25). The last hit is cached, so a hot caller (a movement
+	 * component's tick) pays no actor iteration; a manager's Shutdown drops the cache.
+	 *
+	 * @param World The world to search (null returns null).
+	 * @param bRequireInitialized true: only a manager whose Initialize has run (gameplay, POI, the map and PCG);
+	 *        false: any manager, initialized or not (navigation binds before initialization).
+	 * @return The manager, or null when the world has none.
+	 */
+	static UVoxelChunkManager* Find(const UWorld* World, bool bRequireInitialized = true);
+
+	/** Every chunk manager component in World, in actor order, initialized or not (the console commands' loop). */
+	static TArray<UVoxelChunkManager*> FindAll(const UWorld* World);
+
 	// ==================== Streaming Control ====================
 
 	/**
