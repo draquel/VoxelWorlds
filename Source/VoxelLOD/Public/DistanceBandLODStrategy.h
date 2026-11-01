@@ -147,7 +147,7 @@ public:
 	// ==================== The voxel cut-over (spherical Phase 6, WM-BP10, D18) ====================
 
 	/**
-	 * Whether the viewer is above the voxel cut-over (GetPlanetCutoverAltitude over the surface under it), so the window
+	 * Whether the viewer is above the voxel cut-over (GetCutoverAltitude over the surface under it), so the window
 	 * holds nothing and the far field alone draws the world. Decided in Update with hysteresis: suspended above the
 	 * cut-over, resumed below CutoverResumeFraction of it. In every world mode only while the context reports a far field
 	 * (FLODQueryContext::bFarFieldActive; world modes review WM-MP2, D38; planets too since G78: a suspended window with
@@ -196,20 +196,32 @@ public:
 	bool IsCutoverResumeHeld() const { return bCutoverResumeHeld; }
 
 	/**
-	 * The cut-over altitude in force (uu over the surface; 0 = never): voxel.World.VoxelCutover when set (>= 0), else the
-	 * configuration's PlanetVoxelCutoverAltitude, else DefaultCutoverViewDistances view distances. 0 on a heightmap world
-	 * whose last Update saw no far field (WM-MP2).
+	 * The configured cut-over altitude (uu over the surface; 0 = never), whatever the far field: voxel.World.VoxelCutover
+	 * when set (>= 0), else the configuration's PlanetVoxelCutoverAltitude, else DefaultCutoverViewDistances view distances.
+	 * GetCutoverAltitude is the one in force (this, gated by the far field; code review CR2, STREAM-19); the tests read
+	 * the configured value through this.
 	 */
-	double GetPlanetCutoverAltitude() const;
+	double GetConfiguredCutoverAltitude() const;
 
 	/** The viewer's altitude over the surface under it (the terrain, or the sea where higher), as the last Update saw it. */
 	virtual double GetViewerSurfaceAltitude() const override { return ViewerSurfaceAltitude; }
 
 	/**
-	 * IVoxelLODStrategy: the cut-over in force, 0 while the last Update's context reported no far field (D38, every mode
-	 * since G78); GetPlanetCutoverAltitude is the configured altitude whatever the far field.
+	 * A position's altitude over the surface under it (the terrain, or the sea where that is higher), in any world mode
+	 * (code review CR2, STREAM-20: the one place that measures it): on a planet the distance from the centre less the
+	 * ground radius under it (GetPlanetGroundRadius) or the sea radius; on a heightmap world Z less the generated ground
+	 * there (one sample, memoized for the position) or the sea's Z. Game thread.
+	 *
+	 * @param Position The viewer or camera
+	 * @return Altitude over the surface (negative under it)
 	 */
-	virtual double GetCutoverAltitude() const override { return bCutoverAllowed ? GetPlanetCutoverAltitude() : 0.0; }
+	double ComputeSurfaceAltitude(const FVector& Position) const;
+
+	/**
+	 * IVoxelLODStrategy: the cut-over in force, 0 while the last Update's context reported no far field (D38, every mode
+	 * since G78); GetConfiguredCutoverAltitude is the configured altitude whatever the far field.
+	 */
+	virtual double GetCutoverAltitude() const override { return bCutoverAllowed ? GetConfiguredCutoverAltitude() : 0.0; }
 
 	/** IVoxelLODStrategy: the far-field gate between Updates (the chunk manager, when the far field is built or released). */
 	virtual void SetFarFieldActive(bool bActive) override { bCutoverAllowed = bActive; }
@@ -336,6 +348,30 @@ protected:
 	 * @return The column's window, absolute layers
 	 */
 	FColumnWindow GetColumnWindow(int32 ChunkX, int32 ChunkY, const FLODQueryContext& Context, EWindowUse Use) const;
+
+	/**
+	 * Whether a chunk is in the voxel window, in any world mode (code review CR2, STREAM-21: the one predicate over the
+	 * heightmap column's layer range and the planet chunk's predicate): on a heightmap world its column's window
+	 * (GetColumnWindow) holds its layer; on a planet IsInPlanetWindow.
+	 *
+	 * @param ChunkCoord The chunk
+	 * @param Context The query context
+	 * @param Use Load or Keep
+	 * @return True when the window holds the chunk
+	 */
+	bool IsChunkInWindow(const FIntVector& ChunkCoord, const FLODQueryContext& Context, EWindowUse Use) const;
+
+	/**
+	 * Every chunk the window may load, in any world mode, within the streaming horizon (code review CR2, STREAM-21: the
+	 * one enumeration): on a heightmap world every column within the horizon and in each the layers of its window; on a
+	 * planet the chunks of its window (IsInPlanetWindow) within the horizon's cone, measured along the ground from the
+	 * viewer's ground point. Nothing while the window is suspended. The world-mode culls, the LOD and the frustum are the
+	 * caller's (GetVisibleChunks).
+	 *
+	 * @param Context The query context
+	 * @param Visit Called per candidate with its coordinate and world centre
+	 */
+	void ForEachWindowCandidate(const FLODQueryContext& Context, TFunctionRef<void(const FIntVector&, const FVector&)> Visit) const;
 
 	/**
 	 * A planet column's crossing of the shell (SP-C1): the layers whose chunks meet the shell from ShellWindowInnerRadius
@@ -790,8 +826,8 @@ protected:
 	 */
 	bool bCutoverAllowed = false;
 	double HeightmapSeaZ = TNumericLimits<double>::Lowest();
-	FVector HeightmapGroundViewer = FVector(TNumericLimits<double>::Max());
-	double HeightmapGroundZ = 0.0;
+	mutable FVector HeightmapGroundViewer = FVector(TNumericLimits<double>::Max());
+	mutable double HeightmapGroundZ = 0.0;
 
 	// ==================== Runtime State ====================
 

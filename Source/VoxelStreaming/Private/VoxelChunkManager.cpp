@@ -3982,18 +3982,27 @@ void UVoxelChunkManager::DestroyFarOcean()
 	bFarOceanUndersideShown = false;
 }
 
-void UVoxelChunkManager::UpdateFarOceanUnderside(const FVector& ViewerPosition)
+void UVoxelChunkManager::UpdateUnderside(bool bBelow, bool& bShown, TFunctionRef<void(bool)> Apply)
 {
-	const bool bBelow = ViewerPosition.Z < FarOceanSettings.WaterZ;
-	if (bBelow == bFarOceanUndersideShown)
+	// A sea's underside shows only while the viewer is under its surface (code review CR2, CM-19: the one rule for the
+	// far ocean, the planet ocean and the far field's sea).
+	if (bBelow == bShown)
 	{
 		return;
 	}
-	bFarOceanUndersideShown = bBelow;
-	if (IsValid(FarOceanStatic) && FarOceanStatic->GetNumSections() > 2)
+	bShown = bBelow;
+	Apply(bBelow);
+}
+
+void UVoxelChunkManager::UpdateFarOceanUnderside(const FVector& ViewerPosition)
+{
+	UpdateUnderside(ViewerPosition.Z < FarOceanSettings.WaterZ, bFarOceanUndersideShown, [this](bool bBelow)
 	{
-		FarOceanStatic->SetMeshSectionVisible(2, bBelow);
-	}
+		if (IsValid(FarOceanStatic) && FarOceanStatic->GetNumSections() > 2)
+		{
+			FarOceanStatic->SetMeshSectionVisible(2, bBelow);
+		}
+	});
 }
 
 void UVoxelChunkManager::SetFarOceanVisible(bool bVisible)
@@ -4098,15 +4107,13 @@ void UVoxelChunkManager::UpdatePlanetOceanUnderside(const FVector& ViewerPositio
 	}
 	const bool bInside = FVector::DistSquared(ViewerPosition, PlanetOceanSettings.Center)
 		< PlanetOceanSettings.Radius * PlanetOceanSettings.Radius;
-	if (bInside == bPlanetOceanUndersideShown)
+	UpdateUnderside(bInside, bPlanetOceanUndersideShown, [this](bool bBelow)
 	{
-		return;
-	}
-	bPlanetOceanUndersideShown = bInside;
-	if (PlanetOcean->GetNumSections() > 1)
-	{
-		PlanetOcean->SetMeshSectionVisible(1, bInside);
-	}
+		if (PlanetOcean->GetNumSections() > 1)
+		{
+			PlanetOcean->SetMeshSectionVisible(1, bBelow);
+		}
+	});
 }
 
 void UVoxelChunkManager::SetPlanetOceanVisible(bool bVisible)
@@ -4673,14 +4680,13 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 		ApplyVisibility(Key);
 	}
 	// The sea's undersides show only while the viewer is inside the sea radius (as the ocean shell's).
-	if (bUnderSea != bFarFieldUndersideShown)
+	UpdateUnderside(bUnderSea, bFarFieldUndersideShown, [&](bool)
 	{
-		bFarFieldUndersideShown = bUnderSea;
 		for (const TPair<uint64, TObjectPtr<UProceduralMeshComponent>>& Pair : FarFieldComponents)
 		{
 			ApplyVisibility(Pair.Key);
 		}
-	}
+	});
 
 	// Figures for the bench and vox.Planet.
 	FVoxelFarFieldStats& Stats = FarFieldStats;
@@ -4857,6 +4863,20 @@ bool UVoxelChunkManager::GetPlanetCapOfBox(const FBox& Box, FVector& OutDirectio
 	OutDirection = Distance > UE_KINDA_SMALL_NUMBER ? Offset / Distance : FVector::UpVector;
 	OutAngle = Distance <= HalfDiagonal ? UE_DOUBLE_PI : FMath::Asin(HalfDiagonal / Distance);
 	return true;
+}
+
+void UVoxelChunkManager::GatherConditioningZones(const FBox& Box, TArray<FVoxelConditioningZone>& OutZones) const
+{
+	// The zones a world box's terrain takes, in any mode (code review CR2, CM-20): on a planet the cap the box subtends
+	// (GetPlanetCapOfBox), on a heightmap world its XY region.
+	FVector CapDirection;
+	double CapAngle = 0.0;
+	if (GetPlanetCapOfBox(Box, CapDirection, CapAngle))
+	{
+		GatherConditioningZonesOnSphere(CapDirection, CapAngle, OutZones);
+		return;
+	}
+	GatherConditioningZonesForRegion(FBox2D(FVector2D(Box.Min.X, Box.Min.Y), FVector2D(Box.Max.X, Box.Max.Y)), OutZones);
 }
 
 void UVoxelChunkManager::GatherConditioningZonesOnSphere(const FVector& Direction, double AngularRadius, TArray<FVoxelConditioningZone>& OutZones) const

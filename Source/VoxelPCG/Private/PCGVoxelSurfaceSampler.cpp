@@ -230,12 +230,7 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 		TArray<FVoxelConditioningZone> PlanetZones;
 		if (VoxelCtx.ChunkManager)
 		{
-			FVector CapDirection;
-			double CapAngle = 0.0;
-			if (VoxelCtx.ChunkManager->GetPlanetCapOfBox(Bounds, CapDirection, CapAngle))
-			{
-				VoxelCtx.ChunkManager->GatherConditioningZonesOnSphere(CapDirection, CapAngle, PlanetZones);
-			}
+			VoxelCtx.ChunkManager->GatherConditioningZones(Bounds, PlanetZones);
 		}
 		Transforms.Reserve(Cells.Num());
 		Samples.Reserve(Cells.Num());
@@ -295,7 +290,7 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 		TArray<FVoxelConditioningZone> Zones;
 		if (VoxelCtx.ChunkManager)
 		{
-			VoxelCtx.ChunkManager->GatherConditioningZones(FBox2D(FVector2D(Bounds.Min.X, Bounds.Min.Y), FVector2D(Bounds.Max.X, Bounds.Max.Y)), Zones);
+			VoxelCtx.ChunkManager->GatherConditioningZones(Bounds, Zones);
 		}
 
 		for (int32 IX = MinX; IX <= MaxX; ++IX)

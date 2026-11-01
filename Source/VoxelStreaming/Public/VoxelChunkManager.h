@@ -1280,6 +1280,16 @@ public:
 	}
 
 	/**
+	 * Append the conditioning zones a world box's terrain takes, in any world mode (code review CR2, CM-20: the one
+	 * gather a caller with a box needs, so it never asks the mode): on a planet the zones reaching the cap the box
+	 * subtends (GetPlanetCapOfBox, GatherConditioningZonesOnSphere); on a heightmap world the zones overlapping its XY
+	 * region. Game thread.
+	 * @param Box      World box
+	 * @param OutZones Appended with the zones
+	 */
+	void GatherConditioningZones(const FBox& Box, TArray<FVoxelConditioningZone>& OutZones) const;
+
+	/**
 	 * Planets (spherical SP-B10): append the planet zones (static, with a Direction, and the dynamic conditioner's
 	 * GatherConditioningOnSphere) whose influence reaches a cap on the sphere: what generation layers onto the radial
 	 * height there (apply with FVoxelTerrainConditioning::ApplyToAltitude). Game thread. The map, scatter and PCG use it
@@ -2680,6 +2690,9 @@ private:
 	bool bFarOceanUndersideShown = false;
 
 	/** Show the water's undersides when the viewer is under the water plane, hide them when it is not. */
+	/** A sea underside's visibility: shown while the viewer is under it, applied only when that changes (CM-19). */
+	static void UpdateUnderside(bool bBelow, bool& bShown, TFunctionRef<void(bool)> Apply);
+
 	void UpdateFarOceanUnderside(const FVector& ViewerPosition);
 
 	/** Build the far ocean from the world mode's bounds and the island's seabed (game worlds, islands, bIslandFarOcean). */
