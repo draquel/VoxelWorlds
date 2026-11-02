@@ -285,8 +285,7 @@ lists cooks that read a neighbour as air and are stale.
   a mesh already on a worker is redone once it lands (`bRemeshAfterMeshing`, G57). An edit in a chunk the manager does
   not track forces a streaming update, which pin-loads it.
 - re-meshes no neighbour: their meshes read none of the edited voxels, and the boundary is in the edited chunk's
-  seams (G56; `voxel.Edit.NeighbourRemesh` 1 restores the six face neighbours' re-mesh while that cvar is
-  registered). Tests `Streaming.EditRemesh.{Plane,Planet}`: after each edit every chunk mesh and seam bucket equals a
+  seams (G56). Tests `Streaming.EditRemesh.{Plane,Planet}`: after each edit every chunk mesh and seam bucket equals a
   full rebuild. `voxel.Edit.MeshWork` counts the work.
 - re-cooks collision: the chunk, its six face neighbours, and the edge and corner neighbours the edit's sphere reaches
   within a cook's neighbour depth (`MarkNeighborsDirtyForEdit`; all of them for an edit of unknown radius, an undo or a

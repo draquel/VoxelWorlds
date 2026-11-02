@@ -39,15 +39,6 @@ static TAutoConsoleVariable<int32> CVarVoxelScatterRegionChunks(
 	TEXT("(voxel.Render.RegionChunks); N > 0 = regions of N chunks. Read when the scatter manager initializes."),
 	ECVF_Default);
 
-static TAutoConsoleVariable<int32> CVarVoxelScatterFirstExtractionAtHorizon(
-	TEXT("voxel.Scatter.FirstExtractionAtHorizon"),
-	1,
-	TEXT("World modes review G79: 1 = a chunk handed off with every scatter type out of range (it arrived at the window's front)\n")
-	TEXT("is handed off again by the distance pass once it comes within the scatter horizon (the largest spawn distance), and\n")
-	TEXT("types with SpawnDistance 0 stream at ScatterRadius like the others; 0 = such a chunk waits for its next mesh, the LOD\n")
-	TEXT("refine near the viewer, where every type lands at once (before). Read each distance pass."),
-	ECVF_Default);
-
 /** The scatter HISM regions by default (voxel.Scatter.RegionChunks -1), every world mode: a quarter of the render regions' edge. */
 static constexpr int32 DefaultScatterRegionChunks = 4;
 
@@ -689,8 +680,9 @@ void UVoxelScatterManager::HandOffChunkVoxels(const FIntVector& ChunkCoord, cons
 	if (DefsToGenerate.Num() == 0)
 	{
 		// Every type out of range and nothing cached: the chunk arrived at the window's front (G79). The distance pass hands
-		// it off again once it comes within the scatter horizon, so its scatter does not wait for its next mesh.
-		if (CVarVoxelScatterFirstExtractionAtHorizon.GetValueOnGameThread() != 0 && !SurfaceCache.Contains(ChunkCoord)
+		// it off again once it comes within the scatter horizon, so its scatter does not wait for its next mesh (the LOD
+		// refine near the viewer, where every type would land at once: pop-in).
+		if (!SurfaceCache.Contains(ChunkCoord)
 			&& !SpawnCache.Contains(ChunkCoord) && !AsyncScatterInProgress.Contains(ChunkCoord) && !PendingQueueSet.Contains(ChunkCoord)
 			&& ChunkDistance > GetScatterHorizon())
 		{
@@ -1635,9 +1627,9 @@ void UVoxelScatterManager::ProcessDeferredFirstExtractions()
 	{
 		return;
 	}
-	if (CVarVoxelScatterFirstExtractionAtHorizon.GetValueOnGameThread() == 0 || !ChunkHandOffRequester)
+	if (!ChunkHandOffRequester)
 	{
-		// The rule before: such a chunk waits for its next mesh. Drop the set so it does not grow for nothing.
+		// Nothing can hand such a chunk off again: it waits for its next mesh. Drop the set so it does not grow for nothing.
 		ChunksAwaitingFirstExtraction.Empty();
 		return;
 	}
@@ -1710,7 +1702,6 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 	// Collect the definitions the distance pass streams, each with its spawn distance: those with a SpawnDistance of their
 	// own and, since G79, those at ScatterRadius too (their spawn is no longer tied to the hand-off that happened to find
 	// them in range; the hand-off's tree-mode rule applies to them as it would there)
-	const bool bRadiusTypesStream = CVarVoxelScatterFirstExtractionAtHorizon.GetValueOnGameThread() != 0;
 	struct FDistanceLimitedDef
 	{
 		const FScatterDefinition* Def;
@@ -1728,7 +1719,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 		{
 			DistanceLimitedDefs.Add({ &Def, Def.SpawnDistance, false });
 		}
-		else if (bRadiusTypesStream && PassesTreeModeRule(Def, FLT_MAX))
+		else if (PassesTreeModeRule(Def, FLT_MAX))
 		{
 			DistanceLimitedDefs.Add({ &Def, ScatterRadius, true });
 		}

@@ -1130,8 +1130,6 @@ public:
 		int64 ReadersFolded = 0;
 		/** Readers without voxel data: not loaded yet (their extraction reads the edit when they load), or unloading. */
 		int64 ReadersWithoutData = 0;
-		/** voxel.Scatter.EditReaders 0 (the rule before G33): face neighbours regenerated. */
-		int64 LegacyFaceNeighbours = 0;
 	};
 
 	/** @return What system and editor edits did to scatter since Initialize (see FEditScatterStats) */
@@ -1140,8 +1138,7 @@ public:
 	/**
 	 * Meshing work since Initialize (world modes review G56, G57), for tests and voxel.Edit.MeshWork: chunk meshes and seam
 	 * jobs with their worker time (streaming's as well as edits'), and what edits asked of the meshing pipeline. An edit
-	 * re-meshes the chunks it changed and restales their seams; voxel.Edit.NeighbourRemesh 1 (the rule before G56) also
-	 * re-meshes each edited chunk's six face neighbours.
+	 * re-meshes the chunks it changed and restales their seams (G56: not their face neighbours).
 	 */
 	struct FMeshWorkStats
 	{
@@ -1161,8 +1158,6 @@ public:
 		int64 EditedOnTheWay = 0;
 		/** Of those, chunks whose mesh was on a worker: re-meshed once it landed (G57). */
 		int64 RemeshesAfterMeshing = 0;
-		/** Face neighbours of edited chunks queued for a render re-mesh (voxel.Edit.NeighbourRemesh 1, the rule before G56). */
-		int64 NeighbourRemeshes = 0;
 	};
 
 	/** @return The meshing work since Initialize (see FMeshWorkStats) */
@@ -1846,7 +1841,8 @@ protected:
 
 	/**
 	 * Queue the face neighbours across the faces in FaceMask to pull water again (world modes review G70): those that have
-	 * pulled once (their water settled) and reach below the sea. voxel.Water.PullAgain 0 queues nothing (the rule before).
+	 * pulled once (their water settled) and reach below the sea, so the flood reaches the same voxels whatever order the
+	 * chunks finish meshing in (before G70 each chunk pulled once, when its mesh landed).
 	 *
 	 * @param ChunkCoord The chunk whose water rose
 	 * @param FaceMask The faces to queue across (bit = FaceOffsets index: +X, -X, +Y, -Y, +Z, -Z)

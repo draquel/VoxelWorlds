@@ -63,7 +63,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: no water propagation (bEnableWaterLevel off)"), *TargetWorld->GetName());
 			}
 			const UVoxelChunkManager::FWaterRepullStats R = CM->GetWaterRepullStats();
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: the pull's second passes (G70, voxel.Water.PullAgain): %lld queued, %lld run, %lld flooded (%lld voxels), %lld skipped, %d pending"),
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: the pull's second passes (G70): %lld queued, %lld run, %lld flooded (%lld voxels), %lld skipped, %d pending"),
 				*TargetWorld->GetName(), R.Queued, R.Run, R.Flooded, R.FloodedVoxels, R.Skipped, R.Pending);
 			if (bColumn)
 			{

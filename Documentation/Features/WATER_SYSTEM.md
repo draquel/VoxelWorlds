@@ -143,9 +143,8 @@ every face when its water first settles (its generated water arrived with it), e
 `ProcessWaterRepulls` runs the queue each tick within about a millisecond, first in first out, on Loaded chunks only (a
 chunk queued for a mesh or meshing pulls when that mesh lands, and its voxels are not written while a job may read them);
 a pull that floods refreshes its water tile and queues on. The flood so reaches every dry air voxel below the sea connected
-to the sea through loaded chunks, whatever the order. `voxel.Water.PullAgain` (1; 0 = one pull each, the rule before);
-`voxel.Water.Stats` reports the second pulls (`GetWaterRepullStats`). Tests: `Streaming.Water.PullOrder.Plane`, `.Planet`;
-`Streaming.{Planet,Plane}.FarReadsOffGameThread` compare every chunk's water between their two runs.
+to the sea through loaded chunks, whatever the order (before G70 each chunk pulled once). `voxel.Water.Stats` reports the
+second pulls (`GetWaterRepullStats`). Tests: `Streaming.Water.PullOrder.Plane`, `.Planet`.
 
 ### Edit-Triggered Propagation
 

@@ -35,8 +35,6 @@
 //   the trees' distance) the distance pass hands it off again and it holds the trees and no grass; with the viewer near
 //   it holds the same spawn points as a chunk submitted with the viewer near from the start; with the viewer far again
 //   every type is released (the radius types too), and an unloaded chunk is never asked for.
-// - RuleBefore (voxel.Scatter.FirstExtractionAtHorizon 0): the same chunk still has nothing with the viewer at 15,000 and
-//   with the viewer near, and the radius types stay once spawned: the behaviour before, kept for A/B.
 // ---------------------------------------------------------------------------
 
 namespace VoxelScatterHorizonTestUtils
@@ -50,8 +48,6 @@ namespace VoxelScatterHorizonTestUtils
 	constexpr int32 GrassID = 0;
 	constexpr int32 RockID = 1;
 	constexpr int32 TreeID = 2; // VoxelScatterTesting::SmoothDefinitions' trees (SpawnDistance 20,000)
-
-	using FScopedCVar = VoxelTesting::FScopedCVar; // the one scoped cvar (code review CR2 row 17)
 
 	FVector ChunkCenter(const FIntVector& Coord) { return (FVector(Coord) + FVector(0.5)) * ChunkWorldSize; }
 
@@ -198,7 +194,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterFirstExtractionHorizonTest,
 bool FVoxelScatterFirstExtractionHorizonTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelScatterHorizonTestUtils;
-	const FScopedCVar Rule(TEXT("voxel.Scatter.FirstExtractionAtHorizon"), TEXT("1"));
 
 	const FIntVector Target(0, 0, 0);
 	const FVector Near = ChunkCenter(Target);
@@ -282,49 +277,6 @@ bool FVoxelScatterFirstExtractionHorizonTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Unloaded, nothing of it is cached"), H.Manager->GetChunkSurfaceData(Other) != nullptr, false);
 	AddInfo(FString::Printf(TEXT("end: requests %d (%d for unloaded chunks), deferred first extractions %lld"), H.Requests, H.RequestsForUnloaded,
 		H.Manager->GetTotalDeferredFirstExtractions()));
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterFirstExtractionRuleBeforeTest,
-	"VoxelWorlds.Scatter.FirstExtraction.RuleBefore",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FVoxelScatterFirstExtractionRuleBeforeTest::RunTest(const FString& Parameters)
-{
-	using namespace VoxelScatterHorizonTestUtils;
-	const FScopedCVar Rule(TEXT("voxel.Scatter.FirstExtractionAtHorizon"), TEXT("0"));
-
-	const FIntVector Target(0, 0, 0);
-	const FVector Near = ChunkCenter(Target);
-	const FVector Far = Near + FVector(40000.0, 0.0, 0.0);
-	const FVector TreeRange = Near + FVector(15000.0, 0.0, 0.0);
-
-	FHarness H(TEXT("VoxelScatterHorizonRuleBeforeWorld"));
-	H.Viewer = Far;
-	H.Update();
-	H.Load(Target);
-	H.Settle(Far);
-	H.Settle(TreeRange);
-	const FChunkState InTreeRange = H.State(Target);
-	AddInfo(H.Describe(TEXT("rule before, viewer within the trees' distance"), InTreeRange));
-	TestFalse(TEXT("Rule before: within the trees' distance nothing is cached"), InTreeRange.bSurface);
-	TestEqual(TEXT("Rule before: no hand-off asked for"), H.Requests, 0);
-	H.Settle(Near);
-	const FChunkState NearState = H.State(Target);
-	AddInfo(H.Describe(TEXT("rule before, viewer near"), NearState));
-	TestFalse(TEXT("Rule before: near, still nothing cached (the chunk waits for its next mesh)"), NearState.bSurface);
-	TestEqual(TEXT("Rule before: near, no spawn point"), NearState.Spawns.Num(), 0);
-
-	// Its next mesh: the chunk hands off near and the radius types stay once the viewer leaves (never released, before)
-	H.Load(Target);
-	H.Settle(Near);
-	const FChunkState Meshed = H.State(Target);
-	TestTrue(TEXT("Rule before: the next mesh near brings every type"), Meshed.Grass > 0 && Meshed.Rocks > 0 && Meshed.Trees > 0);
-	H.Settle(Far);
-	const FChunkState FarAgain = H.State(Target);
-	AddInfo(H.Describe(TEXT("rule before, viewer far again"), FarAgain));
-	TestEqual(TEXT("Rule before: far again, the trees are released"), FarAgain.Trees, 0);
-	TestTrue(TEXT("Rule before: far again, the radius types stay"), FarAgain.Grass == Meshed.Grass && FarAgain.Rocks == Meshed.Rocks);
 	return true;
 }
 

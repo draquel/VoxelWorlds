@@ -2,7 +2,6 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
-#include "HAL/IConsoleManager.h"
 #include "Hash/CityHash.h"
 #include "Testing/VoxelTestChunkWorld.h"
 #include "VoxelChunkManager.h"
@@ -32,11 +31,10 @@
 //   chunk's voxels by its min edge (the seams there are owned by its unedited neighbours) and one by another chunk's max
 //   edge, a player brush across the four chunks, and two edits that land while the chunk waits for its mesh (dispatch held)
 //   and while its mesh is on a worker. Once each edit has settled, every chunk mesh and seam bucket must equal what a full
-//   rebuild gives then (every chunk re-meshed, every seam rebuilt; it also gives the next edit a clean start); and with
-//   voxel.Edit.NeighbourRemesh 0 they must equal the rule before's (1), as must the edit-merged voxels' shape. Water flags
-//   are reported, not compared: a chunk's mesh completion pulls them across its faces from its neighbours' generated voxels
-//   (PropagateWaterFromNeighbors), which the face neighbours' re-mesh also ran. The meshing work per edit (chunk meshes, seam
-//   jobs) is logged for both rules.
+//   rebuild gives then (every chunk re-meshed, every seam rebuilt; it also gives the next edit a clean start), with no
+//   face neighbour re-meshed (G56; the rule before re-meshed the six and gave the same geometry). Water flags are reported,
+//   not compared: a chunk's mesh completion pulls them across its faces from its neighbours' generated voxels
+//   (PropagateWaterFromNeighbors). The meshing work per edit (chunk meshes, seam jobs) is logged.
 //
 // G60 (section 19.17): undo and redo restore each voxel in its own chunk and broadcast every chunk they changed (redo wrote
 // every edit into an operation's first chunk and broadcast only it). Edits 6 and 7: a second player brush across the four
@@ -279,22 +277,6 @@ namespace VoxelEditRemeshTest
 		W.Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
 	}
 
-	/** Set voxel.Edit.NeighbourRemesh at console priority (a value typed in the editor's console outranks a code set). */
-	int32 SetRule(FAutomationTestBase& Test, int32 Value)
-	{
-		IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Edit.NeighbourRemesh"));
-		const int32 Previous = CVar ? CVar->GetInt() : 0;
-		if (CVar)
-		{
-			CVar->Set(Value, ECVF_SetByConsole);
-		}
-		if (!CVar || CVar->GetInt() != Value)
-		{
-			Test.AddError(FString::Printf(TEXT("voxel.Edit.NeighbourRemesh could not be set to %d"), Value));
-		}
-		return Previous;
-	}
-
 	/** One world to stream: the meshing mode, LOD, water and planet or plane. */
 	struct FCase
 	{
@@ -314,7 +296,6 @@ namespace VoxelEditRemeshTest
 		int64 EditedRemeshes = 0;
 		int64 OnTheWay = 0;
 		int64 AfterMeshing = 0;
-		int64 NeighbourRemeshes = 0;
 
 		static FWork Between(const UVoxelChunkManager::FMeshWorkStats& A, const UVoxelChunkManager::FMeshWorkStats& B)
 		{
@@ -325,14 +306,13 @@ namespace VoxelEditRemeshTest
 			W.EditedRemeshes = B.EditedRemeshes - A.EditedRemeshes;
 			W.OnTheWay = B.EditedOnTheWay - A.EditedOnTheWay;
 			W.AfterMeshing = B.RemeshesAfterMeshing - A.RemeshesAfterMeshing;
-			W.NeighbourRemeshes = B.NeighbourRemeshes - A.NeighbourRemeshes;
 			return W;
 		}
 
 		FString Describe() const
 		{
-			return FString::Printf(TEXT("%lld chunk meshes, %lld seam jobs (%lld broadcasts: %lld loaded re-meshed, %lld on their way, %lld re-meshed after their mesh landed; %lld face-neighbour re-meshes)"),
-				ChunkMeshes, SeamJobs, Broadcasts, EditedRemeshes, OnTheWay, AfterMeshing, NeighbourRemeshes);
+			return FString::Printf(TEXT("%lld chunk meshes, %lld seam jobs (%lld broadcasts: %lld loaded re-meshed, %lld on their way, %lld re-meshed after their mesh landed)"),
+				ChunkMeshes, SeamJobs, Broadcasts, EditedRemeshes, OnTheWay, AfterMeshing);
 		}
 	};
 
@@ -521,17 +501,15 @@ namespace VoxelEditRemeshTest
 		return true;
 	}
 
-	FRunResult RunCase(FAutomationTestBase& Test, const FCase& Case, int32 Rule)
+	FRunResult RunCase(FAutomationTestBase& Test, const FCase& Case)
 	{
 		FRunResult R;
-		const int32 PreviousRule = SetRule(Test, Rule);
 		VoxelTesting::FTestChunkWorld W;
 		FVector Site;
 		R.bFound = StartWorld(W, Case, Site);
 		if (!R.bFound)
 		{
 			W.Stop();
-			SetRule(Test, PreviousRule);
 			return R;
 		}
 		R.bSettled = Settle(W);
@@ -656,7 +634,6 @@ namespace VoxelEditRemeshTest
 		Edits->OnChunkEdited.Remove(Handle);
 
 		W.Stop();
-		SetRule(Test, PreviousRule);
 		return R;
 	}
 
@@ -678,12 +655,9 @@ namespace VoxelEditRemeshTest
 	{
 		for (const FCase& Case : Cases)
 		{
-			FRunResult Runs[2];
-			for (const int32 Rule : { 0, 1 })
 			{
-				FRunResult& R = Runs[Rule];
-				R = RunCase(Test, Case, Rule);
-				const FString Name = FString::Printf(TEXT("%s, voxel.Edit.NeighbourRemesh %d"), Case.Name, Rule);
+				const FRunResult R = RunCase(Test, Case);
+				const FString Name = Case.Name;
 				if (!Test.TestTrue(FString::Printf(TEXT("%s: a site (non-vacuous)"), *Name), R.bFound))
 				{
 					continue;
@@ -691,14 +665,12 @@ namespace VoxelEditRemeshTest
 				Test.AddInfo(FString::Printf(TEXT("%s: %d chunks loaded; edge point (%.0f, %.0f, %.0f), E (%d,%d,%d) (%d face neighbours with water flags), E2 (%d,%d,%d), edit 4 in (%d,%d,%d), edit 5 in (%d,%d,%d); the first edit changed %d chunks' voxels and %s, %d seam buckets of owners it did not edit; its chunk was %s at the second of edit 4's edits (dispatch held), %s at the second of edit 5's (%d attempts)"),
 					*Name, R.LoadedChunks, R.Q.X, R.Q.Y, R.Q.Z, R.E.X, R.E.Y, R.E.Z, R.FaceNeighboursWithWater, R.E2.X, R.E2.Y, R.E2.Z, R.E4.X, R.E4.Y, R.E4.Z, R.E5.X, R.E5.Y, R.E5.Z, R.FirstEdited.Num(), *R.FirstChanged.Describe(),
 					R.ChangedSeamsOfUneditedOwners, *StateName(R.StateAtQueuedEdit), *StateName(R.StateAtWorkerEdit), R.WorkerAttempts));
-				int64 NeighbourRemeshes = 0;
 				for (int32 i = 0; i < NumEdits; ++i)
 				{
 					Test.AddInfo(FString::Printf(TEXT("%s: edit %d (%s): %s; water flags changed in %d chunks; against a full rebuild: %s; the rebuild changed %d chunks' water flags"), *Name, i + 1,
 						EditNames[i], *R.Work[i].Describe(), R.EditWaterChanged[i], *R.Stale[i].Describe(), R.RebuildWaterChanged[i]));
 					Test.TestEqual(FString::Printf(TEXT("%s: edit %d (%s): no chunk mesh differs from a full rebuild"), *Name, i + 1, EditNames[i]), R.Stale[i].Chunks.Num(), 0);
 					Test.TestEqual(FString::Printf(TEXT("%s: edit %d (%s): no seam bucket differs from a full rebuild"), *Name, i + 1, EditNames[i]), R.Stale[i].Seams.Num(), 0);
-					NeighbourRemeshes += R.Work[i].NeighbourRemeshes;
 				}
 				Test.TestTrue(FString::Printf(TEXT("%s: streaming settles"), *Name), R.bSettled);
 				// The redo (edit 7) re-applies a brush at edit 3's place: it names the same chunks (G60: it named only the first).
@@ -717,62 +689,22 @@ namespace VoxelEditRemeshTest
 				Test.TestTrue(FString::Printf(TEXT("%s: edit 4's second edit is counted on its way to a mesh"), *Name), R.Work[3].OnTheWay >= 1);
 				if (R.StateAtWorkerEdit == EChunkState::Meshing)
 				{
-					// The rule before also re-meshes the face neighbours whose re-mesh for the first edit is on a worker.
-					if (Rule == 0)
-					{
-						Test.TestEqual(FString::Printf(TEXT("%s: edit 5: the chunk re-meshes once after the mesh on the worker lands (G57)"), *Name), R.Work[4].AfterMeshing, int64(1));
-					}
-					else
-					{
-						Test.TestTrue(FString::Printf(TEXT("%s: edit 5: the chunk re-meshes after the mesh on the worker lands (G57)"), *Name), R.Work[4].AfterMeshing >= 1);
-					}
+					Test.TestEqual(FString::Printf(TEXT("%s: edit 5: the chunk re-meshes once after the mesh on the worker lands (G57)"), *Name), R.Work[4].AfterMeshing, int64(1));
 				}
 				else
 				{
 					Test.AddWarning(FString::Printf(TEXT("%s: edit 5 never found its chunk's mesh on a worker (%d attempts): the case went untested"), *Name, R.WorkerAttempts));
 				}
-				if (Rule == 0)
+				if (Case.bWater)
 				{
-					Test.TestEqual(FString::Printf(TEXT("%s: no face-neighbour re-meshes"), *Name), NeighbourRemeshes, int64(0));
+					int32 WaterChunks = 0;
+					for (const TPair<FIntVector, FVoxelDigest>& Pair : R.PreVoxels)
+					{
+						WaterChunks += Pair.Value.WaterVoxels > 0 ? 1 : 0;
+					}
+					Test.TestTrue(FString::Printf(TEXT("%s: chunks with water flags (non-vacuous: %d)"), *Name, WaterChunks), WaterChunks > 0);
 				}
-				else
-				{
-					Test.TestTrue(FString::Printf(TEXT("%s: face neighbours re-mesh (the rule before)"), *Name), NeighbourRemeshes > 0);
-				}
 			}
-			if (!Runs[0].bFound || !Runs[1].bFound)
-			{
-				continue;
-			}
-
-			// The two rules: the same world before the edits, then after each edit the same geometry and voxel shape. Water flags
-			// are reported: the face neighbours' re-mesh pulled flags across their faces (PropagateWaterFromNeighbors).
-			const FGeometryDiff BetweenPre = Compare(Runs[0].Pre, Runs[1].Pre);
-			int32 WaterChunks = 0;
-			for (const TPair<FIntVector, FVoxelDigest>& Pair : Runs[0].PreVoxels)
-			{
-				WaterChunks += Pair.Value.WaterVoxels > 0 ? 1 : 0;
-			}
-			Test.AddInfo(FString::Printf(TEXT("%s: rule 0 against rule 1 before the edits: %s; %d chunks' voxel shape and %d chunks' water flags differ (%d chunks with water flags)"),
-				Case.Name, *BetweenPre.Describe(), DiffVoxels(Runs[0].PreVoxels, Runs[1].PreVoxels, false), DiffVoxels(Runs[0].PreVoxels, Runs[1].PreVoxels, true), WaterChunks));
-			Test.TestEqual(FString::Printf(TEXT("%s: both rules stream the same geometry before the edits"), Case.Name), BetweenPre.Chunks.Num() + BetweenPre.Seams.Num(), 0);
-			for (int32 i = 0; i < NumEdits; ++i)
-			{
-				const FGeometryDiff Between = Compare(Runs[0].Post[i], Runs[1].Post[i]);
-				const int32 Shape = DiffVoxels(Runs[0].PostVoxels[i], Runs[1].PostVoxels[i], false);
-				const int32 Water = DiffVoxels(Runs[0].PostVoxels[i], Runs[1].PostVoxels[i], true);
-				Test.AddInfo(FString::Printf(TEXT("%s: rule 0 against rule 1 after edit %d: %s; %d chunks' voxel shape and %d chunks' water flags differ"), Case.Name, i + 1,
-					*Between.Describe(), Shape, Water));
-				Test.TestEqual(FString::Printf(TEXT("%s: edit %d: no chunk mesh or seam bucket differs between the rules"), Case.Name, i + 1), Between.Chunks.Num() + Between.Seams.Num(), 0);
-				Test.TestEqual(FString::Printf(TEXT("%s: edit %d: no chunk's voxel shape differs between the rules"), Case.Name, i + 1), Shape, 0);
-			}
-			if (Case.bWater)
-			{
-				Test.TestTrue(FString::Printf(TEXT("%s: chunks with water flags (non-vacuous: %d)"), Case.Name, WaterChunks), WaterChunks > 0);
-			}
-			const int64 Meshes0 = Runs[0].Work[0].ChunkMeshes, Meshes1 = Runs[1].Work[0].ChunkMeshes;
-			Test.TestTrue(FString::Printf(TEXT("%s: the first edit meshes fewer chunks without the face neighbours' re-mesh (%lld against %lld)"), Case.Name, Meshes0, Meshes1),
-				Meshes0 < Meshes1);
 		}
 	}
 }
