@@ -77,8 +77,8 @@ Fields that callers build themselves (climate, continentalness, caves, ores) set
   same spread: no step, a continuous slope, within 1.2% rms of the classic noise (correlation 0.9996)
   (`VoxelWorlds.Noise.SimplexContinuous`, `VoxelWorlds.WorldModes.Planet.FaceEdgeContinuity`,
   `VoxelWorlds.WorldModes.Plane.NoiseCreases`). The classic kernel is the tests' control
-  (`VoxelClassicNoiseControl::HashedSimplexClassicKernel`); the GPU shader keeps it behind its `SimplexContinuous`
-  parameter, always 1, because removing the branch changes the codegen (G97).
+  (`VoxelClassicNoiseControl::HashedSimplexClassicKernel`); the GPU shader has the continuous kernel alone since G97
+  removed its classic leg.
 
 ### Where each field samples
 

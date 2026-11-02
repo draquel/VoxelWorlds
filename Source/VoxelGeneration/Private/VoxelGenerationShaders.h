@@ -92,9 +92,8 @@ public:
 		SHADER_PARAMETER(int32, EnableUnderwaterMaterials)
 		SHADER_PARAMETER(uint32, DefaultUnderwaterMaterial)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, BiomeData)
-		// The blend zones' dither (G39): the chunk's first voxel on the world's grid, and voxel.Biome.BlendDither.
+		// The blend zones' dither (G39): the chunk's first voxel on the world's grid.
 		SHADER_PARAMETER(FIntVector, BlendDitherBase)
-		SHADER_PARAMETER(int32, BlendDitherMode)
 		// Height material rules (Phase B) — GPU_HEIGHTRULE_FLOAT4_STRIDE(2) float4s each, priority-sorted;
 		// HeightRuleCount 0 = disabled.
 		SHADER_PARAMETER(int32, HeightRuleCount)
@@ -147,8 +146,6 @@ public:
 		SHADER_PARAMETER(FVector3f, PlanetAnchorDir)
 		SHADER_PARAMETER(float, PlanetAnchorDist)
 		SHADER_PARAMETER(float, PlanetAnchorAltitude)
-		// The Simplex noise's corner kernel: always 1, the continuous one (G43; the shader's classic leg kept for its codegen, G97).
-		SHADER_PARAMETER(int32, SimplexContinuous)
 		// The cave configuration's underwater minimum depth and biome overrides (GpuCaveCarve), 1 float4 each:
 		// [BiomeID, CaveScale, MinDepthOverride, 0].
 		SHADER_PARAMETER(float, CaveUnderwaterMinDepth)

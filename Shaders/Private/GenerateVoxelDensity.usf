@@ -86,10 +86,8 @@ float MoistureFrequency;
 int EnableUnderwaterMaterials;
 uint DefaultUnderwaterMaterial;
 StructuredBuffer<float4> BiomeData;
-// The blend zones' dither (G39): the chunk's first voxel on the world's grid (FVoxelBiomeBlendDither::GridBase), and the
-// mode, always 1 (the old pick kept for the codegen, G97).
+// The blend zones' dither (G39): the chunk's first voxel on the world's grid (FVoxelBiomeBlendDither::GridBase).
 int3 BlendDitherBase;
-int BlendDitherMode;
 
 // Height rules / ore veins / cave-wall / conditioning (Phase B) — layouts in BiomeMaterial.ush.
 int HeightRuleCount;
@@ -145,7 +143,6 @@ float3 PlanetAnchorLocal;     // the anchor in the chunk: (ChunkSize / 2) x Voxe
 float3 PlanetAnchorDir;       // the anchor's direction from the centre
 float PlanetAnchorDist;       // the anchor's distance from the centre
 float PlanetAnchorAltitude;   // that distance minus PlanetRadius, formed in double
-int SimplexContinuous;  // G43: always 1, the continuous Simplex kernel (the classic leg kept for the codegen, G97)
 
 // The cave configuration's underwater minimum depth and biome overrides, which GpuCaveCarve applies in every world mode
 // as FVoxelCPUNoiseGenerator::CalculateCaveDensity does. CaveBiomeOverrideData: 1 float4 per override,

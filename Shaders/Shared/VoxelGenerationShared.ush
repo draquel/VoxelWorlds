@@ -112,12 +112,11 @@
 
 // A corner's contribution. The classic kernel (0.6 - d^2)^4 reaches past the simplex and steps where the next one begins;
 // the continuous kernel (G43) is that less its value and slope at d^2 = 0.5: v^2 (v^2 + 0.4 v + 0.06) with v = 0.5 - d^2.
+// Only the continuous kernel is generated (the tests' control keeps the classic one, VoxelClassicNoiseControl).
 // Unsuffixed: the C++ kernel casts them to its float or double T; HLSL reads them as float.
-#define VOXELGEN_SIMPLEX_CLASSIC_RADIUS2 0.6
 #define VOXELGEN_SIMPLEX_CONTINUOUS_RADIUS2 0.5
 #define VOXELGEN_SIMPLEX_CONTINUOUS_B 0.4
 #define VOXELGEN_SIMPLEX_CONTINUOUS_C 0.06
 
-// The corner sum's scale: 32 for the classic kernel; 33.25 gives the continuous one the same spread.
-#define VOXELGEN_SIMPLEX_SCALE_CLASSIC 32.0f
+// The corner sum's scale: 33.25 gives the continuous kernel the classic one's spread (32).
 #define VOXELGEN_SIMPLEX_SCALE_CONTINUOUS 33.25f

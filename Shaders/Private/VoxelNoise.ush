@@ -9,7 +9,7 @@
 // sample through NoiseFBM3D (the classic table noise shaders were deleted in CR1, CORE-03; the file and its functions
 // carried planet names until CR3, CORE-28).
 //
-// Include AFTER the generation globals (GenerateVoxelDensity.usf): reads NoiseOrigins and SimplexContinuous.
+// Include AFTER the generation globals (GenerateVoxelDensity.usf): reads NoiseOrigins.
 
 #pragma once
 
@@ -21,29 +21,18 @@
 static const int3 NoiseGrad3[12] = VOXELGEN_SIMPLEX_GRAD3(int3);
 
 // A simplex corner's contribution (FVoxelNoise's SimplexCorner). G43: the continuous kernel, (0.6 - d^2)^4 less its
-// value and slope at d^2 = 0.5, v^2 (v^2 + 0.4 v + 0.06) with v = 0.5 - d^2, reaches zero where the next simplex begins;
-// SimplexContinuous is always 1 (the generator sets it); the classic leg stays only because removing the branch changes
-// the codegen (VoxelWorlds 8, G97).
+// value and slope at d^2 = 0.5, v^2 (v^2 + 0.4 v + 0.06) with v = 0.5 - d^2, reaches zero where the next simplex begins
+// (the only kernel since G97 removed the classic leg).
 float NoiseSimplexCorner(uint Hash, float3 X)
 {
     const int3 G = NoiseGrad3[Hash % 12u];
-    if (SimplexContinuous != 0)
-    {
-        const float V = VOXELGEN_SIMPLEX_CONTINUOUS_RADIUS2 - X.x * X.x - X.y * X.y - X.z * X.z;
-        if (V <= 0.0f)
-        {
-            return 0.0f;
-        }
-        const float W = V * V * ((V + VOXELGEN_SIMPLEX_CONTINUOUS_B) * V + VOXELGEN_SIMPLEX_CONTINUOUS_C);
-        return W * ((float)G.x * X.x + (float)G.y * X.y + (float)G.z * X.z);
-    }
-    float R = VOXELGEN_SIMPLEX_CLASSIC_RADIUS2 - X.x * X.x - X.y * X.y - X.z * X.z;
-    if (R < 0.0f)
+    const float V = VOXELGEN_SIMPLEX_CONTINUOUS_RADIUS2 - X.x * X.x - X.y * X.y - X.z * X.z;
+    if (V <= 0.0f)
     {
         return 0.0f;
     }
-    R *= R;
-    return R * R * ((float)G.x * X.x + (float)G.y * X.y + (float)G.z * X.z);
+    const float W = V * V * ((V + VOXELGEN_SIMPLEX_CONTINUOUS_B) * V + VOXELGEN_SIMPLEX_CONTINUOUS_C);
+    return W * ((float)G.x * X.x + (float)G.y * X.y + (float)G.z * X.z);
 }
 
 // FVoxelNoise::Simplex: Simplex noise at the split origin (Cell, Frac in the skewed lattice) + Offset (noise units).
@@ -84,7 +73,7 @@ float NoiseSimplex(uint3 Cell, float3 Frac, float3 Offset, int Seed)
     const float N2 = NoiseSimplexCorner(VoxelLatticeHash(B + asuint(I2), Seed), X2);
     const float N3 = NoiseSimplexCorner(VoxelLatticeHash(B + uint3(1u, 1u, 1u), Seed), X3);
     // The sum's scale: 33.25 gives the continuous kernel the classic one's spread (32).
-    return (SimplexContinuous != 0 ? VOXELGEN_SIMPLEX_SCALE_CONTINUOUS : VOXELGEN_SIMPLEX_SCALE_CLASSIC) * (N0 + N1 + N2 + N3);
+    return VOXELGEN_SIMPLEX_SCALE_CONTINUOUS * (N0 + N1 + N2 + N3);
 }
 
 float NoiseGrad(uint Hash, float X, float Y, float Z)
