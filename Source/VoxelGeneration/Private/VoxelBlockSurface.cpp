@@ -4,21 +4,12 @@
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelCoreTypes.h"
 #include "VoxelWorldConfiguration.h"
-#include "HAL/IConsoleManager.h"
-
-static TAutoConsoleVariable<int32> CVarCubicBlockSurface(
-	TEXT("voxel.Cubic.BlockSurface"),
-	1,
-	TEXT("Cubic heightmap worlds: surface queries, POI pads and campsites use the block tops the world draws (1), or the density ")
-	TEXT("isosurface up to a block below them (0, as before world modes review WM-C5)."),
-	ECVF_Default);
 
 bool FVoxelBlockSurface::UsesBlockSurface(const UVoxelWorldConfiguration& Config)
 {
 	return Config.MeshingMode == EMeshingMode::Cubic
 		&& Config.WorldMode != EWorldMode::SphericalPlanet
-		&& Config.VoxelSize > 0.0f
-		&& CVarCubicBlockSurface.GetValueOnAnyThread() != 0;
+		&& Config.VoxelSize > 0.0f;
 }
 
 double FVoxelBlockSurface::ColumnCorner(double Coord, double Origin, float VoxelSize)

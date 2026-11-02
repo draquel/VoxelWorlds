@@ -644,7 +644,7 @@ bool FFarFieldPlaneMatchesSurfaceTest::RunTest(const FString& Parameters)
  * WM-MP1 on a cubic world (WM-C5's block surface): with cubic meshing the far field's surface is the block tops. For
  * patches at the band and two levels up: every surface vertex's height plus the sink lies a whole number of voxels over
  * the origin and within a block over the generated height of its column's corner; the sea and the skirts as on a smooth
- * world. With voxel.Cubic.BlockSurface 0 the vertices follow the isosurface again.
+ * world.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldCubicBlockTopTest,
 	"VoxelWorlds.FarField.Cubic.BlockTop",
@@ -654,12 +654,10 @@ bool FFarFieldCubicBlockTopTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelHeightmapFarFieldTestUtils;
 
-	for (const bool bBlockSurface : { true, false })
 	{
-		const FScopedCVar BlockVar(TEXT("voxel.Cubic.BlockSurface"), bBlockSurface ? TEXT("1") : TEXT("0"));
 		FRig Rig(MakePlaneConfig(EMeshingMode::Cubic), 64, 150000.0, /*bSea=*/true);
-		const TCHAR* Rule = bBlockSurface ? TEXT("block tops") : TEXT("voxel.Cubic.BlockSurface 0");
-		TestEqual(*FString::Printf(TEXT("%s: the surface knows whether it is block tops"), Rule), Rig.Surface->bBlockSurface, bBlockSurface);
+		const TCHAR* Rule = TEXT("block tops");
+		TestTrue(*FString::Printf(TEXT("%s: the surface knows it is block tops"), Rule), Rig.Surface->bBlockSurface);
 		const FVoxelFarFieldSettings& Settings = Rig.Settings;
 		const int32 Band = Settings.EdgeLevel;
 		int32 Vertices = 0, NonBlock = 0, OffBlock = 0;
@@ -682,32 +680,14 @@ bool FFarFieldCubicBlockTopTest::RunTest(const FString& Parameters)
 				WorstSea = FMath::Max(WorstSea, C.WorstSea);
 			}
 		}
-		// Without the block surface: the isosurface's heights are not on the voxel layers (a smooth terrain).
-		int32 OnLayers = 0;
-		if (!bBlockSurface)
-		{
-			for (int32 I = 0; I < 64; ++I)
-			{
-				const double H = Rig.Height(4000.0 + I * 37.0, -2500.0 + I * 53.0);
-				const double Layers = (H - Settings.GridOrigin.Z) / Settings.VoxelSize;
-				OnLayers += FMath::Abs(Layers - FMath::RoundToDouble(Layers)) * Settings.VoxelSize < 0.05 ? 1 : 0;
-			}
-		}
-		AddInfo(FString::Printf(TEXT("%s: %d surface vertices, %d off a block layer (worst %.3f uu), %d outside the block over the height (highest %.2f over it); surface within %.4f, skirts past their depth %.3f, sea off its plane %.4f; %d of 64 heights on a layer"),
-			Rule, Vertices, NonBlock, WorstBlock, OffBlock, WorstOver, WorstSurface, WorstSkirt, WorstSea, OnLayers));
+		AddInfo(FString::Printf(TEXT("%s: %d surface vertices, %d off a block layer (worst %.3f uu), %d outside the block over the height (highest %.2f over it); surface within %.4f, skirts past their depth %.3f, sea off its plane %.4f"),
+			Rule, Vertices, NonBlock, WorstBlock, OffBlock, WorstOver, WorstSurface, WorstSkirt, WorstSea));
 		TestTrue(*FString::Printf(TEXT("%s: vertices"), Rule), Vertices > 0);
 		TestTrue(*FString::Printf(TEXT("%s: surface vertices on the surface less the sink"), Rule), WorstSurface <= 0.1);
 		TestTrue(*FString::Printf(TEXT("%s: skirts within their depth"), Rule), WorstSkirt <= 0.1);
 		TestTrue(*FString::Printf(TEXT("%s: the sea on its plane"), Rule), WorstSea <= 0.1);
-		if (bBlockSurface)
-		{
-			TestEqual(*FString::Printf(TEXT("%s: every vertex on a block layer"), Rule), NonBlock, 0);
-			TestEqual(*FString::Printf(TEXT("%s: every vertex within a block over the generated height"), Rule), OffBlock, 0);
-		}
-		else
-		{
-			TestTrue(*FString::Printf(TEXT("%s: the isosurface is not on the layers"), Rule), OnLayers < 8);
-		}
+		TestEqual(*FString::Printf(TEXT("%s: every vertex on a block layer"), Rule), NonBlock, 0);
+		TestEqual(*FString::Printf(TEXT("%s: every vertex within a block over the generated height"), Rule), OffBlock, 0);
 	}
 	return true;
 }

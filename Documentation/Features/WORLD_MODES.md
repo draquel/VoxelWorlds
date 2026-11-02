@@ -376,15 +376,14 @@ A cubic world draws and collides with whole blocks: the block at voxel (i, j, k)
 `WorldOrigin`, solid when the generator gives it a density of at least 127 from the column height H sampled at the
 cell's lower corner. The top face of a column's topmost solid block therefore lies between H and H + V, up to a block
 above the density isosurface that smooth meshing draws. The game systems use the block tops in a cubic heightmap world
-(`FVoxelBlockSurface::UsesBlockSurface`, `UVoxelChunkManager::IsBlockSurface`; `voxel.Cubic.BlockSurface 0` = the
-isosurface; D29, D30):
+(`FVoxelBlockSurface::UsesBlockSurface`, `UVoxelChunkManager::IsBlockSurface`; D29, D30):
 
 | System | In a block world | Where |
 |--------|------------------|-------|
 | Surface queries | The generated surface samples the column at its corner and returns the top of the topmost block the generator makes (`FVoxelBlockSurface::BlockTopForHeight`, exact by the generator's own density rule); the edit-merged surface is the top face of the topmost ground voxel with no ground above it (`QueryEditMergedBlockSurface`; the configured voxel trees' leaves are not ground: a canopy is walked under); normal and slope stay the density gradient's. Spawn, surface NPC spawns, navigation, the dungeon entrance stitcher, PCG near points, `vox.TPPOI` and the bench's follow take block tops with no change of their own | `VoxelChunkManager`, `VoxelBlockSurface` |
 | Pads | Generation unchanged (a pad zone's target is still the pad height); the pad's walking surface is `SnapToBlockTop(PadAltitude)` (`FPOIPlacement::GetPadSurfaceAltitude`): the claim, the structures and a dungeon's mouth stand there | `VoxelWorldPOI` |
 | Steps | Players and NPCs step one block (`UVCMovementComponent::MaxStepHeight` = V + 5, `vc.Move.StepUpBlocks`); two blocks are a wall; the camera eases a block step | `VoxelCharacterPlugin` |
-| Navigation | One cell per block column on the voxel grid, a step of at most one block (no √2 on diagonals, no corner cut past a pillar), the node budget scaled by the cell area (`voxel.Nav.BlockSteps`) | `SURFACE_NAVIGATION.md` |
+| Navigation | One cell per block column on the voxel grid, a step of at most one block (no √2 on diagonals, no corner cut past a pillar), the node budget scaled by the cell area (`FVoxelSurfaceNavParams::bBlockSteps`) | `SURFACE_NAVIGATION.md` |
 | Voxel trees | Recomputed from the injector's seeded positions (`FVoxelTreeInjector::FindTreesWithTrunkAt`, `CollectTreeVoxels`; `UVoxelChunkManager::FindVoxelTreeAt`, `GetVoxelTreeBlocks`, `FellVoxelTree`); chopped like a scatter tree, felled to a stump at the third hit | VoxelWorlds, `VoxelCharacterPlugin` |
 | Breaking blocks | Timed by the material's `Hardness` and the tool's mining speed, with an outline, a placement ghost and cracks (`UVCBlockInteractionComponent`) | `VoxelCharacterPlugin` |
 | The far field | Its patches sample the block tops (`FVoxelFarFieldSurface::SampleAltitude` at a heightmap sample: the column's corner height through `BlockTopForHeight`), so past the window the terrain continues at the blocks' level, a voxel under them, with no step at the window's edge | `VoxelFarField` |
@@ -406,7 +405,7 @@ smooth or cubic.
 | Streaming ahead of a fall | The descent prefetch leads the streaming viewer under a descending camera (`voxel.Stream.DescentLead`) | The same | MP1 (WM-MP3) |
 | The frame of a teleport | A second streaming pass for the frame's camera after a cut of more than a chunk (`UpdateStreamingForCamera`) | The same, and the far field's second update (F4.3) | MP1 (WM-MP4) |
 | Precision far from the origin | Render regions and scatter regions (`voxel.Render.RegionChunks` 16, `voxel.Scatter.RegionChunks`): no float of the world's size | The same | MP2 (WM-MP5, D40) |
-| Noise | `FVoxelNoise` / `VoxelNoise.ush` for every field: a hashed split-origin lattice (no period) and the continuous Simplex kernel (`voxel.Noise.ContinuousSimplex`); `GenerationVersion` 3 | The same (`PlanetGenerationVersion` 6) | MP4 (WM-MP6, WM-MP7, D39) |
+| Noise | `FVoxelNoise` / `VoxelNoise.ush` for every field: a hashed split-origin lattice (no period) and the continuous Simplex kernel (G43); `GenerationVersion` 3 | The same (`PlanetGenerationVersion` 6) | MP4 (WM-MP6, WM-MP7, D39) |
 | The near layers | Clipped to the terrain's height bounds (D8): a climbing viewer loads no air above them | Capped at the surface slab's top (G52) | MP1 (WM-MP8, no change needed) |
 | The world map at scale | The marker cap, the tile-redraw throttle and `voxel.Map.ExploreAllMaxTiles` | The same | MP1 (WM-MP9) |
 | The first spawn over the sea | The ring search, then a coarse spiral over the generated surface (`FindPlaneSpawnPointAtScale`) | `FindPlanetSpawnPointAtScale` | MP1 (WM-MP10) |

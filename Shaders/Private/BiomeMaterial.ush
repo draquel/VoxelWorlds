@@ -194,8 +194,8 @@ float GpuBiomeBlendDither(int3 Key, int WorldSeed)
 }
 
 // UVoxelBiomeConfiguration::GetBlendedMaterial[WithWater] (FVoxelBiomeSnapshot::PickBlendIndex): the dominant biome, or a
-// weighted pick by the dither at DitherKey walking the biomes in BiomeID order (BlendDitherMode 0: the old frac value of the
-// weights and depth, in weight order).
+// weighted pick by the dither at DitherKey walking the biomes in BiomeID order (BlendDitherMode is always 1; its 0 leg, the
+// old frac value of the weights and depth in weight order, stays for the codegen, G97).
 uint GpuBlendedMaterial(BiomeBlendResult blend, float DepthBelowSurface, bool bUnderwater, int3 DitherKey)
 {
     if (blend.Count == 1 || blend.Weights[0] > 0.9)

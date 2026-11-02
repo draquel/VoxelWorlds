@@ -11,8 +11,6 @@
 #include "VoxelData.h"
 #include "VoxelNoise.h"
 #include "VoxelClassicNoiseControl.h"
-#include "HAL/IConsoleManager.h"
-#include "Testing/VoxelTestScopedCVar.h"
 #include "Misc/ScopeExit.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -486,7 +484,8 @@ namespace VoxelPlanetSimplexContinuity
 	};
 
 	/** The noise's behaviour across Count random boundary points of each kind. */
-	FStepStats MeasureBoundaries(int32 Count, bool bThroughOrigin, int32 Seed)
+	/** bClassic: the classic kernel's control (VoxelClassicNoiseControl, the double form only; MaxFloatStep stays 0). */
+	FStepStats MeasureBoundaries(int32 Count, bool bThroughOrigin, int32 Seed, bool bClassic = false)
 	{
 		FRandomStream Random(bThroughOrigin ? 4301 : 4302);
 		FStepStats Out;
@@ -498,11 +497,19 @@ namespace VoxelPlanetSimplexContinuity
 			for (int32 i = 0; i < Count; ++i)
 			{
 				const FBoundaryPoint B = RandomBoundaryPoint(Random, Kind, 1000.0, bThroughOrigin);
-				auto F = [&](double T) { return FVoxelNoise::ReferenceSample(B.P + B.N * T, EVoxelNoiseType::Simplex, Seed); };
+				auto F = [&](double T)
+				{
+					return bClassic ? VoxelClassicNoiseControl::HashedSimplexClassicKernel(B.P + B.N * T, Seed)
+						: FVoxelNoise::ReferenceSample(B.P + B.N * T, EVoxelNoiseType::Simplex, Seed);
+				};
 				Out.MaxStep = FMath::Max(Out.MaxStep, FMath::Abs(F(StepEps) - F(-StepEps)));
 				const double SlopePlus = (F(2.0 * SlopeEps) - F(SlopeEps)) / SlopeEps;
 				const double SlopeMinus = (F(-SlopeEps) - F(-2.0 * SlopeEps)) / SlopeEps;
 				Out.MaxSlopeJump = FMath::Max(Out.MaxSlopeJump, FMath::Abs(SlopePlus - SlopeMinus));
+				if (bClassic)
+				{
+					continue;
+				}
 				const FVoxelNoiseSplit Split = FVoxelNoise::Split(B.P, EVoxelNoiseType::Simplex);
 				const FVector3f Offset = FVector3f(B.N) * FloatEps;
 				Out.MaxFloatStep = FMath::Max(Out.MaxFloatStep, static_cast<double>(FMath::Abs(
@@ -537,10 +544,9 @@ bool FVoxelNoiseSimplexContinuousTest::RunTest(const FString& Parameters)
 	FStepStats Stats[2][2]; // [kernel: classic, continuous][boundaries: any, through the origin]
 	for (int32 Kernel = 0; Kernel < 2; ++Kernel)
 	{
-		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Noise.ContinuousSimplex"), Kernel);
 		for (int32 Origin = 0; Origin < 2; ++Origin)
 		{
-			Stats[Kernel][Origin] = MeasureBoundaries(3000, Origin == 1, 1337);
+			Stats[Kernel][Origin] = MeasureBoundaries(3000, Origin == 1, 1337, /*bClassic=*/Kernel == 0);
 			AddInfo(FString::Printf(TEXT("%s kernel, %s: step across the boundary up to %.2e (float form %.2e), slope change up to %.2e"),
 				Kernel == 1 ? TEXT("Continuous") : TEXT("Classic"), Origin == 1 ? TEXT("the planes through the origin") : TEXT("every kind of boundary"),
 				Stats[Kernel][Origin].MaxStep, Stats[Kernel][Origin].MaxFloatStep, Stats[Kernel][Origin].MaxSlopeJump));
@@ -564,13 +570,10 @@ bool FVoxelNoiseSimplexContinuousTest::RunTest(const FString& Parameters)
 		Points.Add(FVector(Random.FRandRange(-1.0e6, 1.0e6), Random.FRandRange(-1.0e6, 1.0e6), Random.FRandRange(-1.0e6, 1.0e6)));
 	}
 	TArray<double> Values[2];
-	for (int32 Kernel = 0; Kernel < 2; ++Kernel)
+	for (const FVector& P : Points)
 	{
-		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Noise.ContinuousSimplex"), Kernel);
-		for (const FVector& P : Points)
-		{
-			Values[Kernel].Add(FVoxelNoise::ReferenceSample(P, EVoxelNoiseType::Simplex, 7));
-		}
+		Values[0].Add(VoxelClassicNoiseControl::HashedSimplexClassicKernel(P, 7));
+		Values[1].Add(FVoxelNoise::ReferenceSample(P, EVoxelNoiseType::Simplex, 7));
 	}
 	double SumC = 0, SumN = 0, SumCC = 0, SumNN = 0, SumCN = 0, MaxAbsN = 0, MaxDiff = 0;
 	for (int32 i = 0; i < Count; ++i)
@@ -616,10 +619,9 @@ bool FVoxelPlanetFaceEdgeContinuityTest::RunTest(const FString& Parameters)
 		}
 	}
 
-	// The terrain noise alone on the small planet and L (ClassicAtLeast: the classic kernel must step by that much), then
-	// the review planets as configured (biomes, continentalness), when their assets are there; SeaAltitude for logging
-	// where the largest step lies on land (the live check's site).
-	struct FPlanetCase { FString Name; const UVoxelWorldConfiguration* Config; double ClassicAtLeast; double SeaAltitude; };
+	// The terrain noise alone on the small planet and L, then the review planets as configured (biomes, continentalness),
+	// when their assets are there.
+	struct FPlanetCase { FString Name; const UVoxelWorldConfiguration* Config; };
 	// The synthetic configurations are rooted while the review assets load.
 	UVoxelWorldConfiguration* SmallNoise = MakePlanetS();
 	UVoxelWorldConfiguration* LargeNoise = VoxelPlanetPrecision::MakePlanetL();
@@ -631,8 +633,8 @@ bool FVoxelPlanetFaceEdgeContinuityTest::RunTest(const FString& Parameters)
 		LargeNoise->RemoveFromRoot();
 	};
 	TArray<FPlanetCase> Cases = {
-		{ TEXT("small planet (R 250,000, terrain noise only)"), SmallNoise, 1.0, -500.0 },
-		{ TEXT("1,000 km planet (R 1e8, Review_Planet_L's terrain noise only)"), LargeNoise, 10.0, -83333.0 },
+		{ TEXT("small planet (R 250,000, terrain noise only)"), SmallNoise },
+		{ TEXT("1,000 km planet (R 1e8, Review_Planet_L's terrain noise only)"), LargeNoise },
 	};
 	for (const TCHAR* Asset : { TEXT("/Game/PluginTesting/Review/Review_Planet.Review_Planet"), TEXT("/Game/PluginTesting/Review/Review_Planet_M.Review_Planet_M"),
 		TEXT("/Game/PluginTesting/Review/Review_Planet_L.Review_Planet_L") })
@@ -643,8 +645,7 @@ bool FVoxelPlanetFaceEdgeContinuityTest::RunTest(const FString& Parameters)
 			AddInfo(FString::Printf(TEXT("%s: not found or not a planet, skipped"), Asset));
 			continue;
 		}
-		const double Sea = Config->bEnableWaterLevel ? static_cast<double>(Config->WaterRadius) - static_cast<double>(Config->WorldRadius) : -1.0e30;
-		Cases.Add({ Config->GetName(), Config, 0.0, Sea });
+		Cases.Add({ Config->GetName(), Config });
 	}
 
 	constexpr double Delta = 1.0e-9; // radians either side of the edge's plane
@@ -655,16 +656,11 @@ bool FVoxelPlanetFaceEdgeContinuityTest::RunTest(const FString& Parameters)
 		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*Mode);
 		// The terrain's own change over the 2 Delta between the samples (about R x 2e-9 x its slope) bounds the step allowed.
 		const double Tolerance = Case.Config->WorldRadius >= 1.0e7 ? 0.5 : 0.05;
-		double Worst[2] = { 0.0, 0.0 };
-		double WorstShared[2] = { 0.0, 0.0 }; // the edges on x = y, y = z, x = z (signs alike): every octave's boundary
-		double WorstLand = 0.0;
-		FVector WorstLandDir = FVector::ZeroVector;
-		double WorstLandAltitude = 0.0;
+		double Worst = 0.0;
+		double WorstShared = 0.0; // the edges on x = y, y = z, x = z (signs alike): every octave's boundary
 		FVector WorstContinuousDir = FVector::UpVector, WorstContinuousNormal = FVector::ForwardVector;
-		double Control[2] = { 0.0, 0.0 }; // the same probe at random directions off the edges
-		for (int32 Kernel = 0; Kernel < 2; ++Kernel)
+		double Control = 0.0; // the same probe at random directions off the edges
 		{
-			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Noise.ContinuousSimplex"), Kernel);
 			FRandomStream Random(4310);
 			for (const FEdge& Edge : Edges)
 			{
@@ -683,37 +679,26 @@ bool FVoxelPlanetFaceEdgeContinuityTest::RunTest(const FString& Parameters)
 					const double Plus = Planet.GetTerrainAltitude((D + N * Delta).GetSafeNormal(), Case.Config->NoiseParams);
 					const double Minus = Planet.GetTerrainAltitude((D - N * Delta).GetSafeNormal(), Case.Config->NoiseParams);
 					const double Step = FMath::Abs(Plus - Minus);
-					if (Kernel == 1 && Step > Worst[1])
+					if (Step > Worst)
 					{
 						WorstContinuousDir = D;
 						WorstContinuousNormal = N;
 					}
-					Worst[Kernel] = FMath::Max(Worst[Kernel], Step);
+					Worst = FMath::Max(Worst, Step);
 					if (Edge.SignA == Edge.SignB)
 					{
-						WorstShared[Kernel] = FMath::Max(WorstShared[Kernel], Step);
-					}
-					if (Kernel == 0 && FMath::Min(Plus, Minus) > Case.SeaAltitude && Step > WorstLand)
-					{
-						WorstLand = Step;
-						WorstLandDir = D;
-						WorstLandAltitude = 0.5 * (Plus + Minus);
+						WorstShared = FMath::Max(WorstShared, Step);
 					}
 				}
 			}
 		}
-		AddInfo(FString::Printf(TEXT("%s: across the 12 face edges (%d directions each, %.0e rad either side) the altitude steps by up to %.3f uu with the classic kernel ")
-			TEXT("(%.3f on x = y, y = z, x = z), %.4f uu with the continuous one (%.4f)"),
-			*Case.Name, PointsPerEdge, Delta, Worst[0], WorstShared[0], Worst[1], WorstShared[1]));
-		AddInfo(FString::Printf(TEXT("%s: the largest classic step on land, %.3f uu, at latitude %.4f, longitude %.4f (altitude %.0f)"), *Case.Name, WorstLand,
-			FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(WorstLandDir.Z, -1.0, 1.0))), FMath::RadiansToDegrees(FMath::Atan2(WorstLandDir.Y, WorstLandDir.X)), WorstLandAltitude));
+		AddInfo(FString::Printf(TEXT("%s: across the 12 face edges (%d directions each, %.0e rad either side) the altitude steps by up to %.4f uu (%.4f on x = y, y = z, x = z)"),
+			*Case.Name, PointsPerEdge, Delta, Worst, WorstShared));
 		// The control: as many random directions as the edges had, each probed across a random tangent the same way. Away
 		// from the face edges no octave's boundary is near, so this is the terrain's own change over the distance plus its
 		// float resolution (on the configured big planets the continentalness field's: its fraction resolves about 7 uu of
 		// ground on L, 0.3-0.5 uu of height a step).
-		for (int32 Kernel = 0; Kernel < 2; ++Kernel)
 		{
-			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Noise.ContinuousSimplex"), Kernel);
 			FRandomStream Random(4311);
 			for (int32 i = 0; i < Edges.Num() * PointsPerEdge; ++i)
 			{
@@ -722,17 +707,16 @@ bool FVoxelPlanetFaceEdgeContinuityTest::RunTest(const FString& Parameters)
 				T = T.GetSafeNormal();
 				const double Plus = Planet.GetTerrainAltitude((D + T * Delta).GetSafeNormal(), Case.Config->NoiseParams);
 				const double Minus = Planet.GetTerrainAltitude((D - T * Delta).GetSafeNormal(), Case.Config->NoiseParams);
-				Control[Kernel] = FMath::Max(Control[Kernel], FMath::Abs(Plus - Minus));
+				Control = FMath::Max(Control, FMath::Abs(Plus - Minus));
 			}
 		}
-		AddInfo(FString::Printf(TEXT("%s: the control, %d random directions off the edges probed the same way: up to %.4f uu with the classic kernel, %.4f with the continuous one"),
-			*Case.Name, Edges.Num() * PointsPerEdge, Control[0], Control[1]));
+		AddInfo(FString::Printf(TEXT("%s: the control, %d random directions off the edges probed the same way: up to %.4f uu"),
+			*Case.Name, Edges.Num() * PointsPerEdge, Control));
 
 		// Where the continuous kernel's difference is largest, how it grows with the distance across the edge: in proportion
 		// for the terrain's own slope, not at all for a step (or the float resolution).
 		double Profile[4];
 		{
-			VoxelTesting::FScopedCVar Continuous(TEXT("voxel.Noise.ContinuousSimplex"), 1);
 			for (int32 k = 0; k < 4; ++k)
 			{
 				const double D = Delta * FMath::Pow(10.0, k);
@@ -743,15 +727,10 @@ bool FVoxelPlanetFaceEdgeContinuityTest::RunTest(const FString& Parameters)
 		AddInfo(FString::Printf(TEXT("%s: the continuous kernel's largest difference (latitude %.4f, longitude %.4f) at 1, 10, 100 and 1,000 times the distance: %.4f, %.4f, %.3f, %.2f uu"),
 			*Case.Name, FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(WorstContinuousDir.Z, -1.0, 1.0))), FMath::RadiansToDegrees(FMath::Atan2(WorstContinuousDir.Y, WorstContinuousDir.X)),
 			Profile[0], Profile[1], Profile[2], Profile[3]));
-		if (Case.ClassicAtLeast > 0.0)
-		{
-			TestTrue(*FString::Printf(TEXT("%s: the classic kernel steps across the face edges (non-vacuous, %.3f uu)"), *Case.Name, WorstShared[0]), WorstShared[0] > Case.ClassicAtLeast);
-		}
-		TestTrue(*FString::Printf(TEXT("%s: with the classic kernel the face edges step far beyond the control (non-vacuous, %.3f against %.4f uu)"), *Case.Name, WorstShared[0], Control[0]),
-			WorstShared[0] > 5.0 * Control[0]);
-		// No step: under the tolerance, or no rougher than the terrain anywhere else (the control).
-		TestTrue(*FString::Printf(TEXT("%s: no step across any face edge (%.4f uu; the control %.4f)"), *Case.Name, Worst[1], Control[1]),
-			Worst[1] < Tolerance || Worst[1] <= 1.5 * Control[1]);
+		// No step: under the tolerance, or no rougher than the terrain anywhere else (the control). The classic kernel
+		// stepped by 1 uu or more on the small planet and 10 uu or more on L here (G43).
+		TestTrue(*FString::Printf(TEXT("%s: no step across any face edge (%.4f uu; the control %.4f)"), *Case.Name, Worst, Control),
+			Worst < Tolerance || Worst <= 1.5 * Control);
 	}
 	return true;
 }

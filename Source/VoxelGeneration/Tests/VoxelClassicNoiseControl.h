@@ -64,6 +64,17 @@ namespace VoxelClassicNoiseControl
 	 * @param OutCellID Stable hash-based cell identifier [0, 1]
 	 */
 	void Voronoi3D(const FVector& Position, int32 Seed, float& OutF1, float& OutF2, float& OutCellID);
+
+	/**
+	 * FVoxelNoise::ReferenceSample's Simplex (the hashed lattice, in double) with the classic 0.6 corner kernel and its
+	 * scale (32): the kernel before G43, which steps where a sample crosses into the next simplex. The control of
+	 * Noise.SimplexContinuous; moved out of FVoxelNoise when VoxelWorlds 8 retired voxel.Noise.ContinuousSimplex.
+	 *
+	 * @param NoisePoint The point in noise units
+	 * @param Seed The lattice hash's seed
+	 * @return Noise in about [-1, 1]
+	 */
+	double HashedSimplexClassicKernel(const FVector& NoisePoint, int32 Seed);
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS

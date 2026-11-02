@@ -76,8 +76,9 @@ Fields that callers build themselves (climate, continentalness, caves, ores) set
   and slope at d^2 = 0.5, v^2 (v^2 + 0.4 v + 0.06) with v = 0.5 - d^2, the sum scaled by 33.25 instead of 32 for the
   same spread: no step, a continuous slope, within 1.2% rms of the classic noise (correlation 0.9996)
   (`VoxelWorlds.Noise.SimplexContinuous`, `VoxelWorlds.WorldModes.Planet.FaceEdgeContinuity`,
-  `VoxelWorlds.WorldModes.Plane.NoiseCreases`). `voxel.Noise.ContinuousSimplex 0` selects the classic weight, for A/B
-  only.
+  `VoxelWorlds.WorldModes.Plane.NoiseCreases`). The classic kernel is the tests' control
+  (`VoxelClassicNoiseControl::HashedSimplexClassicKernel`); the GPU shader keeps it behind its `SimplexContinuous`
+  parameter, always 1, because removing the branch changes the codegen (G97).
 
 ### Where each field samples
 

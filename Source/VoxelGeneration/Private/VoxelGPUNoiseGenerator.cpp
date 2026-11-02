@@ -533,7 +533,9 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->MoistureFrequency = 0.00007f;
 	Parameters->EnableUnderwaterMaterials = 0;
 	Parameters->BlendDitherBase = FVoxelBiomeBlendDither::GridBase(Request.ChunkCoord, Request.ChunkSize, Request.WorldOrigin, Request.VoxelSize);
-	Parameters->BlendDitherMode = FVoxelBiomeBlendDither::IsEnabled() ? 1 : 0;
+	// The lattice dither (G39), the CPU's only pick. The shader keeps its old pick behind this parameter, as it keeps the
+	// classic Simplex kernel (VoxelWorlds 8, G97).
+	Parameters->BlendDitherMode = 1;
 	Parameters->DefaultUnderwaterMaterial = 3;
 
 	const UVoxelBiomeConfiguration* BiomeConfig = Request.BiomeConfiguration;
@@ -652,7 +654,9 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->PlanetAnchorDir = FVector3f(AnchorDir);
 	Parameters->PlanetAnchorDist = static_cast<float>(AnchorDist);
 	Parameters->PlanetAnchorAltitude = static_cast<float>(AnchorDist - Planet.PlanetRadius);
-	Parameters->SimplexContinuous = FVoxelNoise::IsContinuousSimplex() ? 1 : 0;
+	// The continuous Simplex kernel (G43), the CPU's only one. The shader keeps its classic leg behind this parameter: removing
+	// the branch changes the GPU's codegen (24 of the 114 parity lines moved by a voxel's rounding; VoxelWorlds 8, G97).
+	Parameters->SimplexContinuous = 1;
 
 	// The cave configuration's underwater minimum depth and biome overrides — every world-mode branch applies them as
 	// the CPU's CalculateCaveDensity does (GpuCaveCarve).

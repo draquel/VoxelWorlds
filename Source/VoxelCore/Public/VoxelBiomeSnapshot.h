@@ -188,11 +188,11 @@ struct VOXELCORE_API FVoxelBiomeSnapshot
 
 	/**
 	 * Which of a blend's biomes a voxel takes: the dominant one when it holds over 0.9 of the weight, else a weighted pick by
-	 * FVoxelBiomeBlendDither at the voxel, walking the biomes in BiomeID order (G39; voxel.Biome.BlendDither 0: the old
-	 * frac value of the weights and depth, in weight order). Mirrored by GpuBlendedMaterial (BiomeMaterial.ush).
+	 * FVoxelBiomeBlendDither at the voxel, walking the biomes in BiomeID order (G39). Mirrored by GpuBlendedMaterial
+	 * (BiomeMaterial.ush).
 	 *
 	 * @param Blend The blend
-	 * @param DepthBelowSurface Depth under the surface, in voxels (the old value's input)
+	 * @param DepthBelowSurface Depth under the surface, in voxels (unused since G39's dither; the GPU twin's signature keeps it)
 	 * @param Dither The voxel's key and the world seed
 	 * @return An index into Blend.BiomeIDs
 	 */

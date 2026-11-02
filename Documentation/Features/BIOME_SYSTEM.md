@@ -89,8 +89,9 @@ value that decides is the blend dither, `FVoxelBiomeBlendDither` (`VoxelBiomeBle
 
 Two biomes interleave in patches a few voxels across, their shares following the weights across the zone, with no
 relation to the voxel grid (tests `VoxelWorlds.Biome.BlendDither.*`). The value used before G39 followed the voxel's
-depth under the surface, which cycles with the grid on a slope, and drew bands of two materials along the grid;
-`voxel.Biome.BlendDither 0` selects it, for A/B only (read when a chunk generates). A weight over 0.9 takes its biome's
+depth under the surface, which cycles with the grid on a slope, and drew bands of two materials along the grid (the
+GPU shader keeps that pick behind its `BlendDitherMode` parameter, always 1, because removing the branch changes its
+codegen: G97). A weight over 0.9 takes its biome's
 material outright, so a zone's visible edge is where the leading weight crosses 0.9. The dither changed no generation
 version: saves from before it load, their edits on top of the new materials.
 

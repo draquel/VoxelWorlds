@@ -22,7 +22,8 @@ static const int3 NoiseGrad3[12] = VOXELGEN_SIMPLEX_GRAD3(int3);
 
 // A simplex corner's contribution (FVoxelNoise's SimplexCorner). G43: the continuous kernel, (0.6 - d^2)^4 less its
 // value and slope at d^2 = 0.5, v^2 (v^2 + 0.4 v + 0.06) with v = 0.5 - d^2, reaches zero where the next simplex begins;
-// SimplexContinuous 0 (voxel.Planet.ContinuousSimplex) keeps the classic one, which steps there.
+// SimplexContinuous is always 1 (the generator sets it); the classic leg stays only because removing the branch changes
+// the codegen (VoxelWorlds 8, G97).
 float NoiseSimplexCorner(uint Hash, float3 X)
 {
     const int3 G = NoiseGrad3[Hash % 12u];

@@ -35,7 +35,7 @@ struct FVoxelBlendDitherKey
  * across. Exact multiples of 2^-24, mirrored bit for bit by GpuBiomeBlendDither (BiomeMaterial.ush).
  *
  * The pick walks the blend's biomes in BiomeID order, not by weight, so a patch does not change biome where the dominant
- * biome changes inside a zone. voxel.Biome.BlendDither 0 restores the old value and order (for A/B).
+ * biome changes inside a zone.
  */
 struct VOXELCORE_API FVoxelBiomeBlendDither
 {
@@ -93,7 +93,4 @@ struct VOXELCORE_API FVoxelBiomeBlendDither
 	 * @return round(WorldPos / VoxelSize)
 	 */
 	static FIntVector KeyAt(const FVector& WorldPos, float VoxelSize);
-
-	/** voxel.Biome.BlendDither (1: the lattice dither in BiomeID order; 0: the old frac value in weight order). */
-	static bool IsEnabled();
 };

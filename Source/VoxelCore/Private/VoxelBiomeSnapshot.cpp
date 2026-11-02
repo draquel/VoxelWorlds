@@ -216,26 +216,10 @@ int32 FVoxelBiomeSnapshot::PickBlendIndex(const FBiomeBlend& Blend, float DepthB
 	}
 	const int32 Count = FMath::Min(Blend.BiomeCount, MAX_BIOME_BLEND);
 
-	if (!FVoxelBiomeBlendDither::IsEnabled())
-	{
-		// Before G39: a value of the weights and the depth, in weight order. Across a zone the weights change slowly, so it
-		// followed the depth, which cycles with the voxel grid on a slope: bands of two materials along the grid.
-		const float RandomValue = FMath::Frac(Blend.Weights[0] * 17.3f + Blend.Weights[1] * 31.7f + DepthBelowSurface * 0.1f);
-		float CumulativeWeight = 0.0f;
-		for (int32 i = 0; i < Count; ++i)
-		{
-			CumulativeWeight += Blend.Weights[i];
-			if (RandomValue < CumulativeWeight)
-			{
-				return i;
-			}
-		}
-		return 0;
-	}
-
 	// The lattice dither at the voxel (uniform on [0, 1), constant in patches a few voxels across), walking the biomes in
 	// BiomeID order: by weight the order changes where the dominant biome does, inside a zone, and a patch there would
-	// change biome along that line.
+	// change biome along that line. Before G39 a value of the weights and the depth picked in weight order; across a zone
+	// it followed the depth, which cycles with the voxel grid on a slope: bands of two materials along the grid.
 	int32 Order[MAX_BIOME_BLEND] = { 0, 1, 2, 3 };
 	for (int32 i = 1; i < Count; ++i)
 	{

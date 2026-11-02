@@ -2,8 +2,6 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
-#include "HAL/IConsoleManager.h"
-#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelBiomeBlendDither.h"
 #include "VoxelBiomeSnapshot.h"
 
@@ -56,7 +54,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBiomeBlendDitherUniformTest, "VoxelWorlds.Biom
 bool FBiomeBlendDitherUniformTest::RunTest(const FString& Parameters)
 {
 	using namespace BiomeBlendDitherTestUtils;
-	VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Biome.BlendDither"), 1);
 	FRandomStream Random(39);
 	constexpr int32 N = 2000000;
 	int32 Bins[16] = {};
@@ -97,7 +94,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBiomeBlendDitherPatchesTest, "VoxelWorlds.Biom
 bool FBiomeBlendDitherPatchesTest::RunTest(const FString& Parameters)
 {
 	using namespace BiomeBlendDitherTestUtils;
-	VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Biome.BlendDither"), 1);
 	const FBiomeBlend Blend = TwoBiomes(0.5f);
 	FRandomStream Random(40);
 	int32 Same[3] = {}, Pairs = 0;
@@ -163,9 +159,8 @@ bool FBiomeBlendDitherNoGridBandsTest::RunTest(const FString& Parameters)
 	// A gentle slope (0.13 voxels of rise per voxel, diagonally across the grid) at a fixed blend weight. Each column's
 	// surface voxel is the highest at or under the surface; its depth phase is where the surface crosses its layer.
 	const FBiomeBlend Blend = TwoBiomes(0.7f);
-	auto PhaseSpread = [&](int32 Mode, float& OutMin, float& OutMax)
+	auto PhaseSpread = [&](float& OutMin, float& OutMax)
 	{
-		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Biome.BlendDither"), Mode);
 		int32 Count[8] = {}, Took[8] = {};
 		for (int32 X = -600; X < 600; ++X)
 		{
@@ -188,12 +183,10 @@ bool FBiomeBlendDitherNoGridBandsTest::RunTest(const FString& Parameters)
 			OutMax = FMath::Max(OutMax, Share);
 		}
 	};
-	float OldMin, OldMax, NewMin, NewMax;
-	PhaseSpread(0, OldMin, OldMax);
-	PhaseSpread(1, NewMin, NewMax);
-	AddInfo(FString::Printf(TEXT("Weight 0.7, the dominant biome's share by the surface's depth phase (8 bins): before %.3f-%.3f, the dither %.3f-%.3f"),
-		OldMin, OldMax, NewMin, NewMax));
-	TestTrue(TEXT("Before: the share follows the grid's phase (bands; non-vacuous)"), OldMax - OldMin > 0.5f);
+	// Before G39 the old pick's share followed the grid's phase (bands: over 0.5 between bins).
+	float NewMin, NewMax;
+	PhaseSpread(NewMin, NewMax);
+	AddInfo(FString::Printf(TEXT("Weight 0.7, the dominant biome's share by the surface's depth phase (8 bins): %.3f-%.3f"), NewMin, NewMax));
 	TestTrue(TEXT("The dither: the same share at every phase (within 0.05)"), NewMax - NewMin < 0.05f);
 	TestTrue(TEXT("The dither: the dominant biome's share is its weight (within 0.03)"), FMath::Abs(0.5f * (NewMin + NewMax) - 0.7f) < 0.03f);
 	return true;
@@ -208,7 +201,6 @@ bool FBiomeBlendDitherDominanceFlipTest::RunTest(const FString& Parameters)
 	// The same voxels with biome 3 just dominant and just not (sorted by weight, so the blend's order flips): a walk in
 	// weight order would read the dither against the other biome; the BiomeID walk changes only voxels between the two
 	// weights.
-	VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Biome.BlendDither"), 1);
 	const FBiomeBlend Before = TwoBiomes(0.501f);
 	const FBiomeBlend After = TwoBiomes(0.499f);
 	FRandomStream Random(42);
