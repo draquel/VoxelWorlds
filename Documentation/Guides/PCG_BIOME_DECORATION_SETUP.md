@@ -1,9 +1,12 @@
 # How-To: Biome-Keyed PCG Decoration
 
+> State as of 2026-11-02 (code review CR5).
+
 **Audience**: Setting up runtime PCG decoration (foliage/props) that varies per voxel biome.
 **Design/rationale**: [PCG_DECORATION_ARCHITECTURE.md](../Research/PCG_DECORATION_ARCHITECTURE.md).
-**Status**: Sampler + hybrid edit-aware surface + biome dispatcher implemented and smoke-tested
-(`feature/pcg-integration`).
+**What exists**: the Voxel Surface Sampler (edit-merged near loaded chunks, the generator farther out, a planet's
+cube-sphere grid) and the Voxel Biome Dispatcher, in the `VoxelPCG` module. Reacting to edits and claims after
+generation (phase 7) is not built.
 
 ---
 

@@ -1,12 +1,12 @@
 # Dual Contouring Meshing System
 
-**Module**: VoxelMeshing
-**Last Updated**: 2026-02-19
+> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
 
-> **Status note (2026-10):** Dual Contouring runs on the CPU only. The GPU Dual Contouring mesher was
-> retired in seam ownership (its QEF solve was not bit-exact with the CPU seam rings) and deleted in code
-> review CR1 with its shader and the `GT1-GT7` suite that once pinned it; the sections below describe the
-> CPU mesher. DC LOD seams and 4-chunk corner seams are sealed (max-min-area quad diagonal).
+**Module**: VoxelMeshing
+
+Dual Contouring runs on the CPU only: `FVoxelCPUDualContourMesher` meshes each chunk's interior and the face, edge and
+corner seams between chunks. The GPU Dual Contouring mesher was retired in seam ownership (its QEF solve was not
+bit-exact with the CPU seam rings) and deleted in code review CR1 with its shaders (D-CR12).
 
 ## Table of Contents
 
@@ -14,7 +14,7 @@
 2. [Algorithm Overview](#algorithm-overview)
 3. [Pipeline Detail](#pipeline-detail)
 4. [QEF Solver](#qef-solver)
-5. [LOD Boundary Merging](#lod-boundary-merging)
+5. [Chunk Boundaries and LOD Seams](#chunk-boundaries-and-lod-seams)
 6. [Configuration](#configuration)
 7. [Comparison with Marching Cubes](#comparison-with-marching-cubes)
 8. [Performance Considerations](#performance-considerations)
@@ -27,7 +27,7 @@
 Dual Contouring (DC) is the second smooth meshing algorithm in the VoxelWorlds system, alongside [Marching Cubes](MARCHING_CUBES_MESHING.md). Where Marching Cubes places vertices **on edges** where the density field crosses the isosurface, Dual Contouring places vertices **inside cells** at positions that minimize error against all intersecting surface planes. This enables:
 
 - **Sharp feature preservation**: Creases, corners, and hard edges emerge naturally from the QEF solve
-- **Simpler LOD transitions**: Boundary cells merge via QEF re-solve instead of requiring Transvoxel transition cells
+- **No transition tables at LOD boundaries**: the mixed-LOD seam meshers fan fine crossings onto the coarse side's cell vertices
 - **Quad-based output**: Generates quads (2 triangles each) rather than variable triangle counts per cell
 
 Both DC and Marching Cubes share the **smooth terrain rendering pipeline** — triplanar texturing, the same vertex format (`FVoxelVertex`), and the same material system. The choice between them is purely algorithmic (set via `EMeshingMode::DualContouring` in the world configuration).
@@ -36,9 +36,11 @@ Both DC and Marching Cubes share the **smooth terrain rendering pipeline** — t
 
 | File | Purpose |
 |------|---------|
-| `VoxelCPUDualContourMesher.h/cpp` | The mesher (interior chunk meshes and the DC seam meshers) |
+| `VoxelCPUDualContourMesher.h/cpp` | The mesher: the chunk's interior (and the collision cook's whole-chunk request) |
+| `VoxelCPUDualContourSeams.cpp` | The face, edge and corner seam meshers, same-LOD and mixed-LOD |
+| `VoxelCrossingGradient.h` (Private) | Voxel-resolution crossings and fitted shading normals, shared with Marching Cubes |
 | `QEFSolver.h` (Private) | QEF solver with Jacobi SVD |
-| `VoxelMeshingTypes.h` | Shared config (`FVoxelMeshingConfig`) |
+| `VoxelMeshingTypes.h` | Shared config (`FVoxelMeshingConfig`) and the request (`FVoxelMeshingRequest`, `EVoxelMeshCellDomain`) |
 
 ### Enum
 
@@ -56,7 +58,7 @@ enum class EMeshingMode : uint8
 
 ## Algorithm Overview
 
-Dual Contouring processes a chunk in **4 passes**:
+Dual Contouring processes a chunk in **3 passes**:
 
 ```
 Pass 1: Edge Crossing Detection
@@ -67,11 +69,6 @@ Pass 1: Edge Crossing Detection
 Pass 2: QEF Vertex Solve
     For each cell, collect up to 12 edge crossings touching it
     Solve 3x3 QEF via Jacobi SVD for optimal vertex position
-                    |
-                    v
-Pass 3.5: LOD Boundary Cell Merging (before quad generation)
-    Merge groups of fine boundary cells into single coarser cells
-    Re-solve merged QEF to produce vertices matching neighbor resolution
                     |
                     v
 Pass 3: Quad Generation
@@ -92,6 +89,16 @@ Cell and edge indices are packed into flat arrays:
 - **Cell index**: `(CX+1) + (CY+1)*GridDim + (CZ+1)*GridDim*GridDim`
 - **Edge index**: `CellIndex * 3 + Axis` (3 edges per cell: +X, +Y, +Z)
 
+### Cell Domains
+
+The request's `MeshCellDomain` says which cells a pass meshes:
+
+- **`Interior`** (every streamed chunk mesh): only the cells `[0, GridSize-1)` per axis, which depend on no neighbour. The
+  request carries no neighbour data; the boundary layers belong to the seam jobs ([Chunk Boundaries and LOD
+  Seams](#chunk-boundaries-and-lod-seams)).
+- **`WholeChunk`**: the chunk's own cells plus the `-1` boundary layer against the neighbour slices in the request. The
+  collision cook uses it.
+
 ---
 
 ## Pipeline Detail
@@ -101,7 +108,8 @@ Cell and edge indices are packed into flat arrays:
 Each cell owns three edges emanating from its minimum corner in the +X, +Y, and +Z directions. For each edge:
 
 1. Sample density at both endpoints
-2. If the density crosses the isosurface threshold (`IsoLevel`), interpolate the crossing position:
+2. If the density crosses the isosurface threshold (`IsoLevel`), find the crossing: at stride 1 by interpolating between
+   the two samples, at a stride by LOD 0's crossing on the edge (G80, below)
    ```cpp
    float t = (IsoLevel - D0) / (D1 - D0);
    FVector3f CrossPos = P0 + (P1 - P0) * t;
@@ -110,50 +118,36 @@ Each cell owns three edges emanating from its minimum corner in the +X, +Y, and 
    side (the QEF's plane normal). In the Interior domain and in every seam sampler the taps clamp into the voxels the job
    holds ("the terrain continues": no neighbour dependence), and a clamped axis's one-sided difference is scaled back to
    the full span (`VoxelDCGradient::ClampedGradientNormal`; unscaled it lost up to half its weight and drew lines of shading
-   along chunk faces, G25)
+   along chunk faces, G25; `voxel.Mesh.ScaleClampedGradients`)
 4. Store hermite data: `{Position, Normal, bValid}` in the edge crossings array
 5. Append the edge index to a compact valid-edge list (used by Pass 3)
 
-**Normals at a stride (G44).** Generated density saturates a voxel either side of the surface
-(`SignedDistanceToDensity`), so taps `Stride` voxels apart read 0 or 255 on every axis the surface crosses between them: at
-LOD 2 each gradient component is a sign and the normal snaps toward one of the 26 cube directions. The QEF keeps these
-normals (no vertex moves), but the **vertex normal** of a strided cell is LOD 0's: the cell finds where the surface crosses
-each of its strided edges at voxel resolution (`VoxelLODCrossing::FindVoxelCrossing`, beside Marching Cubes' rule in
-`VoxelCrossingGradient.h`), and its normal is LOD 0's vertex
-normal of the voxel cell inside it next to the crossing nearest the vertex (`VoxelCellNormal`: the stride-1 gradient
-normals at that voxel cell's crossings, averaged). The interior pass and the seam template (`ComputeCellVertex`) run the
-same op sequence, so ring recomputes stay bit-identical. `voxel.Mesh.VoxelShadingNormals 0` restores the stride-scale
-vertex normals for A/B (the cvar also covers Marching Cubes' equivalent, G61); `voxel.Mesh.ScaleClampedGradients 0` the
-unscaled clamp.
+**Crossings at a stride (G80).** Generated density saturates a voxel either side of the surface
+(`SignedDistanceToDensity`), so a crossing interpolated between two samples a stride apart lands toward the edge's
+middle whatever the surface does between them: LOD 1 and 2 would be terraced a stride apart, the "ribs" visible in
+their own shadows under a low sun. At a stride the crossing is LOD 0's on the edge: the first voxel step along it that
+changes sign, interpolated within that step (`VoxelLODCrossing::FindVoxelCrossing`), and its QEF normal is the fitted
+gradient there. Every LOD's crossings lie on LOD 0's surface; LOD 2 still drops the detail its cells cannot hold.
+`voxel.Mesh.VoxelLODCrossings` (default 1, shared with Marching Cubes) switches it; tests
+`Meshing.LODCrossings.Planes`, `Streaming.{Planet,Plane}.LODPositions`.
 
-**Crossings at a stride (G80).** The same saturation put an interpolated strided crossing toward the edge's middle,
-whatever the surface did between the two samples, so the error ran with where the surface crossed the strided grid: LOD 1
-and 2 were terraced a stride apart, and under a low sun the terraces shadowed themselves (the "ribs" of the mid and far
-field, on every world mode with an LOD 2 band). At a stride the crossing is now LOD 0's on the edge: the first voxel step
-along it that changes sign, interpolated within that step (`FindVoxelCrossing`), and its QEF normal is the fitted gradient
-there (`CalculateShadingNormal`, the samplers' `ShadingNormal`; exact for a plane, where the central difference tilts with
-the voxel phase over a whole stride). Every LOD's crossings then lie on LOD 0's surface; LOD 2 still drops the detail its
-cells cannot hold. The vertex normal of a strided cell is then LOD 0's estimator over the cell's own crossings, their
-fitted normals summed (nearer the analytic normals than G44's one voxel cell, which stays for
-`voxel.Mesh.VoxelLODCrossings 0`). The interior pass and `ComputeCellVertex` run the same op sequence.
-`voxel.Mesh.VoxelLODCrossings 0` restores the strided crossings and normals (shared with Marching Cubes). See
-`WORLD_MODES_REVIEW_PLAN.md` §23.16.
+**Shading normals (G62).** The central difference about the voxel a crossing floors to reads the saturated rock under a
+surface a fraction of a voxel above it, so its normals tilt with the surface's phase in the voxel layer (bands a voxel
+layer apart). The shading normals are instead the density gradient fitted to the voxels on the ramp around the crossing
+(`VoxelCrossingGradient::FitNormal`: weighted least squares over the 3x3x3 block around the crossing's nearest voxel,
+0 < density < 255, tent weights, a free offset; exact for any plane), over the voxels the view holds (skipped, not
+clamped). Where the ramp's voxels span fewer than three directions the central difference is used, which is exact
+there. At LOD 0 the QEF keeps the central difference, so no vertex moves; at a stride it takes the fitted gradient
+(G80). `voxel.Mesh.CrossingGradientNormals` (shared with Marching Cubes); tests `Meshing.CrossingGradient.Planes`,
+`Streaming.{Planet,Plane}.GradientBands`.
 
-**Shading normals at voxel resolution (G62).** The central difference about the voxel a crossing floors to reads the
-saturated rock under a surface a fraction of a voxel above that voxel, so its normals tilted by 1.0-1.8 times the slope
-with the surface's phase in the voxel layer: bands a voxel layer apart, and on a planet errors of a degree or more on flat
-ground. The shading normals are instead the density gradient fitted to the voxels around the crossing that are on the
-ramp (`VoxelCrossingGradient::FitNormal`: weighted least squares over the 3x3x3 block around the crossing's nearest voxel,
-0 < density < 255, tent weights, a free offset; exact for any plane), over the voxels the view holds (the interior pass's
-box, each seam sampler's `GetBox`: skipped, not clamped). LOD 0's vertex normal sums them at the cell's crossings
-(`FDCEdgeCrossing::ShadingNormal`), and G44's voxel-cell normal and G17's fallback vertex use them too
-(`CalculateShadingNormal`, the samplers' `ShadingNormal`). At LOD 0 the QEF keeps the central difference, so no vertex
-moves (at a stride it takes the fitted gradient, G80). Where
-the voxels on the ramp do not span three directions (the surface through a voxel layer) the central difference is used,
-which is exact there. `voxel.Mesh.CrossingGradientNormals 0` restores the central difference (shared with Marching Cubes).
-See `WORLD_MODES_REVIEW_PLAN.md` §20.12.
-
-**Boundary handling**: The mesher samples beyond chunk bounds using neighbor face, edge, and corner data from `FVoxelMeshingRequest` — the same data structures used by the Marching Cubes mesher.
+**Vertex normals at a stride (G44).** Gradient taps a stride apart read 0 or 255 on every axis the surface crosses
+between them, so at LOD 2 each component is a sign and the normal snaps toward a cube direction (a brighter LOD 2 ring
+on planets). A strided cell's **vertex normal** is LOD 0's instead: the fitted normals of its voxel-resolution crossings,
+summed (G80); with `voxel.Mesh.VoxelLODCrossings 0` the normal of the voxel cell next to the crossing nearest the vertex
+(`VoxelCellNormal`, G44). `voxel.Mesh.VoxelShadingNormals` (shared with Marching Cubes, G61) switches it; tests
+`Streaming.{Planet,Plane}.LODNormals`. The interior pass and the seam template (`ComputeCellVertex`) run the same op
+sequence, so ring recomputes stay bit-identical.
 
 ### Pass 2: QEF Vertex Solve
 
@@ -172,14 +166,10 @@ For each cell in the grid:
    };
    ```
 2. Add each valid crossing's plane (`Normal . (v - Point) = 0`) to the QEF accumulator
-3. Solve the QEF (see [QEF Solver](#qef-solver) section); the vertex normal is the crossings' normals averaged at stride
-   1, and at a stride LOD 0's normal at the voxel crossing nearest the vertex (Pass 1's note)
+3. Solve the QEF (see [QEF Solver](#qef-solver) section); the vertex normal is the crossings' shading normals summed
+   (Pass 1's notes)
 4. Assign material and biome via nearest-solid-voxel voting across the cell's 8 corners
 5. Store the result in the cell vertices array
-
-### Pass 3.5: LOD Boundary Cell Merging
-
-See [LOD Boundary Merging](#lod-boundary-merging) section.
 
 ### Pass 3: Quad Generation
 
@@ -193,11 +183,13 @@ For each valid edge crossing:
    Axis 2 (Z-edge): cells at (0,0,0), (-1,0,0), (-1,-1,0), (0,-1,0)
    ```
 3. Verify all 4 cells have valid QEF vertices
-4. Check **edge ownership**: at least one of the 4 cells must be in the interior `[0, GridSize-1]` range (prevents duplicate quads from overlapping neighbor regions)
+4. Check **edge ownership**: the edge itself must lie in `[0, GridSize)` per axis, so each physical edge belongs to one
+   chunk; in the Interior domain all 4 cells must also be interior
 5. Determine **winding order** from the density sign at the edge start:
    - `D0 < IsoLevel` → flipped winding
    - `D0 >= IsoLevel` → standard winding
-6. Emit 6 indices (2 triangles) referencing the 4 cell vertex positions
+6. Split the quad along the diagonal that maximises the smaller triangle's area (a fixed diagonal can make slivers the
+   renderer drops) and emit 6 indices
 
 ---
 
@@ -224,30 +216,25 @@ Located in `VoxelMeshing/Private/QEFSolver.h`, the solver is a header-only struc
 
 **Key methods**:
 - `Add(Point, Normal)` — Accumulate a plane into the matrix
-- `Merge(Other)` — Combine two QEFs (used for LOD cell merging)
-- `Solve(SVDThreshold, CellBounds, BiasStrength)` — Compute optimal vertex position
+- `Solve(SVDThreshold, CellBounds, BiasStrength, bAboutMassPoint)` — Compute optimal vertex position
 
 ### SVD via Jacobi Eigenvalue Decomposition
 
 The 3x3 symmetric matrix `A^T*A` is decomposed using iterative Givens rotations (up to 20 iterations, convergence threshold `1e-8`):
 
 1. Find the largest off-diagonal element
-2. Apply a Givens rotation to zero it out
+2. Apply a Givens rotation to zero it out on both sides of the diagonal
 3. Accumulate the rotation into the eigenvector matrix
 4. Repeat until convergence
 
-Each rotation zeroes its pivot on both sides of the diagonal (G81: before, only above it; the next rotation read the stale
-element below and the decomposition converged to wrong eigenpairs).
-
-The pseudoinverse solves for the offset from the mass point (G81):
+The pseudoinverse solves for the offset from the mass point:
 ```
 v = MassPoint + V * S^-1 * V^T * (ATb - ATA * MassPoint)
 ```
 where eigenvalues below `SVDThreshold` are treated as zero (degenerate axes), so a degenerate axis stays at the mass point:
-a flat cell's vertex is the mass point on its plane. Before G81 it solved for `v` itself (`V * S^-1 * V^T * ATb`), so a
-degenerate axis went to the frame's origin: a flat cell's vertex was the plane's point nearest the chunk's corner, then
-pulled back toward the mass point by the clamp below, only part of the way when it lay within a cell of the cell.
-`voxel.Mesh.QEFSolve 0` restores that solve and the one-sided rotation for A/B. See `WORLD_MODES_REVIEW_PLAN.md` §23.16.
+a flat cell's vertex is the mass point on its plane (G81). Before G81 the rotation zeroed its pivot above the diagonal
+only (wrong eigenpairs) and the solve was for `v` itself, so a degenerate axis went to the chunk's origin and flat ground
+had vertices a voxel or more off the surface. `voxel.Mesh.QEFSolve` switches it; test `Meshing.QEF.Solve`.
 
 ### Out-of-Bounds Clamping
 
@@ -258,41 +245,34 @@ float Blend = saturate(DistOutside / CellSize * BiasStrength * 2.0);
 Result = lerp(QEFResult, MassPoint, Blend);
 ```
 
-This prevents vertices from drifting too far from their cells while still allowing feature-preserving placement when the solution is within bounds. With G81's solve a result still outside the cell after the blend is cut back along the segment from the mass point (inside the cell: its crossings are on the cell's edges) at the cell's faces, so every vertex stays in its own cell.
+A result still outside the cell after the blend is cut back along the segment from the mass point (inside the cell: its
+crossings are on the cell's edges) at the cell's faces, so every vertex stays in its own cell.
 
 ---
 
-## LOD Boundary Merging
+## Chunk Boundaries and LOD Seams
 
-Unlike Marching Cubes which uses the **Transvoxel algorithm** (special transition cells with 512-entry lookup tables), Dual Contouring handles LOD transitions by **merging boundary cells**.
+Dual Contouring closes chunk boundaries, at one LOD or across two, by **seam ownership**: a chunk meshes its interior
+from its own voxels, and each boundary between chunks (a face, an edge, a corner) is meshed once by one seam job from
+the voxels of every chunk that touches it. The scheduling, ownership and invalidation rules are in
+[STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md); the mesher-side rules are these:
 
-### How It Works
+- **Same-LOD seams** (`GenerateFaceSeamMeshCPU`, `GenerateEdgeSeamMeshCPU`, `GenerateCornerSeamMeshCPU`) recompute the
+  participants' boundary-layer cells (the rings) with each side's own view of its voxels, so a ring vertex is
+  bit-identical to the one the interior pass would make, and emit only the quads the interiors left out.
+- **Mixed-LOD seams** (`GenerateMixedFaceSeam`, `GenerateMixedEdgeSeam`, `GenerateMixedCornerSeam`) recompute each
+  side's rings at that side's own stride and stitch the boundary at the finest participant's stride: every fine crossing
+  gets a fan onto the coarser side's ring vertices, a quad collapsing to a triangle where its two coarse-side slots fall
+  in the same coarse cell.
+- **Boundary fallback vertex (G17).** A fine crossing can face a coarse cell whose corners all have one sign (the surface
+  pokes through the coarse cell's face between its samples), so that cell has no vertex at its own stride. It gets one
+  from `ComputeBoundaryFallbackVertex`: the same QEF solve over every voxel-resolution crossing on the cell's six faces,
+  inside the cell's bounds. It is a function of the voxels, the cell and its stride only, so every mixed job that fans
+  onto the cell solves the same vertex. Tests `Meshing.DualContour.SeamClosure.MS4_MixedFaceClosureNoise`,
+  `Streaming.{Planet,Plane}.ClosedSurface`.
 
-When a chunk face borders a coarser (higher LOD level) neighbor:
-
-1. Compute the **merge ratio**: `CoarserStride / CurrentStride` (e.g., LOD 0 next to LOD 1 → ratio 2)
-2. Group boundary cells into `MergeRatio x MergeRatio` blocks
-3. For each block:
-   a. Collect all edge crossings from the fine cells
-   b. Feed them into a single merged QEF (`QEF.Merge()`)
-   c. Solve the merged QEF within the combined cell bounds
-   d. Invalidate the fine cell vertices
-   e. Store the merged vertex at the base position and alias all fine positions to it
-
-### Example
-
-LOD 0 chunk next to LOD 1 neighbor on the +X face (MergeRatio = 2):
-
-```
-Before merging:          After merging:
-+------+------+         +------+------+
-| V_00 | V_01 |         |             |
-+------+------+   →     |   V_merged  |
-| V_10 | V_11 |         |             |
-+------+------+         +------+------+
-```
-
-The 4 fine-cell vertices are replaced by 1 merged vertex whose position is the QEF solution using all edge crossings from all 4 cells. This naturally matches the coarser neighbor's vertex spacing.
+Every position is QEF output clamped to its own cell, so no seam moves a vertex an interior pass emits. The seam suites
+are `VoxelWorlds.Meshing.DualContour.SeamClosure.*` (closure, ring bit-match, empty seams; `MS*` for mixed LODs).
 
 ---
 
@@ -316,6 +296,19 @@ float QEFBiasStrength = 0.5f;
 
 DC also uses these shared smooth meshing fields:
 - `IsoLevel` — Isosurface threshold (default 0.5 = density 127)
+
+### Console Variables
+
+All default to 1 and apply to interior meshes and seam jobs alike; set them before chunks mesh
+(`voxel.Mesh.RemeshAll` after a change). 0 restores the rule before each fix.
+
+| CVar | What 1 does |
+|------|-------------|
+| `voxel.Mesh.VoxelLODCrossings` | LOD 0's crossings and normals at a stride (G80; shared with MC) |
+| `voxel.Mesh.CrossingGradientNormals` | Fitted shading normals at voxel resolution (G62; shared with MC) |
+| `voxel.Mesh.VoxelShadingNormals` | LOD 0's vertex normals at a stride (G44; shared with MC as G61) |
+| `voxel.Mesh.QEFSolve` | The QEF solved about the mass point with a symmetric Jacobi (G81) |
+| `voxel.Mesh.ScaleClampedGradients` | A clamped gradient tap scaled to the full span (G25) |
 
 ### Recommended Settings
 
@@ -349,7 +342,7 @@ Config.QEFBiasStrength = 0.7f;   // Keep vertices well-centered
 | Vertex placement | On edges (interpolated) | Inside cells (QEF-solved) |
 | Output topology | Triangles (variable count) | Quads (2 tris per edge crossing) |
 | Sharp features | Rounded (edge-constrained) | Preserved (QEF minimization) |
-| LOD transitions | Transvoxel (512-entry tables) | Cell merging (QEF re-solve) |
+| LOD transitions | Transvoxel ribbon + geomorph in the seam band | Mixed-LOD seam fans onto the coarse rings |
 | Lookup tables | 256-entry edge + tri tables | None (algorithmic) |
 | Triangle count | Higher (complex cells) | Lower (1 quad per edge crossing) |
 | Vertex count | Higher (shared edges limited) | Lower (1 vertex per cell) |
@@ -362,19 +355,17 @@ Both meshers share:
 - `FVoxelVertex` output format (28 bytes: position, packed normal+AO, UV, packed material)
 - Triplanar UV computation (dominant-axis projection)
 - Material and biome assignment from solid voxels
-- Neighbor data handling (face, edge, corner slices)
+- Seam ownership: interior meshes plus face, edge and corner seam jobs
+- Voxel-resolution crossings and fitted shading normals (`VoxelCrossingGradient.h`)
 
 ### When to Use Which
 
 **Use Marching Cubes when:**
-- You need proven, battle-tested isosurface extraction
-- Transvoxel LOD transitions are important (well-documented algorithm)
-- Sharp features are not critical (organic terrain)
+- Rounded, organic terrain is wanted and sharp features are not
 
 **Use Dual Contouring when:**
 - Sharp edges and corners must be preserved (cliffs, caves, man-made structures)
 - Lower triangle counts are desired
-- LOD boundary merging is preferred over Transvoxel complexity
 - You want per-cell vertex control via QEF tuning
 
 ---
@@ -393,25 +384,11 @@ DC typically produces fewer triangles and vertices than MC for the same terrain:
 
 *(Approximate — varies with terrain complexity)*
 
-### GPU Performance
+### Cost
 
-Per 32^3 chunk on modern GPUs:
-- Edge crossing detection: ~0.3ms
-- QEF solve (Jacobi SVD in registers): ~0.8ms
-- Quad generation: ~0.2ms
-- **Total: ~1.3ms per chunk** (target < 3ms)
-
-The QEF solve pass is the most expensive due to the iterative Jacobi decomposition. The `[loop]` attribute (not `[unroll]`) is required for the Jacobi iteration to avoid shader compiler miscompilation with dynamic break and indexing.
-
-### Memory Usage
-
-Per 32^3 chunk at LOD 0:
-- Edge crossings buffer: `GridDim^3 * 3 * 32 bytes` = ~3.3 MB (temporary)
-- Cell vertices buffer: `GridDim^3 * 32 bytes` = ~1.1 MB (temporary)
-- Output vertex data: ~50-80 KB (persistent)
-- Output index data: ~20-40 KB (persistent)
-
-Intermediate buffers are allocated per-dispatch and released after readback.
+Meshing runs on worker threads. The QEF solve is the most expensive pass (the iterative Jacobi decomposition per cell).
+The fitted shading normals (G62) and voxel-resolution crossings (G80) cost chunk-mesh worker time at LOD 1 and 2 in
+exchange for LOD 0's surface; the edge-crossing and cell arrays are temporaries of one job, sized `GridDim^3`.
 
 ---
 
@@ -426,23 +403,15 @@ Intermediate buffers are allocated per-dispatch and released after readback.
 2. Increase `QEFBiasStrength` (try 0.7 - 1.0) to keep vertices closer to mass point
 3. Check that density field is smooth (noisy inputs cause unstable QEF solutions)
 
-### Missing Quads at Chunk Boundaries
+### Holes at Chunk Boundaries or LOD Seams
 
-**Symptom**: Holes or gaps at chunk edges
-
-**Solutions**:
-1. Verify neighbor data is being extracted correctly (face, edge, corner slices)
-2. Check that the grid extends to `[-1, GridSize+1]` for proper boundary edge detection
-3. Ensure edge ownership check is correct (at least one of 4 cells in interior range)
-
-### LOD Seams
-
-**Symptom**: Visible cracks between chunks at different LOD levels
+**Symptom**: Holes, gaps or cracks at chunk edges, at one LOD or between two
 
 **Solutions**:
-1. Verify `NeighborLODLevels` is being populated correctly in `FVoxelMeshingRequest`
-2. Check that `MergeLODBoundaryCells()` is running before quad generation
-3. Ensure merge ratio calculation is correct (`CoarserStride / CurrentStride`)
+1. The interior mesh leaves the boundary layers out by design: check that the seam jobs for the chunk ran and were not
+   left stale (`STREAMING_AND_SEAMS.md` has the diagnostics)
+2. Run the seam suites (`VoxelWorlds.Meshing.DualContour.SeamClosure.*`) and `Streaming.{Planet,Plane}.ClosedSurface`
+3. For a hole between two LODs, check whether the coarse cell facing it got a boundary fallback vertex (G17)
 
 ### Inverted Faces
 
@@ -457,8 +426,5 @@ Intermediate buffers are allocated per-dispatch and released after readback.
 - [Dual Contouring of Hermite Data](https://www.cs.rice.edu/~jwarren/papers/dualcontour.pdf) — Ju, Losasso, Schaefer, Warren (2002)
 - [Manifold Dual Contouring](https://people.engr.tamu.edu/schaefer/research/dualsimp_tvcg.pdf) — Schaefer, Ju, Warren (2007)
 - [Marching Cubes Meshing (companion doc)](MARCHING_CUBES_MESHING.md) — MC algorithm, Transvoxel, LOD material selection
+- [Streaming and seams](STREAMING_AND_SEAMS.md) — seam jobs, ownership and scheduling
 - [Architecture Overview](../ARCHITECTURE.md) — System architecture and module organization
-
----
-
-**Status**: Implemented — CPU Dual Contouring with LOD boundary merging, QEF solver with Jacobi SVD

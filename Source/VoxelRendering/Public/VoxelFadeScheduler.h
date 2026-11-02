@@ -24,7 +24,7 @@
  * Pure C++ (no UObject, no RHI); game-thread only.
  *
  * @see UVoxelRegionComponent::AdvanceFades
- * @see Documentation/VOXEL_QA_FOLLOWUPS_PLAN.md (R24)
+ * @see Documentation/Research/Archive/VOXEL_QA_FOLLOWUPS_PLAN.md (R24)
  */
 class VOXELRENDERING_API FVoxelFadeScheduler
 {

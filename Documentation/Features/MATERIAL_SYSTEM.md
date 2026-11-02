@@ -1,24 +1,22 @@
 # Material System
 
+> State as of 2026-11-02 (code review CR5).
+
 **Module**: VoxelCore
 **Dependencies**: Engine, RenderCore
 
 ## Overview
 
-The material system manages 256 different material types with texture atlases for cubic meshing and Texture2DArrays with triplanar projection for smooth meshing. The system is centered around the `UVoxelMaterialAtlas` data asset which provides both runtime texture management and editor configuration.
-
-## Implementation Status: COMPLETE
-
-The material system has been fully implemented with:
-- UVoxelMaterialAtlas data asset for material configuration
-- Auto-generated Texture2DArrays from source textures
-- MaterialID encoding via UV1 channel (sRGB-safe)
-- Triplanar sampling with UDN normal blending
-- Runtime material binding via DynamicMaterialInstance
+The material system manages 256 different material types with a packed texture atlas for cubic meshing and
+Texture2DArrays with triplanar projection for smooth meshing (Marching Cubes and Dual Contouring). It is centred on the
+`UVoxelMaterialAtlas` data asset, which holds the per-material configuration, the saved texture arrays and the material
+LUT; `M_VoxelMaster` draws both paths; MaterialIDs travel in UV1 (sRGB-safe); the arrays are bound at runtime through a
+dynamic material instance.
 
 ## UVoxelMaterialAtlas (Data Asset)
 
-The primary interface for material configuration. Create this asset in the Content Browser and assign it to your VoxelRegionComponent.
+The primary interface for material configuration. Create this asset in the Content Browser and assign it to the world
+configuration; the renderer binds it on every render region's component.
 
 ### FVoxelMaterialTextureConfig
 
@@ -145,8 +143,8 @@ public:
 
 The arrays are **saved assets** next to the atlas: `<Atlas>_AlbedoArray`, `<Atlas>_NormalArray` and
 `<Atlas>_RoughnessArray` in the atlas's folder (`DemoMaterialAtlas_AlbedoArray`, ...), referenced by the atlas and cooked
-with it. A packaged game has no source textures to build from, so it binds what was saved (`VISUAL_POLISH_PLAN.md`,
-F2.11). They are Git LFS files in the parent repo (`.gitattributes`), one slice per distinct texture (F2.12), about
+with it. A packaged game has no source textures to build from, so it binds what was saved (F2.11; before, a package drew
+the smooth terrain black from empty arrays). They are Git LFS files in the parent repo (`.gitattributes`), one slice per distinct texture (F2.12), about
 half of 512 x 512 x 4 bytes a slice on disk (the source, delta-coded and Kraken-compressed): `DemoMaterialAtlas`'s three
 7.9 MB (8, 8 and 3 slices), `VoxelMaterialAtlas`'s 14.3 MB (10 each); 38.8 and 39.2 MB with a slice per MaterialID.
 
@@ -177,7 +175,7 @@ half of 512 x 512 x 4 bytes a slice on disk (the source, delta-coded and Kraken-
 For each array (albedo, normal, roughness), `BuildSingleTextureArray` writes the array's source itself rather than through
 `UTexture2DArray::UpdateSourceFromSourceTextures()`, which would size every slice to the largest source texture and
 convert them all to RGBA32F when their gamma spaces or formats differ (on the demo atlas that was 4096 x 4096 x 22 float
-slices, 20-24 s of the first PIE and 800 MB on the GPU; see `VISUAL_POLISH_PLAN.md`, F2.10):
+slices, 20-24 s of the first PIE and 800 MB on the GPU; F2.10, tests `VoxelWorlds.MaterialAtlas.TextureArrays.*`):
 
 - Slices are `TextureArraySize` square (rounded up to a power of two), 8-bit BGRA. One slice per distinct texture with
   readable source data, in MaterialID order (F2.12): materials sharing a texture share its slice.
@@ -198,6 +196,15 @@ slices, 20-24 s of the first PIE and 800 MB on the GPU; see `VISUAL_POLISH_PLAN.
 
 On `DemoMaterialAtlas` (8, 8 and 3 slices at 512 for its 22 materials) the build takes about 3.3 s and the arrays
 4.8 MB on the GPU (15.8 MB with a slice per MaterialID).
+
+### Shipping on DX11 (SM5)
+
+A Windows package cooks SM6 and SM5. The arrays are saved, so the cook builds nothing (a missing array fails it, see
+"Cook check"). The voxel compute shaders are written so FXC, the SM5 compiler, compiles them in seconds: branchy helpers
+under `[branch]`, voxel and noise loops under `[loop]`, one cellular search for Cellular and Voronoi, and asin by its
+series below 0.1 (FXC's asin polynomial put DX11 planet pads off). Before, the SM5 cook's global shader step ran
+1 h 51 min of FXC and failed (F2.13; [GPU_PIPELINE.md](GPU_PIPELINE.md)). A cold-cache package's local DDC path must
+stay under 119 characters (`-LocalDataCachePath` moves Zen's store too).
 
 ---
 
@@ -241,108 +248,17 @@ float3 DebugMaterialColor(int MaterialID)
 
 ### Atlas Layout
 
-For cubic meshing, all material textures are packed into a single atlas:
-
-```
-Atlas: 2048x2048 pixels
-Tile size: 64x64 pixels
-Tiles per row: 32
-Max materials: 32 × 32 = 1024 tiles (256 materials × 3 faces + extras)
-
-Layout:
-┌────┬────┬────┬────┬───
-│ 0T │ 0B │ 0S │ 1T │...
-├────┼────┼────┼────┼───
-│ 1B │ 1S │ 2T │ 2B │...
-└────┴────┴────┴────┴───
-
-Material 0: Top, Bottom, Side
-Material 1: Top, Bottom, Side
-...
-```
-
-### Building the Atlas
-
-```cpp
-void UVoxelMaterialRegistry::BuildAtlasTexture()
-{
-    // Create atlas texture
-    AtlasTexture = UTexture2D::CreateTransient(AtlasSize, AtlasSize, PF_B8G8R8A8);
-    
-    // Get mip data
-    FTexture2DMipMap& Mip = AtlasTexture->GetPlatformData()->Mips[0];
-    void* Data = Mip.BulkData.Lock(LOCK_READ_WRITE);
-    FColor* PixelData = static_cast<FColor*>(Data);
-    
-    int32 TilesPerRow = AtlasSize / TileSize;
-    
-    // Pack each material
-    for (auto& Pair : Materials)
-    {
-        uint8 MaterialID = Pair.Key;
-        FVoxelMaterialDefinition& Mat = Pair.Value;
-        
-        // Calculate tile positions
-        int32 TileIndex = MaterialID * 3; // 3 tiles per material
-        int32 TopTileX = (TileIndex + 0) % TilesPerRow;
-        int32 TopTileY = (TileIndex + 0) / TilesPerRow;
-        int32 BottomTileX = (TileIndex + 1) % TilesPerRow;
-        int32 BottomTileY = (TileIndex + 1) / TilesPerRow;
-        int32 SideTileX = (TileIndex + 2) % TilesPerRow;
-        int32 SideTileY = (TileIndex + 2) / TilesPerRow;
-        
-        // Copy texture data to atlas
-        CopyTextureToAtlas(Mat.AlbedoTexture, PixelData, TopTileX, TopTileY);
-        CopyTextureToAtlas(Mat.AlbedoTexture, PixelData, BottomTileX, BottomTileY);
-        CopyTextureToAtlas(Mat.AlbedoTexture, PixelData, SideTileX, SideTileY);
-        
-        // Store UV coordinates
-        Mat.TopUV = FVector2D(
-            TopTileX * TileSize / (float)AtlasSize,
-            TopTileY * TileSize / (float)AtlasSize
-        );
-        Mat.BottomUV = FVector2D(
-            BottomTileX * TileSize / (float)AtlasSize,
-            BottomTileY * TileSize / (float)AtlasSize
-        );
-        Mat.SideUV = FVector2D(
-            SideTileX * TileSize / (float)AtlasSize,
-            SideTileY * TileSize / (float)AtlasSize
-        );
-    }
-    
-    Mip.BulkData.Unlock();
-    AtlasTexture->UpdateResource();
-}
-```
-
-### Getting Atlas UVs in Shaders
-
-```hlsl
-// Get UV coordinates for a material face
-float2 GetAtlasUV(uint MaterialID, uint Face, float2 LocalUV)
-{
-    // Each material has 3 tiles: Top, Bottom, Side
-    uint TileIndex = MaterialID * 3 + Face;
-    
-    uint TilesPerRow = AtlasSize / TileSize;
-    uint TileX = TileIndex % TilesPerRow;
-    uint TileY = TileIndex / TilesPerRow;
-    
-    // Base UV of tile
-    float2 TileBaseUV = float2(TileX, TileY) * TileSize / (float)AtlasSize;
-    
-    // Offset by local UV
-    float2 TileUV = LocalUV * TileSize / (float)AtlasSize;
-    
-    return TileBaseUV + TileUV;
-}
-```
+The cubic path samples `PackedAlbedoAtlas` (and the normal and roughness atlases), a grid of `AtlasColumns` x
+`AtlasRows` tiles. Each MaterialID's tile per face comes from the material LUT's face rows (`BuildMaterialLUT`; rows
+0-2 for the top, side and bottom faces): R the atlas column, G the row, B the UV scale x 25.5, A the flags ("LUT
+A-Channel Encoding" below). A config with `bUseFaceVariants` gives each face its own tile (`TopTile`, `SideTile`,
+`BottomTile`), else every face uses `AtlasColumn` / `AtlasRow`. `MF_CubicAtlasSample` reads the LUT by texel with the
+vertex's MaterialID (UV1.x) and face type (UV1.y) and samples the tile with UV0.
 
 ### Face Type on a Planet (spherical Phase 4, SP-D3)
 
-The face type (top, side, bottom) that runs is the custom vertex factory's: `FVoxelSceneProxy::ConvertVertex` classifies
-every vertex's normal against 0.7, along world +Z on heightmap worlds. On a planet the custom VF renderer turns on
+The face type (top, side, bottom) that runs is the renderer's: `FVoxelSceneProxy::ConvertVertex` classifies
+every vertex's normal against 0.7, along world +Z on heightmap worlds. On a planet the renderer turns on
 `UVoxelRegionComponent::SetRadialFaceUp`, and the normal is measured against the vertex's radial up instead
 (`Rendering.Planet.FaceTypeByLocalUp`). `VoxelMaterialCommon.ush` gets an up-aware `GetVoxelFaceTypeUp` for shaders
 that need one (no shader includes it today). Smooth materials are triplanar on world axes, which works in any
@@ -362,17 +278,16 @@ before it reaches a custom node.
 
 ## Smooth Mode: Triplanar Projection
 
-For smooth meshing (Marching Cubes), materials use triplanar projection to avoid UV seams. The implementation uses Custom HLSL nodes in the Unreal Material Editor.
+For smooth meshing (Marching Cubes and Dual Contouring), materials use triplanar projection to avoid UV seams. The implementation uses Custom HLSL nodes in the Unreal Material Editor.
 
 ### MaterialID Encoding
 
 MaterialID is stored in the **UV1.x** channel as a float value. This avoids sRGB gamma conversion issues that would corrupt integer data in vertex colors.
 
-**In Mesh Generator (FVoxelCPUMarchingCubesMesher):**
+**In the renderer's vertex conversion (`FVoxelLocalVertex::FromVoxelVertex`):**
 ```cpp
-// Store MaterialID in UV1.x
-Vertex.UV1.X = static_cast<float>(MaterialID);
-Vertex.UV1.Y = 0.0f;  // Reserved
+// MaterialID and the face type in UV1 as exact floats
+Result.TexCoord1 = FVector2f(static_cast<float>(MaterialID), static_cast<float>(FaceType));
 ```
 
 **In Shader:**
@@ -509,8 +424,8 @@ return BlendedNormal;
 
 ### The Slice Row (F2.12)
 
-The texture arrays hold one slice per distinct texture, not one per MaterialID (`VISUAL_POLISH_PLAN.md`, F2.12), so the
-triplanar functions cannot sample at the MaterialID. `UVoxelMaterialAtlas::BuildMaterialLUT` writes a fourth row below
+The texture arrays hold one slice per distinct texture, not one per MaterialID (F2.12: on `DemoMaterialAtlas` 14-19 of 22
+slices had been copies; test `VoxelWorlds.MaterialAtlas.TextureArrays.SliceTables`), so the triplanar functions cannot sample at the MaterialID. `UVoxelMaterialAtlas::BuildMaterialLUT` writes a fourth row below
 the three face rows: texel (MaterialID, 3) holds the material's slice in the albedo array (R), the normal array (G) and
 the roughness array (B), from the atlas's slice tables; A is 0. Both triplanar functions take the `MaterialLUT` texture
 as an input (wired in `M_VoxelMaster` and `M_VoxelMaster_Fade` from the same `MaterialLUT` parameter the cubic path
@@ -518,21 +433,17 @@ reads) and `Load` that texel. The face rows are read by texel too (`MF_CubicAtla
 move them. An atlas whose arrays were built with a slice per MaterialID has empty slice tables, and its LUT gives every
 MaterialID the slice of its own index. `BuildTextureArrays()` rewrites an existing LUT in place, so materials already
 bound to it read the new slices with the new arrays (the editor rebuilds stale arrays when a world binds the atlas, after
-the LUT was built). The planet far field's `FarFieldMaterialPick` produces a MaterialID like every voxel vertex and needs
-nothing of its own. `Scripts/setup_texture_array_slices.py` (UE5_PluginDev) made the material edits, headless.
+the LUT was built). The far field's `FarFieldMaterialPick` produces a MaterialID like every voxel vertex and needs
+nothing of its own. `Scripts/setup_texture_array_slices.py` (parent repository) made the material edits, headless.
 
 ### Footprint Sampling (visual polish VP2-O1)
 
-Until 2026-10-24 both nodes sampled with `SampleLevel(..., 0)`: mip 0 at every distance. At one 512 px tile per metre a
-pixel of ground 10 m away covers about 5 texels and 50 m away about 26, so every pixel beyond a few metres picked one
-texel out of its footprint, a different one with every sub-pixel camera move and TSR jitter: aliasing TSR cannot
-resolve, the terrain's "extremely noisy" look (`Documentation/VISUAL_POLISH_PLAN.md`). The mip chain restored in
-VoxelWorlds#25 was never read.
-
-Now each projection samples with `SampleGrad` and the UV derivatives of the translated world position, with the
+At one 512 px tile per metre a pixel of ground 10 m away covers about 5 texels and 50 m away about 26, so a sampler
+reading mip 0 picks one texel out of each pixel's footprint, a different one with every sub-pixel camera move and TSR
+jitter: aliasing TSR cannot resolve, a noisy-looking terrain. Each projection samples with `SampleGrad` and the UV derivatives of the translated world position, with the
 array's own sampler (`AlbedoArraySampler` etc., anisotropic: the arrays are `TEXTUREGROUP_World` with `TF_Default`).
 The switch is the scalar `GradientSampling` of `MPC_VoxelMaterial` (`/VoxelWorlds/Materials/`), read inside both
-functions; `voxel.Material.GradientSampling` (1 by default, 0 = mip 0 as before) sets it in every game and PIE world
+functions; `voxel.Material.GradientSampling` (1 by default, 0 = mip 0, the rule before) sets it in every game and PIE world
 (a console variable sink, and each `UVoxelRegionComponent` applies it when its scene proxy is created). On `PlanetTest`
 at four fixed views, a quarter-pixel camera turn changes the ground's pixels by 43.8-45.0 luma (of 255) at mip 0 and
 0.6-1.6 with gradients; the ground's high-frequency energy under TSR falls from 55-59 to 3.5-7.3; GPU time per frame
@@ -572,79 +483,21 @@ of times, with its hash wrapped to it, so nothing jumps where the position wraps
 as before. The tunables (cell size, number of offsets, where the blend starts) are `#define`s at the top of the include;
 the include's hash is part of the material's shader key, so editing it recompiles the masters (in a running editor:
 `recompileshaders changed`, then recompile the materials). `Scripts/setup_texture_variation.py` writes the nodes and the
-collection scalars; `VoxelWorlds.Rendering.TextureVariation.Assets` checks the wiring. Results: `VISUAL_POLISH_PLAN.md`,
-"VP2-O2 texture variation".
+collection scalars; `VoxelWorlds.Rendering.TextureVariation.Assets` checks the wiring. The tile-lattice autocorrelation
+of the ground from above fell from 0.281 to 0.049 (the plaid on far ground gone) at no GPU cost (VP2-O2; history:
+`VISUAL_POLISH_PLAN.md` "VP2-O2 texture variation").
 
 ---
 
 ## Material Assignment
 
-### By Biome
-
-Materials are typically assigned based on biome:
-
-```cpp
-uint8 GetMaterialForBiome(uint8 BiomeID, float Density, FVector WorldPos)
-{
-    const FBiomeDefinition& Biome = BiomeRegistry->GetBiome(BiomeID);
-    
-    // Surface material
-    if (Density > 120 && Density < 135)
-    {
-        return Biome.SurfaceMaterial;
-    }
-    
-    // Subsurface (by depth)
-    float DepthBelowSurface = (Density - 127) * VoxelSize;
-    
-    if (DepthBelowSurface < 200.0f)
-    {
-        return Biome.ShallowMaterial; // Topsoil
-    }
-    else if (DepthBelowSurface < 1000.0f)
-    {
-        return Biome.MediumMaterial; // Stone
-    }
-    else
-    {
-        return Biome.DeepMaterial; // Bedrock
-    }
-}
-```
-
-### By Height
-
-Materials can also vary by altitude:
-
-```cpp
-uint8 GetMaterialByHeight(float Elevation)
-{
-    if (Elevation > 2000.0f)
-    {
-        return MaterialID_Snow;
-    }
-    else if (Elevation > 1500.0f)
-    {
-        return MaterialID_Rock;
-    }
-    else if (Elevation > 500.0f)
-    {
-        return MaterialID_Grass;
-    }
-    else if (Elevation > 0.0f)
-    {
-        return MaterialID_Sand;
-    }
-    else
-    {
-        return MaterialID_Water;
-    }
-}
-```
+Which material a voxel gets (the biome's surface and depth layers, height rules, ores) is decided at generation; see
+[BIOME_SYSTEM.md](BIOME_SYSTEM.md). The material definitions are `FVoxelMaterialDefinition` (`VoxelMaterialDefinition.h`)
+in `FVoxelMaterialRegistry`, which an atlas extends (below).
 
 ---
 
-## Hardness (world modes review §22, decision D31)
+## Hardness (decision D31)
 
 `FVoxelMaterialDefinition::Hardness` is how hard a block of the material is to break: the seconds it takes bare-handed.
 It is a property of the material, set by the registry's defaults (`FVoxelMaterialRegistry::EnsureInitialized`), read with
@@ -667,129 +520,36 @@ is held (`UVCBlockInteractionComponent::GetBreakSeconds`; bare hands 1, the ston
 
 ---
 
-## Example Material Definitions
-
-*(A design sketch from before the registry; its fields do not all exist. The real definition is `VoxelMaterialDefinition.h`,
-and its `Hardness` is the section above.)*
-
-### Grass Material
-
-```cpp
-FVoxelMaterialDefinition GrassMaterial;
-GrassMaterial.MaterialID = 1;
-GrassMaterial.MaterialName = TEXT("Grass");
-GrassMaterial.TopUV = FVector2D(0.0f, 0.0f);
-GrassMaterial.BottomUV = FVector2D(0.0625f, 0.0f);
-GrassMaterial.SideUV = FVector2D(0.125f, 0.0f);
-GrassMaterial.Hardness = 0.5f;
-GrassMaterial.bEmissive = false;
-GrassMaterial.TriplanarScale = 0.1f;
-```
-
-### Stone Material
-
-```cpp
-FVoxelMaterialDefinition StoneMaterial;
-StoneMaterial.MaterialID = 2;
-StoneMaterial.MaterialName = TEXT("Stone");
-StoneMaterial.TopUV = FVector2D(0.1875f, 0.0f);
-StoneMaterial.BottomUV = FVector2D(0.1875f, 0.0f);
-StoneMaterial.SideUV = FVector2D(0.1875f, 0.0f);
-StoneMaterial.Hardness = 3.0f;
-StoneMaterial.bEmissive = false;
-StoneMaterial.TriplanarScale = 0.05f;
-```
-
-### Lava Material (Emissive)
-
-```cpp
-FVoxelMaterialDefinition LavaMaterial;
-LavaMaterial.MaterialID = 10;
-LavaMaterial.MaterialName = TEXT("Lava");
-LavaMaterial.TopUV = FVector2D(0.25f, 0.25f);
-LavaMaterial.BottomUV = FVector2D(0.25f, 0.25f);
-LavaMaterial.SideUV = FVector2D(0.25f, 0.25f);
-LavaMaterial.Hardness = 100.0f; // Unbreakable
-LavaMaterial.bEmissive = true;
-LavaMaterial.EmissiveColor = FLinearColor(1.0f, 0.3f, 0.0f, 5.0f);
-LavaMaterial.TriplanarScale = 0.1f;
-```
-
----
-
-## Data Asset Configuration
-
-```cpp
-/**
- * Material Registry Data Asset
- * 
- * Designer-friendly configuration for materials.
- */
-UCLASS()
-class UVoxelMaterialRegistryAsset : public UDataAsset
-{
-    GENERATED_BODY()
-    
-public:
-    /** Material definitions */
-    UPROPERTY(EditAnywhere, Category = "Materials")
-    TArray<FVoxelMaterialDefinition> Materials;
-    
-    /** Atlas configuration */
-    UPROPERTY(EditAnywhere, Category = "Atlas")
-    int32 AtlasSize = 2048;
-    
-    UPROPERTY(EditAnywhere, Category = "Atlas")
-    int32 TileSize = 64;
-    
-    /** Apply to registry */
-    void ApplyToRegistry(UVoxelMaterialRegistry* Registry);
-};
-```
-
----
-
 ## Runtime Material Binding
 
 The material system uses Dynamic Material Instances to bind texture arrays at runtime.
 
 ### UVoxelRegionComponent::UpdateMaterialAtlasParameters
 
-```cpp
-void UVoxelRegionComponent::UpdateMaterialAtlasParameters(UMaterialInstanceDynamic* DynamicMaterial)
-{
-    if (!MaterialAtlas)
-    {
-        UE_LOG(LogVoxelRendering, Warning, TEXT("No MaterialAtlas, skipping atlas setup"));
-        return;
-    }
+Abridged:
 
-    // Build LUT if needed
+```cpp
+void UVoxelRegionComponent::UpdateMaterialAtlasParameters()
+{
+    DynamicMaterialInstance->SetScalarParameterValue(FName("bSmoothTerrain"), bUseSmoothMeshing ? 1.0f : 0.0f);
+
+    // The material LUT (face rows and the slice row), built if dirty or missing
     if (MaterialAtlas->IsLUTDirty() || !MaterialAtlas->GetMaterialLUT())
     {
         MaterialAtlas->BuildMaterialLUT();
     }
+    DynamicMaterialInstance->SetTextureParameterValue(FName("MaterialLUT"), MaterialAtlas->GetMaterialLUT());
 
-    // The saved arrays; in the editor missing or stale ones are rebuilt first (left unsaved, with a warning)
+    // Cubic: the packed atlases and their grid
+    DynamicMaterialInstance->SetTextureParameterValue(FName("PackedAlbedoAtlas"), MaterialAtlas->PackedAlbedoAtlas);
+    DynamicMaterialInstance->SetScalarParameterValue(FName("AtlasColumns"), MaterialAtlas->AtlasColumns);
+    DynamicMaterialInstance->SetScalarParameterValue(FName("AtlasRows"), MaterialAtlas->AtlasRows);
+
+    // Smooth: the saved arrays; in the editor missing or stale ones are rebuilt first (left unsaved, with a warning)
     MaterialAtlas->EnsureTextureArrays();
-
-    // Set texture array parameters
-    if (MaterialAtlas->AlbedoArray)
-    {
-        DynamicMaterial->SetTextureParameterValue(TEXT("AlbedoArray"), MaterialAtlas->AlbedoArray);
-    }
-    if (MaterialAtlas->NormalArray)
-    {
-        DynamicMaterial->SetTextureParameterValue(TEXT("NormalArray"), MaterialAtlas->NormalArray);
-    }
-    if (MaterialAtlas->RoughnessArray)
-    {
-        DynamicMaterial->SetTextureParameterValue(TEXT("RoughnessArray"), MaterialAtlas->RoughnessArray);
-    }
-
-    // Set atlas dimensions
-    DynamicMaterial->SetScalarParameterValue(TEXT("AtlasColumns"), MaterialAtlas->AtlasColumns);
-    DynamicMaterial->SetScalarParameterValue(TEXT("AtlasRows"), MaterialAtlas->AtlasRows);
+    DynamicMaterialInstance->SetTextureParameterValue(FName("AlbedoArray"), MaterialAtlas->AlbedoArray);
+    DynamicMaterialInstance->SetTextureParameterValue(FName("NormalArray"), MaterialAtlas->NormalArray);
+    DynamicMaterialInstance->SetTextureParameterValue(FName("RoughnessArray"), MaterialAtlas->RoughnessArray);
 }
 ```
 
@@ -811,29 +571,10 @@ void UVoxelRegionComponent::UpdateMaterialAtlasParameters(UMaterialInstanceDynam
 
 ---
 
-## Performance Considerations
+## Memory
 
-### Atlas vs Individual Textures
-
-**Atlas (Cubic)**:
-- ✅ Single texture bind
-- ✅ Better batching
-- ✅ Lower draw calls
-- ❌ Limited resolution per material
-- ❌ Atlas rebuilding overhead
-
-**Individual Textures (Smooth)**:
-- ✅ High resolution per material
-- ✅ Easy to update
-- ❌ More texture binds
-- ❌ Worse batching
-
-### Memory Usage
-
-**Atlas**: 2048×2048 × 4 bytes (RGBA) = 16 MB
-**Individual Textures**: 256 materials × 1024×1024 × 4 × 3 (albedo/normal/RM) = 3 GB
-
-**Recommendation**: Use atlas for cubic, individual textures for smooth (with texture arrays).
+The packed atlas is one texture per kind. The arrays hold one 512 x 512 BC-compressed slice per distinct texture:
+4.8 MB on the GPU for `DemoMaterialAtlas`, 7.2 MB for `VoxelMaterialAtlas` (800 MB at 4096 RGBA32F before F2.10).
 
 ---
 
@@ -864,8 +605,8 @@ The master material uses 4 reusable material functions:
 
 ### Far-Field Material Blend (FarFieldMaterialPick)
 
-A planet's far field ([LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field") draws with the same material, and since G45
-(WORLD_MODES_REVIEW_PLAN.md §20.27, decision D28) its quads blend two materials: UV1.x the quad's first material as on
+The far field ([LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field": a planet's, a plane's and an island's) draws with the
+same material, and since G45 (decision D28) its quads blend two materials: UV1.x the quad's first material as on
 every voxel vertex, vertex colour R its second, and vertex colour A 255 less the second's weight at the vertex. In
 `M_VoxelMaster` and `M_VoxelMaster_Fade` a Custom node, **FarFieldMaterialPick**, sits between `MF_GetMaterialID` and the
 `MaterialID` named reroute, so everything that reads the reroute sees the picked material:
@@ -885,19 +626,22 @@ return MaterialID;
 ```
 
 Each pixel takes one of the two materials against interleaved gradient noise moved every frame, which TSR averages into a
-gradient across the quad: no texture sample is added. Every voxel chunk vertex has alpha 255 (weight 0) and keeps
+gradient across the quad: no texture sample is added. Before, a far-field quad drew one material, the most common of
+its corners' picks, so every material border was a staircase of quads (a few km a step at a planet's horizon);
+`voxel.World.FarFieldMaterialBlend 0` restores that (tests `FarField.Planet.MaterialMix`, `.MaterialBlend`,
+`FarField.Plane.MaterialMix`). Every voxel chunk vertex has alpha 255 (weight 0) and keeps
 `MaterialID`. Vertex colour reaches the shader as UNORM (`VET_Color`, no sRGB decode), so R carries an ID exactly; IDs stay
 out of interpolation because both are flat per triangle. The node is added by `Scripts/setup_farfield_material_blend.py`
-(UE5_PluginDev; idempotent, run headless). The VertexColor node's default output is RGB only, so R and A go in as their own
+(parent repository; idempotent, run headless). The VertexColor node's default output is RGB only, so R and A go in as their own
 inputs: a `.a` on that output fails the material's compile and every mesh using it draws the default material.
 
 ### Material Assets
 
 | Asset | Location | Purpose |
 |-------|----------|---------|
-| M_VoxelMaster | Content/VoxelWorlds/Materials/ | Master material with both paths |
-| MI_VoxelDefault | Content/VoxelWorlds/Materials/ | Default material instance |
-| MF_* | Content/VoxelWorlds/Materials/Functions/ | Reusable material functions |
+| M_VoxelMaster | `/VoxelWorlds/Materials/` | Master material with both paths |
+| MI_VoxelDefault | `/VoxelWorlds/Materials/` | Default material instance |
+| MF_* | `/VoxelWorlds/Materials/Functions/` | Reusable material functions |
 
 See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed setup instructions.
 
@@ -923,7 +667,6 @@ face rows to encode per-material flags:
 - **Bit 0**: `bIsMasked` (1 = masked blend, 0 = opaque)
 - **Bits 1-7**: Reserved for future flags
 
-Previously the A channel was unused (always 255). Now it encodes flags as a bitfield.
 
 ### Non-Occluding Face Generation (Cubic Mesher)
 
@@ -955,38 +698,23 @@ See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed 
 
 ---
 
-## Implementation Complete
-
-The material system is fully implemented with:
-
-1. ✅ `UVoxelMaterialAtlas` data asset with per-material configuration
-2. ✅ Auto-generated Texture2DArrays from source textures
-3. ✅ MaterialID encoding via UV1 channel (sRGB-safe)
-4. ✅ Triplanar sampling for smooth terrain (UDN normal blending)
-5. ✅ UV-based atlas sampling for cubic terrain (MaterialLUT lookup)
-6. ✅ Unified M_VoxelMaster material with automatic mode switching
-7. ✅ 4 reusable Material Functions
-8. ✅ Runtime binding via DynamicMaterialInstance
-9. ✅ Automatic mode sync from UVoxelWorldConfiguration::MeshingMode
-10. ✅ VoxelTriplanarCommon.ush shader utilities
-11. ✅ Per-material opacity flags (`bIsMasked`, `bNonOccluding`)
-13. ✅ LUT A-channel flag encoding
-14. ✅ Non-occluding face generation in cubic mesher
-
-### Key Files
+## Key Files
 
 **C++ Code:**
 - `VoxelCore/Public/VoxelMaterialAtlas.h` - Data asset header
 - `VoxelCore/Private/VoxelMaterialAtlas.cpp` - BuildTextureArrays(), BuildMaterialLUT()
-- `VoxelRendering/Private/VoxelRegionComponent.cpp` - UpdateMaterialAtlasParameters()
+- `VoxelRendering/Private/VoxelRegionComponent.cpp` - UpdateMaterialAtlasParameters(), the `voxel.Material.*` switches
 - `VoxelRendering/Private/VoxelMeshRenderer.cpp` - Automatic mode sync
 
 **Shaders:**
 - `Shaders/Private/VoxelTriplanarCommon.ush` - Triplanar utility functions
+- `Shaders/Private/VoxelTextureVariation.ush` - Tile and macro variation (VP2-O2)
 
-**Material Assets (Content/VoxelWorlds/Materials/):**
+**Material Assets (`/VoxelWorlds/Materials/`):**
 - `M_VoxelMaster` - Unified master material
+- `M_VoxelMaster_Fade` - The crossfade twin (Masked)
 - `MI_VoxelDefault` - Default material instance
+- `MPC_VoxelMaterial` - The `voxel.Material.*` switches
 - `Functions/MF_GetMaterialID` - MaterialID extraction
 - `Functions/MF_TriplanarSampleAlbedoRoughness` - Smooth terrain sampling
 - `Functions/MF_TriplanarSampleNormal` - Smooth terrain normals

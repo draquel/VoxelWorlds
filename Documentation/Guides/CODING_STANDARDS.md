@@ -1,6 +1,10 @@
 # Coding Standards
 
-Project-specific coding conventions and best practices.
+> State as of 2026-11-02 (code review CR5).
+
+Project-specific coding conventions and best practices. The names below (`FClassName`, `IVoxel*`, ...) are patterns,
+not types. The plugin's rules of architecture (seam ownership, world modes, console names) are in
+`.claude/instructions.md`.
 
 ## Unreal Engine Conventions
 
@@ -71,15 +75,18 @@ Arr.Pop();  // Default behavior (allows shrinking)
 - `AVoxel*` - Voxel actors
 - `IVoxel*` - Voxel interfaces
 
+A type, function or cvar that works in every world mode carries no mode in its name (`FVoxelFarField`, not
+`FVoxelPlanetFarField`); a rename of a reflected name adds a `[CoreRedirects]` entry in `Config/DefaultVoxelWorlds.ini`.
+Console names are `voxel.<System>.<Name>`, grouped by the system that reads the value.
+
 ## Module Organization
 
 ### Dependency Rules
-```
-VoxelCore: No dependencies on other modules
-VoxelLOD: Depends only on VoxelCore
-VoxelRendering: Depends only on VoxelCore
-VoxelStreaming: Depends on VoxelCore + VoxelLOD
-```
+- `VoxelCore` depends on no other voxel module; `VoxelMeshing` and `VoxelRendering` only on `VoxelCore`.
+- `VoxelStreaming` is the hub; `VoxelMap`, `VoxelNavigation` and `VoxelPCG` are its clients, and nothing in the plugin
+  depends on them.
+- No voxel module depends on a game plugin. [ARCHITECTURE.md](../ARCHITECTURE.md) has the full table.
+- A module dependency added only to link (no include) says so in a comment in `Build.cs`.
 
 ### File Structure
 ```cpp
@@ -123,7 +130,7 @@ All public interfaces must have Doxygen comments:
  * Thread Safety: Read-only methods are thread-safe.
  * 
  * @see FDistanceBandLODStrategy
- * @see Documentation/LOD_SYSTEM.md
+ * @see Documentation/Features/LOD_SYSTEM.md
  */
 class IVoxelLODStrategy {
     /**
@@ -145,11 +152,12 @@ class IVoxelLODStrategy {
 
 ## Performance Guidelines
 
-### GPU-First Principle
-1. Keep data on GPU whenever possible
-2. Minimize CPU→GPU transfers
-3. No readback in runtime path
-4. Batch operations (multiple chunks per dispatch)
+### Threads
+1. Generation runs on the GPU (one readback per chunk) or on a worker; meshing, seams, collision cooks, scatter
+   extraction and far-compression encodes run on workers
+2. The game thread schedules, installs results and answers queries; it never meshes, decodes or encodes a chunk
+3. Workers read voxels from immutable snapshots, never from a descriptor's array
+4. Budget per-tick work (caps per tick, time slices) rather than letting a queue drain in one frame
 
 ### Memory Guidelines
 1. Use packed data structures
@@ -174,25 +182,24 @@ verify(Expression);            // Check + execute
 ```
 
 ### Logging
+One category per module (`LogVoxelCore`, `LogVoxelStreaming`, `LogVoxelMeshing`, ...):
 ```cpp
-DECLARE_LOG_CATEGORY_EXTERN(LogVoxel, Log, All);
-
-UE_LOG(LogVoxel, Log, TEXT("Message"));
-UE_LOG(LogVoxel, Warning, TEXT("Warning: %s"), *String);
-UE_LOG(LogVoxel, Error, TEXT("Error: %d"), Value);
+UE_LOG(LogVoxelStreaming, Log, TEXT("Message"));
+UE_LOG(LogVoxelStreaming, Warning, TEXT("Warning: %s"), *String);
+UE_LOG(LogVoxelStreaming, Error, TEXT("Error: %d"), Value);
 ```
 
 ### Error Handling
 ```cpp
 // For expected errors
 if (!IsValid()) {
-    UE_LOG(LogVoxel, Warning, TEXT("Invalid state"));
+    UE_LOG(LogVoxelCore, Warning, TEXT("Invalid state"));
     return false;
 }
 
 // For unexpected errors
 if (!CriticalCondition) {
-    UE_LOG(LogVoxel, Error, TEXT("Critical failure"));
+    UE_LOG(LogVoxelCore, Error, TEXT("Critical failure"));
     ensure(false); // Log callstack
     return;
 }
@@ -200,31 +207,20 @@ if (!CriticalCondition) {
 
 ## Testing
 
-### Unit Tests
+Tests are UE automation tests in each module's `Tests/` folder, named `VoxelWorlds.<System>.<Case>`:
 ```cpp
-TEST(VoxelCore, VoxelDataPacking) {
-    FVoxelData Data;
-    Data.MaterialID = 42;
-    Data.Density = 127;
-    
-    EXPECT_EQ(Data.MaterialID, 42);
-    EXPECT_EQ(Data.Density, 127);
-}
-```
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelDataPackingTest, "VoxelWorlds.Core.VoxelDataPacking",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-### Integration Tests
-```cpp
-TEST(VoxelLOD, DistanceBandBasic) {
-    FDistanceBandLODStrategy Strategy;
-    // Configure...
-    
-    FLODQueryContext Context;
-    Context.ViewerPosition = FVector::ZeroVector;
-    
-    int32 LOD = Strategy.GetLODForChunk(FIntVector(0,0,0), Context);
-    EXPECT_EQ(LOD, 0); // Should be finest LOD at origin
+bool FVoxelDataPackingTest::RunTest(const FString& Parameters)
+{
+	const FVoxelData Data(42, 127);
+	TestEqual(TEXT("MaterialID survives a pack"), (int32)FVoxelData::Unpack(Data.Pack()).MaterialID, 42);
+	return true;
 }
 ```
+A test that needs a real RHI (GPU generation, a scene proxy) skips itself under `-nullrhi` and must be run in the
+editor; [TESTING_STRATEGY.md](TESTING_STRATEGY.md) has the suites and the gate.
 
 ## Git Workflow
 
@@ -292,7 +288,7 @@ AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, []() {
 
 ## Anti-Patterns (Avoid)
 
-❌ CPU readback in runtime path
+❌ Meshing, decoding or encoding a chunk on the game thread
 ❌ Synchronous GPU waits
 ❌ Memory allocations per frame
 ❌ Deep recursion

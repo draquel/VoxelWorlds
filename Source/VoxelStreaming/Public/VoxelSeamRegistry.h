@@ -8,7 +8,7 @@
  * Seam ownership + scheduling registry (VoxelStreaming, seam-ownership refactor).
  *
  * Part of the single-owner seam-meshing architecture
- * (Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md §2): every chunk mesh is an INTERIOR mesh
+ * (Documentation/Research/Archive/SEAM_OWNERSHIP_ARCHITECTURE.md §2): every chunk mesh is an INTERIOR mesh
  * (zero neighbour dependence) plus SEAM meshes, where each physical boundary between chunks is meshed
  * exactly ONCE by a single job that reads both sides' data. This registry decides WHICH seam gets
  * meshed, by WHOM, and WHEN; UVoxelChunkManager runs the jobs (DrainSeamJobs) with the mode-matched
@@ -21,7 +21,7 @@
  * headless and decoupled from the streaming component.
  *
  * @see UVoxelChunkManager (the caller that drives the hooks and the per-tick scheduler)
- * @see Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md
+ * @see Documentation/Research/Archive/SEAM_OWNERSHIP_ARCHITECTURE.md
  */
 
 /** The three kinds of physical boundary a chunk shares with its neighbourhood. */

@@ -1,6 +1,11 @@
 # Master Material Setup Guide
 
-This guide walks through creating the unified voxel master material system.
+> State as of 2026-11-02 (code review CR5).
+
+This guide walks through building the unified voxel master material system. The plugin ships the result in
+`Plugins/VoxelWorlds/Content/Materials` (`M_VoxelMaster`, its crossfade twin `M_VoxelMaster_Fade`, `MI_VoxelDefault`,
+`MPC_VoxelMaterial` and the four functions in `Functions/`); the steps below are how they are built and what to keep
+when changing them.
 
 ## Overview
 
@@ -33,7 +38,7 @@ This is synced in `FVoxelMeshRenderer::Initialize()` which sets `bUseSmoothMeshi
 ## Step 1: Create Material Functions
 
 ### Location
-Create in: `Content/VoxelWorlds/Materials/Functions/`
+`/VoxelWorlds/Materials/Functions/` (the plugin's `Content/Materials/Functions`)
 
 ---
 
@@ -374,7 +379,7 @@ return TangentNormal;
 ## Step 2: Create Master Material (M_VoxelMaster)
 
 ### Location
-Create in: `Content/VoxelWorlds/Materials/M_VoxelMaster`
+`/VoxelWorlds/Materials/M_VoxelMaster`
 
 ### Material Settings
 - **Blend Mode**: Masked
@@ -578,7 +583,7 @@ Connect to Material Outputs:
 ## Step 3: Create Default Material Instance
 
 ### Location
-Create in: `Content/VoxelWorlds/Materials/MI_VoxelDefault`
+`/VoxelWorlds/Materials/MI_VoxelDefault`
 
 ### Setup
 1. Right-click M_VoxelMaster → Create Material Instance
@@ -595,15 +600,12 @@ Create in: `Content/VoxelWorlds/Materials/MI_VoxelDefault`
 
 ---
 
-## Step 4: Update VoxelRegionComponent
+## Step 4: How the region component binds it
 
-The component should use M_VoxelMaster as the base material and create a Dynamic Material Instance from it.
-
-### Code Changes
-See `VoxelRegionComponent.cpp` - CreateVoxelMaterialInstance() should:
-1. Load M_VoxelMaster (or accept it as a parameter)
-2. Create Dynamic Material Instance
-3. Call UpdateMaterialAtlasParameters() to bind texture arrays
+Each render region's `UVoxelRegionComponent` makes a dynamic material instance of the master
+(`CreateVoxelMaterialInstance`) and binds the atlas's texture arrays, packed atlases and material LUT to it
+(`UpdateMaterialAtlasParameters`, called again when the atlas changes). Nothing needs adding in code for a new master
+that keeps these parameter names.
 
 ---
 

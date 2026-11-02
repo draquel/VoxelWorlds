@@ -1,6 +1,8 @@
 # Water System Architecture
 
-**Module**: VoxelCore (flags), VoxelGeneration (fill pass), VoxelMeshing (water mesher), VoxelStreaming (tile management), VoxelRendering (rendering)
+> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+
+**Module**: VoxelCore (flags, the sea), VoxelGeneration (fill pass), VoxelMeshing (water mesher), VoxelStreaming (propagation, tiles, the far ocean), VoxelRendering (rendering)
 
 ## Table of Contents
 
@@ -49,11 +51,12 @@ VoxelGeneration
 
 VoxelStreaming
     ├── UVoxelWaterPropagation ← BFS flood fill on terrain edits
+    ├── FVoxelWaterTiles       ← The 2D tiles: masks, dirty queue, meshing
     └── UVoxelChunkManager
         ├── PropagateWaterFromNeighbors() ← Cross-chunk boundary propagation
-        ├── UpdateWaterTileContribution() ← Partial mask from chunk
-        ├── RemoveWaterTileContribution() ← On chunk unload
-        └── ProcessDirtyWaterTiles()      ← Time-sliced mesh generation
+        ├── UpdateWaterTileContribution() ← Partial mask from chunk (FVoxelWaterTiles::Contribute)
+        ├── RemoveWaterTileContribution() ← On chunk unload (FVoxelWaterTiles::Remove)
+        └── ProcessDirtyWaterTiles()      ← Time-sliced mesh generation (FVoxelWaterTiles::ProcessDirty)
 
 VoxelMeshing
     └── FVoxelWaterMesher (static utility)
@@ -97,7 +100,7 @@ static FVoxelData Water();        // Create water voxel (air + water flag)
 - Water voxels are **air** (Density < 127) with the water flag set
 - Solid voxels never have water flags — they represent terrain under water
 - The `VOXEL_FLAG_UNDERGROUND` flag distinguishes cave interiors where water may not propagate
-- GPU generation sets water flags via per-voxel heuristic (`WorldPos.Z < WaterLevel && WorldPos.Z > TerrainHeight`)
+- GPU generation runs the CPU fill pass's phases as compute shaders (`WaterColumnSeedCS`, `WaterLineSeedCS` on a planet, `WaterFloodSweepCS` / `WaterFloodSweepRadialCS`; `Shaders/Private/VoxelPostPasses.usf`), so both generators flag the same voxels
 
 ---
 
@@ -105,14 +108,14 @@ static FVoxelData Water();        // Create water voxel (air + water flag)
 
 ### Initial Fill Pass (Generation Time)
 
-**File**: `VoxelGeneration/Private/` (within terrain generation pipeline)
+**File**: `VoxelGeneration/Private/VoxelGenerationPostPasses.cpp`
 
-During chunk generation, `ApplyWaterFillPass()` performs a CPU column-scan:
+During chunk generation, `FVoxelCPUNoiseGenerator::ApplyWaterFillPass()` runs three phases:
 
-1. For each XY column in the chunk, scan top-down from the highest Z
-2. Flag air voxels below `WaterLevel` as water
-3. Stop scanning at the first solid voxel (terrain surface)
-4. Skip voxels with `VOXEL_FLAG_UNDERGROUND` (caves)
+1. **Column seed** (only in a chunk holding the water level): a column open from the chunk's top down to `WaterLevel`
+   takes the water flag from there down to the first solid or cave-flagged voxel
+2. **Flood**: a BFS spreads the flag through non-cave air below the sea
+3. **Clear** the cave flags (a temporary barrier: caves below the sea stay dry)
 
 ### Cross-Chunk Boundary Propagation
 
@@ -206,19 +209,18 @@ generation's fill pass tests it.
 Until 2026-10-20 both steps read the generated voxels without the edit layer (`GetGeneratedVoxelAt`): a voxel the
 player dug still read solid, so a dig under the sea never flooded, and a flood would have set each voxel to its generated
 value plus the flag, undoing an edit there; only brushes were scanned, a flagged fill counted as water, an unloaded chunk
-read as air, and keys ignored `WorldOrigin` (world modes review G58, WORLD_MODES_REVIEW_PLAN.md §19.14). Tests: `VoxelWorlds.Streaming.WaterPropagation.Plane`, `.Planet`.
+read as air, and keys ignored `WorldOrigin` (world modes review G58). Tests: `VoxelWorlds.Streaming.WaterPropagation.Plane`, `.Planet`.
 
 **The flood's water elsewhere (G59).** A flood's water lives in the edit layer. The 2D water tiles build a chunk with
 edits from its edit-merged voxels (`UpdateWaterTileContribution`, below), so a channel dug inland from the shore below sea
 level draws its water surface once it floods; and the chunk-arrival face scans above carry a flood into a chunk that
-loads after it. Until 2026-10-20 both read the generated voxels only (world modes review G59, WORLD_MODES_REVIEW_PLAN.md
-§19.16). Tests: `VoxelWorlds.Streaming.WaterPropagation.ChunkArrival.Plane`, `.Planet`, `.Tiles.Plane`.
+loads after it. Until 2026-10-20 both read the generated voxels only (world modes review G59). Tests: `VoxelWorlds.Streaming.WaterPropagation.ChunkArrival.Plane`, `.Planet`, `.Tiles.Plane`.
 
 **The flood and undo (G60).** Until 2026-10-20 each frame's flood batch was an undo step of its own, and the edit
 manager's undo record kept only each voxel's previous value: the flood replaces a dug voxel's relative edit with a Set
 whose previous value was the dig's unset one, so the first undo after a dig under the sea (the demo test actor's Z) took
 the flood back and removed the dig at every voxel it had reached, leaving the dig's partly dug voxels; the second undo
-took the rest (world modes review G60, WORLD_MODES_REVIEW_PLAN.md §19.17). A save keeps the flood as edits in its
+took the rest (world modes review G60). A save keeps the flood as edits in its
 `.edits.bin`; loading it floods nothing again (the flooded voxels are water already). Tests:
 `VoxelWorlds.Streaming.WaterPropagation.Undo.Plane`, `.Planet`, `VoxelWorlds.Edit.UndoRedo.Records`.
 
@@ -240,8 +242,8 @@ sphere (`Radius − |P − C|`), positive under the sea. The chunk manager hands
 search, the navigation water check (`FVoxelSurfaceNavParams::IsUnderwater`), the NPC spawner and scatter's underwater
 class. In heightmap worlds the sea is the `WaterLevel` plane in world Z (`FromConfig`), wherever `WorldOrigin` puts the
 chunk grid: the terrain's heights are world Z, generation floods air at or below `WaterLevel`, and the tiles draw there.
-Every plane test works in world space, the water pull and the edit-driven flood included (review plan G19, §20.20: some
-consumers used `WaterLevel + WorldOrigin.Z` until 2026-10-23). On a planet it is the sphere; since spherical Phase 4 the
+Every plane test works in world space, the water pull and the edit-driven flood included (world modes review G19: some
+consumers used `WaterLevel + WorldOrigin.Z` until 2026-10-23; test `Streaming.Plane.OneSeaPlane`). On a planet it is the sphere; since spherical Phase 4 the
 map and the PCG sampler read it too.
 
 **The sea sphere (SP-E2).** A planet's sea surface is the chunk manager's `FVoxelPlanetOcean`: a cube sphere at
@@ -338,7 +340,8 @@ Water meshes are output as `FChunkMeshData` with:
 
 ## 2D Water Tile System
 
-**File**: `VoxelStreaming/Private/VoxelChunkManager.cpp`
+**Files**: `VoxelStreaming/Public/VoxelWaterTiles.h` (`FVoxelWaterTiles`, the chunk manager's owner of the tiles since
+code review CR4), `VoxelStreaming/Private/VoxelChunkManager.cpp` (the masks it builds)
 
 ### Concept
 
@@ -347,35 +350,35 @@ Water tiles are indexed by `FIntVector2` (XY chunk column), independent from 3D 
 ### Data Structures
 
 ```cpp
-struct FWaterTileState
+class FVoxelWaterTiles
 {
-    // Per-Z-level partial masks from loaded 3D chunks
-    TMap<int32, TArray<bool>> PartialMasks;
-    // Key = chunk Z coordinate
-    // Value = ChunkSize² bool mask
-
-    bool bDirty = true;
+    struct FTile
+    {
+        TMap<int32, TArray<bool>> PartialMasks;  // chunk Z -> ChunkSize² wet-column mask
+        bool bDirty = true;
+    };
+    TMap<FIntVector2, FTile> Tiles;              // XY chunk column -> its water
+    TArray<FIntVector2> DirtyQueue;
+    TSet<FIntVector2> DirtySet;                  // O(1) duplicate check
 };
-
-TMap<FIntVector2, FWaterTileState> WaterTiles;
-TArray<FIntVector2> DirtyWaterTileQueue;
-TSet<FIntVector2> DirtyWaterTileSet;  // O(1) duplicate check
 ```
+
+`FVoxelWaterTileGrid` carries what meshing needs: the chunk size, voxel size, `WorldOrigin` and the sea plane
+(`WaterLevel`, G19).
 
 ### Lifecycle
 
 **Chunk loads or re-meshes** → `UpdateWaterTileContribution(ChunkCoord)`:
 1. Build partial mask from chunk voxel data via `BuildColumnMask()`: the edit-merged snapshot when the chunk has edits
    (`GetVoxelSnapshot`; an edit-driven flood's water is in the edit layer, G59), else the generated voxels
-2. Store mask in `WaterTiles[XY].PartialMasks[Z]`
-3. Mark tile dirty, enqueue for processing
+2. `FVoxelWaterTiles::Contribute` stores it as the tile's `PartialMasks[Z]`, marks the tile dirty and queues it
 
-**Chunk unloads** → `RemoveWaterTileContribution(ChunkCoord)`:
+**Chunk unloads** → `RemoveWaterTileContribution(ChunkCoord)` (`FVoxelWaterTiles::Remove`):
 1. Remove Z's partial mask from tile
 2. If no contributors remain, remove tile entirely from renderer
 3. Otherwise mark dirty for re-evaluation
 
-**Per tick** → `ProcessDirtyWaterTiles(MaxTilesPerFrame)`:
+**Per tick** → `ProcessDirtyWaterTiles(MaxTilesPerFrame)` (`FVoxelWaterTiles::ProcessDirty`):
 1. Pop tiles from dirty queue
 2. OR-combine all partial masks into a single `ChunkSize * ChunkSize` mask
 3. Call `FVoxelWaterMesher::GenerateWaterMeshFromMask()` (dilate + greedy merge)
@@ -394,7 +397,8 @@ TSet<FIntVector2> DirtyWaterTileSet;  // O(1) duplicate check
 
 ## Rendering Pipeline
 
-Water tiles are rendered through the `IVoxelMeshRenderer` interface alongside terrain chunks. Both renderer implementations support water tiles.
+Water tiles are rendered through the `IVoxelMeshRenderer` interface alongside terrain chunks, by `FVoxelMeshRenderer` (the
+only renderer since the PMC renderer was deleted in code review CR1).
 
 ### Interface Methods
 
@@ -453,7 +457,7 @@ FMaterialRelevance WaterMaterialRelevance;
 - Same frustum culling as terrain
 - `MeshBatch.CastShadow = false` (water doesn't cast shadows)
 - `MeshBatch.bUseAsOccluder = false` (water is translucent)
-- Counts toward the same 500 mesh batch limit
+- Counts toward the same mesh batch limit (`MaxMeshBatchesPerFrame`, 2,000)
 
 **GetViewRelevance**: Water material relevance is OR'd with terrain relevance so the scene proxy correctly reports translucency support.
 
@@ -485,7 +489,7 @@ With Lumen and a translucent water material (the default `M_Water` is translucen
 from Lumen's radiance cache unless front-layer translucency reflections are on. Lumen marks the probes translucent surfaces
 need in a pass at 1/`r.Lumen.TranslucencyReflections.MarkDownsampleFactor` of the screen; at the engine default (4) a sea
 seen at grazing angles skips probe cells along the view and shows thin dark lines under its horizon, at fixed screen rows,
-most visible over deep water from a swimmer's or a boat's height (world modes review G16, §20.25). Set
+most visible over deep water from a swimmer's or a boat's height (world modes review G16). Set
 `r.Lumen.TranslucencyReflections.MarkDownsampleFactor=1` in the project's `DefaultEngine.ini` (`[SystemSettings]`), as this
 project does: the mark pass costs about 0.02 ms more at 1280 x 720.
 
@@ -496,8 +500,8 @@ project does: the mark pass costs about 0.02 ms more at 1280 x 720.
 ### Full Pipeline: Chunk Load to Water Render
 
 ```
-[1] Chunk Generation (GPU compute)
-    ↓ ApplyWaterFillPass() — column-scan sets water flags
+[1] Chunk Generation (CPU or GPU)
+    ↓ The water fill pass — column seed, flood, cave flags cleared
     ↓
 [2] Chunk Meshing (terrain mesh)
     ↓
@@ -506,7 +510,7 @@ project does: the mark pass costs about 0.02 ms more at 1280 x 720.
     ↓
 [4] UpdateWaterTileContribution()
     ├─ BuildColumnMask() → bool[ChunkSize²] (edit-merged for a chunk with edits)
-    └─ Store in WaterTiles[XY].PartialMasks[Z]
+    └─ FVoxelWaterTiles::Contribute → the tile's PartialMasks[Z]
     ↓ Mark dirty → enqueue
     ↓
 [5] ProcessDirtyWaterTiles() (time-sliced, per tick)
@@ -563,8 +567,8 @@ with `bIslandFarOcean` draws the sea past that: a procedural mesh component on t
 - **Proxy recreation (G15):** the far ocean's mesh lives on its own component, so a recreated terrain scene proxy does
   not lose it; nothing needs re-sending.
 
-Details, cvars (`voxel.World.FarOcean`, `voxel.World.FarOceanStats`) and the trade-offs: WORLD_MODES.md, "Beyond the
-edge".
+Details, cvars (`voxel.World.FarOcean`, `voxel.World.FarOceanStats`) and the trade-offs: [WORLD_MODES.md](WORLD_MODES.md),
+"Beyond the edge".
 
 ## Design Decisions
 
@@ -618,10 +622,7 @@ edge".
 
 ## References
 
-- [Rendering System](RENDERING_SYSTEM.md) — GPU and PMC renderer details
+- [Rendering System](RENDERING_SYSTEM.md) — the renderer, render regions
 - [Architecture Overview](../ARCHITECTURE.md) — System-wide architecture
 - [GPU Pipeline](GPU_PIPELINE.md) — Compute shader generation pipeline
 
----
-
-**Status**: Implementation Complete

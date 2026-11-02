@@ -1,695 +1,177 @@
 # VoxelWorlds Architecture Overview
 
-**Version**: 2.1
-**Last Updated**: 2026-02-19
-**Target Engine**: Unreal Engine 5.8
-
-## Table of Contents
-
-1. [System Overview](#system-overview)
-2. [Architecture Diagram](#architecture-diagram)
-3. [Core Data Structures](#core-data-structures)
-4. [Module Organization](#module-organization)
-5. [Key Systems](#key-systems)
-6. [Integration Points](#integration-points)
-7. [Data Flow](#data-flow)
-8. [Performance Considerations](#performance-considerations)
-9. [Design Decisions](#design-decisions)
-
----
-
-## System Overview
-
-VoxelWorlds is a **GPU-driven voxel terrain system** designed for high-performance, large-scale worlds in Unreal Engine 5.8. The architecture emphasizes:
-
-- **Modularity**: Clear separation of concerns with interface-based integration
-- **Performance**: GPU-first approach minimizing CPU overhead
-- **Flexibility**: Pluggable LOD strategies and rendering implementations
-- **Scalability**: Streaming system handles thousands of chunks efficiently
-
-### Key Capabilities
-
-- Multiple world modes (infinite plane, spherical planet, island/bowl)
-- Three meshing algorithms (cubic, Marching Cubes, Dual Contouring)
-- Pluggable LOD system (distance bands, quadtree, octree)
-- One renderer on UE's FLocalVertexFactory
-- GPU compute pipeline for generation; meshing on CPU workers
-- Biome system with material assignment
-- Edit layer for terrain modification
-- Vegetation scatter system
-
----
-
-## Architecture Diagram
-
-```
-VoxelWorld (Root Container)
-│
-├── WorldConfiguration
-│   ├── WorldMode (Infinite/Spherical/Island)
-│   ├── MeshingMode (Cubic/Smooth)
-│   ├── VoxelSize, ChunkSize
-│   └── Performance Budgets
-│
-├── ChunkManager (Streaming Coordinator)
-│   ├── Spatial Indexing (Grid/Octree)
-│   ├── ChunkPool (Reusable chunks)
-│   ├── LODStrategy (Pluggable) ◄── NEW
-│   │   ├── IVoxelLODStrategy Interface
-│   │   ├── DistanceBandLODStrategy (default)
-│   │   ├── QuadtreeLODStrategy (future)
-│   │   └── OctreeLODStrategy (future)
-│   └── StreamingSystem
-│       ├── LoadQueue (prioritized)
-│       └── UnloadQueue
-│
-├── VoxelDataProvider
-│   ├── NoiseGenerator (GPU Compute)
-│   │   ├── Noise Library (Perlin, Simplex, Voronoi)
-│   │   ├── FBM/Fractal Support
-│   │   └── Domain Warping
-│   ├── BiomeSystem
-│   │   ├── BiomeDefinitions
-│   │   ├── BiomeBlending
-│   │   └── Material Assignment
-│   └── EditLayer (Overlay Modifications)
-│       ├── Sparse Edit Storage
-│       ├── Add/Subtract/Paint Operations
-│       └── Serialization
-│
-├── MaterialRegistry
-│   ├── MaterialDefinitions (256 types)
-│   ├── Atlas Configuration (cubic)
-│   └── Physical Properties
-│
-├── RenderingSystem
-│   ├── IVoxelMeshRenderer Interface
-│   │   └── VoxelCustomVFRenderer
-│   │       ├── UVoxelRegionComponent (one per render region)
-│   │       ├── FVoxelSceneProxy (FLocalVertexFactory per mesh)
-│   │       ├── Mesh-swap crossfades
-│   │       └── Water Tile Rendering (second pass)
-│   ├── MeshingSystem (3 algorithms)
-│   │   ├── CubicMesher (Face-culling, Greedy, AO)
-│   │   ├── MarchingCubesMesher (Isosurface + Transvoxel LOD)
-│   │   └── DualContourMesher (QEF vertex + Cell-merge LOD)
-│   └── CollisionManager (Separate, Async, Lower LOD)
-│
-├── WaterSystem
-│   ├── Water Flags (FVoxelData::Metadata bit 4)
-│   ├── Water Fill Pass (column-scan during generation)
-│   ├── Water Propagation (BFS on terrain edits)
-│   ├── Water Mesher (column mask + dilation + greedy merge)
-│   └── 2D Water Tiles (FIntVector2-keyed, per XY column)
-│
-└── ScatterSystem
-    ├── Vegetation Placement
-    ├── HISM/ISM Management
-    └── Biome-based Distribution
-```
-
----
-
-## Core Data Structures
-
-### FVoxelData (4 bytes per voxel)
-```cpp
-struct FVoxelData {
-    uint8 MaterialID;      // 256 material types
-    uint8 Density;         // 0-255 for smooth terrain (127 = surface)
-    uint8 BiomeID;         // 256 biome types
-    uint8 Metadata;        // AO cache, lighting, custom flags
-};
-```
-
-**Memory**: 32³ chunk = 32,768 voxels × 4 bytes = 128 KB
-
-### FChunkDescriptor
-```cpp
-struct FChunkDescriptor {
-    FIntVector ChunkCoord;     // Chunk position in chunk space
-    int32 LODLevel;            // 0 = finest detail
-    int32 ChunkSize;           // Voxels per edge (32, 64, 128, etc.)
-    
-    TSharedPtr<TArray<FVoxelData>> VoxelArray;  // Voxel contents, shared copy-on-write (G71)
-    
-    FBox Bounds;               // World-space bounds
-    bool bIsDirty;             // Needs remeshing
-    bool bHasEdits;            // Has edit layer modifications
-    
-    int32 GenerationSeed;      // For deterministic regeneration (int32 for BP)
-};
-```
-
-### FLODQueryContext
-```cpp
-struct FLODQueryContext {
-    // Camera state
-    FVector ViewerPosition;
-    FVector ViewerForward;
-    float ViewDistance;
-    float FieldOfView;
-    TArray<FPlane> FrustumPlanes;
-    
-    // World state
-    FVector WorldOrigin;
-    EWorldMode WorldMode;
-    float WorldRadius;
-    
-    // Performance budgets
-    int32 MaxChunksToLoadPerFrame = 4;
-    int32 MaxChunksToUnloadPerFrame = 8;
-    float TimeSliceMS = 2.0f;
-    
-    // Frame info
-    int64 FrameNumber;          // int64 for Blueprint compatibility
-    float GameTime;
-};
-```
-
-### FVoxelVertex (28 bytes - optimized)
-```cpp
-struct FVoxelVertex {
-    FVector3f Position;          // 12 bytes
-    uint32 PackedNormalAndAO;    // 4 bytes (10/10/10 normal + 8-bit AO)
-    FVector2f UV;                // 8 bytes
-    uint32 PackedMaterialData;   // 4 bytes (MaterialID, BiomeID, Metadata)
-};
-```
-
----
-
-## Module Organization
-
-### Dependency Graph
-```
-VoxelCore
-    └── (no internal dependencies — shared foundation)
-
-VoxelGeneration   → VoxelCore
-VoxelMeshing      → VoxelCore
-VoxelRendering    → VoxelCore
-VoxelLOD          → VoxelCore, VoxelGeneration
-VoxelScatter      → VoxelCore, VoxelGeneration, VoxelMeshing
-
-VoxelStreaming    → VoxelCore, VoxelLOD, VoxelRendering, VoxelGeneration,
-                    VoxelMeshing, VoxelScatter      ◄── streaming coordinator / hub
-
-VoxelMap          → VoxelCore, VoxelGeneration, VoxelStreaming
-VoxelPCG          → VoxelCore, VoxelGeneration, VoxelStreaming, VoxelMap   (+ PCG engine plugin)
-
-VoxelWorlds       → VoxelCore                        ◄── plugin-entry integration facade (thin)
-
-VoxelWorldsEditor → VoxelCore, VoxelGeneration, VoxelMeshing, VoxelRendering,
-                    VoxelStreaming, VoxelMap         ◄── Editor target only (stripped from shipping)
-```
-
-### Module Responsibilities
-
-**VoxelCore**
-- Core data structures (FVoxelData, FChunkDescriptor)
-- Math utilities (coordinate conversions)
-- Configuration types (UVoxelWorldConfiguration)
-- Material + biome registries
-- Edit-layer manager (UVoxelEditManager) — sparse add/subtract/paint overlay, undo/redo, serialization
-- No dependencies on other voxel modules
-
-**VoxelLOD**
-- IVoxelLODStrategy interface
-- LOD implementations (DistanceBand; Quadtree/Octree planned)
-- FLODQueryContext and related types
-- Depends on VoxelCore and VoxelGeneration (terrain-height culling bounds)
-
-**VoxelGeneration** *(LoadingPhase: PostConfigInit)*
-- Noise generation (GPU compute shaders)
-- Biome system
-- World mode implementations (IVoxelWorldMode)
-- Material assignment logic
-- **Note**: Requires `PostConfigInit` loading phase for global shader registration
-
-**VoxelMeshing** *(LoadingPhase: PostConfigInit)*
-- Cubic mesher (face culling, greedy meshing, AO)
-- Marching Cubes mesher (isosurface extraction, Transvoxel LOD transitions)
-- Dual Contouring mesher (QEF vertex placement, LOD boundary cell merging)
-- All meshers implement `IVoxelMesher` interface (CPU sync + GPU async paths)
-- Mesh generation compute shaders
-- **Note**: Requires `PostConfigInit` loading phase for global shader registration
-
-**VoxelRendering**
-- IVoxelMeshRenderer interface
-- The FLocalVertexFactory renderer
-- Collision manager
-
-**VoxelStreaming**
-- ChunkManager (main streaming coordinator / hub)
-- Chunk state machine, load/unload queue management
-- Collision manager (async Chaos cooking) and water propagation
-- Integrates LOD, rendering, generation, meshing, and scatter
-
-**VoxelScatter**
-- Vegetation / foliage placement (biome-driven)
-- HISM/ISM instanced rendering
-- Deterministic cross-chunk tree injection
-
-**VoxelMap**
-- Map / minimap subsystem
-- Samples world height and biome for a top-down view
-
-**VoxelPCG**
-- Runtime PCG decoration over the voxel surface (per-biome graph dispatch)
-- Isolated behind the PCG engine plugin so no other module hard-depends on PCG
-
-**VoxelWorlds**
-- Plugin-entry / integration facade (the plugin's namesake module)
-- Thin: depends only on VoxelCore
-- *(Editing is not a separate module — the edit layer lives in VoxelCore)*
-
-**VoxelWorldsEditor** *(Type: Editor — stripped from shipping)*
-- Authoring tools: dockable field-visualization panel, field preview actor
-- Depends downward on the runtime voxel modules only
-
-### Module Loading Phases
-
-Two rationales drive the non-default phases. Modules that register global shaders (`IMPLEMENT_GLOBAL_SHADER`) or rendering / vertex-factory types load at `PostConfigInit`, so the shader system is ready before registration occurs. Modules that create world subsystems and depend on the full runtime load at `PostEngineInit`, after the engine and their dependency modules are initialized.
-
-| Module | LoadingPhase | Reason |
-|--------|--------------|--------|
-| VoxelCore | Default | Data + types; no shaders |
-| VoxelLOD | Default | No shaders |
-| VoxelWorlds | Default | Thin plugin-entry facade |
-| VoxelGeneration | **PostConfigInit** | GPU global shaders (`IMPLEMENT_GLOBAL_SHADER`) |
-| VoxelMeshing | **PostConfigInit** | GPU global shaders (`IMPLEMENT_GLOBAL_SHADER`) |
-| VoxelRendering | **PostConfigInit** | Vertex factory + render shader registration |
-| VoxelStreaming | **PostEngineInit** | World subsystem; needs engine + runtime modules ready |
-| VoxelScatter | **PostEngineInit** | World subsystem / components |
-| VoxelMap | **PostEngineInit** | World subsystem |
-| VoxelPCG | **PostEngineInit** | Runtime PCG bridge; needs PCG + streaming |
-| VoxelWorldsEditor | Default (Editor) | Editor tooling; stripped from shipping |
-
-**Failure to set correct LoadingPhase** will cause editor crashes during startup with access violations in `CreatePackage` or `ProcessNewlyLoadedUObjects`.
-
----
-
-## Key Systems
-
-### 1. Pluggable LOD System
-
-See: [LOD_SYSTEM.md](Features/LOD_SYSTEM.md) for complete details.
-
-**Interface**: `IVoxelLODStrategy`
-```cpp
-class IVoxelLODStrategy {
-    virtual int32 GetLODForChunk(FIntVector ChunkCoord, const FLODQueryContext& Context) const = 0;
-    virtual TArray<FChunkLODRequest> GetVisibleChunks(const FLODQueryContext& Context) const = 0;
-    virtual void GetChunksToLoad(TArray<FChunkLODRequest>& OutLoad, const FLODQueryContext& Context) const = 0;
-    virtual void GetChunksToUnload(TArray<FIntVector>& OutUnload, const FLODQueryContext& Context) const = 0;
-    virtual void Initialize(const FVoxelWorldConfiguration& WorldConfig) = 0;
-    virtual void Update(const FLODQueryContext& Context, float DeltaTime) = 0;
-};
-```
-
-**Default Implementation**: `FDistanceBandLODStrategy`
-- Distance-based LOD rings
-- Simple and predictable
-- Configurable bands per world mode
-
-**Future Implementations**:
-- `FQuadtreeLODStrategy` - Screen-space adaptive for infinite plane
-- `FOctreeLODStrategy` - 3D adaptive for spherical worlds
-
-### 2. Rendering System
-
-See: [RENDERING_SYSTEM.md](Features/RENDERING_SYSTEM.md) for complete details.
-
-**Interface**: `IVoxelMeshRenderer`
-```cpp
-class IVoxelMeshRenderer {
-    virtual void Initialize(UWorld* World, const FVoxelWorldConfiguration& Config) = 0;
-    virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) = 0;
-    virtual void RemoveChunk(FIntVector ChunkCoord) = 0;
-    virtual void SetMaterial(UMaterialInterface* Material) = 0;
-};
-```
-
-`FVoxelMeshRenderer` is the one implementation: a `UVoxelRegionComponent` per render region, its
-`FVoxelSceneProxy` uploading each chunk, seam and water mesh into UE's `FLocalVertexFactory`, LOD flips
-and corrections crossfading between the old and new mesh. (The ProceduralMeshComponent fallback was
-deleted in code review CR1, D-CR7.)
-
-### 3. GPU Compute Pipeline
-
-See: [GPU_PIPELINE.md](Features/GPU_PIPELINE.md) for complete details.
-
-**Phase 1: Voxel Generation**
-```
-Input: ChunkCoord, LOD, WorldMode, NoiseParams
-Compute Shader: GenerateVoxelData.usf
-Output: RWStructuredBuffer<FVoxelData>
-```
-
-**Phase 2: Meshing**
-```
-Input: the chunk's voxels (read back from the GPU), MeshingMode
-CPU worker: FVoxelCPUMarchingCubesMesher, FVoxelCPUDualContourMesher or FVoxelCPUCubicMesher
-            (interior chunk meshes, plus the seam jobs between chunks)
-Output: FChunkMeshData, uploaded by the renderer
-```
-
-**Phase 3: Rendering**
-```
-FVoxelMeshRenderer: the mesh uploaded into per-mesh FLocalVertexFactory buffers
-```
-
-### 4. World Modes
-
-See: [WORLD_MODES.md](Features/WORLD_MODES.md) for complete details.
-
-**Infinite Plane**
-- Standard heightmap-style terrain
-- Extends infinitely in XY
-- Height in Z axis
-- Distance band LOD
-
-**Spherical Planet**
-- Planet with radius
-- Surface detail, coarse interior
-- Curvature affects meshing
-- Hybrid distance band + octree LOD
-
-**Island/Bowl**
-- Bounded world with falloff
-- Radial attenuation from center
-- Ocean level support
-- Distance band LOD
-
-### 5. Material System
-
-See: [MATERIAL_SYSTEM.md](Features/MATERIAL_SYSTEM.md) for complete details.
-
-**Cubic Mode**: Tile atlas with per-face UVs
-**Smooth Mode** (MarchingCubes + DualContouring): Triplanar projection with material blending
-
-### 6. Water System
-
-See: [WATER_SYSTEM.md](Features/WATER_SYSTEM.md) for complete details.
-
-**Per-voxel water flags** stored in `FVoxelData::Metadata` bit 4, set during generation via column-scan and propagated across chunk boundaries. When terrain edits expose air adjacent to water, `UVoxelWaterPropagation` performs bounded BFS flood fill, writing the flags through the edit layer (G58); the tiles read a chunk with edits edit-merged, and a flood crosses into a chunk that loads after it through face scans when the chunk's water settles (G59).
-
-**2D Water Tiles** (`FIntVector2`-keyed) aggregate water from multiple Z-level chunks per XY column. `FVoxelWaterMesher` builds column masks, dilates by 3 cells for shoreline overlap, and greedy-merges into minimal quads.
-
-**Rendering**: `FVoxelMeshRenderer` draws water tiles in a second render pass with the separate water material, through the `IVoxelMeshRenderer` water tile API.
-
-### 7. Biome System
-
-See: [BIOME_SYSTEM.md](Features/BIOME_SYSTEM.md) for complete details.
-
-Selection based on:
-- Temperature (noise-driven)
-- Moisture (noise-driven)
-- Elevation
-
-Each biome defines:
-- Terrain shaping (noise layers)
-- Material assignment
-- Vegetation types
-
----
-
-## Integration Points
-
-### ChunkManager ↔ LODStrategy
-
-```cpp
-// ChunkManager uses cached streaming decisions to avoid per-frame recalculation
-void UVoxelChunkManager::TickComponent(float DeltaTime) {
-    FLODQueryContext Context = BuildQueryContext();
-    FIntVector CurrentViewerChunk = WorldToChunkCoord(Context.ViewerPosition);
-
-    // Phase 2 Optimization: Only update streaming when viewer crosses chunk boundary
-    bool bViewerChunkChanged = (CurrentViewerChunk != CachedViewerChunk);
-
-    // Always update LOD strategy
-    LODStrategy->Update(Context, DeltaTime);
-
-    // Streaming decisions only when necessary
-    if (bForceStreamingUpdate || bViewerChunkChanged) {
-        TArray<FChunkLODRequest> ToLoad;
-        TArray<FIntVector> ToUnload;
-
-        LODStrategy->GetChunksToLoad(ToLoad, LoadedChunkCoords, Context);
-        LODStrategy->GetChunksToUnload(ToUnload, LoadedChunkCoords, Context);
-
-        // Queue operations with O(1) duplicate detection (Phase 1)
-        for (const FChunkLODRequest& Request : ToLoad) {
-            AddToGenerationQueue(Request);  // Uses TSet for dedup
-        }
-
-        CachedViewerChunk = CurrentViewerChunk;
-    }
-
-    // LOD transitions only when viewer moved significantly
-    if (bViewerChunkChanged || PositionDeltaSq > LODUpdateThresholdSq) {
-        UpdateLODTransitions(Context);
-    }
-}
-```
-
-### ChunkManager ↔ Renderer
-
-A chunk mesh lands on the game thread as `FChunkMeshData` (`ProcessCompletedAsyncMeshes`); the chunk manager hands it
-to the renderer with `UpdateChunkMeshFromCPU`, which uploads it on the render thread
-(`FVoxelSceneProxy::UpdateChunkFromCPUData_RenderThread`). Collision is cooked from the same data by the collision
-manager (async: data prep → thread-pool mesh gen + trimesh → game-thread physics); scatter extracts from the voxels.
-
----
-
-## Data Flow
-
-### Chunk Load Flow
-```
-[Frame N]
-Player Movement
-    ↓
-LODStrategy::GetVisibleChunks()
-    ↓
-ChunkManager::RequestChunkGeneration()
-    ↓
-Queue generation request
-
-[Frame N+1]
-ChunkManager::ProcessGenerationQueue()
-    ↓
-Dispatch GPU Compute: GenerateVoxelData
-    ↓
-GPU executes (async)
-
-[Frame N+2]
-Compute complete (async readback or GPU-side)
-    ↓
-ChunkManager::OnChunkGenerationComplete()
-    ↓
-Queue meshing request
-
-[Frame N+3]
-ChunkManager::ProcessMeshingQueue()
-    ↓
-Dispatch GPU Compute: GenerateMesh
-    ↓
-GPU executes (async)
-
-[Frame N+4]
-Meshing complete
-    ↓
-ChunkManager::OnChunkMeshingComplete()
-    ↓
-MeshRenderer::UpdateChunkMesh()
-    ↓
-Chunk visible on screen
-```
-
-### LOD Transition Flow
-```
-[Continuous]
----
-
-## Performance Considerations
-
-### Memory Budget
-```
-Per Chunk (LOD 0, 32³):
-- Voxel Data: 128 KB
-- Vertex Data: ~50 KB (cubic) / ~100 KB (smooth)
-- Index Data: ~30 KB
-- GPU Buffers: Same (no duplicate)
-Total: ~200 KB per chunk
-
-Target: 1000 visible chunks = 200 MB
-Maximum: 2000 visible chunks = 400 MB
-```
-
-### Compute Budget (60 FPS = 16.6ms frame)
-```
-Per Frame:
-- Chunk generation: 4 chunks × 0.5ms = 2.0ms
-- Meshing: 4 chunks × 0.5ms = 2.0ms
-- LOD updates: 0.5ms
-- Collision: 0.5ms
-Total GPU Compute: ~5ms (30% of frame)
-
-Remaining: ~11ms for rendering, game logic
-```
-
-### Streaming Throughput
-```
-Load: 4 chunks per frame = 240 chunks/sec
-Unload: 8 chunks per frame = 480 chunks/sec
-
-At player speed 1000 cm/s:
-- Crosses ~10 chunks/sec
-- Load rate 24x faster than needed
-- Good safety margin
-```
-
-### Optimization Strategies
-
-1. **GPU generation**: one compute dispatch per chunk, one readback
-2. **Batch Operations**: Process multiple chunks per compute dispatch
-3. **Async Compute**: Overlap generation with rendering
-4. **Mesh-swap crossfades**: LOD flips without popping
-5. **Collision Throttling**: Update less frequently than visuals
-6. **Frustum Culling**: Don't generate off-screen chunks
-7. **Chunk Pooling**: Reuse memory allocations
-
-### Streaming Optimizations (Phase 1 & 2)
-
-The streaming system has been optimized to eliminate per-frame overhead:
-
-**Phase 1: Queue Management**
-- O(1) duplicate detection using TSet tracking alongside queue arrays
-- Sorted insertion with `Algo::LowerBound()` instead of repeated Sort() calls
-- Per-frame queue growth limiting (2x processing rate cap)
-
-**Phase 2: Decision Caching**
-- `CachedViewerChunk`: Only recompute visible chunks when viewer crosses chunk boundary
-- `bForceStreamingUpdate`: Flag for manual refresh when needed
-
-**Future Phase 3: LOD Hysteresis** (if needed)
-- Buffer zone around LOD boundaries to prevent rapid back-and-forth remeshing
-- Separate thresholds for LOD upgrades vs downgrades
-- Would add ~50-100 units of hysteresis per LOD band boundary
-
----
-
-## Design Decisions
-
-### Why Pluggable LOD?
-
-**Decision**: Make LOD strategies swappable via interface.
-
-**Rationale**:
-- Allows experimentation without core refactoring
-- Can ship simple (distance bands) and add complexity later
-- Different strategies optimal for different world modes
-- Facilitates testing and comparison
-
-**Trade-offs**:
-- Additional abstraction layer (minor virtual call overhead)
-- Interface design must be forward-compatible
-- More initial architecture work
-
-**Conclusion**: Worth it for flexibility and future-proofing.
-
-### Why GPU Generation and CPU Meshing?
-
-**Decision**: Generation on the GPU via compute shaders; meshing on CPU workers.
-
-**Rationale**:
-- Generation is one thread per voxel: embarrassingly parallel, a fraction of a millisecond per chunk
-- Meshing must be bit-exact between a chunk's interior and the seams it meets (seam ownership); the GPU
-  meshers never were, and no world dispatched them, so they were deleted (code review CR1)
-
-**Trade-offs**:
-- HLSL compute shader expertise required for generation
-- A readback per chunk
-
-**Conclusion**: the generation side pays for itself; the meshing side is where the correctness contract lives.
-
-### Why Distance Bands Default?
-
-**Decision**: Start with simple distance-based LOD rings.
-
-**Rationale**:
-- Trivial to implement and debug
-- Predictable performance and memory
-- Sufficient for most use cases
-- Can add quadtree/octree later if profiling shows need
-
-**Trade-offs**:
-- Not spatially adaptive
-- May use more memory than necessary
-- Fixed hierarchy
-
-**Conclusion**: YAGNI principle - ship simple, optimize if needed.
-
-### Why 4-Byte Voxel?
-
-**Decision**: Pack voxel data into 4 bytes (MaterialID, Density, BiomeID, Metadata).
-
-**Rationale**:
-- 32³ chunk = 128 KB (cache-friendly)
-- 256 materials and biomes sufficient
-- 8-bit density enough for smooth terrain
-- 8-bit metadata for AO, flags
-
-**Trade-offs**:
-- Limited to 256 material types
-- Lower density precision than float
-- Metadata byte is tight
-
-**Conclusion**: Good balance of memory and capability.
-
----
-
-## Next Steps
-
-See [IMPLEMENTATION_PHASES.md](Research/Archive/IMPLEMENTATION_PHASES.md) for development roadmap.
-
-**Phase 1 (Current)**: Foundation
-- Core data structures
-- LOD interface and distance band implementation
-- Rendering interface
-- Chunk manager skeleton
-
-**Phase 2**: Generation
-- GPU noise library
-- Infinite plane world mode
-- Basic biome system
-- Cubic meshing
-
-**Phase 3**: Advanced Meshing
-- Greedy meshing and AO
-- Smooth meshing
-- Custom Vertex Factory
-- GPU-driven renderer
-
-**Phase 4+**: World modes, editing, scatter, optimization
-
----
+> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+
+VoxelWorlds is a voxel terrain engine for Unreal Engine 5.8. Terrain is generated on the GPU (a CPU generator is its
+twin), meshed on CPU workers, streamed around a viewer with LOD, collision and compression, and drawn by one renderer on
+UE's `FLocalVertexFactory`; past the voxel window an analytic far field draws the terrain to the horizon. Worlds are an
+infinite plane, a bounded island or a spherical planet (`EWorldMode`), each smooth (Marching Cubes or Dual Contouring)
+or cubic (`EMeshingMode`). The plugin depends on no other project plugin.
+
+This document is the map: the modules, the runtime pieces, how a chunk moves through them, and the decisions behind
+them. Each system's detail is in its Features doc ([README.md](README.md) lists them).
+
+## Modules
+
+Ten runtime modules and one editor module, in `Source/` (the empty `VoxelWorlds` module was deleted in code review CR1).
+
+| Module | Loading phase | Depends on (voxel modules) | Holds |
+|--------|---------------|----------------------------|-------|
+| `VoxelCore` | Default | none | `FVoxelData`, `FChunkDescriptor` and its residency, `UVoxelWorldConfiguration`, `UVoxelWorldsSettings`, the material and biome registries and `UVoxelMaterialAtlas`, `UVoxelEditManager`, `FVoxelSeaSurface`, `FVoxelCubeSphere`, `FVoxelRenderRegions`, the chunk codec |
+| `VoxelGeneration` | PostConfigInit (global shaders) | Core | `FVoxelGPUNoiseGenerator` / `FVoxelCPUNoiseGenerator`, `FVoxelNoise`, `IVoxelWorldMode` and the three modes, `FVoxelWorldModeFactory`, `FVoxelSurfaceQuery`, `FVoxelBlockSurface`, conditioning zones, `FVoxelTreeInjector` |
+| `VoxelLOD` | Default | Core, Generation | `IVoxelLODStrategy`, `FDistanceBandLODStrategy` |
+| `VoxelMeshing` | PostConfigInit | Core | `IVoxelMesher`: `FVoxelCPUCubicMesher`, `FVoxelCPUMarchingCubesMesher`, `FVoxelCPUDualContourMesher`; `FVoxelWaterMesher` |
+| `VoxelRendering` | PostConfigInit (vertex factory, shader directory) | Core | `IVoxelMeshRenderer`, `FVoxelMeshRenderer`, `UVoxelRegionComponent`, `FVoxelSceneProxy`, `FVoxelFadeScheduler` |
+| `VoxelScatter` | PostEngineInit | Core, Generation | `UVoxelScatterManager`, `UVoxelScatterRenderer`, `UVoxelScatterExclusionSubsystem` |
+| `VoxelStreaming` | PostEngineInit | Core, LOD, Rendering, Generation, Meshing, Scatter | `UVoxelChunkManager` and its owners, `UVoxelCollisionManager`, `UVoxelWaterPropagation`, `FVoxelFarField`, `AVoxelWorldActor`, `FVoxelStreamingBenchmark`, the console commands (`Private/Diagnostics/`) |
+| `VoxelMap` | PostEngineInit | Core, Generation, Streaming | `UVoxelMapSubsystem`, `FVoxelMapTileStore`, the edit overlay |
+| `VoxelNavigation` | PostEngineInit | Core, Streaming, Generation | `UVoxelSurfaceNavigationSubsystem`, `FVoxelSurfacePathfinder` |
+| `VoxelPCG` | PostEngineInit | Core, Generation, Streaming (+ the PCG plugin) | the voxel surface sampler and biome dispatcher nodes, `UVoxelPCGBiomeDecorationMapping` |
+| `VoxelWorldsEditor` | Default, Editor only | Core, Generation | the field preview panel, `AVoxelFieldPreviewActor`, `FVoxelFieldImageBaker` |
+
+`VoxelMap` and `VoxelNavigation` also link `VoxelLOD` and `VoxelRendering` for their tests' chunk world. Modules that
+register global shaders or rendering types load at `PostConfigInit` so the shader system is ready; those that create
+world subsystems or need the full runtime load at `PostEngineInit`. A wrong phase crashes the editor at startup
+(`CreatePackage`, `ProcessNewlyLoadedUObjects`). Shaders live in `Shaders/Private` (generation, materials) and
+`Shaders/Shared` (code shared with C++).
+
+## The pieces at runtime
+
+`AVoxelWorldActor` puts a world in a level: it holds the configuration, the material and atlas, and creates the
+`UVoxelChunkManager`, the `FDistanceBandLODStrategy` and the `FVoxelMeshRenderer`. The chunk manager is the hub. It owns
+the world mode and the noise generator, the edit manager, the collision manager, the scatter manager, water
+propagation, the seam registry, the snapshot cache, the far field and the components the actor needs beyond the
+chunks (`FVoxelWorldBoundaryOwner`, `FVoxelFarOceanOwner`, `FVoxelPlanetOceanOwner`, `FVoxelFarFieldPresenter`), the
+water tiles (`FVoxelWaterTiles`) and the viewer policy (`FVoxelStreamingViewerPolicy`: the streaming viewer, the descent
+lead, the camera-cut pass). The map, navigation and PCG modules are clients: they find the chunk manager in the world
+and read through its queries and events.
+
+Game code (VoxelCharacterPlugin, VoxelWorldPOI, the project's game module) reaches the world only through the chunk
+manager's API (surface queries, the world mode's bounds and frame, the sea, edits) and `IVoxelEditValidator`.
+
+## Data flow
+
+### A chunk's life
+
+1. **Window.** Each tick the LOD strategy turns the streaming viewer into the voxel window: the chunks to hold and
+   their LOD (`IVoxelLODStrategy`). A heightmap streams each column's surface slab plus the viewer's layers; a planet
+   streams by chunk (each chunk's surface slab, the near layers, a horizon along the ground). Above the cut-over
+   altitude (with a far field on) the window is suspended and every chunk unloads.
+2. **Generation.** A queued chunk is generated by the GPU compute shader (`GenerateVoxelDensity.usf`, then the
+   post-passes for water and underground flags) and read back, or by the CPU generator on a worker. A chunk whose
+   voxels are all the same is stored collapsed to one value.
+3. **Meshing.** A CPU worker meshes the chunk's interior from its own voxels (`EVoxelMeshCellDomain::Interior`). Each
+   boundary the chunk shares is a seam: once all its participants have voxels, one seam job reads their snapshots and
+   meshes the boundary at both sides' LODs (`FVoxelSeamRegistry`). Neither waits on the other.
+4. **Rendering.** The mesh lands on the game thread as `FChunkMeshData`; the renderer uploads it to the render region's
+   scene proxy, which crossfades it with the mesh it replaces (a dithered swap). Water tiles per XY column are a second
+   pass with the water material.
+5. **Collision.** The collision manager cooks a Chaos trimesh near the player on the thread pool, reading neighbours
+   through boundary shells; a neighbour arriving later re-cooks a chunk that read it as missing.
+6. **Scatter.** Once inside the scatter horizon a chunk's surface points are extracted from its voxels on a worker,
+   placed per biome and drawn as HISM instances per scatter region.
+7. **Far compression.** A settled chunk far enough out (its band's stride at least `voxel.FarCompression.MinStride`)
+   is encoded on a worker and its array dropped; readers get snapshots decoded off the game thread.
+8. **Unload.** A chunk past the unload horizon leaves every system, scatter caches included.
+
+### Edits
+
+`UVoxelEditManager` keeps a sparse overlay of edits per chunk (Add, Subtract, Paint, Set), with undo and redo for
+player edits and per-voxel records. An edit operation broadcasts each changed chunk with its bounds; the chunk manager
+re-meshes those chunks, restales their seams, re-cooks the collision of the chunks whose cooks read them, re-extracts
+the scatter readers, and water propagation floods what the edit opened under the sea. System edits (POI terraforming,
+dungeon stamps, floods) stay out of the undo history.
+
+### Reading voxels
+
+Readers off the game thread never touch a chunk's array directly: they take an immutable edit-merged snapshot
+(`UVoxelChunkManager::GetVoxelSnapshot`), shared copy-on-write with the resident array, collapsed for a uniform chunk, or
+decoded by a worker from the compact form. Collision cooks read neighbours as boundary shells. Point reads on the game
+thread go through the chunk manager: `GetVoxelAt` (the voxel with its edits) and `GetGeneratedVoxelAt` (as generation
+made it).
+
+### Surfaces
+
+One ladder of surfaces serves every consumer (`UVoxelChunkManager::QuerySurfacePoint`, `EVoxelSurfaceLayer`): the
+natural surface of the world mode, the generated surface (conditioning zones applied; block tops in a cubic world), and
+the edit-merged surface of the loaded voxels. Every query runs along local up, so the same call works on a planet.
+
+### Beyond the voxel window
+
+`FVoxelFarField` draws the conditioned analytic surface past the window: six cube-face quadtrees on a planet, root-tile
+quadtrees on the XY grid on a heightmap, patches split by screen-space error and built on the thread pool, one
+procedural mesh component each. Band patches hide once every chunk they cover is drawn, so the window and the far field
+neither gap nor overlap. An island keeps its far ocean (open sea and seabed past its edge); a small planet without a far
+field sea draws a sea sphere.
+
+## Core data
+
+**`FVoxelData`** is 4 bytes: `MaterialID`, `Density` (0-255, 127 the surface), `BiomeID`, `Metadata` (low nibble AO,
+high nibble flags: water, cave, underground). A 64³ chunk, the demo's size, is 1 MB resident.
+
+**`FChunkDescriptor`** holds a chunk's coordinate, LOD level, size and voxels in one of four residencies
+(`EVoxelDataResidency`: empty, resident, uniform, compressed), the resident array shared copy-on-write
+(`GetVoxelDataForRead`, `GetVoxelDataMutable`), and a content version that counts generation and edits.
+
+**`UVoxelWorldConfiguration`** is the world's asset: world mode and its parameters, meshing mode, voxel and chunk size,
+view distance and LOD bands, generation, materials, water, scatter, caves and the far field. `UVoxelWorldsSettings`
+holds project-wide tuning; a `voxel.*` cvar overrides either. `voxel.World.ConfigOverride` (or `-VoxelConfig=`) swaps
+a level's configuration for a test run.
+
+[DATA_STRUCTURES.md](Features/DATA_STRUCTURES.md) has the full types.
+
+## Design decisions
+
+**GPU generation, CPU meshing.** Generation is one thread per voxel and costs the GPU a fraction of a millisecond per
+chunk; the readback is one buffer. Meshing stays on CPU workers because a chunk mesh and the seams it meets must agree
+exactly, which the GPU meshers never did; no world dispatched them and they were deleted (the cubic one in the world
+modes review, Marching Cubes and Dual Contouring in code review CR1). The CPU generator stays as the GPU's twin, held to
+it by the `GPUvsCPU*Parity` tests, and runs headless runs (`-VoxelForceCPU`).
+
+**Seam ownership.** Each chunk boundary belongs to one seam job that reads both sides, instead of each chunk reading
+its neighbours' faces. Seams are watertight across LOD levels by construction, a chunk never waits for a neighbour, and an
+edit re-meshes only the chunks it changed. It replaced the June LOD-boundary welds and the Transvoxel plan
+(`Research/Archive/SEAM_OWNERSHIP_ARCHITECTURE.md`).
+
+**Distance bands behind an interface.** `IVoxelLODStrategy` keeps the strategy swappable; the distance band strategy
+is the only one, since predictable rings with refine and coarsen hysteresis and a 2:1 balance have met every world mode,
+the planet included. Cubic worlds run without LOD (`IsLODEnabled()` false): greedy meshing is their answer to distance.
+
+**A 4-byte voxel.** 256 materials and biomes, 8-bit density and a metadata byte keep a chunk compact and cache-friendly;
+far compression and uniform collapse do the rest (a demo window of about 1,100 chunks settles near 130 MB of voxel data).
+
+**One renderer on `FLocalVertexFactory`.** A custom scene proxy per render region uploads each chunk, seam and water mesh
+into UE's local vertex factory; the custom vertex factory research (`Research/Archive/`) and the
+`ProceduralMeshComponent` fallback were dropped (the fallback in code review CR1). `DynamicMeshComponent` and
+GeometryScript were not taken: a dynamic draw path without instancing is worse for runtime geometry.
+
+**Precision by regions, not origin rebasing.** Every primitive sits at its render region's origin (16³ chunks, double)
+and stores float offsets from it, in every world mode; generation keeps size-R values in double or in the chunk's frame
+and the noise is split-origin. Heightmap worlds are exact to the range of a double position and planets to about
+1,000 km, with no world-origin shift ([TRAVERSAL_LIMITS.md](Research/TRAVERSAL_LIMITS.md)).
+
+**No Nanite.** Nanite geometry is built at cook time; terrain generated at runtime from a seed cannot be Nanite. The
+hand-built renderer and LOD are the engine's best option for runtime geometry, not a stand-in for Nanite.
+
+**Runtime Virtual Textures.** The scene proxy emits RVT mesh batches when the configuration lists
+`RuntimeVirtualTextures` (copied onto each region component before it registers), and `M_VoxelMaster` has a Runtime
+Virtual Texture Output node; with none assigned it costs nothing.
+
+**Runtime PCG** decorates the surface through `VoxelPCG`: a sampler that emits biome-tagged points from edit-merged
+voxels near loaded chunks and the generator farther out, and a dispatcher that runs one graph per biome. It coexists with
+the bespoke scatter ([PCG_DECORATION_ARCHITECTURE.md](Research/PCG_DECORATION_ARCHITECTURE.md)).
+
+**World Partition for actors only.** World Partition streams placed actors (POIs, props, gameplay) in a finite world; the
+terrain is one always-loaded actor whose chunk manager streams on its own. The two were verified side by side in PIE.
+
+**Mode-generic code.** A feature built for one world mode moves to all of them once it applies (the far field, the
+cut-over, regions, the noise), and its name carries no mode (`FVoxelFarField`, `FVoxelNoise`, `VoxelCutoverAltitude`).
 
 ## References
 
-- [LOD System Details](Features/LOD_SYSTEM.md)
-- [Marching Cubes Meshing & Transvoxel](Features/MARCHING_CUBES_MESHING.md)
-- [Dual Contouring Meshing](Features/DUAL_CONTOURING.md)
-- [Rendering System Details](Features/RENDERING_SYSTEM.md)
-- [Water System](Features/WATER_SYSTEM.md)
-- [GPU Pipeline Details](Features/GPU_PIPELINE.md)
-- [Data Structures Reference](Features/DATA_STRUCTURES.md)
-- [World Modes Guide](Features/WORLD_MODES.md)
-- [Implementation Phases](Research/Archive/IMPLEMENTATION_PHASES.md)
-- [Coding Standards](Guides/CODING_STANDARDS.md)
-
----
-
-**Architecture Version**: 2.1
-**Status**: Design Complete, Implementation In Progress
+- [Features](README.md#features): the system docs, one per system.
+- [STREAMING_AND_SEAMS.md](Features/STREAMING_AND_SEAMS.md): the chunk manager, seam ownership, snapshots, collision and residency.
+- [WORLD_MODES.md](Features/WORLD_MODES.md), [LOD_SYSTEM.md](Features/LOD_SYSTEM.md),
+  [RENDERING_SYSTEM.md](Features/RENDERING_SYSTEM.md), [GPU_PIPELINE.md](Features/GPU_PIPELINE.md).
+- [Guides/TESTING_STRATEGY.md](Guides/TESTING_STRATEGY.md), [Guides/CODING_STANDARDS.md](Guides/CODING_STANDARDS.md).
+- `Documentation/GLOSSARY.md` and `Documentation/EDITOR_CONSOLE_GUIDE.md` at the project root.

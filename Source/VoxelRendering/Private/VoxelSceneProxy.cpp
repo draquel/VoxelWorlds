@@ -212,7 +212,7 @@ FVoxelSceneProxy::FVoxelSceneProxy(UVoxelRegionComponent* InComponent, UMaterial
 	// component has RVTs assigned. The base FPrimitiveSceneProxy constructor reads
 	// UPrimitiveComponent::RuntimeVirtualTextures and populates
 	// RuntimeVirtualTextureMaterialTypes; we just opt in here and emit the RVT mesh
-	// batches in GetDynamicMeshElements. See Documentation/Research/ENGINE_INTEGRATION.md.
+	// batches in GetDynamicMeshElements. See Documentation/Research/Archive/ENGINE_INTEGRATION.md.
 	bSupportsRuntimeVirtualTexture = true;
 
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Created with FLocalVertexFactory (RVT material types=%d)"), RuntimeVirtualTextureMaterialTypes.Num());
@@ -555,7 +555,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			// other combination renders the current mesh with the shared material as before.
 			// The exception is an appearance (R24 P3): no previous mesh, the current one alone
 			// dithers in from nothing.
-			// See Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md §5.
+			// See Documentation/Research/Archive/SEAM_OWNERSHIP_ARCHITECTURE.md §5.
 			const FVoxelChunkFadeState* FadeState = nullptr;
 			const FVoxelChunkPreviousMesh* PreviousMesh = nullptr;
 			if (bAnyFades && !bWireframe)

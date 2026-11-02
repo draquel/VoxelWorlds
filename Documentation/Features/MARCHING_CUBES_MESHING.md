@@ -1,7 +1,12 @@
 # Marching Cubes Meshing System
 
+> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+
 **Module**: VoxelMeshing
-**Last Updated**: 2026-02-19
+
+Marching Cubes runs on the CPU only (`FVoxelCPUMarchingCubesMesher`, on the chunk manager's worker tasks). The GPU
+Marching Cubes mesher that mirrored it was never dispatched by a world and was deleted in code review CR1 with its
+shaders (D-CR12).
 
 ## Table of Contents
 
@@ -9,11 +14,12 @@
 2. [Smooth Terrain Pipeline](#smooth-terrain-pipeline)
 3. [Marching Cubes Algorithm](#marching-cubes-algorithm)
 4. [LOD Support](#lod-support)
-5. [Transvoxel Algorithm](#transvoxel-algorithm)
+5. [LOD Seams: Transvoxel Ribbon and Geomorph](#lod-seams-transvoxel-ribbon-and-geomorph)
 6. [Configuration](#configuration)
 7. [Implementation Details](#implementation-details)
 8. [Performance Considerations](#performance-considerations)
 9. [Troubleshooting](#troubleshooting)
+10. [Marching Cubes on a Planet](#marching-cubes-on-a-planet)
 
 ---
 
@@ -23,12 +29,11 @@ The Marching Cubes meshing system generates organic, curved terrain surfaces usi
 
 - **Marching Cubes**: Core algorithm for isosurface extraction from density fields
 - **LOD Support**: Strided sampling for level-of-detail rendering
-- **LOD-seam handling**: Shipped via **geomorph** (bending the fine surface toward the coarse
-  contour at the boundary) — see
-  [Research/GEOMORPH_IMPLEMENTATION_PLAN.md](../Research/Archive/GEOMORPH_IMPLEMENTATION_PLAN.md).
-  The Transvoxel transition-cell approach described later in this doc was implemented but is
-  **disabled** (`bUseTransvoxel=false`); see
-  [Research/TRANSVOXEL_IMPLEMENTATION_PLAN.md](../Research/Archive/TRANSVOXEL_IMPLEMENTATION_PLAN.md).
+- **Seams and LOD seams**: a chunk meshes its interior; face, edge and corner seam jobs mesh the boundary bands. Where
+  a face borders a coarser chunk the face seam job emits a **Transvoxel ribbon** (zero-thickness transition cells on the
+  boundary plane) and **geomorphs** the fine band toward the coarse contour ([LOD Seams](#lod-seams-transvoxel-ribbon-and-geomorph));
+  history: [GEOMORPH_IMPLEMENTATION_PLAN.md](../Research/Archive/GEOMORPH_IMPLEMENTATION_PLAN.md),
+  [TRANSVOXEL_IMPLEMENTATION_PLAN.md](../Research/Archive/TRANSVOXEL_IMPLEMENTATION_PLAN.md).
 
 ### When to Use Marching Cubes Meshing
 
@@ -45,6 +50,7 @@ The Marching Cubes meshing system generates organic, curved terrain surfaces usi
 |------|---------|
 | `VoxelCPUMarchingCubesMesher.h/cpp` | CPU implementation |
 | `VoxelCPUMarchingCubesSeams.cpp` | CPU seam jobs (face, edge and corner seams between chunks) |
+| `VoxelCrossingGradient.h` (Private) | Voxel-resolution crossings and fitted shading normals, shared with Dual Contouring |
 | `MarchingCubesTables.h/cpp` | Lookup tables for standard Marching Cubes |
 | `TransvoxelTables.h/cpp` | Lookup tables for LOD transitions |
 | `VoxelMeshingTypes.h` | Configuration structures |
@@ -62,7 +68,7 @@ Marching Cubes and [Dual Contouring](DUAL_CONTOURING.md) are both **smooth meshi
 | Rendering mode | Triplanar texturing | UV-atlas per face |
 | Vertex format | `FVoxelVertex` (28 bytes) | Same format, different UV usage |
 | Material parameter | `bSmoothTerrain = 1` in shader | `bSmoothTerrain = 0` |
-| Normal source | Density gradient (central differences) | Face normals |
+| Normal source | Density gradient fitted to the voxels around the vertex (G62) | Face normals |
 | UV computation | Triplanar projection (dominant axis) | Per-face atlas lookup |
 
 ### Algorithm and rendering style
@@ -74,18 +80,22 @@ carries no mode flag of its own (its `bUseSmoothMeshing` was read by nothing and
 ### Shared Mesh Types
 
 Both smooth meshers implement the `IVoxelMesher` interface and produce the same output types:
-- **Input**: `FVoxelMeshingRequest` (voxel data + neighbor slices + LOD info)
+- **Input**: `FVoxelMeshingRequest` (voxel data, LOD, cell domain; neighbour slices or snapshot views for seam jobs and the collision cook)
 - **Output**: `FChunkMeshData` (positions, normals, UVs, colors, indices)
 - **Config**: `FVoxelMeshingConfig` (shared fields + algorithm-specific fields)
 
-Both use the same neighbor data system (face slices, edge strips, corner voxels) for seamless chunk boundaries.
+Both close chunk boundaries by seam ownership: the interior mesh (`EVoxelMeshCellDomain::Interior`) carries no
+neighbour data and meshes only the cells that need none; seam jobs mesh the rest. The scheduling is in
+[STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md).
 
-**MC seam jobs** (`VoxelCPUMarchingCubesSeams.cpp`, seam ownership P3) mesh each participant's boundary band through the
-same `ProcessCubeLOD`, ribbon and geomorph code as a chunk. Each participant frame reads the participants' snapshots in
-place (`FVoxelMeshingRequest::NeighbourSnapshotViews`): at every read, the voxel a copied face plane, edge strip or corner would hold.
-Before G63 every frame copied its whole volume and gathered its neighbours' planes, strips and corners, 95% of a seam
-job's time. `voxel.Seam.MCReadInPlace 0` restores the copies for A/B, and `voxel.Seam.MCStats` times the stages. See
-`WORLD_MODES_REVIEW_PLAN.md` §20.29.
+**MC seam jobs** (`VoxelCPUMarchingCubesSeams.cpp`) mesh each participant's boundary band through the same
+`ProcessCubeLOD`, ribbon and geomorph code as a chunk, so junctions with the interior meshes are bit-identical. Per
+chunk the interior mesh covers cells `[1, N-2]` per axis; a face seam the cells with one axis at `{0, N-1}`, an edge seam
+two, a corner seam three. Each participant frame reads the participants' snapshots in place
+(`FVoxelMeshingRequest::NeighbourSnapshotViews`): at every read, the voxel a copied face plane, edge strip or corner
+would hold. Copying them was 95% of a seam job's time; reading in place made MC seam jobs about 30 times cheaper (G63).
+`voxel.Seam.MCReadInPlace 0` restores the copies, `voxel.Seam.MCStats` times the stages; tests
+`Meshing.MarchingCubes.SeamClosure.MCS4_ReadInPlace`, `Streaming.{Planet,Plane}.MCSeamReadInPlace`.
 
 ### LOD Transition Differences
 
@@ -93,9 +103,9 @@ The two smooth meshers handle LOD boundaries differently:
 
 | | Marching Cubes | Dual Contouring |
 |-|---------------|-----------------|
-| Mechanism | Transvoxel transition cells | Boundary cell merging |
+| Mechanism | Transvoxel ribbon + band-confined geomorph, in the face seam job | Mixed-LOD seam meshers fan fine crossings onto the coarse rings |
 | Lookup tables | 512-entry tables (56 classes) | None |
-| Config | `bUseTransvoxel`, `TransitionFaces` | `NeighborLODLevels` |
+| Request fields | `TransitionFaces`, `NeighborLODLevels`, `MorphWidthOverride` | `NeighborLODLevels` |
 
 ---
 
@@ -177,14 +187,14 @@ FVector3f Normal = FVector3f(-gx, -gy, -gz).GetSafeNormal();
 ```
 
 That is the central difference before G62 (`CalculateGradientNormal`, the vertex floored to a voxel). LOD 0's vertex normal
-is now `CalculateShadingNormal`: the density gradient fitted to the voxels on the ramp around the vertex
+is `CalculateShadingNormal`: the density gradient fitted to the voxels on the ramp around the vertex
 (`VoxelCrossingGradient::FitNormal`: weighted least squares over the 3x3x3 block around its nearest voxel, 0 < density <
 255, tent weights, a free offset, so a geomorphed vertex off the surface is fitted too), over the voxels the request holds
 (`IsVoxelHeld`: the chunk, or one voxel past it where that face's plane, edge's strip or corner is present). The central
 difference read the saturated rock under the surface and tilted a slope's normal by 1.0-1.8 times with the surface's phase
 in the voxel layer (bands; G62). Where the voxels on the ramp do not span three directions it is used, exact there.
-`voxel.Mesh.CrossingGradientNormals 0` restores it (shared with Dual Contouring; the GPU shader the same). See
-`WORLD_MODES_REVIEW_PLAN.md` §20.12.
+`voxel.Mesh.CrossingGradientNormals 0` restores it (shared with Dual Contouring); tests
+`Meshing.CrossingGradient.Planes`, `Streaming.{Planet,Plane}.GradientBands`.
 
 **Normals at a stride (G61).** Generated density saturates a voxel either side of the surface
 (`SignedDistanceToDensity`), so taps `Stride` voxels apart read 0 or 255 on every axis the surface crosses between them:
@@ -192,8 +202,9 @@ at LOD 2 each gradient component is a sign and the normal snaps toward one of th
 planets, streaks on heightmap slopes). So at stride > 1 an edge vertex's normal is LOD 0's (`CalculateShadingNormal`) at
 the voxel crossing on its edge nearest it (`CalculateEdgeShadingNormal`: the edge walked from its min end in voxel steps). It is a function of the
 edge alone, so every cell, seam band and transition ribbon sharing the edge gives the vertex the same normal, and the
-boundary geomorph (which moves vertices) does not change it. Positions are unchanged. `voxel.Mesh.VoxelShadingNormals 0` (shared with Dual Contouring's
-G44) restores the stride-scale normals (`CalculateGradientNormalLOD`) for A/B. See `WORLD_MODES_REVIEW_PLAN.md` §20.9.
+boundary geomorph (which moves vertices) does not change it. `voxel.Mesh.VoxelShadingNormals 0` (shared with Dual
+Contouring's G44) restores the stride-scale normals (`CalculateGradientNormalLOD`); tests `Meshing.MarchingCubes.LODNormals`,
+`Streaming.{Planet,Plane}.LODNormalsMC`.
 
 **Vertices at a stride (G80).** The same saturation put an interpolated strided vertex toward the edge's middle, whatever
 the surface did between the two samples, so LOD 1 and 2 were terraced a stride apart (ribs in the terrain's own shadows
@@ -202,9 +213,9 @@ G61's normal reads), so regular cells, seam bands and the transition ribbon (its
 neighbour's, its face-face ones the fine mesh's; one-voxel edges keep `InterpolateEdge`) still agree on every shared edge.
 The boundary geomorph's target follows the coarse cells' new vertices: the voxel crossings on the four coarse edge columns
 along the morph axis around the vertex, blended bilinearly (`ComputeCoarseCrossingsAlongAxis`; on a column, that column's
-coarse vertex), in place of the trilinear coarse density's crossing. The GPU shader does the same (`ComputeCoarseCrossingsZ`).
-`voxel.Mesh.VoxelLODCrossings 0` (shared with Dual Contouring) restores the interpolated vertices and the trilinear
-target. See `WORLD_MODES_REVIEW_PLAN.md` §23.16.
+coarse vertex), in place of the trilinear coarse density's crossing. `voxel.Mesh.VoxelLODCrossings 0` (shared with Dual
+Contouring) restores the interpolated vertices and the trilinear target; tests `Meshing.LODCrossings.Planes`,
+`Streaming.{Planet,Plane}.LODPositions`.
 
 ---
 
@@ -255,7 +266,7 @@ The high-LOD chunk has 3 vertices on the boundary, but the low-LOD chunk only ha
 
 ---
 
-## Transvoxel Algorithm
+## LOD Seams: Transvoxel Ribbon and Geomorph
 
 ### Overview
 
@@ -280,17 +291,27 @@ Low-res corners: 0, 2, 6, 8 (the 4 corners)
 
 ### How It Works
 
-1. **Detect Transition Faces**: The chunk manager identifies which chunk faces border lower-LOD neighbors
-2. **Mark Cells**: Cells on transition boundaries are processed differently
-3. **Sample 9 Points**: Instead of 8 corners, sample 9 points on the transition face
-4. **Build Case Index**: 2^9 = 512 possible configurations
-5. **Generate Transition Geometry**: Use special lookup tables that produce geometry matching both LOD levels
+1. **Detect Transition Faces**: the face seam job sets `TransitionFaces` (and `NeighborLODLevels`) in the finer
+   participant's frame when the other participant is coarser; chunk meshes never set it
+2. **Sample 9 Points**: Instead of 8 corners, sample 9 points on the transition face
+3. **Build Case Index**: 2^9 = 512 possible configurations
+4. **Generate Transition Geometry**: `ProcessTransitionCell` uses the lookup tables to emit a zero-thickness ribbon on the
+   boundary plane matching both LOD levels
+
+The same job **geomorphs** the fine band toward the coarse contour (along the axis nearest local up, steep slopes
+skipped) with a band-confined ramp (`MorphWidthOverride`) that reaches zero at the band's inner edge, so morphed band
+vertices stay coincident with the unmorphed interior mesh; whole-chunk meshing uses `voxel.Mesh.MCBoundaryMorphWidth`
+(2 coarse cells, also `UVoxelWorldsSettings::MCBoundaryMorphWidth`). Ribbon cells that would need voxels beyond the
+two face participants (the positive-perpendicular perimeter rows) skip themselves (`HasRequiredNeighborData`), leaving
+small boundary-plane gaps along those face edges at mixed LOD that the geomorph makes less visible. `bUseTransvoxel` is
+on unless the world configuration's `bEnableLODSeams` is off. Tests `Meshing.MarchingCubes.LODBoundary.*`,
+`Meshing.MarchingCubes.SeamClosure.MCS3_MixedFaceParity`.
 
 ### Implementation
 
 **In VoxelMeshingRequest:**
 ```cpp
-// Set by chunk manager based on neighbor LOD levels
+// Set by the MC face seam job when the other participant is coarser
 uint8 TransitionFaces = 0;
 
 // Flags for each face
@@ -300,18 +321,6 @@ static constexpr uint8 TRANSITION_YNEG = 1 << 2;
 static constexpr uint8 TRANSITION_YPOS = 1 << 3;
 static constexpr uint8 TRANSITION_ZNEG = 1 << 4;
 static constexpr uint8 TRANSITION_ZPOS = 1 << 5;
-```
-
-**In Chunk Manager (ProcessMeshingQueue):**
-```cpp
-// Check each neighbor's LOD level
-for (int i = 0; i < 6; i++) {
-    FIntVector NeighborCoord = ChunkCoord + NeighborOffsets[i];
-    if (NeighborState->LODLevel > CurrentLOD) {
-        // Neighbor is coarser - need transition cells
-        MeshRequest.TransitionFaces |= TransitionFlags[i];
-    }
-}
 ```
 
 **In MarchingCubes Mesher:**
@@ -342,7 +351,7 @@ for each cell:
 // Isosurface threshold (0.0-1.0, default 0.5 = density 127)
 float IsoLevel = 0.5f;
 
-// Use Transvoxel for seamless LOD transitions (recommended)
+// Transvoxel ribbon at LOD seams (the chunk manager clears it when the world's bEnableLODSeams is off)
 bool bUseTransvoxel = true;
 ```
 
@@ -360,28 +369,12 @@ Config.bUseTransvoxel = true;
 
 ## Implementation Details
 
-### The mesher
-
-`FVoxelCPUMarchingCubesMesher` runs synchronously on the chunk manager's worker tasks (interior chunk
-meshes and the MC seam jobs). The GPU Marching Cubes mesher that mirrored it was never dispatched by a
-world and was deleted in code review CR1.
-
 ### Neighbor Data Handling
 
-Marching Cubes meshing requires sampling beyond chunk boundaries. The meshing request includes neighbor slice data:
-
-```cpp
-// Face neighbors (ChunkSize^2 voxels each)
-TArray<FVoxelData> NeighborXPos, NeighborXNeg;
-TArray<FVoxelData> NeighborYPos, NeighborYNeg;
-TArray<FVoxelData> NeighborZPos, NeighborZNeg;
-
-// Edge neighbors (ChunkSize voxels each) - for corner cubes
-TArray<FVoxelData> EdgeXPosYPos, EdgeXPosYNeg, ...;
-
-// Corner neighbors (single voxels) - for corner-of-corner cubes
-FVoxelData CornerXPosYPosZPos, ...;
-```
+An interior mesh reads only its own voxels. A seam job's participant frame reads its neighbours through
+`NeighbourSnapshotViews` (G63); a whole-chunk request (the collision cook, or seam frames with
+`voxel.Seam.MCReadInPlace 0`) carries copied face planes (`NeighborXPos` ..., `NeighborPlaneDepth` deep), edge strips
+(`EdgeXPosYPos` ...) and corner voxels.
 
 ### Material Assignment
 
@@ -401,7 +394,7 @@ uint8 GetDominantMaterial(int X, int Y, int Z, uint8 CubeIndex) {
 }
 ```
 
-### LOD Material Selection (LOD > 0)
+### LOD-Aware Material Selection (LOD > 0)
 
 At higher LOD levels, the standard majority-vote approach causes material pop-in because strided sampling misses thin surface layers. The surface material (e.g., grass) may only be 1-2 voxels thick, while the strided cube samples deeper underground materials (e.g., dirt).
 
@@ -440,8 +433,9 @@ uint8 GetDominantMaterialLOD(const FVoxelMeshingRequest& Request,
 **Why This Works**:
 - Even when LOD stride causes corners to sample below surface, scanning upward finds the actual surface
 - Using highest surface Z ensures grass (on top) is preferred over dirt (on slopes where one corner touches surface)
-- MaxScanDistance of 8 limits performance impact while covering typical terrain variations
+- The scan stops after 8 voxels, which limits its cost while covering typical terrain variations
 - Same approach applied to `GetDominantBiomeLOD()` for consistent biome selection
+- At LOD 0 majority voting is used; cubic meshing uses face-based material assignment
 
 ---
 
@@ -460,17 +454,15 @@ Marching Cubes meshing typically produces more triangles than cubic:
 ### Optimization Strategies
 
 1. **LOD**: Use aggressive LOD to reduce distant triangle counts
-2. **Transvoxel**: seamless transitions with no extra geometry
-3. **GPU Meshing**: 10-20x faster than CPU
-4. **Early-Out**: Skip empty cubes (EdgeTable[cubeIndex] == 0)
-5. **Pre-allocated Buffers**: Reserve based on estimates
+2. **Early-Out**: Skip empty cubes (EdgeTable[cubeIndex] == 0)
+3. **Pre-allocated Buffers**: Reserve based on estimates
+
+The fitted shading normals (G62) cost chunk-mesh worker time, about half as much again; seam jobs read their
+participants in place (G63).
 
 ### Memory Usage
 
-Per 32^3 chunk at LOD 0:
-- Input voxel data: 128 KB
-- Output vertices (typical): ~50-100 KB
-- Output indices (typical): ~30-60 KB
+A chunk's voxels are 4 bytes each (1 MB at 64^3); meshing reads them from the chunk's snapshot.
 
 ---
 
@@ -481,9 +473,9 @@ Per 32^3 chunk at LOD 0:
 **Symptom**: Gaps or cracks between chunks at different LOD levels
 
 **Solutions**:
-1. Enable Transvoxel: `Config.bUseTransvoxel = true`
-2. Verify TransitionFaces is being set correctly in chunk manager
-3. Check that neighbor LOD levels are being queried correctly
+1. Check that the world configuration's `bEnableLODSeams` is on (it keeps `bUseTransvoxel`)
+2. Check that the face seam jobs ran and were not left stale ([STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md))
+3. Small gaps along a mixed-LOD face's positive-perpendicular edges are the ribbon's known limit (above)
 
 ### Incorrect Surface Position
 
@@ -503,20 +495,21 @@ Per 32^3 chunk at LOD 0:
 
 **Solutions**:
 1. Increase LOD aggressiveness
-2. Reduce MaxChunksPerFrame in config
+2. Time the seam stages with `voxel.Seam.MCStats`
 3. Profile with Unreal Insights
 
 ### Missing Geometry at Chunk Edges
 
 **Symptom**: Holes at chunk boundaries
 
-**Solution**: Ensure neighbor data is being extracted correctly in `ExtractNeighborEdgeSlices()`
+**Solution**: The interior mesh leaves the boundary bands to the seam jobs by design; run the seam suite
+(`Meshing.MarchingCubes.SeamClosure.*`) and check the chunk's seam jobs ran.
 
 ---
 
 ## References
 
-- [Dual Contouring (companion doc)](DUAL_CONTOURING.md) — DC algorithm, QEF solver, LOD boundary merging
+- [Dual Contouring (companion doc)](DUAL_CONTOURING.md) — DC algorithm, QEF solver, mixed-LOD seams
 - [Marching Cubes Original Paper](http://www.cs.carleton.edu/cs_comps/0405/shape/marching_cubes.html)
 - [Transvoxel Algorithm](https://transvoxel.org/) - Eric Lengyel
 - [Polygonising a Scalar Field](http://paulbourke.net/geometry/polygonise/) - Paul Bourke
@@ -524,35 +517,7 @@ Per 32^3 chunk at LOD 0:
 
 ---
 
----
-
-## LOD-Aware Material Selection
-
-### The Problem
-
-At LOD > 0, Marching Cubes samples with a stride (LOD 1 = stride 2, LOD 2 = stride 4, etc.). This causes the cube corners to sample deeper into the terrain than at LOD 0. When the surface material layer (grass) is thin (1-2 voxels), the strided corners may entirely miss it, causing underground materials (dirt, stone) to be selected.
-
-This manifests as visible "pop-in" when chunks transition from high LOD to LOD 0 - the material suddenly changes from dirt to grass.
-
-### The Solution
-
-Instead of simple majority voting, `GetDominantMaterialLOD()` scans upward from each solid corner to find the actual surface transition point:
-
-1. For each solid corner in the cube, scan upward (max 8 voxels)
-2. Track the last solid material before hitting air
-3. Record the Z position of this surface transition
-4. Use the material from the corner with the highest surface Z
-
-This ensures that surface materials (grass on top) are preferred over underground materials (dirt on slopes).
-
-### Implementation Notes
-
-- `MaxScanDistance = 8` limits performance impact
-- Same approach used for `GetDominantBiomeLOD()` to prevent biome pop-in
-- At LOD 0, standard majority voting is used (no scanning needed)
-- The fix only affects Marching Cubes meshing; cubic meshing uses face-based material assignment
-
-### On a Planet (spherical Phase 4, SP-D1, SP-D2)
+## Marching Cubes on a Planet
 
 Meshing and seam requests carry `LocalUp`, the chunk centre's local up (+Z on heightmap worlds, which runs the old
 arithmetic). On a planet:
@@ -564,8 +529,4 @@ arithmetic). On a planet:
   the plane (`Meshing.MarchingCubes.PlanetGeomorph`); the gate skips vertices more than 60° off the axis, as it skips
   steep slopes on the plane.
 
-Planets mesh with Dual Contouring by default, so these run only on an MC planet.
-
----
-
-**Status**: Implemented - CPU Marching Cubes with LOD material fix; the skirt fallback and the non-LOD `ProcessCube` path were deleted in CR1 (MESH-04, MESH-05)
+Planets mesh with Dual Contouring by default, so these run only on an MC planet (SP-D1, SP-D2).

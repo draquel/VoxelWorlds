@@ -1,5 +1,7 @@
 # Map System
 
+> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+
 **Module**: VoxelMap
 **Dependencies**: VoxelCore, VoxelGeneration, VoxelStreaming
 
@@ -9,7 +11,7 @@ The Map System generates 2D top-down map tile data from voxel terrain. Each tile
 
 The system lives entirely within the VoxelWorlds plugin and has zero knowledge of players, characters, or UI. External consumers (such as minimap or world map widgets in VoxelCharacterPlugin) query the subsystem for tile data and drive exploration via `RequestTilesInRadius()`.
 
-Tile images live under a fixed memory budget (world modes review WM-E2, finding KI15; see [Tile Images and Memory](#tile-images-and-memory)): every drawn tile keeps a small overview, and its full-resolution image only while recently used. Exploration is kept whole and saved; a tile whose images were dropped is drawn again when something looks at it.
+Tile images live under a fixed memory budget (world modes review WM-E2, finding KI15; see [Tile Images and Memory](#tile-images-and-memory)): every drawn tile keeps a small overview, and its full-resolution image only while recently used. Exploration is kept whole and saved; a tile whose images were dropped is drawn again when something looks at it. Player and system edits show on the map through per-tile edit overlays ([Edit Overlays](#edit-overlays-r22)).
 
 ## Architecture
 
@@ -25,11 +27,13 @@ UVoxelMapSubsystem (UWorldSubsystem)
 ├── Predictive Generation ──→ RequestTilesInRadius()
 │   (generates ahead of chunk streaming, driven by external callers)
 │
+├── Edit Overlays: FVoxelMapEditOverlay per edited tile (R22; saved)
+│
 └── Background Thread ──→ GenerateTileAsync()
-    ├── IVoxelWorldMode::GetTerrainHeightAt()  (height sampling)
-    ├── FVoxelCPUNoiseGenerator::FBM3D()       (biome noise)
-    ├── FBiomeDefinition::GetMaterialAtDepth()  (biome material)
-    └── FVoxelMaterialRegistry::GetMaterialColor() (material → color)
+    ├── FVoxelMapTileFrame::Altitude()                 (the generated surface, conditioning zones applied)
+    ├── FVoxelSurfaceQuery::QueryMapSurfaceMaterial()  (the surface material as generation writes it)
+    ├── the edit overlays                              (edited columns' height, material, water)
+    └── the map palette                                (the atlas's baked albedo per material, else the registry colour)
 ```
 
 ## Key Types
@@ -66,8 +70,8 @@ World subsystem that manages tile generation, caching, and exploration tracking.
 | `HasTile(FIntPoint)` / `HasTileDetail(FIntPoint)` | Whether the tile has any image / its full-resolution one |
 | `RequestTileImage(FIntPoint, bool bDetail)` | For an explored tile: draw it again if it has no image, or (bDetail) only its overview. The world map calls it for the tiles in view (BlueprintCallable) |
 | `GetTileOverviewResolution()` | Pixels a side of an overview (ChunkSize / 4); a view showing more texels per tile wants detail |
-| `GetTileStore()` | The images and their budgets (diagnostics, tests); replaces `GetTileCache()` (removed with WM-E2) |
-| `ExploreAllTiles(FVector, float)` | Debug (`voxel.Map.ExploreAll`): explore every tile of a bounded world, as a fully explored save restores it |
+| `GetTileStore()` | The images and their budgets (diagnostics, tests) |
+| `ExploreAllTiles(FVector, float)` | Debug (`voxel.Map.ExploreAll`): explore every tile of a bounded world (an unbounded one: within Radius of Center), as a fully explored save restores it, at most `voxel.Map.ExploreAllMaxTiles` |
 | `RequestTilesInRadius(FVector, float)` | Mark tiles as explored and queue generation |
 | `IsTileExplored(FIntPoint)` | Check if a tile is in the explored set |
 | `GetExploredTiles()` | Get all explored tile coordinates |
@@ -94,7 +98,7 @@ The subsystem binds to `UVoxelChunkManager::OnChunkGenerated` during initializat
 
 **2. Predictive (look-ahead)**
 
-`RequestTilesInRadius()` generates tiles for areas visible on a minimap or world map, even if those chunks haven't loaded yet. Since `GetTerrainHeightAt()` is deterministic and doesn't need loaded chunks, predictive generation works without any chunk data. This is critical because the minimap view radius typically exceeds the chunk streaming radius.
+`RequestTilesInRadius()` generates tiles for areas visible on a minimap or world map, even if those chunks haven't loaded yet. The generated surface is a function of the world's configuration and needs no loaded chunk, so predictive generation works without any chunk data. This is critical because the minimap view radius typically exceeds the chunk streaming radius.
 
 ### Async Generation
 
@@ -102,41 +106,50 @@ All tile generation runs on background threads via `AsyncTask(ENamedThreads::Any
 
 When a task completes, it marshals results back to the game thread via `AsyncTask(ENamedThreads::GameThread)` and checks for more pending tiles to process, maintaining a steady pipeline.
 
-**Thread safety:** All terrain sampling APIs (`GetTerrainHeightAt`, `FBM3D`, `GetMaterialColor`) are stateless and safe to call from any thread. Biome definitions and noise parameters are captured by value before the async lambda — UObject pointers are never accessed on background threads. `TileCache` writes are protected by `FCriticalSection` and happen exclusively on the game thread.
+**Thread safety:** The task samples a standalone world mode the subsystem owns (a `TSharedPtr` the task co-owns, so a PIE stop cannot free it under the task), the tile frame (`FVoxelMapTileFrame`, a value type), a `FVoxelBiomeSnapshot` and the palette, all captured by value; UObject pointers are never accessed on background threads. `TileStore` writes happen on the game thread when a drawing completes, under `TileMutex`.
 
 ### Color Generation
 
-Each pixel's color is determined through a multi-step process:
+Each pixel's colour is determined in four steps (`VoxelMapTileDrawing.cpp`; one drawer for both kinds of world, the
+frame answering what differs since code review CR2):
 
-**1. Height sampling**
-```
-Height = WorldMode->GetTerrainHeightAt(WorldX, WorldY, NoiseParams)
-```
+1. **Height.** The generated surface at the pixel (`FVoxelMapTileFrame::Altitude`): on a heightmap world the world
+   mode's surface on the up line through (X, Y) (`GetSurfaceOnUpLine`, continentalness and the island falloff included)
+   with the terrain conditioning zones over the tile layered on (`FVoxelTerrainConditioning::ApplyToHeight`: POI pads,
+   campsites); on a planet the conditioned altitude along the pixel's direction. A one-pixel apron from the neighbouring
+   tiles feeds the hillshade, so shading is continuous across tile seams.
+2. **Material.** `FVoxelSurfaceQuery::QueryMapSurfaceMaterial`: the material generation writes at the surface voxel,
+   by the same pipeline as generation, tree placement and PCG (biome selection and blending, height rules, the
+   underwater rules). The colour is the material atlas's baked average albedo (`BuildMapPalette`), else
+   `FVoxelMaterialRegistry::GetMaterialColor`.
+3. **Water.** Where the sea is above the terrain the pixel is blue `(20, 80, 180)` scaled by
+   `Lerp(1.0, 0.3, Depth / DepthSpan)`, the depth span taken from the world's own terrain floor so a shallow sea still
+   shows a gradient.
+4. **Land shading.** The palette colour times an elevation tint, `Lerp(0.75, 1.0)` across the world's height range above
+   the sea, times a hillshade from the neighbouring pixels (`FVoxelMapTileFrame::ShadeAt`, a north-west key light).
 
-**2. Material selection (biome-aware)**
+An edited column (below) draws with its overlay's height, material and water instead.
 
-When biomes are enabled, the system replicates the same noise sampling used by `FVoxelCPUNoiseGenerator`:
-- Sample temperature and moisture at the pixel's world position using `FBM3D`
-- Select the dominant biome using `FBiomeDefinition::Contains()` with closest-center tiebreaking
-- Get the biome's surface material via `GetMaterialAtDepth(0.0)`
-- Apply height material rules (e.g., snow above a certain elevation)
+### Edit Overlays (R22)
 
-When biomes are disabled, falls back to `WorldMode->GetMaterialAtDepth()`.
+The analytic map knows nothing of voxel edits, so each tile with edits that changed its **top surface** keeps an
+`FVoxelMapEditOverlay`: per edited column the edited surface height, its material and whether water covers it (a
+water-flagged voxel anywhere in the air above it), stored sparsely. The subsystem binds `UVoxelEditManager::OnChunkEdited`,
+coalesces the edited tiles on a timer (`voxel.Map.EditRefreshSeconds`, 0.5 s; water propagation edits every frame), and
+rebuilds at most `voxel.Map.EditRefreshMaxTiles` (8) a refresh, those whose edited chunks are loaded, from the chunks'
+edit-merged snapshots (shared with the seam pipeline; at most one gather a frame on the game thread, the build on the tile
+task). A column is masked only where an edited voxel lies at or above the surface and the surface differs from the
+analytic one (height by more than half a voxel, material, or water), so dungeon interiors and other buried edits never
+show. A column dug into a chunk that is not loaded keeps its previous value until the chunk loads. Neighbouring tiles
+redraw when an overlay's border changes, so the hillshade stays continuous. On a planet the overlay is built along each
+pixel's local up (below).
 
-**3. Water rendering**
-
-When water is enabled and the terrain height is below the water level, the pixel renders as water with a depth gradient:
-- Shallow water: light blue `(20, 80, 180)`
-- Deep water: dark blue, scaled by `DepthFactor = Clamp(1.0 - Depth/3000, 0.3, 1.0)`
-
-**4. Land elevation shading**
-
-Above-water terrain gets topographic shading based on elevation above the water level (or 0 if water is disabled):
-- Low elevation: 45% brightness
-- High elevation (4000+ units above water): 100% brightness
-- Formula: `Brightness = Lerp(0.45, 1.0, Clamp(Elevation / 4000, 0, 1))`
-
-This creates a natural relief effect matching the water depth gradient.
+Overlays are saved with the world (`ExportEditOverlays` / `ImportEditOverlays`: magic `VMEO`, zlib and base64 in the
+world document), so edits show on the map before their area loads again; a loaded save's tiles whose edited chunks are
+loaded are rebuilt from them, a tile with no edits left is cleared. Only the server saves; a client's map rebuilds its
+overlays as chunks load. `voxel.Map.Redraw [1]` redraws every explored tile (1 rebuilds the overlays too),
+`voxel.Map.Capture [radius] [name] [highlight]` writes the cached tiles around the pawn to a PNG (overlay columns tinted
+with highlight 1). Tests: `VoxelWorlds.Map.EditOverlay.*`, `VoxelWorlds.Map.Tiles.*`.
 
 ### Tile Images and Memory
 
@@ -160,8 +173,7 @@ away. Why a coarser image rather than dropping tiles outright: the world map at 
 exactly an overview, so a fully explored island stays fully drawn without regeneration; only zooming in or the minimap
 asks for detail, a few hundred to two thousand tiles.
 
-Measured on a fully explored island L in one build (`voxel.Map.ExploreAll` / an imported save, WORLD_MODES_REVIEW_PLAN.md
-§14.10): 37.1 MB of images (3.4 MB detail for the 216 tiles around the spawn, 33.7 MB of overviews) against 573 MB with
+Measured on a fully explored island L (`voxel.Map.ExploreAll` / an imported save, world modes review M6): 37.1 MB of images (3.4 MB detail for the 216 tiles around the spawn, 33.7 MB of overviews) against 573 MB with
 both budgets unlimited (539 MB of detail images, the pre-WM-E2 cost, plus the overviews). The world map at zoom 1 draws
 the whole view from overviews.
 
@@ -201,6 +213,28 @@ box. `voxel.Map.Stats` reports how many explored tiles lie outside the world (0 
 
 The world map widget uses exploration state for fog of war — unexplored tiles render as dark areas.
 
+`voxel.Map.ExploreAll` explores at most `voxel.Map.ExploreAllMaxTiles` (1,000,000) tiles, nearest the pawn first, in
+every world mode (a plane's tiles are unbounded; world modes review MP1, test `VoxelWorlds.Map.ExploreAllCap.Plane`).
+
+## The Widgets (VoxelCharacterPlugin)
+
+The minimap and the world map live in VoxelCharacterPlugin (`Plugins/VoxelCharacterPlugin/Documentation/MAP_UI_WIDGETS.md`).
+What they ask of the map:
+
+- **The minimap** (`UVCMinimapWidget`) fills its texture from the tile images only when it must: with no texture, after
+  `RefillShiftTexels` (2) texels of movement, when an image of a tile it read changed (a signature over the tiles it
+  visited), or after `MaxRefillSeconds` (2 s); in between it shifts the image by the movement. A plane is filled texel by
+  texel. Before world modes review G64 it filled every refresh, ten times a second, 2-3 ms each. `vc.Minimap.SkipUnchanged`
+  and `vc.Minimap.TexelFill` switch the two parts, `vc.Minimap.Stats` reports the fills.
+- **The world map** (`UVCWorldMapWidget`) asks for tile images in view (`RequestTileImage`, detail when zoomed in). When
+  the images do not show (the globe drawn from its albedo) or the view holds more than `TileRedrawThrottleTiles` (256)
+  tiles, in any mode, a tile's arrival redraws the map at most every 2 s (G51: a redraw per arrival held the open map at
+  6.5 FPS after an `ExploreAll`; test `VoxelCharacter.Map.TileRedrawThrottle`).
+- **Markers** (VoxelWorldPOI, `UPOIMapMarkerSubsystem`): a marker query is clamped to `MarkerMaxCells` (20,000) placement
+  cells around its centre in every mode, and the map draws at most `MaxMarkers` (64) (G50: on a 1,000 km planet the
+  zoomed-out globe asked for all 36 million POI cells and held the game thread for 1 min 45 s; test
+  `VoxelWorlds.POI.Map.MarkerCap`).
+
 ## Key Packing
 
 `FIntPoint` coordinates are packed into `uint64` keys for `TMap`/`TSet` storage:
@@ -214,9 +248,11 @@ This avoids `GetTypeHash` issues with `FIntPoint` in some container configuratio
 ## World Mode Compatibility
 
 The subsystem is world-mode-agnostic by design:
-- Uses only `IVoxelWorldMode*` interface — never casts to a specific mode
-- `GetTerrainHeightAt()` is pure virtual, implemented by all modes (InfinitePlane, IslandBowl, SphericalPlanet)
-- Biome sampling uses the same noise functions regardless of world mode
+- What depends on the kind of world (a heightmap's chunk-column grid, a planet's cube-sphere atlas) is in
+  `FVoxelMapTileFrame`; the drawer, the queue, the store and the saves are shared
+- Heights come from the world mode's generated surface (above), not the legacy `GetTerrainHeightAt`, which on a planet
+  only covers the upper hemisphere
+- Biome sampling uses the same pipeline as generation regardless of world mode
 - SphericalPlanet: tiles on the cube sphere (below); heightmap tiles keep their (chunk X, Y) keys and code paths
 - For IslandBowl, areas beyond the island edge render based on their material (water/void)
 
@@ -249,10 +285,10 @@ the tile store and its budgets, the queue and the save blobs therefore work unch
   carry a 3D position (`FVCMapMarker::WorldLocation`, gathered through the one `UVCMapMarkerRegistry::OnGatherMarkers`
   by centre and distance since code review CR2); POIs reach planets in
   Phase 5, so no provider binds them yet.
-- **Saves**: the same blobs with atlas keys and version-2 overlays; `PlanetGenerationVersion` (3 since D13, 5
-  since spherical Phase 6's P6.2) refuses older planet saves.
+- **Saves**: the same blobs with atlas keys and version-2 overlays; a save made under another generation version
+  (`FVoxelWorldModeFactory::PlanetGenerationVersion`, 6) is refused with the rest of the world.
 
-**At scale** (spherical Phase 6, WM-BP11; WORLD_MODES_REVIEW_PLAN.md §20.6). A 1,000 km planet's atlas is 32,725 tiles a
+**At scale** (spherical Phase 6, WM-BP11). A 1,000 km planet's atlas is 32,725 tiles a
 face edge, 6.4 billion tiles, so the map works on what is near the player and draws the rest coarsely:
 
 - **The zoom range from R** (`UVCWorldMapWidget::GetPlanetZoomRange`, `GetZoomRange`, `SetZoom`): zoomed out to the
@@ -268,17 +304,11 @@ face edge, 6.4 billion tiles, so the map works on what is near the player and dr
   holding an explored tile (`IsGlobeCellExplored`, refreshed when the exploration changes, at most once a second past
   100,000 explored tiles).
 - **`voxel.Map.ExploreAll`** counts in `int64` (6 N² overflowed `int32` from about 50 million tiles) and explores at most
-  `voxel.Map.ExploreAllMaxTiles` (1,000,000) tiles, nearest the pawn first (`GatherWithinAngle`'s flood fill); it queues
+  `voxel.Map.ExploreAllMaxTiles` tiles, nearest the pawn first (`GatherWithinAngle`'s flood fill); it queues
   the images of the nearest `PlanetExploreAllImageTiles` (65,536), the rest drawn when the map shows them. The small
   planet (40,000 tiles) is explored whole as before.
-- **Markers on a zoomed-out globe** (VoxelWorldPOI, `UPOIMapMarkerSubsystem::GetPlanetMarkersNear`): the globe asks for
-  the markers of everything it shows, and on a big planet that was every POI cell of the planet (L's 36 million: the map
-  held the game thread for about 1 min 45 s, G50). The far markers now come from at most `PlanetMarkerMaxCells` (20,000)
-  cells around the view's centre, and the last cap's POIs are reused by the half-second refresh; the map draws at most
-  `MaxMarkers` (64) anyway. The small planet's few hundred cells are always whole.
-- **Redraws at the albedo's zoom** (`UVCWorldMapWidget`): the tile images do not show there, so a tile's arrival redraws
-  the globe at most every 2 s (for the exploration it carries), and only the albedo's own arrival at once; a redraw per
-  arrival held the open map at 6.5 FPS after an `ExploreAll` queued 65,536 images (G51).
+- **Markers and redraws** on a zoomed-out globe follow the widget rules above (G50, G51); the last marker query's POIs
+  are reused by the half-second refresh, and the albedo's own arrival redraws at once.
 - `vox.Map [zoom|min|0]` (the game module, QA) opens the world map at a zoom.
 
 Tests: `VoxelWorlds.Map.Planet.TileKeys`, `.TileMatchesGeneration` (1,000 pixels at five sites, each the generated
@@ -298,8 +328,12 @@ globe zoomed out drawn from the albedo).
 | `Source/VoxelMap/Public/VoxelMapTileStore.h` | FVoxelMapTileStore: detail and overview images under two budgets (WM-E2) |
 | `Source/VoxelMap/Public/VoxelMapTileQueue.h` | FVoxelMapTileQueue: which tiles wait for a drawing, per-tile generations (R22) |
 | `Source/VoxelMap/Public/VoxelMapEditOverlay.h` | FVoxelMapEditOverlay: edited columns drawn over the analytic terrain (R22) |
+| `Source/VoxelMap/Public/VoxelMapTileFrame.h` | FVoxelMapTileFrame: the tile grid, samples, altitudes and shading per kind of world |
 | `Source/VoxelMap/Public/VoxelMapSubsystem.h` | UVoxelMapSubsystem declaration |
-| `Source/VoxelMap/Private/VoxelMapSubsystem.cpp` | Subsystem implementation |
+| `Source/VoxelMap/Private/VoxelMapSubsystem.cpp` | Subsystem: exploration, queue, budgets, edit refresh |
+| `Source/VoxelMap/Private/VoxelMapTileDrawing.cpp` | The tile task (`GenerateTileAsync`) and its completion |
+| `Source/VoxelMap/Private/VoxelMapGlobe.cpp` | The planet globe albedo |
+| `Source/VoxelMap/Private/VoxelMapPersistence.cpp` | Explored tiles and edit overlays to and from saves |
 
 ## See Also
 

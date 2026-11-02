@@ -8,7 +8,7 @@
 // Seam ownership + scheduling registry (seam-ownership refactor P0).
 // Pure logic: no RHI, no world access, no reflection. All state is pushed in
 // by UVoxelChunkManager, which also runs the seam jobs this scheduler drains.
-// See VoxelSeamRegistry.h and Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md.
+// See VoxelSeamRegistry.h and Documentation/Research/Archive/SEAM_OWNERSHIP_ARCHITECTURE.md.
 // ============================================================================
 
 namespace VoxelSeamRegistryDetail

@@ -33,7 +33,7 @@
  * releases. Game-thread only.
  *
  * @see UVoxelChunkManager (OnChunkMeshingComplete / ProcessCompletedSeamMeshes / TickSeamScheduler)
- * @see Documentation/VOXEL_QA_FOLLOWUPS_PLAN.md (R24)
+ * @see Documentation/Research/Archive/VOXEL_QA_FOLLOWUPS_PLAN.md (R24)
  */
 class VOXELSTREAMING_API FVoxelSeamTransitionHolds
 {

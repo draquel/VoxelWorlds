@@ -1,210 +1,122 @@
 # Noise Library Reference
 
+> State as of 2026-11-02 (code review CR5).
+
 ## Overview
 
-The VoxelWorlds noise library provides four noise algorithms with GPU and CPU implementations, combined via fBm (Fractal Brownian Motion) for terrain generation, cave carving, biome selection, and ore vein placement.
+One noise serves every field of every world mode (terrain, continentalness, temperature, moisture, caves, ores):
+`FVoxelNoise` on the CPU (`Source/VoxelGeneration/Public/VoxelNoise.h`) and `NoiseFBM3D` on the GPU
+(`Shaders/Private/VoxelNoise.ush`), the same float algebra in the same order. It has four noise types, combined by
+fBm, on a hashed integer lattice sampled from a split origin, so it has no period and keeps its precision at any
+distance from the world origin. Planets have sampled it since spherical Phase 6; heightmap worlds (InfinitePlane,
+IslandBowl, cubic on either) since the world modes review's MP4 (decision D39); CR3 renamed it from its planet
+name.
 
-## Noise Types
+The classic table noise heightmap worlds sampled before MP4 (Ken Perlin's 256-entry permutation, which repeats every
+256 noise units, at absolute float positions) survives only as the tests' control,
+`Source/VoxelGeneration/Tests/VoxelClassicNoiseControl.h` (`ClassicFBM3D`).
 
-### Perlin (`EVoxelNoiseType::Perlin`)
+## Noise Types (`EVoxelNoiseType`)
 
-Classic gradient noise by Ken Perlin. Smooth, continuous, slightly grid-aligned artifacts.
+| Type | What it is | Output | Use |
+|------|-------|-----------------|-----|
+| `Perlin` | gradient noise | [-1, 1] | general terrain |
+| `Simplex` (default) | gradient noise on the simplex lattice, the continuous kernel (below) | [-1, 1] | terrain, climate, caves |
+| `Cellular` | Worley F1: distance to the nearest feature point | F1 x 2 - 1 | bubbly, cell-like shapes |
+| `Voronoi` | the cell edge distance F2 - F1 | (F2 - F1) x 2 - 1 | cracked, fractured shapes, flat cell interiors |
 
-- **Range:** [-1, 1]
-- **Performance:** Baseline
-- **Best for:** General terrain, subsurface features
-- **Artifacts:** Slight axis-alignment at low frequencies
-
-### Simplex (`EVoxelNoiseType::Simplex`)
-
-Improved noise using simplex grid. Less directional artifacts than Perlin, slightly faster.
-
-- **Range:** [-1, 1]
-- **Performance:** ~0.9x Perlin (faster)
-- **Best for:** Default choice for terrain, biome noise, cave noise
-- **Artifacts:** Minimal
-
-### Cellular (`EVoxelNoiseType::Cellular`)
-
-Worley/Cell noise. Returns distance to nearest feature point (F1).
-
-- **Range:** [-1, 1] (mapped from F1 distance [0, ~1.5])
-- **Performance:** ~1.5-2x Perlin (3x3x3 cell search)
-- **Best for:** Organic patterns, rocky textures, cave shapes
-- **Characteristics:** Produces cell-like, bubbly patterns
-
-### Voronoi (`EVoxelNoiseType::Voronoi`)
-
-Cell noise returning edge distance (F2 - F1). Highlights boundaries between cells.
-
-- **Range:** [-1, 1] (mapped from F2-F1 [0, ~1])
-- **Performance:** ~1.8x Perlin (3x3x3 cell search + cell ID)
-- **Best for:** Cracked/fractured patterns, canyon-like features
-- **Characteristics:** Pronounced cell edges, flat cell interiors
+Cellular and Voronoi share one 3x3x3 feature-point search (`FVoxelNoise::Cellular`, `NoiseCellular`). The type
+integers are `VOXELGEN_NOISE_TYPE_*` in `Shaders/Shared/VoxelGenerationShared.ush`, which C++ and the shaders share.
 
 ## fBm Composition
 
-All noise types are combined via Fractal Brownian Motion (fBm):
-
 ```
-Total = 0
-for each octave i:
-    Total += NoiseAt(Position * Frequency) * Amplitude
+Total = 0; MaxValue = 0; Amplitude = Params.Amplitude; Frequency = Params.Frequency
+for each octave i (Octaves, at most 16):
+    Total    += Sample(Position * Frequency) * Amplitude
+    MaxValue += Amplitude
     Frequency *= Lacunarity
     Amplitude *= Persistence
-Result = Total / MaxAmplitude
+Result = Total / MaxValue
 ```
 
-### Parameters
+### Parameters (`FVoxelNoiseParams`)
 
-| Parameter | Typical Range | Effect |
-|-----------|---------------|--------|
-| `Frequency` | 0.0001 - 0.1 | Scale of features (lower = larger) |
-| `Octaves` | 1 - 8 | Detail layers (more = finer detail) |
-| `Persistence` | 0.3 - 0.7 | How much detail each octave adds |
-| `Lacunarity` | 1.5 - 3.0 | Frequency jump between octaves |
-| `Amplitude` | 0.5 - 2.0 | Overall noise strength |
-| `Seed` | any int32 | Deterministic randomization |
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `NoiseType` | `Simplex` | the noise type |
+| `Seed` | 0 | 0 = the world seed |
+| `Octaves` | 6 | detail layers (1-16) |
+| `Frequency` | 0.001 | scale of features in 1/uu (lower = larger) |
+| `Lacunarity` | 2.0 | frequency step between octaves |
+| `Persistence` | 0.5 | amplitude step between octaves |
+| `Amplitude` | 1.0 | the first octave's weight; it divides out (`Result` is normalised by `MaxValue`), so it does not change the output |
 
-### Ridged fBm
+Fields that callers build themselves (climate, continentalness, caves, ores) set `Amplitude` 1;
+`FVoxelNoise::MakeFieldParams` builds the 2-octave fields.
 
-`RidgedFBM3D()` deleted in CR1 (CORE-03).
+## How it samples
 
-## GPU Implementation
+- **Hashed lattice.** A lattice cell's gradient or feature point comes from an integer hash of the cell
+  (`FVoxelNoise::LatticeHash`, `VoxelHash::Lattice`; GPU `VoxelLatticeHash` in `Shaders/Shared/VoxelHash.ush`, the mix
+  the ore `Rarity` test shares), cells wrapping mod 2^32: no period (`VoxelWorlds.Noise.PlanetHashNoPeriod`).
+- **Split-origin sampling.** A sample point is an origin plus a small float offset. Per octave the origin is scaled by
+  the octave's frequency in double and split into an integer cell and a float fraction (`FVoxelNoiseSplit`; simplex in
+  its skewed lattice, the others in the cube lattice). The CPU splits each sample point itself
+  (`FVoxelNoise::FBM3D(Position, Params)`); the GPU gets one split origin per chunk and field (`NoiseOrigins`, built by
+  `BuildNoiseOrigins` in `VoxelGPUNoiseGenerator.cpp`) and adds the voxel's offset from the chunk's anchor: a planet's
+  anchor is the chunk's centre on the datum sphere, a heightmap chunk's its origin corner (the 2D fields at (X, Y, 0),
+  each cave layer at (X, Y, Z x VerticalScale), each ore at the corner through its streak map). Within 10^-5 of a
+  double reference (`FVoxelNoise::ReferenceFBM3D`) at origins up to 10^9 noise units (`VoxelWorlds.Noise.SplitOrigin`,
+  `VoxelWorlds.Noise.HeightmapNoise`).
+- **Continuous Simplex (G43).** The classic corner weight (0.6 - d^2)^4 reaches past the simplex, so a corner's
+  contribution dropped out where a sample crossed into the next simplex: steps of up to 0.0064 of the noise's range,
+  every octave's at once on the planes x = y, y = z and x = z (on a planet the cube sphere's face edges, hundreds of uu
+  on a 1,000 km planet; about a quarter voxel along X = Y on a heightmap world). The kernel is that weight less its value
+  and slope at d^2 = 0.5, v^2 (v^2 + 0.4 v + 0.06) with v = 0.5 - d^2, the sum scaled by 33.25 instead of 32 for the
+  same spread: no step, a continuous slope, within 1.2% rms of the classic noise (correlation 0.9996)
+  (`VoxelWorlds.Noise.SimplexContinuous`, `VoxelWorlds.WorldModes.Planet.FaceEdgeContinuity`,
+  `VoxelWorlds.WorldModes.Plane.NoiseCreases`). `voxel.Noise.ContinuousSimplex 0` selects the classic weight, for A/B
+  only.
 
-### Files
+### Where each field samples
 
-| File | Contents |
-|------|----------|
-| `VoxelNoiseCommon.ush` | `NOISE_TYPE_*`, `NoiseToDensity`, `PackVoxelData` |
-| `PerlinNoise.ush`, `SimplexNoise.ush`, `CellularNoise.ush`, `FBMNoise.ush` | deleted in CR1 (CORE-03) |
-
-### Noise Type Defines
-
-```hlsl
-#define NOISE_TYPE_PERLIN 0
-#define NOISE_TYPE_SIMPLEX 1
-#define NOISE_TYPE_CELLULAR 2
-#define NOISE_TYPE_VORONOI 3
-```
-
-Must match `EVoxelNoiseType` enum values.
-
-### GPU Functions
-
-The classic GPU functions (`FBM3D`, its wrappers, `Cellular3D`, `Voronoi3D`) were deleted in CR1 (CORE-03); generation samples `NoiseFBM3D` (below).
-
-## CPU Implementation
-
-### Files
-
-| File | Contents |
-|------|----------|
-| `VoxelCPUNoiseGenerator.h` | Public API |
-| `VoxelCPUNoiseGenerator.cpp` | All implementations |
-
-### CPU Functions
-
-```cpp
-// fBm with automatic noise type selection: the entry point every field samples. Since the world modes review's MP4
-// (decision D39) it is FVoxelNoise::FBM3D in every world mode (the section below).
-static float FBM3D(const FVector& Position, const FVoxelNoiseParams& Params);
-
-// The classic table noise (Perlin3D, Simplex3D, Cellular3D, Voronoi3D, ClassicFBM3D) moved to the tests' VoxelClassicNoiseControl in CR1 (CORE-02).
-```
+- **Planet**: terrain, continentalness, temperature and moisture at the direction's point on the datum sphere; caves at
+  the planet-relative position with the altitude scaled (`ScaleAltitudeRelative`); ores at the planet-relative position.
+- **Heightmap**: the 2D fields at (X, Y, 0); caves at the position with Z scaled; ores at the position.
+- **Ores, every mode**: the position squashed along one direction per ore type for a streak (`GetPlanetOreSamplePoint`,
+  a linear map), and the `Rarity` test an integer hash of the position rounded to whole uu (`OreRarityHash`), so the
+  GPU's float and the CPU's double agree (`ORE_VEINS.md`).
 
 ## GPU/CPU Consistency
 
-The GPU and the CPU sample the same noise with the same float operations in the same order (`FVoxelNoise` and
-`VoxelNoise.ush`, below). The CPU splits each sample point itself; the GPU splits a per-chunk origin and adds each
-voxel's offset, so the two differ by float rounding only: the `VoxelWorlds.Generation.GPUvsCPU*Parity` tests hold every
-world mode's densities within 2 steps on 99% of the voxels and their materials, biomes and flags equal (the planet lines
-were within a few voxels since spherical Phase 6; the heightmap lines, bit-identical before MP4, are now of the same kind).
+The CPU splits each sample point itself; the GPU splits a per-chunk origin and adds each voxel's offset, so the two
+differ by float rounding only. The `VoxelWorlds.Generation.GPUvsCPU*Parity` tests hold every world mode's densities
+within 2 steps on 99% of the voxels with materials, biomes and flags equal (`GPU_PIPELINE.md`).
 
-The classic shader files were deleted in CR1 (CORE-03); `VoxelNoiseCommon.ush` keeps the `NOISE_TYPE_*` defines.
+## Versions
 
-## The Terrain Noise (spherical Phase 6; every world mode since MP4)
+Changing this noise changes every world's terrain, so it bumps a generation version (`DATA_STRUCTURES.md`, "Version
+fingerprints"): `PlanetGenerationVersion` 5 for the planet noise (D21, D22) and 6 for the continuous kernel (G43, D27);
+`GenerationVersion` 3 for MP4's move of the heightmap worlds onto it. Every save from before is refused and kept on
+disk.
 
-The permutation noise above repeats its fine octaves every 256 noise units (the top terrain octave 61 times around
-`Review_Planet_L`'s equator, the continental frequency every ~120 km on a plane), and an absolute float position of size
-10^8 is 8 uu coarse. Every field of every world mode samples `FVoxelNoise` (`VoxelGeneration/VoxelNoise.h`;
-GPU: `Shaders/Private/VoxelNoise.ush`, the same float algebra; planets have sampled it since spherical Phase 6 and
-heightmap worlds through `FVoxelCPUNoiseGenerator::FBM3D` since the world modes review's MP4, decision D39,
-`GenerationVersion` 3; it was `FVoxelPlanetNoise` / `PlanetNoise.ush` until CR3):
+## Usage
 
-- **Hashed lattice:** the gradient or feature point of a lattice cell comes from an integer hash of the cell
-  (`LatticeHash`, the ore `Rarity` hash's mixing), cells wrapping mod 2^32: no period
-  (`VoxelWorlds.Noise.PlanetHashNoPeriod`).
-- **Split-origin sampling:** a sample point is an origin plus a small float offset. Per octave the origin is scaled by
-  the octave's frequency in double and split into an integer cell (`FVoxelNoiseSplit::Cell`) and a float fraction;
-  simplex splits in its skewed lattice, the others in the cube lattice. The CPU splits each sample point itself
-  (`FBM3D(Position, Params)`); the GPU gets one split origin per chunk and field (`NoiseOrigins`) and adds the
-  voxel's offset from the chunk's anchor (`NoiseFBM3D`): a planet's anchor is the chunk's centre on the datum sphere,
-  a heightmap chunk's its origin corner (the 2D fields at (X, Y, 0), each cave layer at (X, Y, Z × VerticalScale), each
-  ore at the corner through its streak map; `BuildNoiseOrigins` in `VoxelGPUNoiseGenerator.cpp`). Within 10^-5 of a
-  double reference at origins up to 10^9 noise units (`VoxelWorlds.Noise.SplitOrigin`, `VoxelWorlds.Noise.HeightmapNoise`).
-- **Continuous Simplex (G43):** the classic corner weight (0.6 − d²)⁴ reaches past the simplex (a point's nearest corner
-  outside its simplex is √0.5 away), so a corner's contribution dropped out where a sample crossed into the next simplex:
-  steps of up to 0.0064 of the noise's range, every octave's at once on the planes x = y, y = z and x = z through the
-  planet centre, the cube sphere's face edges (up to 465 uu across them on `Review_Planet_L`'s terrain; about a quarter
-  voxel along X = Y on a heightmap world). The kernel is now that weight less its value and slope at d² = 0.5,
-  v²(v² + 0.4v + 0.06) with v = 0.5 − d², and the sum is scaled by 33.25 instead of 32 for the same spread: no step, a
-  continuous slope, within 1.2% rms of the classic noise (correlation 0.9996) (`VoxelWorlds.Noise.PlanetSimplexContinuous`,
-  `VoxelWorlds.WorldModes.Planet.FaceEdgeContinuity`, `VoxelWorlds.WorldModes.Plane.NoiseCreases`).
-  `voxel.Noise.ContinuousSimplex 0` (`voxel.Planet.ContinuousSimplex` before MP4) restores the classic weight, for A/B only.
-- **Fields:** on a planet terrain and continentalness at the direction's point on the datum sphere, temperature and
-  moisture likewise (the 2-octave fields: `MakeFieldParams`, `SampleClimate`), caves at the planet-relative position with
-  the altitude scaled (`ScaleAltitudeRelative`), ores at the planet-relative position; on a heightmap world the 2D fields
-  at (X, Y, 0), caves at the position with Z scaled, ores at the position. Ores in every mode squash the position along
-  one direction per ore type for a streak (`GetPlanetOreSamplePoint`, a linear map) and pass their `Rarity` test by an
-  integer hash of the position rounded to whole uu (`OreRarityHash`; the planet's since spherical Phase 4, the heightmap
-  modes' since MP4, whose `frac(sin(p · k))` the GPU's float and the CPU's double rounded differently).
-
-Changing this noise changes every world: planets bump `FVoxelWorldModeFactory::PlanetGenerationVersion` (5 since
-D21/D22, 6 since G43/D27), and MP4's move of the heightmap worlds onto it bumped `GenerationVersion` 2 → 3 (every save from
-before is refused and kept on disk).
-
-## Usage Examples
-
-### Terrain Height (existing)
 ```cpp
+// Terrain-style field
 FVoxelNoiseParams Params;
 Params.NoiseType = EVoxelNoiseType::Simplex;
 Params.Frequency = 0.001f;
 Params.Octaves = 6;
-float Height = FVoxelCPUNoiseGenerator::FBM3D(Position, Params);
-```
+float Value = FVoxelNoise::FBM3D(Position, Params);   // FVoxelCPUNoiseGenerator::FBM3D forwards here
 
-### Cave Carving (new)
-```cpp
-// Cheese cave: single threshold
+// Cave-style threshold
 FVoxelNoiseParams CaveNoise;
-CaveNoise.NoiseType = EVoxelNoiseType::Simplex;
 CaveNoise.Frequency = 0.003f;
 CaveNoise.Octaves = 3;
-float Noise = FVoxelCPUNoiseGenerator::FBM3D(ScaledPos, CaveNoise);
-if (Noise > Threshold) { /* carve */ }
+if (FVoxelNoise::FBM3D(ScaledPos, CaveNoise) > Threshold) { /* carve */ }
+
+// Large origin plus a small offset (what the GPU does per chunk)
+float Near = FVoxelNoise::FBM3D(ChunkAnchor, FVector3f(VoxelOffset), Params);
 ```
-
-### Cellular Terrain (experimental)
-```cpp
-FVoxelNoiseParams CellParams;
-CellParams.NoiseType = EVoxelNoiseType::Cellular;
-CellParams.Frequency = 0.002f;
-CellParams.Octaves = 4;
-// Produces bubble/cell-like terrain patterns
-float CellNoise = FVoxelCPUNoiseGenerator::FBM3D(Position, CellParams);
-```
-
-## Performance Comparison
-
-Approximate relative cost per 32^3 chunk (CPU, 6 octaves):
-
-| Noise Type | Relative Cost |
-|------------|---------------|
-| Simplex | 1.0x (baseline) |
-| Perlin | 1.1x |
-| Cellular | 1.8x |
-| Voronoi | 1.9x |
-
-GPU performance is dominated by memory bandwidth rather than ALU, so noise type differences are smaller (~1.3x for Cellular vs Simplex).
