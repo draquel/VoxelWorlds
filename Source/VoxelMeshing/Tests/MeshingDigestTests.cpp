@@ -2,8 +2,6 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
-#include "HAL/IConsoleManager.h"
-#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelCPUDualContourMesher.h"
 #include "VoxelMeshingTestFixtures.h"
 #include "VoxelCPUMarchingCubesMesher.h"
@@ -21,7 +19,8 @@
 // Interior domain and in the WholeChunk domain with every neighbour plane, strip and corner (deep, as the extractor
 // fills them) and with most missing (the missing-neighbour rule), Marching Cubes' transition ribbon and boundary
 // geomorph along +Z and along a tilted local up, and both meshers' face, edge and corner seams at uniform and
-// mixed LODs; each under the default cvars and under each of the meshing cvars turned off. Pure CPU; headless.
+// mixed LODs. Each line carries the prefix "default." the records have (they once also carried each meshing A/B switch
+// turned off; VoxelWorlds 8 retired the switches). Pure CPU; headless.
 // ---------------------------------------------------------------------------
 
 namespace VoxelMeshingDigest
@@ -229,8 +228,6 @@ namespace VoxelMeshingDigest
 			&& Same(A.UV1s, B.UV1s) && Same(A.Colors, B.Colors) && Same(A.Indices, B.Indices);
 	}
 
-	using FScopedCVar = VoxelTesting::FScopedCVar; // the one scoped cvar (code review CR2 row 17)
-
 	/** The digest's recorder: one line per case, and the uniform-against-mixed seam comparison. */
 	struct FDigest
 	{
@@ -427,17 +424,6 @@ bool FVoxelMeshingDigestTest::RunTest(const FString& Parameters)
 
 	D.Prefix = TEXT("default.");
 	RunAllCases(D);
-
-	// Each meshing cvar off on its own.
-	const TCHAR* CVars[] = {
-		TEXT("voxel.Mesh.CrossingGradientNormals"), TEXT("voxel.Mesh.VoxelShadingNormals"), TEXT("voxel.Mesh.VoxelLODCrossings"),
-		TEXT("voxel.Mesh.QEFSolve"), TEXT("voxel.Mesh.ScaleClampedGradients"), TEXT("voxel.Seam.MCReadInPlace") };
-	for (const TCHAR* Name : CVars)
-	{
-		FScopedCVar Off(Name, 0);
-		D.Prefix = FString::Printf(TEXT("%s=0."), Name);
-		RunAllCases(D);
-	}
 
 	UE_LOG(LogTemp, Display, TEXT("[MeshDigest] total cases=%d crc=%08X"), D.Cases, D.Total);
 	return true;

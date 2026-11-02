@@ -94,8 +94,7 @@ chunk the interior mesh covers cells `[1, N-2]` per axis; a face seam the cells 
 two, a corner seam three. Each participant frame reads the participants' snapshots in place
 (`FVoxelMeshingRequest::NeighbourSnapshotViews`): at every read, the voxel a copied face plane, edge strip or corner
 would hold. Copying them was 95% of a seam job's time; reading in place made MC seam jobs about 30 times cheaper (G63).
-`voxel.Seam.MCReadInPlace 0` restores the copies, `voxel.Seam.MCStats` times the stages; tests
-`Meshing.MarchingCubes.SeamClosure.MCS4_ReadInPlace`, `Streaming.{Planet,Plane}.MCSeamReadInPlace`.
+`voxel.Seam.MCStats` times the stages.
 
 ### LOD Transition Differences
 
@@ -193,8 +192,7 @@ is `CalculateShadingNormal`: the density gradient fitted to the voxels on the ra
 (`IsVoxelHeld`: the chunk, or one voxel past it where that face's plane, edge's strip or corner is present). The central
 difference read the saturated rock under the surface and tilted a slope's normal by 1.0-1.8 times with the surface's phase
 in the voxel layer (bands; G62). Where the voxels on the ramp do not span three directions it is used, exact there.
-`voxel.Mesh.CrossingGradientNormals 0` restores it (shared with Dual Contouring); tests
-`Meshing.CrossingGradient.Planes`, `Streaming.{Planet,Plane}.GradientBands`.
+Tests `Meshing.CrossingGradient.Planes`, `Streaming.{Planet,Plane}.GradientBands`.
 
 **Normals at a stride (G61).** Generated density saturates a voxel either side of the surface
 (`SignedDistanceToDensity`), so taps `Stride` voxels apart read 0 or 255 on every axis the surface crosses between them:
@@ -202,19 +200,18 @@ at LOD 2 each gradient component is a sign and the normal snaps toward one of th
 planets, streaks on heightmap slopes). So at stride > 1 an edge vertex's normal is LOD 0's (`CalculateShadingNormal`) at
 the voxel crossing on its edge nearest it (`CalculateEdgeShadingNormal`: the edge walked from its min end in voxel steps). It is a function of the
 edge alone, so every cell, seam band and transition ribbon sharing the edge gives the vertex the same normal, and the
-boundary geomorph (which moves vertices) does not change it. `voxel.Mesh.VoxelShadingNormals 0` (shared with Dual
-Contouring's G44) restores the stride-scale normals (`CalculateGradientNormalLOD`); tests `Meshing.MarchingCubes.LODNormals`,
+boundary geomorph (which moves vertices) does not change it. Where the edge has no voxel crossing the stride-scale
+gradient (`CalculateGradientNormalLOD`) stands in. Tests `Meshing.MarchingCubes.LODNormals`,
 `Streaming.{Planet,Plane}.LODNormalsMC`.
 
 **Vertices at a stride (G80).** The same saturation put an interpolated strided vertex toward the edge's middle, whatever
 the surface did between the two samples, so LOD 1 and 2 were terraced a stride apart (ribs in the terrain's own shadows
-under a low sun). At stride > 1 an edge vertex is now the voxel crossing on its edge (`FindEdgeVoxelCrossing`, the point
+under a low sun). At stride > 1 an edge vertex is the voxel crossing on its edge (`FindEdgeVoxelCrossing`, the point
 G61's normal reads), so regular cells, seam bands and the transition ribbon (its coarse corner-corner edges are the coarser
 neighbour's, its face-face ones the fine mesh's; one-voxel edges keep `InterpolateEdge`) still agree on every shared edge.
-The boundary geomorph's target follows the coarse cells' new vertices: the voxel crossings on the four coarse edge columns
-along the morph axis around the vertex, blended bilinearly (`ComputeCoarseCrossingsAlongAxis`; on a column, that column's
-coarse vertex), in place of the trilinear coarse density's crossing. `voxel.Mesh.VoxelLODCrossings 0` (shared with Dual
-Contouring) restores the interpolated vertices and the trilinear target; tests `Meshing.LODCrossings.Planes`,
+The boundary geomorph's target is the coarse cells' vertices: the voxel crossings on the four coarse edge columns along
+the morph axis around the vertex, blended bilinearly (`ComputeCoarseCrossingsAlongAxis`; on a column, that column's
+coarse vertex; before G80 the trilinear coarse density's crossing). Tests `Meshing.LODCrossings.Planes`,
 `Streaming.{Planet,Plane}.LODPositions`.
 
 ---
@@ -372,8 +369,7 @@ Config.bUseTransvoxel = true;
 ### Neighbor Data Handling
 
 An interior mesh reads only its own voxels. A seam job's participant frame reads its neighbours through
-`NeighbourSnapshotViews` (G63); a whole-chunk request (the collision cook, or seam frames with
-`voxel.Seam.MCReadInPlace 0`) carries copied face planes (`NeighborXPos` ..., `NeighborPlaneDepth` deep), edge strips
+`NeighbourSnapshotViews` (G63); a whole-chunk request (the collision cook) carries copied face planes (`NeighborXPos` ..., `NeighborPlaneDepth` deep), edge strips
 (`EdgeXPosYPos` ...) and corner voxels.
 
 ### Material Assignment

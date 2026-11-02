@@ -983,42 +983,25 @@ namespace VoxelPlanetStreamingTestUtils
 	}
 
 	/**
-	 * Streams one place with the normals before G44 (Dual Contouring) or G61 (Marching Cubes) (voxel.Mesh.VoxelShadingNormals
-	 * 0, and voxel.Mesh.VoxelLODCrossings 0: with G80's voxel crossings a strided Dual Contouring cell's normal sums the
-	 * fitted normals at them whatever the first says) and as they are, and measures both. G80 moves vertices, so the two
-	 * runs' vertex counts differ a little. With gentle relief (bStrictBound) the current normals meet LODNormalsMatch and
-	 * the old ones do not; with the default relief, whose finest octave LOD 2 cannot resolve, LOD 1 and 2 come closer to
-	 * the analytic normals than before.
+	 * Streams one place and measures its LOD normals (G44 for Dual Contouring, G61 for Marching Cubes, with G80's voxel
+	 * crossings). With gentle relief (bStrictBound) they meet LODNormalsMatch, which the stride-scale normals before G44
+	 * and G61 failed; the default relief, whose finest octave LOD 2 cannot resolve, is measured and logged.
 	 */
 	void RunLODNormalsPlace(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
 		const FVector& Sun, float Relief, int32 Octaves, bool bStrictBound, EMeshingMode MeshingMode = EMeshingMode::DualContouring)
 	{
-		const TCHAR* Finding = (MeshingMode == EMeshingMode::MarchingCubes) ? TEXT("G61") : TEXT("G44");
-		FLODNormalStats Before, After;
-		for (int32 Mode = 0; Mode < 2; ++Mode)
+		FLODNormalStats After;
 		{
-			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.VoxelShadingNormals"), Mode);
-			IConsoleVariable* Crossings = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Mesh.VoxelLODCrossings"));
-			const int32 PreviousCrossings = Crossings ? Crossings->GetInt() : 1;
-			if (Crossings)
-			{
-				Crossings->Set(Mode, ECVF_SetByConsole);
-			}
 			FPlanetStreamingWorld World;
 			World.Relief = Relief;
 			World.Octaves = Octaves;
 			World.MeshingMode = MeshingMode;
 			Start(World);
-			Test.TestTrue(*FString::Printf(TEXT("%s (normals %d): the pipeline settled"), Place, Mode), World.Settle());
-			(Mode == 0 ? Before : After) = MeasureLODNormals(World, Sun);
+			Test.TestTrue(*FString::Printf(TEXT("%s: the pipeline settled"), Place), World.Settle());
+			After = MeasureLODNormals(World, Sun);
 			World.Stop();
-			if (Crossings)
-			{
-				Crossings->Set(PreviousCrossings, ECVF_SetByConsole);
-			}
 		}
-		Test.AddInfo(FString::Printf(TEXT("%s, before %s: %s"), Place, Finding, *Before.Describe()));
-		Test.AddInfo(FString::Printf(TEXT("%s, after: %s"), Place, *After.Describe()));
+		Test.AddInfo(FString::Printf(TEXT("%s: %s"), Place, *After.Describe()));
 		for (int32 LOD = 0; LOD < 3; ++LOD)
 		{
 			Test.TestTrue(*FString::Printf(TEXT("%s: LOD %d vertices measured"), Place, LOD), After.Vertices[LOD] > 500);
@@ -1026,23 +1009,14 @@ namespace VoxelPlanetStreamingTestUtils
 		Test.TestTrue(*FString::Printf(TEXT("%s: at most 0.1%% of vertices off the analytic surface's up-line by two cells (%d)"), Place, After.Skipped),
 			After.Skipped * 1000 <= After.TotalVertices());
 
+		// With an octave finer than LOD 2's cells the angles and brightness are reported, not bounded: they are the coarse
+		// triangles' interpolation (the far field's quads near the window do the same with the analytic normals), not the
+		// estimator.
 		if (bStrictBound)
 		{
 			FString Why;
 			const bool bAfterMatches = LODNormalsMatch(After, Why);
 			Test.TestTrue(*FString::Printf(TEXT("%s: LOD 1 and 2 normals match LOD 0's against the analytic surface %s"), Place, *Why), bAfterMatches);
-			FString WhyBefore;
-			const bool bBeforeMatches = LODNormalsMatch(Before, WhyBefore);
-			Test.TestFalse(*FString::Printf(TEXT("%s: the stride-scale normals before %s fail the bound"), Place, Finding), bBeforeMatches);
-			Test.AddInfo(FString::Printf(TEXT("%s, before %s fails on: %s"), Place, Finding, *WhyBefore));
-			return;
-		}
-		// Brightness is reported, not bounded, here: with an octave finer than LOD 2's cells it is the coarse triangles'
-		// interpolation (the far field's quads near the window do the same with the analytic normals), not the estimator.
-		for (int32 LOD = 1; LOD < 3; ++LOD)
-		{
-			Test.TestTrue(*FString::Printf(TEXT("%s: LOD %d's mean angle %.2f below the %.2f before %s"), Place, LOD, After.MeanAngle(LOD), Before.MeanAngle(LOD), Finding),
-				After.MeanAngle(LOD) < Before.MeanAngle(LOD));
 		}
 	}
 }
@@ -1050,9 +1024,8 @@ namespace VoxelPlanetStreamingTestUtils
 /**
  * G44 on a planet: from viewers at 45N 20E (G44's site; up far from every cube axis and diagonal) and on the equator, with
  * gentle relief (+-200, two octaves: LOD 2 resolves it) LOD 1 and 2 vertex normals (chunk meshes and seam buckets) are as
- * close to the analytic surface's as LOD 0's, with no tilt and no brightness step under the local noon sun, which
- * voxel.Mesh.VoxelShadingNormals 0 (the stride-scale normals before G44) fails; with the streaming tests' relief (+-800,
- * three octaves) they come closer to LOD 0's than before.
+ * close to the analytic surface's as LOD 0's, with no tilt and no brightness step under the local noon sun, which the
+ * stride-scale normals before G44 failed; the streaming tests' relief (+-800, three octaves) is measured.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingLODNormalsTest,
 	"VoxelWorlds.Streaming.Planet.LODNormals",
@@ -1086,8 +1059,8 @@ bool FVoxelPlanetStreamingLODNormalsTest::RunTest(const FString& Parameters)
 /**
  * G44 on a heightmap world: the plane of the closed-surface test (chunk 16, voxel 100, three LOD bands) under an overhead
  * sun, with gentle hills (+-200, one octave of 25 voxels, which LOD 2 resolves: LOD 1 and 2 normals as close to the
- * analytic surface's as LOD 0's, which the stride-scale normals before G44 fail) and with the closed-surface test's
- * (closer to the analytic normals than before).
+ * analytic surface's as LOD 0's, which the stride-scale normals before G44 failed) and with the closed-surface test's
+ * (measured).
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneStreamingLODNormalsTest,
 	"VoxelWorlds.Streaming.Plane.LODNormals",
@@ -1113,8 +1086,7 @@ bool FVoxelPlaneStreamingLODNormalsTest::RunTest(const FString& Parameters)
 /**
  * G61 on a planet: Marching Cubes chunk meshes and seam buckets from viewers at 45N 20E and on the equator, with gentle
  * relief LOD 1 and 2 normals as close to the analytic surface's as LOD 0's (no tilt, no brightness step under the local
- * noon sun), which voxel.Mesh.VoxelShadingNormals 0 (the stride-scale normals before G61) fails; with the streaming tests'
- * relief they come closer than before.
+ * noon sun), which the stride-scale normals before G61 failed; the streaming tests' relief is measured.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingLODNormalsMCTest,
 	"VoxelWorlds.Streaming.Planet.LODNormalsMC",
@@ -1146,8 +1118,8 @@ bool FVoxelPlanetStreamingLODNormalsMCTest::RunTest(const FString& Parameters)
 
 /**
  * G61 on a heightmap world: the Plane.LODNormals places with Marching Cubes. Gentle hills: LOD 1 and 2 normals as close
- * to the analytic surface's as LOD 0's, which the stride-scale normals before G61 fail; the closed-surface test's hills:
- * closer to the analytic normals than before.
+ * to the analytic surface's as LOD 0's, which the stride-scale normals before G61 failed; the closed-surface test's hills:
+ * measured.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneStreamingLODNormalsMCTest,
 	"VoxelWorlds.Streaming.Plane.LODNormalsMC",
@@ -1194,12 +1166,10 @@ namespace VoxelPlanetStreamingTestUtils
  * the edge of its voxels ("the terrain continues": no neighbour dependence), which made the clamped axis's difference
  * one-sided and up to half weight, so the normals of the cells along a chunk face leaned away from it: on a planet at 45
  * degrees, where the surface crosses every chunk face obliquely, dark lines along X and Y faces and bright ones along Z
- * faces under the noon sun (stronger at LOD 1 and 2 once their normals came from voxel-scale gradients, G44). With the
- * clamped difference scaled to the full span (voxel.Mesh.ScaleClampedGradients 1) triangles along X, Y and Z faces light
- * like the interior's at LOD 0, 1 and 2 on gentle relief at 45N 20E and on the equator; without it (0) they do not. Since
- * G62 the shading normals are a fit that skips the voxels a job does not hold instead of clamping taps, so this A/B runs on
- * the central difference (voxel.Mesh.CrossingGradientNormals 0), and the defaults (the fit) must light chunk faces like the
- * interior too.
+ * faces under the noon sun (stronger at LOD 1 and 2 once their normals came from voxel-scale gradients, G44). G25 scaled
+ * the clamped difference to the full span; since G62 the shading normals are a fit that skips the voxels a job does not
+ * hold instead of clamping taps. Triangles along X, Y and Z faces must light like the interior's at LOD 0, 1 and 2 on
+ * gentle relief at 45N 20E and on the equator.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingChunkFaceShadingTest,
 	"VoxelWorlds.Streaming.Planet.ChunkFaceShading",
@@ -1219,42 +1189,28 @@ bool FVoxelPlanetStreamingChunkFaceShadingTest::RunTest(const FString& Parameter
 		{ TEXT("45N 20E"), Direction(45.0, 20.0) },
 		{ TEXT("equator"), Direction(1.0, 1.5) },
 	};
-	bool bAnyBeforeFails = false;
 	for (const TPair<const TCHAR*, FVector>& Place : Places)
 	{
 		const FVector Sun = FVector(Place.Value.X, Place.Value.Y, 0.0).GetSafeNormal();
-		// Mode 0: the central difference, clamp unscaled (before G25); 1: scaled (G25); 2: the defaults (G62's fit).
-		FLODNormalStats Before, After, Fit;
-		for (int32 Mode = 0; Mode < 3; ++Mode)
+		FLODNormalStats Fit;
 		{
-			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.ScaleClampedGradients"), Mode == 0 ? 0 : 1);
-			VoxelTesting::FScopedCVar ScopedFit(TEXT("voxel.Mesh.CrossingGradientNormals"), Mode == 2 ? 1 : 0);
 			FPlanetStreamingWorld World;
 			World.Relief = 400.0f;
 			World.Octaves = 2;
 			World.Start(TEXT("VoxelPlanetChunkFaceTestWorld"), Place.Value, 300.0f);
-			TestTrue(*FString::Printf(TEXT("%s (mode %d): the pipeline settled"), Place.Key, Mode), World.Settle());
-			(Mode == 0 ? Before : Mode == 1 ? After : Fit) = MeasureLODNormals(World, Sun);
+			TestTrue(*FString::Printf(TEXT("%s: the pipeline settled"), Place.Key), World.Settle());
+			Fit = MeasureLODNormals(World, Sun);
 			World.Stop();
 		}
-		AddInfo(FString::Printf(TEXT("%s, unscaled clamp: %s"), Place.Key, *Before.DescribeFaces()));
-		AddInfo(FString::Printf(TEXT("%s, scaled: %s"), Place.Key, *After.DescribeFaces()));
-		AddInfo(FString::Printf(TEXT("%s, the fit (G62): %s"), Place.Key, *Fit.DescribeFaces()));
+		AddInfo(FString::Printf(TEXT("%s: %s"), Place.Key, *Fit.DescribeFaces()));
 		for (int32 LOD = 0; LOD < 3; ++LOD)
 		{
-			TestTrue(*FString::Printf(TEXT("%s: LOD %d has interior triangles to compare with"), Place.Key, LOD), After.FaceTris[LOD][0] >= 200);
+			TestTrue(*FString::Printf(TEXT("%s: LOD %d has interior triangles to compare with"), Place.Key, LOD), Fit.FaceTris[LOD][0] >= 200);
 		}
 		FString Why;
-		const bool bAfterMatches = ChunkFacesMatch(After, Why);
-		TestTrue(*FString::Printf(TEXT("%s: triangles along chunk faces light like the interior's %s"), Place.Key, *Why), bAfterMatches);
-		FString WhyFit;
-		const bool bFitMatches = ChunkFacesMatch(Fit, WhyFit);
-		TestTrue(*FString::Printf(TEXT("%s: with the fit too %s"), Place.Key, *WhyFit), bFitMatches);
-		FString WhyBefore;
-		bAnyBeforeFails |= !ChunkFacesMatch(Before, WhyBefore);
-		AddInfo(FString::Printf(TEXT("%s, unscaled clamp: %s"), Place.Key, WhyBefore.IsEmpty() ? TEXT("within the bound") : *WhyBefore));
+		const bool bFitMatches = ChunkFacesMatch(Fit, Why);
+		TestTrue(*FString::Printf(TEXT("%s: triangles along chunk faces light like the interior's %s"), Place.Key, *Why), bFitMatches);
 	}
-	TestTrue(TEXT("The unscaled clamp shows lines along chunk faces"), bAnyBeforeFails);
 	return true;
 }
 
@@ -1262,62 +1218,44 @@ bool FVoxelPlanetStreamingChunkFaceShadingTest::RunTest(const FString& Parameter
 // G62 (WORLD_MODES_REVIEW_PLAN.md §14.1): both smooth meshers took their voxel-resolution normals from a central difference
 // about the voxel the crossing floors to, whose tap under a surface lies in the saturated rock, so a vertex's error
 // depended on where the surface crossed the voxel layer: bands a voxel layer apart at LOD 0, sampled sparsely by LOD 1 and
-// 2 (rings around hills from altitude). The fitted gradient (voxel.Mesh.CrossingGradientNormals 1) has no such dependence.
+// 2 (rings around hills from altitude). The fitted gradient has no such dependence.
 // ---------------------------------------------------------------------------
 
 namespace VoxelPlanetStreamingTestUtils
 {
 	/**
-	 * Streams one place with gentle relief with the central difference before G62 (0) and the fitted gradient (1), in one
-	 * meshing mode, and measures both (chunk meshes and seam buckets). Marching Cubes' positions are the same either way, so
-	 * its vertex counts must agree (Dual Contouring's QEF takes the fit since G81, so its vertices move with it). LOD 0
-	 * must band less than half a degree over the voxel phase with the fit and more than a degree without it; every LOD's
-	 * mean angle from the analytic normals must fall.
+	 * Streams one place with gentle relief in one meshing mode and measures its normals (chunk meshes and seam buckets):
+	 * LOD 0 must band less than half a degree over the voxel phase (the central difference before G62 banded it by more
+	 * than a degree).
 	 */
 	void RunGradientBandsPlace(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
 		float Relief, int32 Octaves, EMeshingMode MeshingMode)
 	{
 		const FVector Sun = FVector::UpVector; // unused by the bands
-		FLODNormalStats Before, After;
-		for (int32 Mode = 0; Mode < 2; ++Mode)
+		FLODNormalStats After;
 		{
-			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.CrossingGradientNormals"), Mode);
 			FPlanetStreamingWorld World;
 			World.Relief = Relief;
 			World.Octaves = Octaves;
 			World.MeshingMode = MeshingMode;
 			Start(World);
-			Test.TestTrue(*FString::Printf(TEXT("%s (gradient %d): the pipeline settled"), Place, Mode), World.Settle());
-			(Mode == 0 ? Before : After) = MeasureLODNormals(World, Sun);
+			Test.TestTrue(*FString::Printf(TEXT("%s: the pipeline settled"), Place), World.Settle());
+			After = MeasureLODNormals(World, Sun);
 			World.Stop();
 		}
-		Test.AddInfo(FString::Printf(TEXT("%s, before G62: %s"), Place, *Before.DescribeBands()));
-		Test.AddInfo(FString::Printf(TEXT("%s, after: %s"), Place, *After.DescribeBands()));
+		Test.AddInfo(FString::Printf(TEXT("%s: %s"), Place, *After.DescribeBands()));
 		for (int32 LOD = 0; LOD < 3; ++LOD)
 		{
 			Test.TestTrue(*FString::Printf(TEXT("%s: LOD %d vertices measured"), Place, LOD), After.Vertices[LOD] > 500);
-			if (MeshingMode == EMeshingMode::MarchingCubes)
-			{
-				Test.TestEqual(*FString::Printf(TEXT("%s: LOD %d vertices the same in either setting (no vertex moves)"), Place, LOD),
-					After.Vertices[LOD], Before.Vertices[LOD]);
-			}
-			// Dual Contouring's LOD 2 since G80: a strided cell's normal averages its voxel crossings' normals, which evens
-			// the two estimators out over a 4-voxel cell (within a quarter degree either way).
-			const bool bAveraged = MeshingMode == EMeshingMode::DualContouring && LOD == 2;
-			Test.TestTrue(*FString::Printf(TEXT("%s: LOD %d's mean angle %.2f %s the %.2f before G62"), Place, LOD, After.MeanAngle(LOD),
-				bAveraged ? TEXT("within a quarter degree of") : TEXT("below"), Before.MeanAngle(LOD)),
-				bAveraged ? After.MeanAngle(LOD) < Before.MeanAngle(LOD) + 0.25 : After.MeanAngle(LOD) < Before.MeanAngle(LOD));
 		}
 		Test.TestTrue(*FString::Printf(TEXT("%s: LOD 0 bands %.2f deg over the voxel phase (at most 0.5)"), Place, After.Band(0)), After.Band(0) <= 0.5);
-		Test.TestTrue(*FString::Printf(TEXT("%s: the central difference before G62 bands LOD 0 by %.2f deg (more than 1)"), Place, Before.Band(0)),
-			Before.Band(0) > 1.0);
 	}
 }
 
 /**
  * G62 on a planet: Dual Contouring and Marching Cubes chunk meshes and seam buckets from viewers at 45N 20E and on the
  * equator, gentle relief: with the fitted gradient LOD 0's vertex normals do not band over the surface's phase in the voxel
- * grid and every LOD comes closer to the analytic normals, where the central difference before G62 bands.
+ * grid (the central difference before G62 banded).
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingGradientBandsTest,
 	"VoxelWorlds.Streaming.Planet.GradientBands",
@@ -2046,146 +1984,13 @@ bool FVoxelPlaneStreamingUniformAtGenerationTest::RunTest(const FString& Paramet
 	return true;
 }
 
-namespace VoxelPlanetStreamingTestUtils
-{
-	/** What a Marching Cubes world left with its seam frames' reads copied (voxel.Seam.MCReadInPlace 0) or in place (1). */
-	struct FMCSeamReadsResult
-	{
-		uint32 MeshCrc = 0;                    // every chunk mesh and seam bucket
-		TMap<FIntVector, uint32> ChunkCrcs;    // per chunk mesh
-		TMap<FIntVector, uint32> SeamCrcs;     // per seam bucket (by owner)
-		int32 ChunksPerLOD[3] = {};
-		int64 SeamJobs = 0;                    // MC seam jobs meshed (the mesher's counters)
-		int64 InPlaceJobs = 0;
-		double SeamMs = 0.0;
-	};
-
-	uint32 SingleMeshCrc(const FChunkMeshData& Mesh)
-	{
-		uint32 Crc = FCrc::MemCrc32(Mesh.Positions.GetData(), Mesh.Positions.Num() * Mesh.Positions.GetTypeSize());
-		Crc = FCrc::MemCrc32(Mesh.Normals.GetData(), Mesh.Normals.Num() * Mesh.Normals.GetTypeSize(), Crc);
-		Crc = FCrc::MemCrc32(Mesh.UVs.GetData(), Mesh.UVs.Num() * Mesh.UVs.GetTypeSize(), Crc);
-		Crc = FCrc::MemCrc32(Mesh.UV1s.GetData(), Mesh.UV1s.Num() * Mesh.UV1s.GetTypeSize(), Crc);
-		Crc = FCrc::MemCrc32(Mesh.Colors.GetData(), Mesh.Colors.Num() * Mesh.Colors.GetTypeSize(), Crc);
-		return FCrc::MemCrc32(Mesh.Indices.GetData(), Mesh.Indices.Num() * Mesh.Indices.GetTypeSize(), Crc);
-	}
-
-	/** G63: streams a Marching Cubes place (three LOD bands: LOD 0, 1 and 2 and mixed-LOD seams), moves by Move and settles. */
-	FMCSeamReadsResult RunMCSeamReads(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
-		const FVector& Move, int32 ReadInPlace)
-	{
-		VoxelTesting::FScopedCVar Reads(TEXT("voxel.Seam.MCReadInPlace"), ReadInPlace);
-		FVoxelCPUMarchingCubesMesher::ResetSeamJobStats();
-		FMCSeamReadsResult Result;
-		FPlanetStreamingWorld World;
-		World.MeshingMode = EMeshingMode::MarchingCubes;
-		Start(World);
-		Test.TestTrue(*FString::Printf(TEXT("%s (read in place %d): the pipeline settled"), Place, ReadInPlace), World.Settle());
-		World.Viewer += Move;
-		World.Manager->SetBenchmarkView(true, World.Viewer);
-		Test.TestTrue(*FString::Printf(TEXT("%s (read in place %d): settled after the move"), Place, ReadInPlace), World.Settle());
-
-		Result.MeshCrc = MeshesCrc(World);
-		for (const TPair<FIntVector, FChunkMeshData>& Pair : World.Renderer.ChunkMeshes)
-		{
-			Result.ChunkCrcs.Add(Pair.Key, SingleMeshCrc(Pair.Value));
-			const int32* LOD = World.Renderer.ChunkLODs.Find(Pair.Key);
-			if (LOD && *LOD >= 0 && *LOD < 3)
-			{
-				++Result.ChunksPerLOD[*LOD];
-			}
-		}
-		for (const TPair<FIntVector, FChunkMeshData>& Pair : World.Renderer.SeamBuckets)
-		{
-			Result.SeamCrcs.Add(Pair.Key, SingleMeshCrc(Pair.Value));
-		}
-		FVoxelCPUMarchingCubesMesher::GetSeamJobStats(Result.SeamJobs, Result.InPlaceJobs, Result.SeamMs);
-		World.Stop();
-		return Result;
-	}
-
-	/** Keys of A whose CRC differs in B or is missing there, and the other way round. */
-	int32 CountDifferentCrcs(const TMap<FIntVector, uint32>& A, const TMap<FIntVector, uint32>& B)
-	{
-		int32 Different = 0;
-		for (const TPair<FIntVector, uint32>& Pair : A)
-		{
-			const uint32* Other = B.Find(Pair.Key);
-			Different += (!Other || *Other != Pair.Value) ? 1 : 0;
-		}
-		for (const TPair<FIntVector, uint32>& Pair : B)
-		{
-			Different += A.Contains(Pair.Key) ? 0 : 1;
-		}
-		return Different;
-	}
-
-	/** Runs a place with the seam frames' reads copied and in place: the same meshes and seams bit for bit. */
-	void RunMCSeamReadsPlace(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start, const FVector& Move)
-	{
-		const FMCSeamReadsResult Copied = RunMCSeamReads(Test, Place, Start, Move, 0);
-		const FMCSeamReadsResult InPlace = RunMCSeamReads(Test, Place, Start, Move, 1);
-		Test.AddInfo(FString::Printf(TEXT("%s: chunks at LOD 0/1/2 %d/%d/%d, %d seam buckets; MC seam jobs copied %lld (%.1f ms, %.3f ms a job), in place %lld (%.1f ms, %.3f ms a job)"),
-			Place, InPlace.ChunksPerLOD[0], InPlace.ChunksPerLOD[1], InPlace.ChunksPerLOD[2], InPlace.SeamCrcs.Num(),
-			Copied.SeamJobs, Copied.SeamMs, Copied.SeamJobs > 0 ? Copied.SeamMs / Copied.SeamJobs : 0.0,
-			InPlace.SeamJobs, InPlace.SeamMs, InPlace.SeamJobs > 0 ? InPlace.SeamMs / InPlace.SeamJobs : 0.0));
-
-		Test.TestTrue(*FString::Printf(TEXT("%s: every LOD streamed"), Place),
-			InPlace.ChunksPerLOD[0] > 0 && InPlace.ChunksPerLOD[1] > 0 && InPlace.ChunksPerLOD[2] > 0);
-		Test.TestTrue(*FString::Printf(TEXT("%s: copied, MC seam jobs ran and none read in place"), Place), Copied.SeamJobs > 100 && Copied.InPlaceJobs == 0);
-		Test.TestTrue(*FString::Printf(TEXT("%s: in place, every MC seam job read in place"), Place), InPlace.SeamJobs > 100 && InPlace.InPlaceJobs == InPlace.SeamJobs);
-		const int32 ChunksDifferent = CountDifferentCrcs(Copied.ChunkCrcs, InPlace.ChunkCrcs);
-		const int32 SeamsDifferent = CountDifferentCrcs(Copied.SeamCrcs, InPlace.SeamCrcs);
-		Test.TestEqual(*FString::Printf(TEXT("%s: every chunk mesh the same (%d chunks)"), Place, InPlace.ChunkCrcs.Num()), ChunksDifferent, 0);
-		Test.TestEqual(*FString::Printf(TEXT("%s: every seam bucket the same bit for bit (%d buckets)"), Place, InPlace.SeamCrcs.Num()), SeamsDifferent, 0);
-		Test.TestEqual(*FString::Printf(TEXT("%s: every mesh and seam the same"), Place), InPlace.MeshCrc, Copied.MeshCrc);
-	}
-}
-
-/**
- * G63 on a planet (45N 20E, Marching Cubes): the far-reads test's place and move, its seam frames reading their
- * participants copied into a request (voxel.Seam.MCReadInPlace 0) and in place (1). Every chunk mesh and seam bucket, LOD 0,
- * 1 and 2 and the mixed-LOD seams between them, must be the same bit for bit.
- */
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingMCSeamReadsTest,
-	"VoxelWorlds.Streaming.Planet.MCSeamReadInPlace",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FVoxelPlanetStreamingMCSeamReadsTest::RunTest(const FString& Parameters)
-{
-	using namespace VoxelPlanetStreamingTestUtils;
-
-	const double Lat = FMath::DegreesToRadians(45.0);
-	const double Lon = FMath::DegreesToRadians(20.0);
-	const FVector Direction(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
-	const FVector East = FVector::CrossProduct(FVector::UpVector, Direction).GetSafeNormal();
-	auto Start = [&Direction](FPlanetStreamingWorld& World) { World.Start(TEXT("VoxelPlanetMCSeamReadsTestWorld"), Direction, 300.0f); };
-	RunMCSeamReadsPlace(*this, TEXT("45N 20E"), Start, East * 3000.0);
-	return true;
-}
-
-/** G63 on a heightmap world (Marching Cubes): the same over the plane of the far-reads test, moving 3,000 uu east. */
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneStreamingMCSeamReadsTest,
-	"VoxelWorlds.Streaming.Plane.MCSeamReadInPlace",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FVoxelPlaneStreamingMCSeamReadsTest::RunTest(const FString& Parameters)
-{
-	using namespace VoxelPlanetStreamingTestUtils;
-
-	auto Start = [](FPlanetStreamingWorld& World) { World.StartPlane(TEXT("VoxelPlaneMCSeamReadsTestWorld"), 23000.0f, 7000.0f, 300.0f); };
-	RunMCSeamReadsPlace(*this, TEXT("plane east"), Start, FVector(3000.0, 0.0, 0.0));
-	return true;
-}
-
 // ---------------------------------------------------------------------------
 // G80: the LOD ribs (VISUAL_POLISH_PLAN.md VP5): steps a stride apart in the LOD 1 and 2 terrain that smooth out at
 // LOD 0. Every LOD's voxels are generated at voxel resolution (SignedDistanceToDensity: one voxel of ramp, 0 or 255
 // beyond), so a strided edge interpolated between its two saturated samples puts its crossing near the edge's middle
 // whatever the surface does in between: an error that runs with where the surface crosses the strided grid. This
 // measures every rendered vertex's distance from the analytic surface along local up and every triangle's face normal
-// against the analytic one, per LOD, with the strided crossings (voxel.Mesh.VoxelLODCrossings 0) and the crossings at
-// voxel resolution (1), for Dual Contouring and Marching Cubes.
+// against the analytic one, per LOD, with the crossings at voxel resolution, for Dual Contouring and Marching Cubes.
 // ---------------------------------------------------------------------------
 
 namespace VoxelPlanetStreamingTestUtils
@@ -2338,56 +2143,34 @@ namespace VoxelPlanetStreamingTestUtils
 	}
 
 	/**
-	 * One place streamed with the strided crossings and with voxel crossings (voxel.Mesh.VoxelLODCrossings 0 and 1),
-	 * measured and logged. Dual Contouring renders a closed surface either way, Marching Cubes no more open edges with
-	 * voxel crossings than without (its ribbon's v1 gaps); with voxel crossings LOD 2's band over the phase in its cell
-	 * and its triangles' tilt from the analytic normal are below the strided crossings' (and on gentle relief, where
-	 * nothing else moves a vertex, the band is under a quarter voxel at LOD 2 and below the strided one at LOD 1).
+	 * One place streamed, measured and logged. Dual Contouring renders a closed surface (Marching Cubes' mixed-LOD ribbon
+	 * leaves small gaps along its face edges, a v1 limitation of VoxelCPUMarchingCubesSeams.cpp: logged); on gentle relief,
+	 * where nothing else moves a vertex, LOD 2's band over the phase in its cell is under a quarter voxel (the strided
+	 * crossings before G80 banded more at LOD 1 and 2, and tilted LOD 2's triangles more).
 	 */
 	void RunLODPositionsPlace(FAutomationTestBase& Test, const TCHAR* Place, TFunctionRef<void(FPlanetStreamingWorld&)> Start,
 		float Relief, int32 Octaves, bool bGentle, EMeshingMode MeshingMode)
 	{
 		const TCHAR* Mesher = (MeshingMode == EMeshingMode::MarchingCubes) ? TEXT("MC") : TEXT("DC");
-		FLODPositionStats Stats[2];
-		for (int32 Mode = 0; Mode < 2; ++Mode)
+		FLODPositionStats Stats;
 		{
-			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.VoxelLODCrossings"), Mode);
 			FPlanetStreamingWorld World;
 			World.Relief = Relief;
 			World.Octaves = Octaves;
 			World.MeshingMode = MeshingMode;
 			Start(World);
-			Test.TestTrue(*FString::Printf(TEXT("%s %s (crossings %d): the pipeline settled"), Mesher, Place, Mode), World.Settle());
-			Stats[Mode] = MeasureLODPositions(Test, Place, World);
+			Test.TestTrue(*FString::Printf(TEXT("%s %s: the pipeline settled"), Mesher, Place), World.Settle());
+			Stats = MeasureLODPositions(Test, Place, World);
 			World.Stop();
-			Test.AddInfo(FString::Printf(TEXT("%s %s, crossings %d: %s"), Mesher, Place, Mode, *Stats[Mode].Describe()));
+			Test.AddInfo(FString::Printf(TEXT("%s %s: %s"), Mesher, Place, *Stats.Describe()));
 		}
-		const int32 Holes[2] = {
-			Stats[0].Surface.OtherHoles + Stats[0].Surface.MixedSeamHoles, Stats[1].Surface.OtherHoles + Stats[1].Surface.MixedSeamHoles };
-		if (MeshingMode == EMeshingMode::MarchingCubes)
+		if (MeshingMode == EMeshingMode::DualContouring)
 		{
-			// Marching Cubes' mixed-LOD ribbon leaves small gaps along its face edges (VoxelCPUMarchingCubesSeams.cpp, a
-			// v1 limitation): voxel crossings add none.
-			Test.TestTrue(*FString::Printf(TEXT("MC %s: open edges with voxel crossings %d, no more than the strided %d"), Place,
-				Holes[1], Holes[0]), Holes[1] <= Holes[0]);
+			Test.TestEqual(*FString::Printf(TEXT("DC %s: no hole"), Place), Stats.Surface.OtherHoles + Stats.Surface.MixedSeamHoles, 0);
 		}
-		else
-		{
-			for (int32 Mode = 0; Mode < 2; ++Mode)
-			{
-				Test.TestEqual(*FString::Printf(TEXT("DC %s (crossings %d): no hole"), Place, Mode), Holes[Mode], 0);
-			}
-		}
-		Test.TestTrue(*FString::Printf(TEXT("%s %s: LOD 2's band with voxel crossings %.3f below the strided %.3f voxels"), Mesher, Place,
-			Stats[1].Band(2), Stats[0].Band(2)), Stats[1].Band(2) < Stats[0].Band(2));
-		Test.TestTrue(*FString::Printf(TEXT("%s %s: LOD 2's face normals with voxel crossings %.2f below the strided %.2f deg"), Mesher, Place,
-			Stats[1].FaceAngle(2), Stats[0].FaceAngle(2)), Stats[1].FaceAngle(2) < Stats[0].FaceAngle(2));
 		if (bGentle)
 		{
-			Test.TestTrue(*FString::Printf(TEXT("%s %s: LOD 2's band with voxel crossings %.3f under 0.25 voxels"), Mesher, Place,
-				Stats[1].Band(2)), Stats[1].Band(2) < 0.25);
-			Test.TestTrue(*FString::Printf(TEXT("%s %s: LOD 1's band with voxel crossings %.3f below the strided %.3f voxels"), Mesher, Place,
-				Stats[1].Band(1), Stats[0].Band(1)), Stats[1].Band(1) < Stats[0].Band(1));
+			Test.TestTrue(*FString::Printf(TEXT("%s %s: LOD 2's band %.3f under 0.25 voxels"), Mesher, Place, Stats.Band(2)), Stats.Band(2) < 0.25);
 		}
 	}
 }
@@ -2395,8 +2178,7 @@ namespace VoxelPlanetStreamingTestUtils
 /**
  * G80 on a planet: at 45N 20E, on the equator and near the pole, with gentle relief and the streaming tests' relief,
  * each LOD's vertex error from the analytic surface (mean, RMS, 95th percentile, the band over the phase in the LOD's
- * cell) and its triangles' face normals, with the strided crossings and voxel crossings, Dual Contouring and Marching
- * Cubes.
+ * cell) and its triangles' face normals, Dual Contouring and Marching Cubes.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetStreamingLODPositionsTest,
 	"VoxelWorlds.Streaming.Planet.LODPositions",
@@ -2429,7 +2211,7 @@ bool FVoxelPlanetStreamingLODPositionsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-/** G80 on a heightmap world: the plane of the closed-surface test, gentle and rolling, both crossings, both meshers. */
+/** G80 on a heightmap world: the plane of the closed-surface test, gentle and rolling, both meshers. */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneStreamingLODPositionsTest,
 	"VoxelWorlds.Streaming.Plane.LODPositions",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

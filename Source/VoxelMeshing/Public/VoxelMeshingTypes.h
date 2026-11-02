@@ -237,7 +237,7 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	FVector LocalUp = FVector::UpVector;
 
 	/**
-	 * Marching Cubes seam jobs only (world modes review G63, voxel.Seam.MCReadInPlace): the volumes of this chunk and of
+	 * Marching Cubes seam jobs only (world modes review G63): the volumes of this chunk and of
 	 * its neighbours, read in place from the seam job's snapshots (each ChunkSize^3 elements) instead of copied into
 	 * VoxelData and the neighbour planes, strips and corners. Index (dx + 1) + (dy + 1) * 3 + (dz + 1) * 9 for the
 	 * neighbour at (dx, dy, dz); [13] is this chunk's own volume, and a request that sets it leaves VoxelData empty (so

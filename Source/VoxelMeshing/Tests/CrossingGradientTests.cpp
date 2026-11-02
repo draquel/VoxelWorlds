@@ -8,8 +8,6 @@
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
-#include "HAL/IConsoleManager.h"
-#include "Testing/VoxelTestScopedCVar.h"
 #include "QEFSolver.h"       // G81: the solve itself (VoxelMeshing/Private)
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -19,8 +17,8 @@
 // whose density is the generators' one-voxel ramp of the signed distance along local up (SignedDistanceToDensity: a
 // heightmap's vertical distance, a planet's radial one), saturating beyond it. The central difference about the voxel a
 // crossing floors to read the saturated rock under the surface, so a plane's normals tilted by 1.0-1.8 times its slope
-// with the surface's phase in the voxel grid: bands. The fitted gradient (voxel.Mesh.CrossingGradientNormals 1) is exact
-// for a plane at any phase. Pure CPU.
+// with the surface's phase in the voxel grid: bands. The fitted gradient is exact for a plane at
+// any phase. Pure CPU.
 // ---------------------------------------------------------------------------
 
 namespace VoxelCrossingGradientTestUtils
@@ -165,21 +163,13 @@ namespace VoxelCrossingGradientTestUtils
 			return FString::Printf(TEXT("%d vertices, mean %.3f deg, max %.2f, band %.3f"), Count, Mean(), Max, Band());
 		}
 	};
-
-	bool PositionsIdentical(const FChunkMeshData& A, const FChunkMeshData& B)
-	{
-		return A.Positions.Num() == B.Positions.Num() && A.Indices.Num() == B.Indices.Num()
-			&& (A.Positions.Num() == 0 || FMemory::Memcmp(A.Positions.GetData(), B.Positions.GetData(), A.Positions.Num() * sizeof(FVector3f)) == 0)
-			&& (A.Indices.Num() == 0 || FMemory::Memcmp(A.Indices.GetData(), B.Indices.GetData(), A.Indices.Num() * sizeof(uint32)) == 0);
-	}
 }
 
 /**
  * G62 on exact planes: with the fitted gradient Dual Contouring's and Marching Cubes' vertex normals at LOD 0, 1 and 2
- * (LOD 1 and 2 take LOD 0's estimator at a voxel crossing: G44, G61) are within a quarter of a degree of the plane's on
- * average with no band over the surface's phase in the voxel grid; with the central difference before G62 (0) LOD 0
- * bands by more than a degree in both meshers. Marching Cubes' vertex positions are the same either way (Dual
- * Contouring's QEF takes the fitted gradient since G80 and G81).
+ * (LOD 1 and 2 take LOD 0's estimator at a voxel crossing: G61, G80) are within a quarter of a degree of the plane's on
+ * average with no band over the surface's phase in the voxel grid (the central difference before G62 banded LOD 0 by
+ * more than a degree in both meshers).
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCrossingGradientPlanesTest, "VoxelWorlds.Meshing.CrossingGradient.Planes",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -195,29 +185,20 @@ bool FVoxelCrossingGradientPlanesTest::RunTest(const FString& Parameters)
 	MCMesher.Initialize();
 	MCMesher.SetConfig(MakeDCConfig());
 	const TArray<FRampPlane> Planes = MakePlanes();
-	// [Mode][Mesher: 0 DC, 1 MC][LOD]
-	FPlaneNormalStats Stats[2][2][3];
-	bool bPositionsSame[2][3] = { { true, true, true }, { true, true, true } };
+	// [Mesher: 0 DC, 1 MC][LOD]
+	FPlaneNormalStats Stats[2][3];
 	for (int32 LOD = 0; LOD < 3; ++LOD)
 	{
 		const float Margin = 1.5f * (1 << LOD) + 1.0f;
 		for (const FRampPlane& Plane : Planes)
 		{
 			const FVoxelMeshingRequest Request = MakeRequest(Plane, LOD);
-			FChunkMeshData Meshes[2][2];
-			for (int32 Mode = 0; Mode < 2; ++Mode)
-			{
-				VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.CrossingGradientNormals"), Mode);
-				TestTrue(TEXT("DC meshing succeeds"), DCMesher.GenerateMeshCPU(Request, Meshes[Mode][0]));
-				TestTrue(TEXT("MC meshing succeeds"), MCMesher.GenerateMeshCPU(Request, Meshes[Mode][1]));
-				for (int32 Mesher = 0; Mesher < 2; ++Mesher)
-				{
-					Stats[Mode][Mesher][LOD].Add(Meshes[Mode][Mesher], Plane.Normal(), Margin);
-				}
-			}
+			FChunkMeshData Meshes[2];
+			TestTrue(TEXT("DC meshing succeeds"), DCMesher.GenerateMeshCPU(Request, Meshes[0]));
+			TestTrue(TEXT("MC meshing succeeds"), MCMesher.GenerateMeshCPU(Request, Meshes[1]));
 			for (int32 Mesher = 0; Mesher < 2; ++Mesher)
 			{
-				bPositionsSame[Mesher][LOD] &= PositionsIdentical(Meshes[0][Mesher], Meshes[1][Mesher]);
+				Stats[Mesher][LOD].Add(Meshes[Mesher], Plane.Normal(), Margin);
 			}
 		}
 	}
@@ -227,23 +208,14 @@ bool FVoxelCrossingGradientPlanesTest::RunTest(const FString& Parameters)
 	{
 		for (int32 LOD = 0; LOD < 3; ++LOD)
 		{
-			const FPlaneNormalStats& Before = Stats[0][Mesher][LOD];
-			const FPlaneNormalStats& After = Stats[1][Mesher][LOD];
-			AddInfo(FString::Printf(TEXT("%s LOD %d: before G62 %s; after %s"), Names[Mesher], LOD, *Before.Describe(), *After.Describe()));
+			const FPlaneNormalStats& After = Stats[Mesher][LOD];
+			AddInfo(FString::Printf(TEXT("%s LOD %d: %s"), Names[Mesher], LOD, *After.Describe()));
 			TestTrue(*FString::Printf(TEXT("%s LOD %d: vertices measured (%d)"), Names[Mesher], LOD, After.Count), After.Count > (1000 >> (2 * LOD)));
-			// Dual Contouring's QEF takes the fitted gradient since G80 (a stride) and G81 (stride 1), so its vertices move
-			// with the setting (onto the plane: VoxelWorlds.Meshing.LODCrossings.Planes); Marching Cubes' do not.
-			if (Mesher == 1)
-			{
-				TestTrue(*FString::Printf(TEXT("%s LOD %d: positions the same in either setting"), Names[Mesher], LOD), bPositionsSame[Mesher][LOD]);
-			}
 			TestTrue(*FString::Printf(TEXT("%s LOD %d: normals within a quarter degree of the plane's (mean %.3f)"), Names[Mesher], LOD, After.Mean()),
 				After.Mean() < 0.25);
 			TestTrue(*FString::Printf(TEXT("%s LOD %d: no band over the voxel phase (%.3f deg)"), Names[Mesher], LOD, After.Band()),
 				After.Band() < 0.25);
 		}
-		TestTrue(*FString::Printf(TEXT("%s LOD 0: the central difference before G62 bands (%.2f deg)"), Names[Mesher], Stats[0][Mesher][0].Band()),
-			Stats[0][Mesher][0].Band() > 1.0);
 	}
 	MCMesher.Shutdown();
 	DCMesher.Shutdown();
@@ -254,9 +226,8 @@ bool FVoxelCrossingGradientPlanesTest::RunTest(const FString& Parameters)
 // G80 (VISUAL_POLISH_PLAN.md VP5, the LOD ribs): the smooth meshers' vertex positions at LOD 1 and 2 against the same
 // exact planes. A strided edge interpolated between its two samples a stride apart reads them saturated (the ramp is a
 // voxel either side of the surface), so its crossing lands toward the edge's middle by where the plane crosses the
-// strided grid: the vertices' distance from the plane runs with that phase (terraces a stride apart). With
-// voxel.Mesh.VoxelLODCrossings the crossing is LOD 0's on the voxel step along the edge that changes sign, which lies
-// on a plane to the density's 8-bit step.
+// strided grid: the vertices' distance from the plane runs with that phase (terraces a stride apart). The crossing is
+// LOD 0's on the voxel step along the edge that changes sign, which lies on a plane to the density's 8-bit step.
 // ---------------------------------------------------------------------------
 
 namespace VoxelCrossingGradientTestUtils
@@ -336,10 +307,9 @@ namespace VoxelCrossingGradientTestUtils
 }
 
 /**
- * G80 on exact planes: Dual Contouring's and Marching Cubes' vertices at LOD 1 and 2 against the plane, with the strided
- * crossings (voxel.Mesh.VoxelLODCrossings 0) and voxel crossings (1). The strided crossings band by more than a quarter
- * voxel at LOD 2 in both meshers; voxel crossings put Marching Cubes' vertices on the plane (the crossing itself) and
- * Dual Contouring's as close as LOD 0's, with no band. LOD 0 is the same in either setting.
+ * G80 on exact planes: Dual Contouring's and Marching Cubes' vertices at LOD 1 and 2 against the plane. Voxel crossings
+ * put Marching Cubes' vertices on the plane (the crossing itself) and Dual Contouring's as close as LOD 0's, with no band
+ * (the strided crossings before G80 banded by more than a quarter voxel at LOD 2 in both meshers).
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelLODCrossingPlanesTest, "VoxelWorlds.Meshing.LODCrossings.Planes",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -355,32 +325,20 @@ bool FVoxelLODCrossingPlanesTest::RunTest(const FString& Parameters)
 	MCMesher.Initialize();
 	MCMesher.SetConfig(MakeDCConfig());
 	const TArray<FRampPlane> Planes = MakePlanes();
-	// [Mode][Mesher: 0 DC, 1 MC][LOD]
-	FPlanePositionStats Stats[2][2][3];
-	bool bLOD0Same[2] = { true, true };
+	// [Mesher: 0 DC, 1 MC][LOD]
+	FPlanePositionStats Stats[2][3];
 	for (int32 LOD = 0; LOD < 3; ++LOD)
 	{
 		const float Margin = 1.5f * (1 << LOD) + 1.0f;
 		for (const FRampPlane& Plane : Planes)
 		{
 			const FVoxelMeshingRequest Request = MakeRequest(Plane, LOD);
-			FChunkMeshData Meshes[2][2];
-			for (int32 Mode = 0; Mode < 2; ++Mode)
+			FChunkMeshData Meshes[2];
+			TestTrue(TEXT("DC meshing succeeds"), DCMesher.GenerateMeshCPU(Request, Meshes[0]));
+			TestTrue(TEXT("MC meshing succeeds"), MCMesher.GenerateMeshCPU(Request, Meshes[1]));
+			for (int32 Mesher = 0; Mesher < 2; ++Mesher)
 			{
-				VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.VoxelLODCrossings"), Mode);
-				TestTrue(TEXT("DC meshing succeeds"), DCMesher.GenerateMeshCPU(Request, Meshes[Mode][0]));
-				TestTrue(TEXT("MC meshing succeeds"), MCMesher.GenerateMeshCPU(Request, Meshes[Mode][1]));
-				for (int32 Mesher = 0; Mesher < 2; ++Mesher)
-				{
-					Stats[Mode][Mesher][LOD].Add(Meshes[Mode][Mesher], Plane, LOD, Margin);
-				}
-			}
-			if (LOD == 0)
-			{
-				for (int32 Mesher = 0; Mesher < 2; ++Mesher)
-				{
-					bLOD0Same[Mesher] &= PositionsIdentical(Meshes[0][Mesher], Meshes[1][Mesher]);
-				}
+				Stats[Mesher][LOD].Add(Meshes[Mesher], Plane, LOD, Margin);
 			}
 		}
 	}
@@ -388,34 +346,27 @@ bool FVoxelLODCrossingPlanesTest::RunTest(const FString& Parameters)
 	static const TCHAR* Names[2] = { TEXT("DC"), TEXT("MC") };
 	for (int32 Mesher = 0; Mesher < 2; ++Mesher)
 	{
-		TestTrue(*FString::Printf(TEXT("%s LOD 0: positions the same in either setting"), Names[Mesher]), bLOD0Same[Mesher]);
 		for (int32 LOD = 0; LOD < 3; ++LOD)
 		{
-			const FPlanePositionStats& Before = Stats[0][Mesher][LOD];
-			const FPlanePositionStats& After = Stats[1][Mesher][LOD];
-			AddInfo(FString::Printf(TEXT("%s LOD %d: strided crossings %s; voxel crossings %s"), Names[Mesher], LOD, *Before.Describe(), *After.Describe()));
+			const FPlanePositionStats& After = Stats[Mesher][LOD];
+			AddInfo(FString::Printf(TEXT("%s LOD %d: %s"), Names[Mesher], LOD, *After.Describe()));
 			TestTrue(*FString::Printf(TEXT("%s LOD %d: vertices measured (%d)"), Names[Mesher], LOD, After.Count), After.Count > (1000 >> (2 * LOD)));
 		}
 		for (int32 LOD = 1; LOD < 3; ++LOD)
 		{
-			const FPlanePositionStats& Before = Stats[0][Mesher][LOD];
-			const FPlanePositionStats& After = Stats[1][Mesher][LOD];
-			const FPlanePositionStats& LOD0 = Stats[1][Mesher][0];
-			TestTrue(*FString::Printf(TEXT("%s LOD %d: voxel crossings no farther from the plane than LOD 0 (mean %.4f against %.4f voxels)"),
+			const FPlanePositionStats& After = Stats[Mesher][LOD];
+			const FPlanePositionStats& LOD0 = Stats[Mesher][0];
+			TestTrue(*FString::Printf(TEXT("%s LOD %d: no farther from the plane than LOD 0 (mean %.4f against %.4f voxels)"),
 				Names[Mesher], LOD, After.Mean(), LOD0.Mean()), After.Mean() <= LOD0.Mean() * 1.5 + 0.01);
-			TestTrue(*FString::Printf(TEXT("%s LOD %d: voxel crossings band under 0.05 voxels (%.4f)"), Names[Mesher], LOD, After.Band()),
+			TestTrue(*FString::Printf(TEXT("%s LOD %d: band under 0.05 voxels (%.4f)"), Names[Mesher], LOD, After.Band()),
 				After.Band() < 0.05);
-			TestTrue(*FString::Printf(TEXT("%s LOD %d: voxel crossings closer to the plane than the strided (mean %.4f against %.4f)"),
-				Names[Mesher], LOD, After.Mean(), Before.Mean()), After.Mean() < Before.Mean());
 		}
-		TestTrue(*FString::Printf(TEXT("%s LOD 2: the strided crossings band (%.3f voxels)"), Names[Mesher], Stats[0][Mesher][2].Band()),
-			Stats[0][Mesher][2].Band() > 0.25);
 		if (Mesher == 1)
 		{
 			for (int32 LOD = 1; LOD < 3; ++LOD)
 			{
-				TestTrue(*FString::Printf(TEXT("MC LOD %d: voxel crossings on the plane (max %.4f voxels)"), LOD, Stats[1][1][LOD].Max),
-					Stats[1][1][LOD].Max < 0.02);
+				TestTrue(*FString::Printf(TEXT("MC LOD %d: vertices on the plane (max %.4f voxels)"), LOD, Stats[1][LOD].Max),
+					Stats[1][LOD].Max < 0.02);
 			}
 		}
 	}
@@ -433,9 +384,9 @@ bool FVoxelLODCrossingPlanesTest::RunTest(const FString& Parameters)
 
 /**
  * G81 on single cells: the cell G80's planes test found (three crossings on a planet's flat tangent plane at 45N 20E, a
- * stride-2 cell of 100 uu voxels) solves onto the plane, at its mass point, with the solve about the mass point; the
- * solve before put it more than a voxel off the plane. A corner (three orthogonal planes meeting inside the cell) solves
- * to the corner either way, and a cell far from the origin solves onto its plane with the new solve wherever it is.
+ * stride-2 cell of 100 uu voxels) solves onto the plane, at its mass point (the solve before G81 put it more than a voxel
+ * off the plane). A corner (three orthogonal planes meeting inside the cell) solves to the corner, and a cell far from
+ * the origin solves onto its plane wherever it is.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelQEFSolveTest, "VoxelWorlds.Meshing.QEF.Solve",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -459,15 +410,12 @@ bool FVoxelQEFSolveTest::RunTest(const FString& Parameters)
 		}
 		const FBox3f Cell(FVector3f(14.0f, 10.0f, 16.0f) * VoxelSize, FVector3f(16.0f, 12.0f, 18.0f) * VoxelSize);
 		const FVector3f MassPoint = QEF.MassPoint / static_cast<float>(QEF.Count);
-		const FVector3f After = QEF.Solve(SVDThreshold, Cell, BiasStrength, true);
-		const FVector3f Before = QEF.Solve(SVDThreshold, Cell, BiasStrength, false);
+		const FVector3f After = QEF.Solve(SVDThreshold, Cell, BiasStrength);
 		const float AfterOff = FMath::Abs(FVector3f::DotProduct(Normal, After - Points[0] * VoxelSize)) / VoxelSize;
-		const float BeforeOff = FMath::Abs(FVector3f::DotProduct(Normal, Before - Points[0] * VoxelSize)) / VoxelSize;
-		AddInfo(FString::Printf(TEXT("Planet cell: the solve about the mass point %.4f voxels off the plane, %.4f from the mass point; before %.4f off"),
-			AfterOff, FVector3f::Dist(After, MassPoint) / VoxelSize, BeforeOff));
+		AddInfo(FString::Printf(TEXT("Planet cell: %.4f voxels off the plane, %.4f from the mass point"),
+			AfterOff, FVector3f::Dist(After, MassPoint) / VoxelSize));
 		TestTrue(*FString::Printf(TEXT("Planet cell: on the plane (%.4f voxels)"), AfterOff), AfterOff < 0.001f);
 		TestTrue(TEXT("Planet cell: at its mass point"), FVector3f::Dist(After, MassPoint) < 0.001f * VoxelSize);
-		TestTrue(*FString::Printf(TEXT("Planet cell: the solve before was off the plane (%.4f voxels)"), BeforeOff), BeforeOff > 0.5f);
 	}
 
 	// A corner: three orthogonal planes through (5.3, 6.2, 7.7) voxels, inside the cell [4, 8]^3.
@@ -478,15 +426,12 @@ bool FVoxelQEFSolveTest::RunTest(const FString& Parameters)
 		QEF.Add(Corner + FVector3f(-0.8f, 0.0f, -0.5f) * VoxelSize, FVector3f(0.0f, 1.0f, 0.0f));
 		QEF.Add(Corner + FVector3f(-0.6f, 0.4f, 0.0f) * VoxelSize, FVector3f(0.0f, 0.0f, 1.0f));
 		const FBox3f Cell(FVector3f(4.0f) * VoxelSize, FVector3f(8.0f) * VoxelSize);
-		for (const bool bAboutMassPoint : { false, true })
-		{
-			const FVector3f V = QEF.Solve(SVDThreshold, Cell, BiasStrength, bAboutMassPoint);
-			TestTrue(*FString::Printf(TEXT("Corner (solve %d): at the corner (%.4f voxels)"), bAboutMassPoint ? 1 : 0, FVector3f::Dist(V, Corner) / VoxelSize),
-				FVector3f::Dist(V, Corner) < 0.001f * VoxelSize);
-		}
+		const FVector3f V = QEF.Solve(SVDThreshold, Cell, BiasStrength);
+		TestTrue(*FString::Printf(TEXT("Corner: at the corner (%.4f voxels)"), FVector3f::Dist(V, Corner) / VoxelSize),
+			FVector3f::Dist(V, Corner) < 0.001f * VoxelSize);
 	}
 
-	// A tilted plane in cells along a line away from the origin: the new solve is on the plane in every one.
+	// A tilted plane in cells along a line away from the origin: the solve is on the plane in every one.
 	{
 		const FVector3f Normal = FVector3f(0.3f, -0.5f, 0.81f).GetSafeNormal();
 		float Worst = 0.0f;
@@ -503,7 +448,7 @@ bool FVoxelQEFSolveTest::RunTest(const FString& Parameters)
 				QEF.Add((Centre + Tangent1 * O.X + Tangent2 * O.Y) * VoxelSize, Normal);
 			}
 			const FBox3f Cell(Base * VoxelSize, (Base + FVector3f(4.0f)) * VoxelSize);
-			const FVector3f V = QEF.Solve(SVDThreshold, Cell, BiasStrength, true);
+			const FVector3f V = QEF.Solve(SVDThreshold, Cell, BiasStrength);
 			Worst = FMath::Max(Worst, FMath::Abs(FVector3f::DotProduct(Normal, V - Centre * VoxelSize)) / VoxelSize);
 		}
 		TestTrue(*FString::Printf(TEXT("A plane in 16 cells to 1,900 voxels out: on it in every one (worst %.4f voxels)"), Worst), Worst < 0.01f);

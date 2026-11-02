@@ -6,8 +6,6 @@
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
-#include "HAL/IConsoleManager.h"
-#include "Testing/VoxelTestScopedCVar.h"
 
 // ==================== Helper Functions ====================
 
@@ -491,9 +489,8 @@ namespace MarchingCubesMeshingTestHelpers
 
 /**
  * G61 (WORLD_MODES_REVIEW_PLAN.md §14.1, §20.9): on a tilted plane whose density saturates a voxel either side of the
- * surface, Marching Cubes' LOD 1 and 2 vertex normals are as close to the plane's as LOD 0's (voxel.Mesh.VoxelShadingNormals
- * 1), where the stride-scale gradient before G61 (0) snaps them toward the cube directions; positions are the same either
- * way.
+ * surface, Marching Cubes' LOD 1 and 2 vertex normals are as close to the plane's as LOD 0's (the stride-scale gradient
+ * before G61 snapped them toward the cube directions).
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMarchingCubesMeshingLODNormalsTest, "VoxelWorlds.Meshing.MarchingCubes.LODNormals",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -507,31 +504,23 @@ bool FMarchingCubesMeshingLODNormalsTest::RunTest(const FString& Parameters)
 	CPUMesher.Initialize();
 	CPUMesher.SetConfig(CreateMCConfig());
 
-	double Angle[2][3] = {};
-	for (int32 Mode = 0; Mode < 2; ++Mode)
+	double Angle[3] = {};
+	for (int32 LOD = 0; LOD < 3; ++LOD)
 	{
-		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Mesh.VoxelShadingNormals"), Mode);
-		for (int32 LOD = 0; LOD < 3; ++LOD)
-		{
-			const FVoxelMeshingRequest Request = CreateSaturatedPlaneRequest(ChunkSize, LOD, Normal);
-			FChunkMeshData CPUMesh;
-			TestTrue(*FString::Printf(TEXT("Normals %d LOD %d: CPU meshing succeeds"), Mode, LOD), CPUMesher.GenerateMeshCPU(Request, CPUMesh));
-			int32 Count = 0;
-			// Away from the chunk's faces, where the taps clamp (no neighbour data here).
-			Angle[Mode][LOD] = MeanAngleInside(CPUMesh, Normal, Request.VoxelSize, ChunkSize, 1.5f * (1 << LOD) + 1.0f, Count);
-			TestTrue(*FString::Printf(TEXT("Normals %d LOD %d: vertices measured (%d)"), Mode, LOD, Count), Count > 50);
-		}
+		const FVoxelMeshingRequest Request = CreateSaturatedPlaneRequest(ChunkSize, LOD, Normal);
+		FChunkMeshData CPUMesh;
+		TestTrue(*FString::Printf(TEXT("LOD %d: CPU meshing succeeds"), LOD), CPUMesher.GenerateMeshCPU(Request, CPUMesh));
+		int32 Count = 0;
+		// Away from the chunk's faces, where the taps clamp (no neighbour data here).
+		Angle[LOD] = MeanAngleInside(CPUMesh, Normal, Request.VoxelSize, ChunkSize, 1.5f * (1 << LOD) + 1.0f, Count);
+		TestTrue(*FString::Printf(TEXT("LOD %d: vertices measured (%d)"), LOD, Count), Count > 50);
 	}
-	AddInfo(FString::Printf(TEXT("Mean angle from the plane's normal, LOD 0/1/2: before G61 %.2f / %.2f / %.2f deg, after %.2f / %.2f / %.2f deg"),
-		Angle[0][0], Angle[0][1], Angle[0][2], Angle[1][0], Angle[1][1], Angle[1][2]));
-	TestTrue(TEXT("LOD 0 is the same in either mode"), FMath::IsNearlyEqual(Angle[0][0], Angle[1][0], 1e-6));
+	AddInfo(FString::Printf(TEXT("Mean angle from the plane's normal, LOD 0/1/2: %.2f / %.2f / %.2f deg"), Angle[0], Angle[1], Angle[2]));
 	for (int32 LOD = 1; LOD < 3; ++LOD)
 	{
-		TestTrue(*FString::Printf(TEXT("LOD %d's normals within a degree of LOD 0's error (%.2f against %.2f)"), LOD, Angle[1][LOD], Angle[1][0]),
-			Angle[1][LOD] <= Angle[1][0] + 1.0);
+		TestTrue(*FString::Printf(TEXT("LOD %d's normals within a degree of LOD 0's error (%.2f against %.2f)"), LOD, Angle[LOD], Angle[0]),
+			Angle[LOD] <= Angle[0] + 1.0);
 	}
-	TestTrue(*FString::Printf(TEXT("The stride-scale normals before G61 snap at LOD 2 (%.2f deg against LOD 0's %.2f)"), Angle[0][2], Angle[0][0]),
-		Angle[0][2] > Angle[0][0] + 3.0);
 
 	CPUMesher.Shutdown();
 	return true;

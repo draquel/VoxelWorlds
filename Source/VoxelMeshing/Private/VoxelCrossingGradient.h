@@ -3,14 +3,6 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "HAL/IConsoleManager.h"
-
-// voxel.Mesh.CrossingGradientNormals (VoxelCPUDualContourMesher.cpp): the smooth meshers' voxel-resolution shading normals.
-extern TAutoConsoleVariable<int32> CVarVoxelCrossingGradientNormals;
-// voxel.Mesh.VoxelShadingNormals (VoxelCPUDualContourMesher.cpp): both smooth meshers' vertex normals at LOD > 0 (G44, G61).
-extern TAutoConsoleVariable<int32> CVarVoxelShadingNormals;
-// voxel.Mesh.VoxelLODCrossings (VoxelCPUDualContourMesher.cpp): both smooth meshers' edge crossings at LOD > 0 (G80).
-extern TAutoConsoleVariable<int32> CVarVoxelLODCrossings;
 
 /**
  * The density gradient at a point of the surface, fitted to the voxels around it (G62, WORLD_MODES_REVIEW_PLAN.md §14.1).
@@ -35,27 +27,6 @@ extern TAutoConsoleVariable<int32> CVarVoxelLODCrossings;
  */
 namespace VoxelCrossingGradient
 {
-	/** voxel.Mesh.CrossingGradientNormals: 1 = the fit (default), 0 = the floored central difference, as before. */
-	inline bool UseCrossingGradientNormals()
-	{
-		return CVarVoxelCrossingGradientNormals.GetValueOnAnyThread() != 0;
-	}
-
-	/** voxel.Mesh.VoxelShadingNormals for a vertex or cell of this stride (always false at stride 1: LOD 0 is the reference). */
-	inline bool UseVoxelShadingNormals(int32 Stride)
-	{
-		return Stride > 1 && CVarVoxelShadingNormals.GetValueOnAnyThread() != 0;
-	}
-
-	/**
-	 * voxel.Mesh.VoxelLODCrossings for an edge of this stride, or this many voxels long (always false at 1: a one-voxel
-	 * edge's crossing is LOD 0's, so LOD 0, and a ribbon's fine side against LOD 0, stay bit for bit as they were).
-	 */
-	inline bool UseVoxelLODCrossings(int32 StrideOrLength)
-	{
-		return StrideOrLength > 1 && CVarVoxelLODCrossings.GetValueOnAnyThread() != 0;
-	}
-
 	/** The voxels of the box [Lo, Hi] (inclusive per axis) as FitNormal's IsHeld. */
 	struct FBoxHeld
 	{
@@ -181,54 +152,43 @@ namespace VoxelCrossingGradient
 	}
 
 	/**
-	 * The shading normal at a point of the surface (G62): the fitted gradient over the voxels the caller's view holds
-	 * (voxel.Mesh.CrossingGradientNormals 1), else, or where the fit is ill-conditioned, the caller's own estimate (its
-	 * central difference at stride 1, as before G62). One body behind both meshers' CalculateShadingNormal and Dual
-	 * Contouring's seam samplers (code review CR2, MESH-10).
+	 * The shading normal at a point of the surface (G62): the fitted gradient over the voxels the caller's view holds, or
+	 * where the fit is ill-conditioned the caller's own estimate (its central difference at stride 1). One body behind
+	 * both meshers' CalculateShadingNormal and Dual Contouring's seam samplers (code review CR2, MESH-10).
 	 *
 	 * @param Density (X, Y, Z) -> density in [0, 1] at a voxel
 	 * @param IsHeld (X, Y, Z) -> whether the caller's view holds that voxel
 	 * @param X, Y, Z The point (voxels, the view's frame)
-	 * @param Fallback () -> the caller's estimate where the fit is off or fails
+	 * @param Fallback () -> the caller's estimate where the fit fails
 	 * @return The outward unit normal
 	 */
 	template <typename TDensityFn, typename THeldFn, typename TFallbackFn>
 	FVector3f ShadingNormal(const TDensityFn& Density, const THeldFn& IsHeld, float X, float Y, float Z, const TFallbackFn& Fallback)
 	{
-		if (UseCrossingGradientNormals())
+		FVector3f Normal;
+		if (FitNormal(Density, IsHeld, X, Y, Z, Normal))
 		{
-			FVector3f Normal;
-			if (FitNormal(Density, IsHeld, X, Y, Z, Normal))
-			{
-				return Normal;
-			}
+			return Normal;
 		}
 		return Fallback();
 	}
 }
 
 /**
- * Where a strided edge's surface crosses at voxel resolution (G80, voxel.Mesh.VoxelLODCrossings). Every LOD's data is at
- * voxel resolution, so a strided edge's vertex lies on LOD 0's surface when it takes one voxel step's crossing instead of
- * the interpolation between the edge's two saturated ends (which put the vertex toward the edge's middle: the LOD ribs).
- * The two smooth meshers pick the step by two rules, kept apart on purpose (code review CR2, MESH-11):
+ * Where a strided edge's surface crosses at voxel resolution (G80). Every LOD's data is at voxel resolution, so a strided
+ * edge's vertex lies on LOD 0's surface when it takes one voxel step's crossing instead of the interpolation between the
+ * edge's two saturated ends (which put the vertex toward the edge's middle: the LOD ribs). The two smooth meshers pick the
+ * step by two rules, kept apart on purpose (code review CR2, MESH-11):
  *   - Dual Contouring takes the first voxel step along the edge that changes sign (FindVoxelCrossing): its QEF takes one
- *     crossing per edge in the edge's walking order, and the voxel cell beside that step is where G44 reads the vertex's
- *     normal;
+ *     crossing per edge in the edge's walking order;
  *   - Marching Cubes takes the step whose crossing lies nearest the place InterpolateEdge gave the vertex
  *     (FindEdgeVoxelCrossing): the vertex moves the least, and the transition ribbon's geomorph target follows it.
  * Each is a pure function of the edge, walked from its min end, so every cell, seam frame and ribbon sharing an edge finds
  * the same point. Changing either rule moves that mesher's LOD 1 and 2 vertices (the Streaming.*.LODPositions baselines).
+ * A one-voxel edge's crossing is LOD 0's interpolation, so both meshers keep it at stride 1.
  */
 namespace VoxelLODCrossing
 {
-	/** Where a strided edge's surface crosses at voxel resolution, and the voxel cell inside the strided cell there. */
-	struct FVoxelCrossing
-	{
-		FVector3f VoxelPosition; // voxels, the strided cell's frame
-		FIntVector VoxelCell;    // min corner of the voxel cell inside the strided cell next to the crossing
-	};
-
 	/**
 	 * Dual Contouring's rule: the first of a strided cell edge's Stride voxel steps whose ends differ in sign.
 	 *
@@ -237,13 +197,11 @@ namespace VoxelLODCrossing
 	 * @param Axis The edge's axis
 	 * @param Stride The edge's length (voxels)
 	 * @param IsoLevel The surface threshold
-	 * @param EdgeOffset The edge's corner offset in the cell (FEdgeRef's DX, DY, DZ): 1 = the edge runs along the cell's
-	 *                   max face on that axis
-	 * @return The crossing (the edge's first step if none changes sign, which a crossing on the edge excludes)
+	 * @return The crossing (voxels, the strided cell's frame; the edge's first step if none changes sign, which a crossing on
+	 *         the edge excludes)
 	 */
 	template <typename TDensityFn>
-	FVoxelCrossing FindVoxelCrossing(const TDensityFn& Density, int32 VX, int32 VY, int32 VZ, int32 Axis, int32 Stride,
-		float IsoLevel, const int32 EdgeOffset[3])
+	FVector3f FindVoxelCrossing(const TDensityFn& Density, int32 VX, int32 VY, int32 VZ, int32 Axis, int32 Stride, float IsoLevel)
 	{
 		int32 P[3] = { VX, VY, VZ };
 		float T = 0.0f;
@@ -264,22 +222,9 @@ namespace VoxelLODCrossing
 				D0 = D1;
 			}
 		}
-		FVoxelCrossing Out;
 		float C[3] = { static_cast<float>(P[0]), static_cast<float>(P[1]), static_cast<float>(P[2]) };
 		C[Axis] += T;
-		Out.VoxelPosition = FVector3f(C[0], C[1], C[2]);
-		// Across the edge, the voxel cell inside the strided cell starts a voxel below the edge on each axis where the
-		// edge runs along the cell's max face.
-		int32 Cell[3] = { P[0], P[1], P[2] };
-		for (int32 A = 0; A < 3; ++A)
-		{
-			if (A != Axis)
-			{
-				Cell[A] -= EdgeOffset[A];
-			}
-		}
-		Out.VoxelCell = FIntVector(Cell[0], Cell[1], Cell[2]);
-		return Out;
+		return FVector3f(C[0], C[1], C[2]);
 	}
 
 	/**

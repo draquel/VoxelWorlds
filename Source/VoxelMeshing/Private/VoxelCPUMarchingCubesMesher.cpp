@@ -34,16 +34,15 @@ TAutoConsoleVariable<float> CVarMCBoundaryMorphWidth(
  * so an edge vertex's normal at stride > 1 is LOD 0's at the voxel crossing on its edge nearest it
  * (CalculateEdgeShadingNormal).
  *
- * Vertex positions at stride > 1 (G80, WORLD_MODES_REVIEW_PLAN.md §23.16, voxel.Mesh.VoxelLODCrossings): interpolated between the two samples a stride
+ * Vertex positions at stride > 1 (G80, WORLD_MODES_REVIEW_PLAN.md §23.16): interpolated between the two samples a stride
  * apart, the same saturation put a strided edge's vertex toward the edge's middle by where the surface crosses the
  * strided grid, so LOD 1 and 2 were terraced a stride apart (ribs in the terrain's own shadows under a low sun). The
- * vertex is now that voxel crossing (FindEdgeVoxelCrossing), a function of the edge, so regular cells, seam frames and
- * the transition ribbon still agree on every shared edge; the boundary geomorph's target follows the coarse cells' new
- * vertices (ComputeCoarseCrossingsAlongAxis).
+ * vertex is that voxel crossing (FindEdgeVoxelCrossing), a function of the edge, so regular cells, seam frames and the
+ * transition ribbon agree on every shared edge; the boundary geomorph's target is the coarse cells' vertices
+ * (ComputeCoarseCrossingsAlongAxis).
  *
- * Both switches (voxel.Mesh.VoxelShadingNormals, voxel.Mesh.VoxelLODCrossings) are read through VoxelCrossingGradient's
- * predicates, shared with Dual Contouring, and the two meshers' crossing rules live side by side in VoxelLODCrossing
- * (VoxelCrossingGradient.h; code review CR2, MESH-10 and MESH-11).
+ * The two meshers' crossing rules live side by side in VoxelLODCrossing (VoxelCrossingGradient.h; code review CR2,
+ * MESH-10 and MESH-11).
  */
 
 FVoxelCPUMarchingCubesMesher::FVoxelCPUMarchingCubesMesher()
@@ -353,7 +352,7 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 	FVector3f CellVertices[12];
 	int32 VertexCorners[12][2];
 	// At a stride, the vertex at the voxel crossing on its edge (the point G61's normal reads; G80).
-	const bool bVoxelCrossings = VoxelCrossingGradient::UseVoxelLODCrossings(Stride);
+	const bool bVoxelCrossings = Stride > 1;
 
 	for (int32 i = 0; i < VertexCount; i++)
 	{
@@ -394,9 +393,8 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 	}
 
 	// Vertex normals. G61: at stride > 1, LOD 0's normal at the voxel crossing on the vertex's edge (a function of the
-	// edge alone, so the geomorph does not change it); otherwise the stride-scale gradient at the vertex, as before. At
-	// stride 1 the fitted gradient at the vertex (G62).
-	const bool bVoxelShading = VoxelCrossingGradient::UseVoxelShadingNormals(Stride);
+	// edge alone, so the geomorph does not change it). At stride 1 the fitted gradient at the vertex (G62).
+	const bool bVoxelShading = Stride > 1;
 	FVector3f CellNormals[12];
 	for (int32 i = 0; i < VertexCount; i++)
 	{
@@ -412,9 +410,7 @@ void FVoxelCPUMarchingCubesMesher::ProcessCubeLOD(
 		}
 		else
 		{
-			CellNormals[i] = (Stride == 1)
-				? CalculateShadingNormal(Request, VertexVoxel.X, VertexVoxel.Y, VertexVoxel.Z)
-				: CalculateGradientNormalLOD(Request, VertexVoxel.X, VertexVoxel.Y, VertexVoxel.Z, Stride);
+			CellNormals[i] = CalculateShadingNormal(Request, VertexVoxel.X, VertexVoxel.Y, VertexVoxel.Z);
 		}
 	}
 
@@ -575,87 +571,19 @@ FVector3f FVoxelCPUMarchingCubesMesher::InterpolateEdge(
 	return p0 + (p1 - p0) * t;
 }
 
-bool FVoxelCPUMarchingCubesMesher::ComputeCoarseSurfaceAlongAxis(
-	const FVoxelMeshingRequest& Request,
-	const FVector3f& V, int32 Axis,
-	int32 CoarserStride,
-	float& OutCoord) const
-{
-	// Density sampled on the coarse (stride-E) lattice, trilinear between coarse grid points: the surface the coarser
-	// neighbour sees, evaluated on the line along Axis through V. The two face-parallel coordinates are clamped to
-	// [0, ChunkSize]: neighbour data is one plane deep, so a read more than a voxel past a chunk face returns clamped or
-	// air densities and corrupts the coarse surface (worst on steep terrain: a large spurious morph, seam holes); at a
-	// boundary the clamp samples the shared plane, what the neighbour sees, so the morph target equals its coarse
-	// contour. Along Axis the search walks the coarse cells around V and returns the iso-crossing nearest it (caves and
-	// several crossings: the closest). One search for every up (code review CR2, MESH-30).
-	const float IsoLevel = Config.IsoLevel;
-	const int32 E = FMath::Max(1, CoarserStride);
-	const float Ef = static_cast<float>(E);
-	const int32 ChunkSize = Request.ChunkSize;
-	const int32 AxisB = (Axis + 1) % 3;
-	const int32 AxisC = (Axis + 2) % 3;
-
-	auto SampleCoarse = [&](float Aq) -> float
-	{
-		const int32 B0 = FMath::FloorToInt(V[AxisB] / Ef) * E;
-		const int32 C0 = FMath::FloorToInt(V[AxisC] / Ef) * E;
-		const int32 A0 = FMath::FloorToInt(Aq / Ef) * E;
-		const float Fb = (V[AxisB] - static_cast<float>(B0)) / Ef;
-		const float Fc = (V[AxisC] - static_cast<float>(C0)) / Ef;
-		const float Fa = (Aq - static_cast<float>(A0)) / Ef;
-		const int32 Ba = FMath::Clamp(B0, 0, ChunkSize);
-		const int32 Bb = FMath::Clamp(B0 + E, 0, ChunkSize);
-		const int32 Ca = FMath::Clamp(C0, 0, ChunkSize);
-		const int32 Cb = FMath::Clamp(C0 + E, 0, ChunkSize);
-		auto At = [&](int32 A, int32 B, int32 C)
-		{
-			FIntVector I;
-			I[Axis] = A;
-			I[AxisB] = B;
-			I[AxisC] = C;
-			return GetDensityAt(Request, I.X, I.Y, I.Z);
-		};
-		const float D0 = FMath::Lerp(FMath::Lerp(At(A0, Ba, Ca), At(A0, Bb, Ca), Fb), FMath::Lerp(At(A0, Ba, Cb), At(A0, Bb, Cb), Fb), Fc);
-		const float D1 = FMath::Lerp(FMath::Lerp(At(A0 + E, Ba, Ca), At(A0 + E, Bb, Ca), Fb), FMath::Lerp(At(A0 + E, Ba, Cb), At(A0 + E, Bb, Cb), Fb), Fc);
-		return FMath::Lerp(D0, D1, Fa);
-	};
-
-	const int32 SearchCells = 4;
-	const float Near = V[Axis];
-	const int32 ABase = FMath::FloorToInt(Near / Ef) * E;
-	float BestDist = TNumericLimits<float>::Max();
-	bool bFound = false;
-	for (int32 k = -SearchCells; k < SearchCells; k++)
-	{
-		const float Aa = static_cast<float>(ABase + k * E);
-		const float Ab = Aa + Ef;
-		const float Da = SampleCoarse(Aa);
-		const float Db = SampleCoarse(Ab);
-		const float Denom = Db - Da;
-		if ((Da >= IsoLevel) != (Db >= IsoLevel))
-		{
-			const float T = (FMath::Abs(Denom) < KINDA_SMALL_NUMBER) ? 0.5f : FMath::Clamp((IsoLevel - Da) / Denom, 0.0f, 1.0f);
-			const float Ac = Aa + T * Ef;
-			const float Dist = FMath::Abs(Ac - Near);
-			if (Dist < BestDist)
-			{
-				BestDist = Dist;
-				OutCoord = Ac;
-				bFound = true;
-			}
-		}
-	}
-	return bFound;
-}
-
 bool FVoxelCPUMarchingCubesMesher::ComputeCoarseCrossingsAlongAxis(
 	const FVoxelMeshingRequest& Request,
 	const FVector3f& V, int32 Axis,
 	int32 CoarserStride,
 	float& OutCoord) const
 {
-	// The coarse cells' vertices on the four coarse edge columns along Axis around the line (ComputeCoarseSurfaceAlongAxis'
-	// lattice, its clamp and search band), blended bilinearly: on a column, that column's coarse vertex.
+	// The coarse cells' vertices on the four coarse edge columns along Axis around the line, blended bilinearly: on a
+	// column, that column's coarse vertex. The two face-parallel coordinates are clamped to [0, ChunkSize]: neighbour data
+	// is one plane deep, so a read more than a voxel past a chunk face returns clamped or air densities and corrupts the
+	// coarse surface (worst on steep terrain: a large spurious morph, seam holes); at a boundary the clamp samples the
+	// shared plane, what the neighbour sees, so the morph target equals its coarse contour. Along Axis the search walks the
+	// coarse cells around V and takes the crossing nearest it (caves and several crossings: the closest). One search for
+	// every up (code review CR2, MESH-30).
 	const float IsoLevel = Config.IsoLevel;
 	const int32 E = FMath::Max(1, CoarserStride);
 	const float Ef = static_cast<float>(E);
@@ -794,14 +722,10 @@ void FVoxelCPUMarchingCubesMesher::MorphVertexToCoarse(
 		return;
 	}
 
-	// Morph toward the coarse surface along Axis (the coarse cells' crossings with voxel.Mesh.VoxelLODCrossings, G80, else
-	// the coarse lattice's trilinear surface). With no coarse crossing found nearby the vertex stays (never worse than the
-	// current wall).
+	// Morph toward the coarse surface along Axis: the coarse cells' voxel crossings (G80). With no coarse crossing found
+	// nearby the vertex stays (never worse than the current wall).
 	float SecCoord;
-	const bool bFound = VoxelCrossingGradient::UseVoxelLODCrossings(BestE)
-		? ComputeCoarseCrossingsAlongAxis(Request, V, Axis, BestE, SecCoord)
-		: ComputeCoarseSurfaceAlongAxis(Request, V, Axis, BestE, SecCoord);
-	if (bFound)
+	if (ComputeCoarseCrossingsAlongAxis(Request, V, Axis, BestE, SecCoord))
 	{
 		Vertex[Axis] = FMath::Lerp(V[Axis], SecCoord, BestW) * VoxelSize;
 	}
@@ -1475,8 +1399,7 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 			const FIntVector EdgeDelta = EndB - EndA;
 			const int32 EdgeLength = FMath::Abs(EdgeDelta.X) + FMath::Abs(EdgeDelta.Y) + FMath::Abs(EdgeDelta.Z);
 			FVector3f Crossing;
-			if (VoxelCrossingGradient::UseVoxelLODCrossings(EdgeLength)
-				&& FindEdgeVoxelCrossing(Request, EndA, EndB, DensityA, DensityB, Crossing))
+			if (EdgeLength > 1 && FindEdgeVoxelCrossing(Request, EndA, EndB, DensityA, DensityB, Crossing))
 			{
 				VertexPos = Crossing * VoxelSize;
 			}
@@ -1547,12 +1470,10 @@ bool FVoxelCPUMarchingCubesMesher::ProcessTransitionCell(
 		const int32 SampleA = VertexSamples[i][0];
 		const int32 SampleB = VertexSamples[i][1];
 		// At stride 1 the fitted gradient at the vertex, as ProcessCubeLOD's (G62).
-		const FVector3f Normal = VoxelCrossingGradient::UseVoxelShadingNormals(NormalStride)
+		const FVector3f Normal = (NormalStride > 1)
 			? CalculateEdgeShadingNormal(Request, SampleVoxel(SampleA), SampleVoxel(SampleB), Densities[SampleA], Densities[SampleB],
 				PosVoxel, NormalStride)
-			: (NormalStride == 1)
-				? CalculateShadingNormal(Request, PosVoxel.X, PosVoxel.Y, PosVoxel.Z)
-				: CalculateGradientNormalLOD(Request, PosVoxel.X, PosVoxel.Y, PosVoxel.Z, NormalStride);
+			: CalculateShadingNormal(Request, PosVoxel.X, PosVoxel.Y, PosVoxel.Z);
 		OutMeshData.Normals.Add(Normal);
 
 		// UV mapping (triplanar-style based on normal)

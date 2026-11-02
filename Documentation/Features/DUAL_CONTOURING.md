@@ -114,11 +114,12 @@ Each cell owns three edges emanating from its minimum corner in the +X, +Y, and 
    float t = (IsoLevel - D0) / (D1 - D0);
    FVector3f CrossPos = P0 + (P1 - P0) * t;
    ```
-3. Compute the surface gradient normal at the crossing point via central differences, the taps `Stride` voxels either
-   side (the QEF's plane normal). In the Interior domain and in every seam sampler the taps clamp into the voxels the job
-   holds ("the terrain continues": no neighbour dependence), and a clamped axis's one-sided difference is scaled back to
-   the full span (`VoxelDCGradient::ClampedGradientNormal`; unscaled it lost up to half its weight and drew lines of shading
-   along chunk faces, G25; `voxel.Mesh.ScaleClampedGradients`)
+3. Compute the surface normal at the crossing point (the QEF's plane normal): the fitted gradient (G62, below), or where
+   the fit is ill-conditioned the central difference about the voxel the crossing floors to. In the Interior domain and in
+   every seam sampler the fit reads only the voxels the job holds and the central difference's taps clamp into them ("the
+   terrain continues": no neighbour dependence), a clamped axis's one-sided difference scaled back to the full span
+   (`VoxelDCGradient::ClampedGradientNormal`; unscaled it lost up to half its weight and drew lines of shading along chunk
+   faces, G25)
 4. Store hermite data: `{Position, Normal, bValid}` in the edge crossings array
 5. Append the edge index to a compact valid-edge list (used by Pass 3)
 
@@ -127,8 +128,7 @@ Each cell owns three edges emanating from its minimum corner in the +X, +Y, and 
 middle whatever the surface does between them: LOD 1 and 2 would be terraced a stride apart, the "ribs" visible in
 their own shadows under a low sun. At a stride the crossing is LOD 0's on the edge: the first voxel step along it that
 changes sign, interpolated within that step (`VoxelLODCrossing::FindVoxelCrossing`), and its QEF normal is the fitted
-gradient there. Every LOD's crossings lie on LOD 0's surface; LOD 2 still drops the detail its cells cannot hold.
-`voxel.Mesh.VoxelLODCrossings` (default 1, shared with Marching Cubes) switches it; tests
+gradient there. Every LOD's crossings lie on LOD 0's surface; LOD 2 still drops the detail its cells cannot hold. Tests
 `Meshing.LODCrossings.Planes`, `Streaming.{Planet,Plane}.LODPositions`.
 
 **Shading normals (G62).** The central difference about the voxel a crossing floors to reads the saturated rock under a
@@ -137,15 +137,13 @@ layer apart). The shading normals are instead the density gradient fitted to the
 (`VoxelCrossingGradient::FitNormal`: weighted least squares over the 3x3x3 block around the crossing's nearest voxel,
 0 < density < 255, tent weights, a free offset; exact for any plane), over the voxels the view holds (skipped, not
 clamped). Where the ramp's voxels span fewer than three directions the central difference is used, which is exact
-there. At LOD 0 the QEF keeps the central difference, so no vertex moves; at a stride it takes the fitted gradient
-(G80). `voxel.Mesh.CrossingGradientNormals` (shared with Marching Cubes); tests `Meshing.CrossingGradient.Planes`,
+there. The QEF takes the fitted gradient too, at a stride (G80) and at LOD 0 (G81). Tests `Meshing.CrossingGradient.Planes`,
 `Streaming.{Planet,Plane}.GradientBands`.
 
 **Vertex normals at a stride (G44).** Gradient taps a stride apart read 0 or 255 on every axis the surface crosses
 between them, so at LOD 2 each component is a sign and the normal snaps toward a cube direction (a brighter LOD 2 ring
 on planets). A strided cell's **vertex normal** is LOD 0's instead: the fitted normals of its voxel-resolution crossings,
-summed (G80); with `voxel.Mesh.VoxelLODCrossings 0` the normal of the voxel cell next to the crossing nearest the vertex
-(`VoxelCellNormal`, G44). `voxel.Mesh.VoxelShadingNormals` (shared with Marching Cubes, G61) switches it; tests
+summed (G80; G44 first took the normal of the voxel cell next to the crossing nearest the vertex). Tests
 `Streaming.{Planet,Plane}.LODNormals`. The interior pass and the seam template (`ComputeCellVertex`) run the same op
 sequence, so ring recomputes stay bit-identical.
 
@@ -216,7 +214,7 @@ Located in `VoxelMeshing/Private/QEFSolver.h`, the solver is a header-only struc
 
 **Key methods**:
 - `Add(Point, Normal)` — Accumulate a plane into the matrix
-- `Solve(SVDThreshold, CellBounds, BiasStrength, bAboutMassPoint)` — Compute optimal vertex position
+- `Solve(SVDThreshold, CellBounds, BiasStrength)` — Compute optimal vertex position
 
 ### SVD via Jacobi Eigenvalue Decomposition
 
@@ -234,7 +232,7 @@ v = MassPoint + V * S^-1 * V^T * (ATb - ATA * MassPoint)
 where eigenvalues below `SVDThreshold` are treated as zero (degenerate axes), so a degenerate axis stays at the mass point:
 a flat cell's vertex is the mass point on its plane (G81). Before G81 the rotation zeroed its pivot above the diagonal
 only (wrong eigenpairs) and the solve was for `v` itself, so a degenerate axis went to the chunk's origin and flat ground
-had vertices a voxel or more off the surface. `voxel.Mesh.QEFSolve` switches it; test `Meshing.QEF.Solve`.
+had vertices a voxel or more off the surface. Test `Meshing.QEF.Solve`.
 
 ### Out-of-Bounds Clamping
 
@@ -296,19 +294,6 @@ float QEFBiasStrength = 0.5f;
 
 DC also uses these shared smooth meshing fields:
 - `IsoLevel` — Isosurface threshold (default 0.5 = density 127)
-
-### Console Variables
-
-All default to 1 and apply to interior meshes and seam jobs alike; set them before chunks mesh
-(`voxel.Mesh.RemeshAll` after a change). 0 restores the rule before each fix.
-
-| CVar | What 1 does |
-|------|-------------|
-| `voxel.Mesh.VoxelLODCrossings` | LOD 0's crossings and normals at a stride (G80; shared with MC) |
-| `voxel.Mesh.CrossingGradientNormals` | Fitted shading normals at voxel resolution (G62; shared with MC) |
-| `voxel.Mesh.VoxelShadingNormals` | LOD 0's vertex normals at a stride (G44; shared with MC as G61) |
-| `voxel.Mesh.QEFSolve` | The QEF solved about the mass point with a symmetric Jacobi (G81) |
-| `voxel.Mesh.ScaleClampedGradients` | A clamped gradient tap scaled to the full span (G25) |
 
 ### Recommended Settings
 
