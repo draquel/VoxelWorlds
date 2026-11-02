@@ -3178,83 +3178,6 @@ void UVoxelChunkManager::SetPlanetOceanVisible(bool bVisible)
 
 // ==================== The far field (spherical Phase 6 WM-BP9; every world mode since MP3) ====================
 
-namespace VoxelFarFieldManagerPrivate
-{
-	/** A procedural mesh component for one far-field patch at its origin (no collision, no shadow, nothing to navigate). */
-	UProceduralMeshComponent* MakePatchComponent(AActor* Owner, const FVector& Location)
-	{
-		UProceduralMeshComponent* Component = NewObject<UProceduralMeshComponent>(Owner, NAME_None, RF_Transient);
-		Component->SetUsingAbsoluteLocation(true);
-		Component->SetUsingAbsoluteRotation(true);
-		Component->SetUsingAbsoluteScale(true);
-		Component->SetupAttachment(Owner->GetRootComponent());
-		Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		Component->SetCanEverAffectNavigation(false);
-		Component->SetGenerateOverlapEvents(false);
-		Component->SetCastShadow(false);
-		Component->bUseAsyncCooking = false;
-		Component->SetWorldLocationAndRotation(Location, FRotator::ZeroRotator);
-		Component->RegisterComponent();
-		return Component;
-	}
-
-	/** Hand a far-field section to a procedural mesh section, its triangles reversed for an underside; clears it when empty. */
-	void SetPatchSection(UProceduralMeshComponent* Component, int32 Section, const FVoxelFarFieldSection& Mesh, bool bReverse,
-		UMaterialInterface* Material)
-	{
-		if (Mesh.IsEmpty())
-		{
-			Component->ClearMeshSection(Section);
-			return;
-		}
-		const int32 N = Mesh.Positions.Num();
-		TArray<FVector> Vertices;
-		TArray<FVector> Normals;
-		TArray<FVector2D> UV0;
-		TArray<FVector2D> UV1;
-		TArray<FProcMeshTangent> Tangents;
-		Vertices.SetNumUninitialized(N);
-		Normals.SetNumUninitialized(N);
-		UV0.SetNumUninitialized(N);
-		UV1.SetNumUninitialized(N);
-		Tangents.Reserve(N);
-		for (int32 i = 0; i < N; ++i)
-		{
-			Vertices[i] = FVector(Mesh.Positions[i]);
-			Normals[i] = FVector(Mesh.Normals[i]);
-			UV0[i] = FVector2D(Mesh.UV0[i]);
-			UV1[i] = FVector2D(Mesh.UV1[i]);
-			Tangents.Add(FProcMeshTangent(FVector(Mesh.Tangents[i]), false));
-		}
-		TArray<int32> Triangles;
-		if (bReverse)
-		{
-			Triangles.Reserve(Mesh.Triangles.Num());
-			for (int32 i = 0; i + 2 < Mesh.Triangles.Num(); i += 3)
-			{
-				Triangles.Append({ Mesh.Triangles[i], Mesh.Triangles[i + 2], Mesh.Triangles[i + 1] });
-			}
-		}
-		else
-		{
-			Triangles = Mesh.Triangles;
-		}
-		const TArray<FVector2D> NoUV;
-		Component->CreateMeshSection(Section, Vertices, Triangles, Normals, UV0, UV1, NoUV, NoUV, Mesh.Colors, Tangents,
-			/*bCreateCollision=*/false);
-		if (Material)
-		{
-			Component->SetMaterial(Section, Material);
-		}
-	}
-
-	/** What a component's sections hold on the CPU and the GPU (an estimate: the proc-mesh vertex and a GPU vertex). */
-	int64 EstimateBytes(int64 Vertices, int64 Indices)
-	{
-		return Vertices * (static_cast<int64>(sizeof(FProcMeshVertex)) + 64) + Indices * 8;
-	}
-}
-
 void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 {
 	DestroyFarField();
@@ -3375,7 +3298,7 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 	FarFieldStats = FVoxelFarFieldStats();
 	FarFieldStats.bActive = true;
 	FarFieldStats.bDrawsSea = Settings.bSea;
-	bFarFieldUndersideShown = false;
+	FarFieldPresenter.ResetUnderside();
 	FarFieldGroundViewer = FVector(TNumericLimits<double>::Max());
 
 	if (bPlanet)
@@ -3401,20 +3324,9 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 
 void UVoxelChunkManager::DestroyFarField()
 {
-	for (TPair<uint64, TObjectPtr<UProceduralMeshComponent>>& Pair : FarFieldComponents)
-	{
-		if (IsValid(Pair.Value))
-		{
-			Pair.Value->DestroyComponent();
-		}
-	}
-	FarFieldComponents.Reset();
-	FarFieldComponentSizes.Reset();
-	FarFieldComponentVertices = 0;
-	FarFieldComponentIndices = 0;
+	FarFieldPresenter.Destroy();
 	FarField.Reset();
 	FarFieldStats = FVoxelFarFieldStats();
-	bFarFieldUndersideShown = false;
 	if (LODStrategy)
 	{
 		LODStrategy->SetFarFieldActive(false);
@@ -3428,8 +3340,7 @@ bool UVoxelChunkManager::DoesFarFieldDrawSea() const
 
 UProceduralMeshComponent* UVoxelChunkManager::GetFarFieldComponent(uint64 PackedPatchKey) const
 {
-	const TObjectPtr<UProceduralMeshComponent>* Found = FarFieldComponents.Find(PackedPatchKey);
-	return Found ? Found->Get() : nullptr;
+	return FarFieldPresenter.Find(PackedPatchKey);
 }
 
 void UVoxelChunkManager::SetFarFieldEnabled(bool bEnabled)
@@ -3563,7 +3474,6 @@ bool UVoxelChunkManager::UpdateStreamingForCamera(const FVector& CameraPosition)
 
 void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVector& ViewerPosition, float FieldOfView)
 {
-	using namespace VoxelFarFieldManagerPrivate;
 	if (!FarField || !Configuration)
 	{
 		return;
@@ -3639,102 +3549,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	UMaterialInterface* TerrainMaterial = MeshRenderer ? MeshRenderer->GetSurfaceMaterial() : nullptr;
 	UMaterialInterface* WaterMaterial = Configuration->WaterMeshMaterial.Get();
 	const bool bUnderSea = Settings.bSea && FarField->GetFrame().IsUnderSea(CameraPosition);
-	for (const uint64 Key : Changes.Removed)
-	{
-		if (TObjectPtr<UProceduralMeshComponent>* Found = FarFieldComponents.Find(Key))
-		{
-			if (IsValid(*Found))
-			{
-				(*Found)->DestroyComponent();
-			}
-			FarFieldComponents.Remove(Key);
-		}
-		if (const FIntPoint* Size = FarFieldComponentSizes.Find(Key))
-		{
-			FarFieldComponentVertices -= Size->X;
-			FarFieldComponentIndices -= Size->Y;
-			FarFieldComponentSizes.Remove(Key);
-		}
-	}
-	for (const uint64 Key : Changes.Built)
-	{
-		const FVoxelFarField::FPatchState* Patch = FarField->FindPatch(Key);
-		if (!Patch || !Patch->Mesh.IsValid() || !Owner)
-		{
-			continue;
-		}
-		const FVoxelFarFieldPatchMesh& Mesh = *Patch->Mesh;
-		TObjectPtr<UProceduralMeshComponent>& Component = FarFieldComponents.FindOrAdd(Key);
-		if (!IsValid(Component))
-		{
-			Component = MakePatchComponent(Owner, Mesh.Origin);
-		}
-		else
-		{
-			Component->ClearAllMeshSections();
-			Component->SetWorldLocation(Mesh.Origin);
-		}
-		SetPatchSection(Component, 0, Mesh.Terrain, false, TerrainMaterial);
-		// The sea's underside only near the voxel window: seen from under the water, the surface is only visible close by.
-		const bool bUnderside = Settings.bSea && !Mesh.Sea.IsEmpty() && Patch->Key.Level >= Settings.EdgeLevel - FarFieldUndersideLevels;
-		if (Settings.bSea && !Mesh.Sea.IsEmpty())
-		{
-			SetPatchSection(Component, 1, Mesh.Sea, false, WaterMaterial);
-			if (bUnderside)
-			{
-				SetPatchSection(Component, 2, Mesh.Sea, true, WaterMaterial);
-			}
-			Component->SetTranslucentSortPriority(0);
-		}
-		const int32 SeaCopies = Settings.bSea ? (bUnderside ? 2 : 1) : 0;
-		const FIntPoint Size(Mesh.Terrain.Positions.Num() + SeaCopies * Mesh.Sea.Positions.Num(),
-			Mesh.Terrain.Triangles.Num() + SeaCopies * Mesh.Sea.Triangles.Num());
-		if (const FIntPoint* Old = FarFieldComponentSizes.Find(Key))
-		{
-			FarFieldComponentVertices -= Old->X;
-			FarFieldComponentIndices -= Old->Y;
-		}
-		FarFieldComponentSizes.Add(Key, Size);
-		FarFieldComponentVertices += Size.X;
-		FarFieldComponentIndices += Size.Y;
-		// The component keeps its own copy.
-		FarField->ReleaseMesh(Key);
-	}
-	auto ApplyVisibility = [this, bUnderSea](uint64 Key)
-	{
-		const FVoxelFarField::FPatchState* Patch = FarField->FindPatch(Key);
-		const TObjectPtr<UProceduralMeshComponent>* Found = FarFieldComponents.Find(Key);
-		if (!Patch || !Found || !IsValid(*Found))
-		{
-			return;
-		}
-		UProceduralMeshComponent* Component = *Found;
-		const int32 Sections = Component->GetNumSections();
-		if (Sections > 0)
-		{
-			Component->SetMeshSectionVisible(0, Patch->bDrawTerrain);
-		}
-		if (Sections > 1)
-		{
-			Component->SetMeshSectionVisible(1, Patch->bDrawSea);
-		}
-		if (Sections > 2)
-		{
-			Component->SetMeshSectionVisible(2, Patch->bDrawSea && bUnderSea);
-		}
-	};
-	for (const uint64 Key : Changes.Visibility)
-	{
-		ApplyVisibility(Key);
-	}
-	// The sea's undersides show only while the viewer is inside the sea radius (as the sea sphere's).
-	FVoxelSeaUnderside::Update(bUnderSea, bFarFieldUndersideShown, [&](bool)
-	{
-		for (const TPair<uint64, TObjectPtr<UProceduralMeshComponent>>& Pair : FarFieldComponents)
-		{
-			ApplyVisibility(Pair.Key);
-		}
-	});
+	FarFieldPresenter.Apply(*FarField, Changes, Owner, TerrainMaterial, WaterMaterial, bUnderSea);
 
 	// Figures for the bench and vox.Planet.
 	FVoxelFarFieldStats& Stats = FarFieldStats;
@@ -3755,8 +3570,8 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	Stats.BuildsPending = FarField->GetBuildsPending();
 	Stats.TotalBuilt = FarField->GetTotalBuilt();
 	Stats.BuildMsMean = Stats.TotalBuilt > 0 ? static_cast<float>(FarField->GetTotalBuildMs() / Stats.TotalBuilt) : 0.0f;
-	Stats.Components = FarFieldComponents.Num();
-	Stats.MemoryMB = static_cast<float>((FarField->GetMeshMemoryBytes() + EstimateBytes(FarFieldComponentVertices, FarFieldComponentIndices))
+	Stats.Components = FarFieldPresenter.Num();
+	Stats.MemoryMB = static_cast<float>((FarField->GetMeshMemoryBytes() + FarFieldPresenter.GetMemoryBytes())
 		/ (1024.0 * 1024.0));
 	Stats.StandIns = FarField->GetStandInCount();
 	Stats.StandInMinLevel = FarField->GetStandInMinLevel();

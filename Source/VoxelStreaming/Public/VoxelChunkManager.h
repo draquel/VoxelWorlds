@@ -1609,7 +1609,7 @@ public:
 	FVoxelFarField* GetFarFieldMutable() { return FarField.Get(); }
 
 	/** Patch components alive. */
-	int32 GetFarFieldComponentCount() const { return FarFieldComponents.Num(); }
+	int32 GetFarFieldComponentCount() const { return FarFieldPresenter.Num(); }
 
 /** A built patch's component (section 0 terrain, 1 sea, 2 the sea's underside), or null. */
 	UProceduralMeshComponent* GetFarFieldComponent(uint64 PackedPatchKey) const;
@@ -2747,20 +2747,10 @@ private:
 	TUniquePtr<FVoxelFarField> FarField;
 
 	/**
-	 * One procedural mesh component per built patch, at the patch's origin (owned by this component's actor): section 0
-	 * the terrain (the terrain material), 1 the sea's top and 2 its underside (the water material). Sections are shown
-	 * and hidden as the far field selects (a render command, no proxy rebuild); a component goes with its patch.
+	 * The far field's components, one per built patch at its origin (FVoxelFarFieldPresenter, owned by this component's actor).
 	 */
 	UPROPERTY(Transient)
-	TMap<uint64, TObjectPtr<UProceduralMeshComponent>> FarFieldComponents;
-
-	/** Patches this many levels coarser than the edge level or finer get the sea's underside (seen only close by) */
-	static constexpr int32 FarFieldUndersideLevels = 4;
-
-	/** Vertices and indices each component holds (its memory estimate) */
-	TMap<uint64, FIntPoint> FarFieldComponentSizes;
-	int64 FarFieldComponentVertices = 0;
-	int64 FarFieldComponentIndices = 0;
+	FVoxelFarFieldPresenter FarFieldPresenter;
 
 	/** The last update's figures (GetFarFieldStats) */
 	FVoxelFarFieldStats FarFieldStats;
@@ -2783,9 +2773,6 @@ private:
 	/** Runs TickAfterCameraUpdate in TG_PostUpdateWork, after the player camera managers (F4.3, WM-MP4) */
 	UPROPERTY()
 	FVoxelFarFieldCameraTickFunction FarFieldCameraTick;
-
-	/** Whether the sea's underside sections are shown (the viewer is inside the sea radius) */
-	bool bFarFieldUndersideShown = false;
 
 	/**
 	 * Bumped whenever a chunk changes state or leaves: the far field recomputes which edge patches the voxel chunks
