@@ -3,18 +3,13 @@
 #include "VoxelMaterialRegistry.h"
 #include "VoxelMaterialAtlas.h"
 #include "VoxelCore.h"
+#include "Misc/ScopeLock.h"
+#include <atomic>
 
-TArray<FVoxelMaterialDefinition> FVoxelMaterialRegistry::Materials;
-bool FVoxelMaterialRegistry::bInitialized = false;
-
-void FVoxelMaterialRegistry::EnsureInitialized()
+/** The default materials, in MaterialID order. */
+static TArray<FVoxelMaterialDefinition> BuildDefaultMaterials()
 {
-	if (bInitialized)
-	{
-		return;
-	}
-
-	Materials.Empty();
+	TArray<FVoxelMaterialDefinition> Materials;
 	Materials.Reserve(EVoxelMaterial::Count);
 
 	// Define all materials with their colors and default atlas positions
@@ -165,12 +160,68 @@ void FVoxelMaterialRegistry::EnsureInitialized()
 		Materials[Entry.Key].Hardness = Entry.Value;
 	}
 
-	bInitialized = true;
+	return Materials;
+}
+
+namespace VoxelMaterialRegistryTables
+{
+	using FTable = TArray<FVoxelMaterialDefinition>;
+
+	/** The defaults, built once on the first query (G100). */
+	static const FTable& DefaultMaterials()
+	{
+		// C++ initialises a function-local static on one thread while the others wait, so first queries from several
+		// workers at once no longer build the array together
+		static const FTable Defaults = BuildDefaultMaterials();
+		return Defaults;
+	}
+
+	/** Whether two tables hold the same definitions, field for field. */
+	static bool SameTable(const FTable& A, const FTable& B)
+	{
+		if (A.Num() != B.Num())
+		{
+			return false;
+		}
+		for (int32 Index = 0; Index < A.Num(); ++Index)
+		{
+			const FVoxelMaterialDefinition& L = A[Index];
+			const FVoxelMaterialDefinition& R = B[Index];
+			if (L.MaterialID != R.MaterialID || !L.Name.Equals(R.Name, ESearchCase::CaseSensitive) || L.Color != R.Color
+				|| L.AtlasColumn != R.AtlasColumn || L.AtlasRow != R.AtlasRow || L.ArrayIndex != R.ArrayIndex
+				|| L.TriplanarScale != R.TriplanarScale || L.UVScale != R.UVScale || L.bIsMasked != R.bIsMasked
+				|| L.bNonOccluding != R.bNonOccluding || L.Hardness != R.Hardness)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * The table the last atlas published, or null for the defaults. Readers load it with no lock; a table is never
+	 * changed once published and never freed, so a reference or pointer a reader holds stays valid when a newer one
+	 * replaces it (G100).
+	 */
+	static std::atomic<const FTable*> Published{ nullptr };
+
+	/** Serialises publishing. */
+	static FCriticalSection PublishLock;
+
+	/** Every table ever published, one per distinct content (PublishLock): a table republished is found here, not copied. */
+	static TArray<TUniquePtr<const FTable>> Tables;
+}
+
+const TArray<FVoxelMaterialDefinition>& FVoxelMaterialRegistry::Table()
+{
+	using namespace VoxelMaterialRegistryTables;
+	const FTable* Current = Published.load(std::memory_order_acquire);
+	return Current ? *Current : DefaultMaterials();
 }
 
 const FVoxelMaterialDefinition* FVoxelMaterialRegistry::GetMaterial(uint8 MaterialID)
 {
-	EnsureInitialized();
+	const TArray<FVoxelMaterialDefinition>& Materials = Table();
 
 	if (MaterialID < Materials.Num())
 	{
@@ -182,7 +233,7 @@ const FVoxelMaterialDefinition* FVoxelMaterialRegistry::GetMaterial(uint8 Materi
 
 FColor FVoxelMaterialRegistry::GetMaterialColor(uint8 MaterialID)
 {
-	EnsureInitialized();
+	const TArray<FVoxelMaterialDefinition>& Materials = Table();
 
 	if (MaterialID < Materials.Num())
 	{
@@ -195,21 +246,19 @@ FColor FVoxelMaterialRegistry::GetMaterialColor(uint8 MaterialID)
 
 int32 FVoxelMaterialRegistry::GetMaterialCount()
 {
-	EnsureInitialized();
-	return Materials.Num();
+	return Table().Num();
 }
 
 const TArray<FVoxelMaterialDefinition>& FVoxelMaterialRegistry::GetAllMaterials()
 {
-	EnsureInitialized();
-	return Materials;
+	return Table();
 }
 
 // ===== Atlas Support =====
 
 FVector2D FVoxelMaterialRegistry::GetAtlasUVOffset(uint8 MaterialID, int32 Columns, int32 Rows)
 {
-	EnsureInitialized();
+	const TArray<FVoxelMaterialDefinition>& Materials = Table();
 
 	if (Columns <= 0 || Rows <= 0)
 	{
@@ -239,7 +288,7 @@ FVector2D FVoxelMaterialRegistry::GetAtlasUVOffset(uint8 MaterialID, int32 Colum
 
 int32 FVoxelMaterialRegistry::GetArrayIndex(uint8 MaterialID)
 {
-	EnsureInitialized();
+	const TArray<FVoxelMaterialDefinition>& Materials = Table();
 
 	if (MaterialID < Materials.Num())
 	{
@@ -251,7 +300,7 @@ int32 FVoxelMaterialRegistry::GetArrayIndex(uint8 MaterialID)
 
 float FVoxelMaterialRegistry::GetTriplanarScale(uint8 MaterialID)
 {
-	EnsureInitialized();
+	const TArray<FVoxelMaterialDefinition>& Materials = Table();
 
 	if (MaterialID < Materials.Num())
 	{
@@ -263,7 +312,7 @@ float FVoxelMaterialRegistry::GetTriplanarScale(uint8 MaterialID)
 
 float FVoxelMaterialRegistry::GetUVScale(uint8 MaterialID)
 {
-	EnsureInitialized();
+	const TArray<FVoxelMaterialDefinition>& Materials = Table();
 
 	if (MaterialID < Materials.Num())
 	{
@@ -275,7 +324,7 @@ float FVoxelMaterialRegistry::GetUVScale(uint8 MaterialID)
 
 bool FVoxelMaterialRegistry::IsMaterialMasked(uint8 MaterialID)
 {
-	EnsureInitialized();
+	const TArray<FVoxelMaterialDefinition>& Materials = Table();
 
 	if (MaterialID < Materials.Num())
 	{
@@ -287,7 +336,7 @@ bool FVoxelMaterialRegistry::IsMaterialMasked(uint8 MaterialID)
 
 bool FVoxelMaterialRegistry::IsNonOccluding(uint8 MaterialID)
 {
-	EnsureInitialized();
+	const TArray<FVoxelMaterialDefinition>& Materials = Table();
 
 	if (MaterialID < Materials.Num())
 	{
@@ -299,7 +348,7 @@ bool FVoxelMaterialRegistry::IsNonOccluding(uint8 MaterialID)
 
 float FVoxelMaterialRegistry::GetHardness(uint8 MaterialID)
 {
-	EnsureInitialized();
+	const TArray<FVoxelMaterialDefinition>& Materials = Table();
 
 	if (MaterialID < Materials.Num())
 	{
@@ -311,10 +360,8 @@ float FVoxelMaterialRegistry::GetHardness(uint8 MaterialID)
 
 TSet<uint8> FVoxelMaterialRegistry::GetMaskedMaterialIDs()
 {
-	EnsureInitialized();
-
 	TSet<uint8> Result;
-	for (const FVoxelMaterialDefinition& Mat : Materials)
+	for (const FVoxelMaterialDefinition& Mat : Table())
 	{
 		if (Mat.bIsMasked)
 		{
@@ -326,9 +373,13 @@ TSet<uint8> FVoxelMaterialRegistry::GetMaskedMaterialIDs()
 
 void FVoxelMaterialRegistry::SetAtlasPositions(const TArray<FVoxelMaterialTextureConfig>& Configs, int32 AtlasColumns, int32 AtlasRows)
 {
-	EnsureInitialized();
+	using namespace VoxelMaterialRegistryTables;
 
-	// Grow the Materials array if atlas defines materials beyond the hardcoded set
+	// A new table from the defaults and this atlas, never the published one changed in place: the meshers' and the map's
+	// workers read the published table with no lock while the game thread calls this for every region component (G100)
+	FTable Materials = DefaultMaterials();
+
+	// Grow the table if the atlas defines materials beyond the hardcoded set
 	for (const FVoxelMaterialTextureConfig& Config : Configs)
 	{
 		if (Config.MaterialID >= Materials.Num())
@@ -365,9 +416,32 @@ void FVoxelMaterialRegistry::SetAtlasPositions(const TArray<FVoxelMaterialTextur
 		}
 	}
 
-	// Log non-occluding materials after atlas application
+	// Publish: a table with this content already published is published again; otherwise this one is kept and published.
+	// Readers see the old table or the new one, whole.
+	const FTable* ToPublish = nullptr;
+	{
+		FScopeLock Lock(&PublishLock);
+		for (const TUniquePtr<const FTable>& Kept : Tables)
+		{
+			if (SameTable(*Kept, Materials))
+			{
+				ToPublish = Kept.Get();
+				break;
+			}
+		}
+		if (!ToPublish)
+		{
+			ToPublish = Tables.Add_GetRef(MakeUnique<const FTable>(MoveTemp(Materials))).Get();
+		}
+		if (Published.exchange(ToPublish, std::memory_order_acq_rel) == ToPublish)
+		{
+			return;
+		}
+	}
+
+	// Log non-occluding materials when the published table changes
 	FString NonOccList;
-	for (const FVoxelMaterialDefinition& Mat : Materials)
+	for (const FVoxelMaterialDefinition& Mat : *ToPublish)
 	{
 		if (Mat.bNonOccluding)
 		{
@@ -376,5 +450,5 @@ void FVoxelMaterialRegistry::SetAtlasPositions(const TArray<FVoxelMaterialTextur
 		}
 	}
 	UE_LOG(LogVoxelCore, Log, TEXT("SetAtlasPositions: %d materials total, NonOccluding: [%s]"),
-		Materials.Num(), *NonOccList);
+		ToPublish->Num(), *NonOccList);
 }

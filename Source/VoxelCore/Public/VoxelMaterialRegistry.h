@@ -39,6 +39,9 @@ struct FVoxelMaterialTextureConfig;
 /**
  * Static registry of voxel material definitions.
  * Provides lookup of material properties by MaterialID.
+ * The definitions are an immutable table: the defaults, built on the first query, or the table an atlas published
+ * (SetAtlasPositions). Any thread may query with no lock and sees one table whole; no table is changed or freed once
+ * published, so the pointers and references the queries return stay valid (G100).
  */
 class VOXELCORE_API FVoxelMaterialRegistry
 {
@@ -46,7 +49,7 @@ public:
 	/**
 	 * Get the material definition for a given ID.
 	 * @param MaterialID The material ID to look up
-	 * @return Pointer to the material definition, or nullptr if invalid
+	 * @return Pointer to the material definition (valid for the process), or nullptr if invalid
 	 */
 	static const FVoxelMaterialDefinition* GetMaterial(uint8 MaterialID);
 
@@ -64,6 +67,7 @@ public:
 
 	/**
 	 * Get all registered material definitions.
+	 * @return The table published now, in MaterialID order (valid for the process; a later atlas publishes another)
 	 */
 	static const TArray<FVoxelMaterialDefinition>& GetAllMaterials();
 
@@ -129,7 +133,10 @@ public:
 	static TSet<uint8> GetMaskedMaterialIDs();
 
 	/**
-	 * Update material atlas positions from texture configs.
+	 * Publish the table of an atlas: the defaults, grown to the atlas's highest MaterialID with placeholders, with each
+	 * configured material's atlas position, scales, name and flags from its config. A table is built and published whole,
+	 * never changed in place (queries on other threads see the old table or the new one); an atlas whose table was
+	 * published before republishes that table. Called by UVoxelRegionComponent::SetMaterialAtlas on the game thread.
 	 * @param Configs Array of material texture configurations
 	 * @param AtlasColumns Number of columns in the atlas
 	 * @param AtlasRows Number of rows in the atlas
@@ -137,12 +144,9 @@ public:
 	static void SetAtlasPositions(const TArray<FVoxelMaterialTextureConfig>& Configs, int32 AtlasColumns, int32 AtlasRows);
 
 private:
-	/** Array of all material definitions */
-	static TArray<FVoxelMaterialDefinition> Materials;
-
-	/** Whether the registry has been initialized */
-	static bool bInitialized;
-
-	/** Initialize the registry with default materials */
-	static void EnsureInitialized();
+	/**
+	 * The table published now: the last atlas's, or the defaults (built once on the first call, thread-safely).
+	 * @return The material definitions in MaterialID order
+	 */
+	static const TArray<FVoxelMaterialDefinition>& Table();
 };
