@@ -224,7 +224,7 @@ private:
 		float ShellMB;
 		// Of BatchesDrawn, the voxel batches drawn into shadow maps (visual polish VP3: voxel.Render.ShadowCullFrustum)
 		int32 ShadowBatchesDrawn;
-		// Far-field stand-ins over the voxel window since the last sample (visual polish VP4: voxel.World.FarFieldAvoidStandIns)
+		// Far-field stand-ins over the voxel window since the last sample (visual polish VP4)
 		int32 FarFieldStandIns;
 	};
 

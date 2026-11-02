@@ -153,7 +153,7 @@ struct FVoxelStreamingCounters
 	 * Chunks with a mesh submitted since they were loaded (to detect re-mesh churn): filled at every mesh submission,
 	 * emptied of a chunk when its state is removed. Kept outside a benchmark too, so a run counts the re-meshes of
 	 * chunks meshed before it started (G14: a bench started after a slower, cold PIE start had meshed fewer of them and
-	 * counted about twice as many LOD re-meshes). `voxel.Bench.CountPreBenchMeshes` 0 empties it at the run's start.
+	 * counted about twice as many LOD re-meshes).
 	 */
 	TSet<FIntVector> EverMeshed;
 
@@ -175,11 +175,8 @@ struct FVoxelStreamingCounters
 	double UnloadDistSumUU = 0.0;
 	double UnloadDistMaxUU = 0.0;
 
-	/**
-	 * Start a run's counts over.
-	 * @param bKeepEverMeshed  Keep the chunks meshed before the run (voxel.Bench.CountPreBenchMeshes, G14)
-	 */
-	void Reset(bool bKeepEverMeshed)
+	/** Start a run's counts over, keeping the chunks meshed before the run (G14). */
+	void Reset()
 	{
 		RemeshCount = 0;
 		for (int64& C : RemeshByReason) { C = 0; }
@@ -190,10 +187,6 @@ struct FVoxelStreamingCounters
 		UnloadDistSumUU = 0.0;
 		UnloadDistMaxUU = 0.0;
 		UnloadEnqueueTimeSeconds.Reset();
-		if (!bKeepEverMeshed)
-		{
-			EverMeshed.Reset();
-		}
 		QueuedRemeshReason.Reset();
 	}
 };
@@ -981,7 +974,7 @@ public:
 	 * TG_PostPhysics), so after a cut (a teleport) the first frame was drawn with the selection for the old position: on a
 	 * face the camera never saw, nothing. When this frame's camera lies more than a chunk from the camera of the last
 	 * update, the far field updates again for it, the streaming viewer (the window's centre) as the last update had it.
-	 * Called from TG_PostUpdateWork (FVoxelFarFieldCameraTickFunction) with voxel.World.FarFieldCameraUpdate on.
+	 * Called from TG_PostUpdateWork (FVoxelFarFieldCameraTickFunction).
 	 *
 	 * @param CameraPosition This frame's camera
 	 * @param FieldOfView Its horizontal field of view (degrees)
@@ -991,8 +984,7 @@ public:
 
 	/**
 	 * The camera tick's body, with the first player camera manager's camera (nothing while the bench drives the view,
-	 * SetBenchmarkView, or without a camera manager): UpdateFarFieldForCamera unless voxel.World.FarFieldCameraUpdate is 0,
-	 * then UpdateStreamingForCamera unless voxel.Stream.CameraCutUpdate is 0.
+	 * SetBenchmarkView, or without a camera manager): UpdateFarFieldForCamera, then UpdateStreamingForCamera.
 	 */
 	void TickAfterCameraUpdate();
 
@@ -1549,7 +1541,7 @@ public:
 
 	/**
 	 * Reset benchmark counters (call at the start of a benchmark run). The chunks that already have a mesh stay known, so
-	 * their re-meshes count like those of chunks meshed during the run (world modes review G14; `voxel.Bench.CountPreBenchMeshes`).
+	 * their re-meshes count like those of chunks meshed during the run (world modes review G14).
 	 */
 	void ResetBenchCounters();
 

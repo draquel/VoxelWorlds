@@ -98,7 +98,7 @@ machine's state moves every timing together (G82, G85).
 | `farCompressMsP50/95/99` | The far-compression sweep's share of `totalMs` (traverse phase) |
 | `farCompressEncodes` / `Installed` / `Stale` | Fresh compression encodes this session, async results installed (raw array dropped or form cached), and async results discarded because the chunk's array changed or the chunk left |
 | `catchUpSec` | Time to drain to equilibrium after the viewer stops (the key UX metric) |
-| `thrashRemeshCount` + `thrashLOD`/`thrashNeighbor`/`thrashDirty`/`thrashOther` | Mesh jobs launched for chunks that already had a mesh, attributed to the reason the chunk was queued, counted when the job launches (G5). A chunk meshed before the bench started counts too, so a bench started after the window has meshed counts the same re-meshes as one started cold (G14; `voxel.Bench.CountPreBenchMeshes` 0 counts only chunks meshed since the start) |
+| `thrashRemeshCount` + `thrashLOD`/`thrashNeighbor`/`thrashDirty`/`thrashOther` | Mesh jobs launched for chunks that already had a mesh, attributed to the reason the chunk was queued, counted when the job launches (G5). A chunk meshed before the bench started counts too, so a bench started after the window has meshed counts the same re-meshes as one started cold (G14) |
 | `unloadLagMean/MaxMs` | Enqueue -> actual-unload dwell (drain latency) |
 | `unloadDistMean/MaxUU` | Viewer distance when a chunk is finally removed (lingering) |
 | `effMaxAsyncGen` / `effMaxAsyncMesh` / `effMaxLODRemeshPerFrame` | Resulting scheduler caps (after overrides/adaptive throttle) |

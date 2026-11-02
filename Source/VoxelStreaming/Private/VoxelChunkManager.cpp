@@ -192,36 +192,6 @@ static TAutoConsoleVariable<float> CVarFarFieldDistance(
 	TEXT("field is built."),
 	ECVF_Default);
 
-// Visual polish VP4: the terrain flicker on planets. A far-field patch that needed a build while nothing showed of it (a
-// edge patch the voxel chunks covered, past the prebuild radius or with a chunk under it re-meshing an empty mesh; a patch
-// coming up over the horizon) was stood in for by its nearest built ancestor, often a cube face's root, whose coarse
-// surface replaced the horizon and rose through the voxel terrain for the frame or more the build took.
-static TAutoConsoleVariable<int32> CVarFarFieldAvoidStandIns(
-	TEXT("voxel.World.FarFieldAvoidStandIns"),
-	1,
-	TEXT("Every world mode with a far field (visual polish VP4): no far-field stand-in where nothing would show.\n")
-	TEXT("  1 = an edge patch whose chunks are all drawn draws nothing, built or not (one kept built for the window's edge builds\n")
-	TEXT("      meanwhile); a chunk re-meshing counts as drawn as it was; a patch coming up over the horizon waits for its build\n")
-	TEXT("      drawing nothing. No coarse ancestor is drawn over the voxel terrain or the horizon for them (default)\n")
-	TEXT("  0 = as before: each needed a build, and its nearest built ancestor (often a cube face's root) flashed in its place,\n")
-	TEXT("      over everything under it, until the build landed"),
-	ECVF_Default);
-
-// Visual polish F4.2: a cube face's far-field root was built only once some of the face came into view, so after a teleport
-// onto a face the camera had never seen nothing of the far field was there to stand in, and the first update drew none.
-static TAutoConsoleVariable<int32> CVarFarFieldBuildAllRoots(
-	TEXT("voxel.World.FarFieldBuildAllRoots"),
-	1,
-	TEXT("Planets (visual polish F4.2): build all six cube faces' far-field roots, also faces under the horizon.\n")
-	TEXT("  1 = every root is built in the first updates and kept (a patch each), so after a teleport onto a face the camera\n")
-	TEXT("      never saw its root stands in from the first update (default)\n")
-	TEXT("  0 = as before: a root is built once some of its face comes into view; a teleport onto a face never seen drew no\n")
-	TEXT("      far field there until builds landed"),
-	ECVF_Default);
-
-// Visual polish F4.3: the tick (TG_PrePhysics) reads the player camera manager's camera before the camera managers
-// update (after TG_PostPhysics), so the far field lagged the rendered camera a frame: the first frame after a teleport
-// was drawn with the selection for the old position.
 /**
  * Counts a worker job that holds a raw pointer to one of the chunk manager's meshers (a chunk mesh, a seam job) from its
  * dispatch to its end, so Shutdown can wait for them before the meshers go (world modes review G76: a seam job finishing
@@ -235,30 +205,6 @@ struct FMesherWorkerGuard
 	FMesherWorkerGuard& operator=(const FMesherWorkerGuard&) = delete;
 	~FMesherWorkerGuard() { --(*Count); }
 };
-
-static TAutoConsoleVariable<int32> CVarFarFieldCameraUpdate(
-	TEXT("voxel.World.FarFieldCameraUpdate"),
-	1,
-	TEXT("Every world mode with a far field (visual polish F4.3): after a cut, update the far field again for the camera the frame renders with.\n")
-	TEXT("  1 = in TG_PostUpdateWork, after the camera managers, when the camera lies more than a chunk from the camera of\n")
-	TEXT("      the tick's update (a teleport), the far field updates for it: the first frame after a teleport draws the\n")
-	TEXT("      far field there (default)\n")
-	TEXT("  0 = as before: the tick's update only, for the frame before's camera; the first frame after a teleport drew the\n")
-	TEXT("      far field for the old position (nothing where the camera arrived)"),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarStreamCameraCutUpdate(
-	TEXT("voxel.Stream.CameraCutUpdate"),
-	1,
-	TEXT("Every world mode (world modes review WM-MP4): after a cut, run the streaming decisions again for the camera the\n")
-	TEXT("frame renders with.\n")
-	TEXT("  1 = in TG_PostUpdateWork, after the camera managers, when the camera lies more than a chunk from the camera of\n")
-	TEXT("      the tick's update (a teleport, a respawn, a switch of view target), the load and unload decisions, the queues'\n")
-	TEXT("      order and the first generation launches run again for it: the chunks under the new position are requested\n")
-	TEXT("      in the frame of the cut (default)\n")
-	TEXT("  0 = as before: the tick's decisions only, for the frame before's camera; the frame of a teleport streamed for the\n")
-	TEXT("      old position and the next frame for the new one"),
-	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarFarFieldTrace(
 	TEXT("voxel.World.FarFieldTrace"),
@@ -527,15 +473,6 @@ static TAutoConsoleVariable<int32> CVarFarCompressionMaxInFlight(
 	8,
 	TEXT("Async encodes in flight at most. Each reads its chunk's own array, shared copy-on-write (a write to the chunk "
 	     "meanwhile clones it), so this also caps the clones' memory (1MB each for a 64^3 chunk)."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarBenchCountPreBenchMeshes(
-	TEXT("voxel.Bench.CountPreBenchMeshes"),
-	1,
-	TEXT("The streaming bench's re-mesh count (world modes review G14). 1 = a re-mesh counts for every chunk that had a mesh "
-	     "when its job launched, also one meshed before the bench started. 0 = only chunks meshed since the bench started "
-	     "count (the rule before): a bench started after a cold first PIE, which had meshed fewer chunks by then, counted "
-	     "about twice the LOD re-meshes of a later one."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarWaterPullAgain(
@@ -3328,8 +3265,7 @@ bool UVoxelChunkManager::IsChunkDrawnForFarField(const FIntVector& ChunkCoord) c
 		// Re-meshing (an LOD change, an edit): its old mesh is still drawn. A chunk loaded before is drawn as it was, also
 		// with an empty mesh the renderer holds nothing for (VP4: such a chunk under an edge patch uncovered the patch for its
 		// re-mesh, and the patch's ancestor flashed over the terrain).
-		return (CVarFarFieldAvoidStandIns.GetValueOnGameThread() != 0 && LoadedChunkCoords.Contains(ChunkCoord))
-			|| (MeshRenderer && MeshRenderer->IsChunkLoaded(ChunkCoord));
+		return LoadedChunkCoords.Contains(ChunkCoord) || (MeshRenderer && MeshRenderer->IsChunkLoaded(ChunkCoord));
 	default:
 		return false;
 	}
@@ -3380,14 +3316,13 @@ void UVoxelChunkManager::TickAfterCameraUpdate()
 		return;
 	}
 	const FVector Camera = PC->PlayerCameraManager->GetCameraLocation();
-	if (FarField && CVarFarFieldCameraUpdate.GetValueOnGameThread() != 0)
+	// After a cut (VP F4.3, WM-MP4): the tick (TG_PrePhysics) read the camera before the camera managers updated, so the
+	// frame of a teleport would draw the far field and stream for the frame before's camera.
+	if (FarField)
 	{
 		UpdateFarFieldForCamera(Camera, PC->PlayerCameraManager->GetFOVAngle());
 	}
-	if (CVarStreamCameraCutUpdate.GetValueOnGameThread() != 0)
-	{
-		UpdateStreamingForCamera(Camera);
-	}
+	UpdateStreamingForCamera(Camera);
 }
 
 bool UVoxelChunkManager::UpdateStreamingForCamera(const FVector& CameraPosition)
@@ -3499,8 +3434,6 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	static IConsoleVariable* FadeDuration = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.MeshFade.Duration"));
 	View.HideDelay = FMath::Max(0.0f, VoxelSettings::IsOverridden(FadeDuration) ? FadeDuration->GetFloat() : UVoxelWorldsSettings::Get().MeshFadeDuration) + 0.1;
 	View.ChunkStateVersion = ChunkStateVersion;
-	View.bAvoidStandIns = CVarFarFieldAvoidStandIns.GetValueOnGameThread() != 0;
-	View.bBuildAllRoots = CVarFarFieldBuildAllRoots.GetValueOnGameThread() != 0;
 
 	FarField->SetMaxBuildsInFlight(VoxelSettings::Resolve(CVarFarFieldMaxBuilds, Configuration->FarFieldMaxBuilds));
 	FVoxelFarFieldChanges Changes;
@@ -3575,14 +3508,12 @@ FString UVoxelChunkManager::GetFarFieldDebugString() const
 		const FVoxelFarField::FPatchState* Root = FarField->FindPatch(Key);
 		RootsBuilt += Root && Root->bResident ? 1 : 0;
 	}
-	return FString::Printf(TEXT("%spatches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s; stand-ins over the window %lld in %lld updates (voxel.World.FarFieldAvoidStandIns %d); roots built %d of %d (voxel.World.FarFieldBuildAllRoots %d); updates for the frame's camera after a cut %lld (voxel.World.FarFieldCameraUpdate %d)"),
+	return FString::Printf(TEXT("%spatches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s; stand-ins over the window %lld in %lld updates; roots built %d of %d; updates for the frame's camera after a cut %lld"),
 		Settings.bHeightmap ? *FString::Printf(TEXT("heightmap (root tiles of %d chunks, out to %.0f uu) "), Settings.RootChunks, Settings.FarDistance) : TEXT(""),
 		Stats.Patches, Stats.DrawnPatches, Stats.DrawnTerrain, Stats.DrawnSea, Stats.HiddenEdge, Stats.Components, Stats.BuildsPending,
 		Stats.TotalBuilt, Stats.BuildMsMean, Stats.UpdateMs, Stats.MemoryMB, Settings.EdgeLevel, Settings.GetPatchArc(Settings.EdgeLevel),
 		Settings.Sink, Settings.bSea ? TEXT("far field") : (Settings.bHeightmap ? TEXT("tiles / far ocean / none") : TEXT("ocean shell / none")),
-		Stats.TotalStandIns, Stats.StandInUpdates,
-		CVarFarFieldAvoidStandIns.GetValueOnGameThread(), RootsBuilt, Roots, CVarFarFieldBuildAllRoots.GetValueOnGameThread(),
-		FarFieldCameraUpdates, CVarFarFieldCameraUpdate.GetValueOnGameThread());
+		Stats.TotalStandIns, Stats.StandInUpdates, RootsBuilt, Roots, FarFieldCameraUpdates);
 }
 
 FString UVoxelChunkManager::GetFarOceanDebugString() const
@@ -7599,7 +7530,7 @@ void UVoxelChunkManager::RemoveFromUnloadQueue(const FIntVector& ChunkCoord)
 
 void UVoxelChunkManager::ResetBenchCounters()
 {
-	BenchCounters.Reset(CVarBenchCountPreBenchMeshes.GetValueOnGameThread() != 0);
+	BenchCounters.Reset();
 }
 
 void UVoxelChunkManager::StartBenchmark(const FVoxelBenchConfig& InConfig)

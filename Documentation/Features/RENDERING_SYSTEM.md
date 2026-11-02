@@ -245,8 +245,7 @@ underside with the water material.
   tangent cross(Z, N), UV0 the position on the normal's dominant plane in voxels (relative to the patch).
 - Both materials are flat per triangle (vertices duplicated where quads' pairs differ) and the terrain material picks
   between them per pixel by the interpolated weight ([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Far-Field Material
-  Blend"); every voxel chunk vertex has alpha 255, weight 0. With `voxel.World.FarFieldMaterialBlend 0` colour R is
-  the material itself and alpha 255: one material per triangle.
+  Blend"); every voxel chunk vertex has alpha 255, weight 0.
 - Sections are shown and hidden with `SetMeshSectionVisible` (a render command), so the window's hole moving costs no
   proxy rebuild; a component is created when its patch is built and goes when the patch is released or pruned. They
   are about 200 bytes a vertex (the component's CPU copy and the GPU one): 29-56 MB at the surveyed sites of the three
