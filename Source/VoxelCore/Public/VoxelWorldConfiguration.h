@@ -359,7 +359,7 @@ public:
 	 * Defines cave layers (cheese caverns, spaghetti tunnels, noodle passages),
 	 * per-biome overrides, and cave wall material settings.
 	 * Create a UVoxelCaveConfiguration asset and assign it here.
-	 * If null but bEnableCaves is true, default cave layers will be used.
+	 * Null carves nothing, even with bEnableCaves set: a world with caves needs a configuration (G89).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Caves", meta = (EditCondition = "bEnableCaves"))
 	TObjectPtr<UVoxelCaveConfiguration> CaveConfiguration;
