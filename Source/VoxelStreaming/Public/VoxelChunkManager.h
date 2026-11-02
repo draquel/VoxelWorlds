@@ -22,6 +22,7 @@
 #include "VoxelWorldComponentOwners.h"
 #include "VoxelWaterTiles.h"
 #include "VoxelStreamingViewerPolicy.h"
+#include "VoxelConditioningZoneSet.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelSurfaceQuery.h"
 #include "VoxelTreeInjector.h"
@@ -43,6 +44,7 @@ class FVoxelFarField;
 class UBoxComponent;
 class UProceduralMeshComponent;
 struct FIslandBowlParams;
+enum class EEditSource : uint8;
 
 /**
  * Internal chunk state tracking.
@@ -569,27 +571,6 @@ public:
 	int64 GetSnapshotDecodeCount() const { return SnapshotDecodeTasks; }
 
 	/**
-	 * Snapshots of resident chunks that shared the chunk's own array this session instead of copying it (world modes review
-	 * G71; voxel.Snapshot.ShareResident), and those copied (without edits).
-	 *
-	 * @param OutCopied Receives the copies made from resident chunks without edits
-	 * @return The shared ones
-	 */
-	int64 GetResidentSnapshotsShared(int64& OutCopied) const
-	{
-		OutCopied = SnapshotCounters.Made[static_cast<int32>(ESnapshotKind::Copied)];
-		return SnapshotCounters.Made[static_cast<int32>(ESnapshotKind::SharedResident)];
-	}
-
-	/**
-	 * Chunks collapsed to uniform as they were generated this session (world modes review G67;
-	 * voxel.FarCompression.UniformAtGeneration).
-	 *
-	 * @return The count
-	 */
-	int64 GetUniformAtGenerationCount() const { return UniformAtGenerationCount; }
-
-	/**
 	 * The seam snapshot cache's contents and session counters (world modes review G69): entries and MB by how they were
 	 * made (copied from a resident chunk, with edits, decoded from a compressed or a uniform chunk), by the reader that
 	 * made them and the last that read them, by age since their last read and by reads; how many workers still hold;
@@ -946,12 +927,6 @@ public:
 	/** One-line summary of the far ocean for logs (voxel.World.FarOceanStats). */
 	FString GetFarOceanDebugString() const;
 
-	/** The far ocean's meshes: section 0 the seabed, 1 the open-sea water, 2 its underside (null without one). */
-	UProceduralMeshComponent* GetFarOceanStaticComponent() const { return FarOcean.GetComponent(); }
-
-	/** The settings the far ocean was built with. */
-	const FVoxelFarOceanSettings& GetFarOceanSettings() const { return FarOcean.GetSettings(); }
-
 	// ==================== Planet Ocean (spherical SP-E2) ====================
 
 	/**
@@ -962,9 +937,6 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
 	bool HasPlanetOcean() const { return PlanetOcean.GetComponent() != nullptr; }
-
-	/** The planet ocean: section 0 the top (faces outward), section 1 the underside (null without an ocean). */
-	UProceduralMeshComponent* GetPlanetOceanComponent() const { return PlanetOcean.GetComponent(); }
 
 	/** Whether the planet ocean's underside is shown now (the viewer is inside the sea radius). */
 	bool IsPlanetOceanUndersideShown() const { return PlanetOcean.IsUndersideShown(); }
@@ -984,17 +956,8 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
 	bool HasFarField() const { return FarField.IsValid(); }
 
-	/** The far field, mutable (tests: synchronous builds). */
-	FVoxelFarField* GetFarFieldMutable() { return FarField.Get(); }
-
 	/** Whether the far field draws the sea, in place of the sea sphere (at scale: FVoxelFarField::ShouldDrawSea). */
 	bool DoesFarFieldDrawSea() const;
-
-/** A built patch's component (section 0 terrain, 1 sea, 2 the sea's underside), or null. */
-	UProceduralMeshComponent* GetFarFieldComponent(uint64 PackedPatchKey) const;
-
-	/** Patch components alive. */
-	int32 GetFarFieldComponentCount() const { return FarFieldComponents.Num(); }
 
 	/**
 	 * Build or drop the far field, the sea sphere and the far ocean for voxel.World.FarField: with the far field off the
@@ -1006,14 +969,6 @@ public:
 
 	/** One-line summary of the far field for logs (voxel.World.FarFieldStats). */
 	FString GetFarFieldDebugString() const;
-
-	/**
-	 * Run one far-field update now for a viewer (tests; the tick does this every frame after the streaming sections).
-	 *
-	 * @param ViewerPosition The streaming viewer and camera
-	 * @param FieldOfView Horizontal field of view (degrees)
-	 */
-	void UpdateFarFieldForViewer(const FVector& ViewerPosition, float FieldOfView = 90.0f);
 
 	/**
 	 * The far field for the camera a frame renders with (visual polish F4.3). The tick updates the far field in
@@ -1049,12 +1004,6 @@ public:
 	 */
 	bool UpdateStreamingForCamera(const FVector& CameraPosition);
 
-	/** Streaming updates run again for a frame's camera after a cut (UpdateStreamingForCamera), in all. */
-	int64 GetCameraCutUpdates() const { return CameraCutUpdates; }
-
-	/** The tick function that runs TickAfterCameraUpdate after the camera managers (tests run it as a world tick would). */
-	FVoxelFarFieldCameraTickFunction& GetFarFieldCameraTickFunction() { return FarFieldCameraTick; }
-
 	// ==================== The voxel window's cut-over (spherical Phase 6 WM-BP10, D18; every world mode since MP3) ====================
 
 	/**
@@ -1067,12 +1016,6 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
 	bool IsVoxelWindowSuspended() const;
-
-	/** The camera the streaming follows this tick, before the descent prefetch moves the streaming viewer under it. */
-	FVector GetCameraPosition() const { return CurrentCameraPosition; }
-
-	/** The streaming viewer this tick: the camera, or under it while it descends (the descent prefetch, every world mode). */
-	FVector GetStreamingViewerPosition() const { return CurrentViewerPosition; }
 
 	/** How far under the camera the streaming viewer is this tick (uu along local down; 0 = at the camera). */
 	double GetStreamingViewerLead() const { return ViewerPolicy.GetLead(); }
@@ -1275,7 +1218,7 @@ public:
 	 */
 	void SetTerrainConditioner(IVoxelTerrainConditioner* InConditioner)
 	{
-		TerrainConditioner = InConditioner;
+		ConditioningZones.SetConditioner(InConditioner);
 		OnTerrainConditioningChanged.Broadcast();
 	}
 
@@ -1651,6 +1594,68 @@ public:
 	 */
 	UVoxelMaterialAtlas* GetMaterialAtlas() const;
 
+	// ==================== Test access ====================
+	// Public for the automation tests alone (code review CR4, CM-17): nothing in the plugins or the game calls these.
+
+	/**
+	 * Run one far-field update now for a viewer (tests; the tick does this every frame after the streaming sections).
+	 *
+	 * @param ViewerPosition The streaming viewer and camera
+	 * @param FieldOfView Horizontal field of view (degrees)
+	 */
+	void UpdateFarFieldForViewer(const FVector& ViewerPosition, float FieldOfView = 90.0f);
+
+	/** The far field, mutable (tests: synchronous builds). */
+	FVoxelFarField* GetFarFieldMutable() { return FarField.Get(); }
+
+	/** Patch components alive. */
+	int32 GetFarFieldComponentCount() const { return FarFieldComponents.Num(); }
+
+/** A built patch's component (section 0 terrain, 1 sea, 2 the sea's underside), or null. */
+	UProceduralMeshComponent* GetFarFieldComponent(uint64 PackedPatchKey) const;
+
+	/** The tick function that runs TickAfterCameraUpdate after the camera managers (tests run it as a world tick would). */
+	FVoxelFarFieldCameraTickFunction& GetFarFieldCameraTickFunction() { return FarFieldCameraTick; }
+
+	/** Streaming updates run again for a frame's camera after a cut (UpdateStreamingForCamera), in all. */
+	int64 GetCameraCutUpdates() const { return CameraCutUpdates; }
+
+	/** The camera the streaming follows this tick, before the descent prefetch moves the streaming viewer under it. */
+	FVector GetCameraPosition() const { return CurrentCameraPosition; }
+
+	/** The streaming viewer this tick: the camera, or under it while it descends (the descent prefetch, every world mode). */
+	FVector GetStreamingViewerPosition() const { return CurrentViewerPosition; }
+
+	/** The far ocean's meshes: section 0 the seabed, 1 the open-sea water, 2 its underside (null without one). */
+	UProceduralMeshComponent* GetFarOceanStaticComponent() const { return FarOcean.GetComponent(); }
+
+	/** The settings the far ocean was built with. */
+	const FVoxelFarOceanSettings& GetFarOceanSettings() const { return FarOcean.GetSettings(); }
+
+	/** The planet ocean: section 0 the top (faces outward), section 1 the underside (null without an ocean). */
+	UProceduralMeshComponent* GetPlanetOceanComponent() const { return PlanetOcean.GetComponent(); }
+
+	/**
+	 * Snapshots of resident chunks that shared the chunk's own array this session instead of copying it (world modes review
+	 * G71; voxel.Snapshot.ShareResident), and those copied (without edits).
+	 *
+	 * @param OutCopied Receives the copies made from resident chunks without edits
+	 * @return The shared ones
+	 */
+	int64 GetResidentSnapshotsShared(int64& OutCopied) const
+	{
+		OutCopied = SnapshotCounters.Made[static_cast<int32>(ESnapshotKind::Copied)];
+		return SnapshotCounters.Made[static_cast<int32>(ESnapshotKind::SharedResident)];
+	}
+
+	/**
+	 * Chunks collapsed to uniform as they were generated this session (world modes review G67;
+	 * voxel.FarCompression.UniformAtGeneration).
+	 *
+	 * @return The count
+	 */
+	int64 GetUniformAtGenerationCount() const { return UniformAtGenerationCount; }
+
 	// ==================== Events ====================
 
 	/** Called when a chunk completes voxel generation */
@@ -1736,6 +1741,16 @@ protected:
 	 * @return Number of candidates: tracked chunks whose committed LOD differs from the strategy's.
 	 */
 	int32 EvaluateLODLevelChanges(const FLODQueryContext& Context, int32& OutQueued, bool& OutCapReached);
+
+	/**
+	 * What an edit asks of the pipeline (the edit manager's OnChunkEdited): the chunk's content version, its re-mesh and
+	 * seams, its neighbours' collision, the scatter that reads it, the water.
+	 * @param ChunkCoord  The edited chunk
+	 * @param Source      Who edited (player, system, editor)
+	 * @param EditCenter  The edit's centre
+	 * @param EditRadius  The edit's radius
+	 */
+	void HandleChunkEdited(const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius);
 
 	// ==================== Chunk State Management ====================
 
@@ -2427,11 +2442,8 @@ private:
 	/** Analytic world mode matching the config's WorldMode (FVoxelWorldModeFactory::Create) */
 	TSharedPtr<IVoxelWorldMode> WorldMode;
 
-	/** Static terrain conditioning zones (gen-time flattening under POIs/claims; Phase 6c). */
-	TArray<FVoxelConditioningZone> ConditioningZones;
-
-	/** Optional game-supplied dynamic conditioner queried per chunk (not owned). */
-	IVoxelTerrainConditioner* TerrainConditioner = nullptr;
+	/** The static terrain conditioning zones (gen-time flattening under POIs/claims; Phase 6c) and the game's conditioner */
+	FVoxelConditioningZoneSet ConditioningZones;
 
 	/** Collect conditioning zones overlapping a chunk's XY footprint into OutZones (game thread). */
 	void GatherConditioningZonesForChunk(const FIntVector& ChunkCoord, TArray<FVoxelConditioningZone>& OutZones) const;
