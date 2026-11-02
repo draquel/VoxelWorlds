@@ -6,64 +6,6 @@
 #include "QEFSolver.h"
 #include "VoxelCrossingGradient.h"
 #include "VoxelMeshingVoxelSampler.h"
-#include "HAL/IConsoleManager.h"
-
-// Shared with the Marching Cubes mesher (VoxelCPUMarchingCubesMesher.cpp) through VoxelCrossingGradient.h (G62).
-TAutoConsoleVariable<int32> CVarVoxelCrossingGradientNormals(
-	TEXT("voxel.Mesh.CrossingGradientNormals"),
-	1,
-	TEXT("Smooth meshing's shading normals at voxel resolution (G62): 1 = the density gradient fitted to the voxels on the ")
-	TEXT("density ramp around the point (default); 0 = the central difference about the voxel the point floors to, as before ")
-	TEXT("(the voxel under a surface lies in the saturated rock, so a slope tilted by 1.0-1.8 times by where the surface ")
-	TEXT("crosses the voxel layer: bands a layer apart, and faint rings around hills at LOD 1 and 2). Both meshers' vertex ")
-	TEXT("normals at every LOD; Dual Contouring's QEF keeps the central difference, so no vertex moves. Set it before chunks ")
-	TEXT("mesh: interior meshes and seam jobs read it per job."),
-	ECVF_Default);
-
-// Shared with the Marching Cubes mesher (VoxelCPUMarchingCubesMesher.cpp: G61).
-TAutoConsoleVariable<int32> CVarVoxelShadingNormals(
-	TEXT("voxel.Mesh.VoxelShadingNormals"),
-	1,
-	TEXT("Smooth meshing's vertex normals at LOD > 0: 1 = LOD 0's normals at voxel resolution (default): Dual Contouring ")
-	TEXT("(G44) takes the normal of the voxel cell where the surface crosses the cell's edges nearest the vertex, Marching ")
-	TEXT("Cubes (G61) the gradient at the voxel crossing on the vertex's edge nearest it; 0 = the gradients at the cell's ")
-	TEXT("stride, as before (their taps read the saturated density, so LOD 2 leans toward the cube diagonals: a brighter ")
-	TEXT("ring on planets). Vertex positions are the same either way. Set it before chunks mesh: interior meshes and seam ")
-	TEXT("jobs read it per job."),
-	ECVF_Default);
-
-// Shared with the Marching Cubes mesher (VoxelCPUMarchingCubesMesher.cpp: G80).
-TAutoConsoleVariable<int32> CVarVoxelLODCrossings(
-	TEXT("voxel.Mesh.VoxelLODCrossings"),
-	1,
-	TEXT("Smooth meshing's edge crossings at LOD > 0 (G80): 1 = where the surface crosses the edge at voxel resolution ")
-	TEXT("(default): Dual Contouring the first voxel step along the strided edge that changes sign, with the fitted gradient as ")
-	TEXT("its QEF normal there (G62), Marching Cubes the voxel crossing on the edge nearest the strided interpolation (G61), its ")
-	TEXT("LOD-seam geomorph toward the coarse cells' crossings; 0 = interpolated between the samples a stride apart, as before ")
-	TEXT("(generated density saturates a voxel either side of the surface, so the crossing snaps toward the edge's middle by ")
-	TEXT("where the surface crosses the strided grid: terraces a stride apart at LOD 1 and 2, ribs in their shadows under a low ")
-	TEXT("sun). Interior meshes and seam jobs alike; set it before chunks mesh (voxel.Mesh.RemeshAll after a change)."),
-	ECVF_Default);
-
-TAutoConsoleVariable<int32> CVarDCQEFSolve(
-	TEXT("voxel.Mesh.QEFSolve"),
-	1,
-	TEXT("Dual Contouring's QEF vertex solve (G81): 1 = for the offset from the cell's mass point, with a Jacobi decomposition ")
-	TEXT("that keeps its matrix symmetric (default); 0 = as before: for the position itself, so a direction the SVD threshold ")
-	TEXT("drops went to the chunk's origin (a flat cell's vertex was the plane's point nearest the chunk's corner, pulled ")
-	TEXT("back toward the mass point only part of the way when it lay within a cell of the cell), and each rotation zeroed ")
-	TEXT("its pivot above the diagonal only (wrong eigenpairs: a vertex a voxel or more off the surface where a cell's normals ")
-	TEXT("were nearly parallel, more at LOD 1 and 2). Interior meshes and seam jobs alike; set it before chunks mesh ")
-	TEXT("(voxel.Mesh.RemeshAll after a change)."),
-	ECVF_Default);
-
-TAutoConsoleVariable<int32> CVarDCScaleClampedGradients(
-	TEXT("voxel.Mesh.ScaleClampedGradients"),
-	1,
-	TEXT("Dual Contouring gradient normals where a tap is clamped at the edge of a mesh job's voxels (chunk faces, G25): ")
-	TEXT("1 = scale the clamped axis's one-sided difference to the full span (default); 0 = leave it at up to half weight, ")
-	TEXT("as before (lines of shading along chunk faces). Set it before chunks mesh."),
-	ECVF_Default);
 
 FVoxelCPUDualContourMesher::FVoxelCPUDualContourMesher()
 {
@@ -226,10 +168,7 @@ void FVoxelCPUDualContourMesher::DetectEdgeCrossings(
 	const float VoxelSize = Request.VoxelSize;
 	const float IsoLevel = Config.IsoLevel;
 	const int32 GridSize = ChunkSize / Stride;
-	const bool bVoxelCrossings = VoxelCrossingGradient::UseVoxelLODCrossings(Stride);
-	const bool bFittedQEFNormals = VoxelDCShading::UseFittedQEFNormals(Stride);
 	auto DensityFn = [&](int32 X, int32 Y, int32 Z) { return GetDensityAt(Request, X, Y, Z); };
-	static const int32 NoEdgeOffset[3] = { 0, 0, 0 };
 
 	for (int32 CZ = -1; CZ <= GridSize; CZ++)
 	{
@@ -272,8 +211,8 @@ void FVoxelCPUDualContourMesher::DetectEdgeCrossings(
 						// At a stride, LOD 0's crossing on the edge and the fitted gradient's normal there (G62's shading
 						// normal: exact for a plane, so the QEF's vertex lies on it; the central difference tilts with the
 						// voxel phase, and a strided cell spreads that tilt over a stride; G80).
-						Crossing.Position = bVoxelCrossings
-							? VoxelLODCrossing::FindVoxelCrossing(DensityFn, VX, VY, VZ, Axis, Stride, IsoLevel, NoEdgeOffset).VoxelPosition * VoxelSize
+						Crossing.Position = (Stride > 1)
+							? VoxelLODCrossing::FindVoxelCrossing(DensityFn, VX, VY, VZ, Axis, Stride, IsoLevel) * VoxelSize
 							: P0 + (P1 - P0) * t;
 						Crossing.bValid = true;
 
@@ -281,17 +220,13 @@ void FVoxelCPUDualContourMesher::DetectEdgeCrossings(
 						const float CrossVoxelY = Crossing.Position.Y / VoxelSize;
 						const float CrossVoxelZ = Crossing.Position.Z / VoxelSize;
 						// LOD 0's vertex normal sums its crossings' shading normals (G62).
-						if (Stride == 1 && VoxelCrossingGradient::UseCrossingGradientNormals())
+						if (Stride == 1)
 						{
 							Crossing.ShadingNormal = CalculateShadingNormal(Request, CrossVoxelX, CrossVoxelY, CrossVoxelZ);
 						}
-						// The QEF's plane normal: the fitted gradient with G80 (a stride) and G81 (stride 1), else the central
-						// difference at the crossing's stride.
-						Crossing.Normal = bFittedQEFNormals
-							? ((Stride == 1) ? Crossing.ShadingNormal : CalculateShadingNormal(Request, CrossVoxelX, CrossVoxelY, CrossVoxelZ))
-							: (Stride > 1)
-								? CalculateGradientNormalLOD(Request, CrossVoxelX, CrossVoxelY, CrossVoxelZ, Stride)
-								: CalculateGradientNormal(Request, CrossVoxelX, CrossVoxelY, CrossVoxelZ);
+						// The QEF's plane normal: the fitted gradient (G80 at a stride, G81 at stride 1).
+						Crossing.Normal = (Stride == 1)
+							? Crossing.ShadingNormal : CalculateShadingNormal(Request, CrossVoxelX, CrossVoxelY, CrossVoxelZ);
 
 						OutValidEdgeIndices.Add(EIdx);
 					}
@@ -318,15 +253,10 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 	const float CellWorldSize = static_cast<float>(Stride) * VoxelSize;
 	const float SVDThreshold = Config.QEFSVDThreshold;
 	const float BiasStrength = Config.QEFBiasStrength;
-	const float IsoLevel = Config.IsoLevel;
-	// At a stride with G80 the crossings are LOD 0's with the fitted gradient's normals, and the vertex normal sums them as
-	// LOD 0's does (AvgNormal: the cell's own crossings, nearer the analytic normals than G44's one voxel cell); without
-	// G80 it is LOD 0's at the voxel crossing nearest the vertex (G44). LOD 0's shading normals are the fitted gradient at
-	// each crossing (G62), which G81 gives the QEF too.
-	const bool bVoxelShading = VoxelCrossingGradient::UseVoxelShadingNormals(Stride) && !VoxelCrossingGradient::UseVoxelLODCrossings(Stride);
-	const bool bCrossingShading = Stride == 1 && VoxelCrossingGradient::UseCrossingGradientNormals();
-	auto DensityFn = [&](int32 X, int32 Y, int32 Z) { return GetDensityAt(Request, X, Y, Z); };
-	auto GradientFn = [&](float X, float Y, float Z) { return CalculateShadingNormal(Request, X, Y, Z); };
+	// At a stride the crossings are LOD 0's with the fitted gradient's normals (G80), and the vertex normal sums them as
+	// LOD 0's does (AvgNormal: the cell's own crossings). LOD 0's shading normals are the fitted gradient at each crossing
+	// (G62), which G81 gives the QEF too.
+	const bool bCrossingShading = Stride == 1;
 
 	// 12 edges of a cube cell: 4 along each axis (the seams' ring recompute walks the same table)
 	const auto& CellEdges = VoxelDCTables::CellEdges;
@@ -356,7 +286,6 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 				FQEFSolver QEF;
 				FVector3f AvgNormal = FVector3f::ZeroVector;
 				FVector3f ShadingSum = FVector3f::ZeroVector;
-				VoxelDCShading::FCellVoxelCrossings VoxelCrossings;
 
 				for (const auto& Edge : CellEdges)
 				{
@@ -369,12 +298,6 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 						if (bCrossingShading)
 						{
 							ShadingSum += Crossing.ShadingNormal;
-						}
-						if (bVoxelShading)
-						{
-							const int32 EdgeOffset[3] = { Edge.DX, Edge.DY, Edge.DZ };
-							VoxelCrossings.Add(VoxelLODCrossing::FindVoxelCrossing(DensityFn,
-								(CX + Edge.DX) * Stride, (CY + Edge.DY) * Stride, (CZ + Edge.DZ) * Stride, Edge.Axis, Stride, IsoLevel, EdgeOffset));
 						}
 					}
 				}
@@ -396,21 +319,13 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 				FDCCellVertex& Vertex = OutCellVertices[CIdx];
 				Vertex.bValid = true;
 				Vertex.MeshVertexIndex = -1;  // SetNumZeroed zeroes this to 0; EmitVertex needs -1 to know it's unemitted
-				Vertex.Position = QEF.Solve(SVDThreshold, CellBounds, BiasStrength, CVarDCQEFSolve.GetValueOnAnyThread() != 0);
+				Vertex.Position = QEF.Solve(SVDThreshold, CellBounds, BiasStrength);
 
 				if (!AvgNormal.Normalize())
 				{
 					AvgNormal = FVector3f(0.0f, 0.0f, 1.0f);
 				}
-				if (bCrossingShading && ShadingSum.Normalize())
-				{
-					Vertex.Normal = ShadingSum;
-				}
-				else
-				{
-					Vertex.Normal = bVoxelShading
-						? VoxelCrossings.VertexNormal(Vertex.Position, VoxelSize, DensityFn, GradientFn, IsoLevel, AvgNormal) : AvgNormal;
-				}
+				Vertex.Normal = (bCrossingShading && ShadingSum.Normalize()) ? ShadingSum : AvgNormal;
 				// Material/biome are assigned per-quad in GenerateQuads (from the owned
 				// edge's solid endpoint) so triangles stay material-uniform.
 			}

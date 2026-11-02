@@ -185,7 +185,7 @@ Only ready seams (every participant resident) enter the scan rotation. Each tick
 and the mixed-LOD meshers stitch across them (Dual Contouring's boundary fallback vertex, G17; Marching Cubes' ribbon
 and geomorph). The request carries each participant's shared snapshot (built at most once per `ContentVersion`); a
 far-compressed participant's is decoded on a worker that the job waits for on its own worker (G65). Marching Cubes'
-seam frames read the snapshots in place (`FVoxelMeshingRequest::NeighbourSnapshotViews`; G63, `voxel.Seam.MCReadInPlace`).
+seam frames read the snapshots in place (`FVoxelMeshingRequest::NeighbourSnapshotViews`; G63).
 Seam jobs always run on the CPU through the seam mesher matching the meshing mode (`EnsureSeamMesher`).
 
 A seam re-dirtied while its job is on a worker stays scheduled and is rebuilt once the job finishes

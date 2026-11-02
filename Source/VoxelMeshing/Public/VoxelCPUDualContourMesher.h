@@ -128,7 +128,7 @@ private:
 	{
 		FVector3f Position;  // World-space crossing point on edge
 		FVector3f Normal;    // Surface gradient normal at crossing (at the cell's stride: the QEF's plane normal)
-		FVector3f ShadingNormal; // At stride 1 with voxel.Mesh.CrossingGradientNormals: the fitted gradient's normal (G62), summed into the vertex normal
+		FVector3f ShadingNormal; // At stride 1: the fitted gradient's normal (G62), summed into the vertex normal
 		bool bValid = false; // Whether this edge has a crossing
 	};
 
@@ -136,7 +136,7 @@ private:
 	struct FDCCellVertex
 	{
 		FVector3f Position;     // QEF-solved vertex position
-		FVector3f Normal;       // Averaged normal from edge crossings (at a stride: LOD 0's at the voxel crossing nearest the vertex, G44)
+		FVector3f Normal;       // Averaged normal of the edge crossings (their fitted gradients, G62)
 		uint8 EmittedMaterialID = 0; // Material of the primary emission (valid when MeshVertexIndex >= 0)
 		uint8 EmittedBiomeID = 0;    // Biome of the primary emission (valid when MeshVertexIndex >= 0)
 		int32 MeshVertexIndex = -1;  // Primary emission index in output FChunkMeshData (-1 = not emitted yet)
@@ -182,8 +182,8 @@ private:
 
 	/**
 	 * The shading normal at a point of the surface at voxel resolution (G62): the density gradient fitted to the voxels
-	 * this request's view holds around it (voxel.Mesh.CrossingGradientNormals 1), else CalculateGradientNormal. LOD 0's
-	 * vertex normals and, at a stride, G44's voxel-cell normals; the QEF keeps CalculateGradientNormal(LOD).
+	 * this request's view holds around it, or CalculateGradientNormal where the fit is ill-conditioned. The QEF's plane
+	 * normals at every stride (G80, G81) and LOD 0's vertex normals.
 	 *
 	 * @param Request The meshing request (its MeshCellDomain picks the voxels held)
 	 * @param X, Y, Z The point (voxels, chunk-local)

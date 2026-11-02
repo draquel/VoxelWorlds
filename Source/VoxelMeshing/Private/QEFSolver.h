@@ -85,17 +85,15 @@ struct FQEFSolver
 	}
 
 	/**
-	 * Solve the QEF and return the optimal vertex position.
+	 * Solve the QEF and return the optimal vertex position: the offset from the mass point, with a symmetric Jacobi
+	 * decomposition, so a direction the SVD threshold drops stays at the mass point (G81).
 	 *
 	 * @param SVDThreshold Singular values below this are zeroed (controls feature sharpness)
 	 * @param CellBounds Bounding box for the cell — result is blended toward mass point if outside
 	 * @param BiasStrength How aggressively to blend toward mass point when outside bounds (0-1)
-	 * @param bAboutMassPoint G81 (voxel.Mesh.QEFSolve): solve for the offset from the mass point, with a symmetric
-	 *                        Jacobi decomposition, so a direction the SVD threshold drops stays at the mass point; false =
-	 *                        the solve before G81 (about the frame's origin, the decomposition left asymmetric)
 	 * @return Optimal vertex position
 	 */
-	FVector3f Solve(float SVDThreshold, const FBox3f& CellBounds, float BiasStrength, bool bAboutMassPoint) const
+	FVector3f Solve(float SVDThreshold, const FBox3f& CellBounds, float BiasStrength) const
 	{
 		if (Count == 0)
 		{
@@ -120,19 +118,15 @@ struct FQEFSolver
 		float Eigenvalues[3];
 		float V[3][3]; // Eigenvectors as columns
 
-		JacobiEigen3x3(M, Eigenvalues, V, bAboutMassPoint);
+		JacobiEigen3x3(M, Eigenvalues, V);
 
-		// The right-hand side for the offset from the mass point, A^T*b - A^T*A * MP (G81). Before, the pseudoinverse solved
-		// for the position itself, so a direction the threshold dropped (along a flat surface every direction but its
-		// normal) went to the frame's origin: the vertex of a flat cell was the plane's point nearest the chunk's corner,
-		// usually outside the cell, then pulled back toward the mass point by the bias blend, often only part of the way.
+		// The right-hand side for the offset from the mass point, A^T*b - A^T*A * MP (G81). Solved for the position itself,
+		// a direction the threshold dropped (along a flat surface every direction but its normal) went to the frame's
+		// origin: the vertex of a flat cell was the plane's point nearest the chunk's corner, usually outside the cell.
 		float Rhs[3] = { ATb[0], ATb[1], ATb[2] };
-		if (bAboutMassPoint)
+		for (int32 i = 0; i < 3; i++)
 		{
-			for (int32 i = 0; i < 3; i++)
-			{
-				Rhs[i] -= M[i][0] * MP.X + M[i][1] * MP.Y + M[i][2] * MP.Z;
-			}
+			Rhs[i] -= M[i][0] * MP.X + M[i][1] * MP.Y + M[i][2] * MP.Z;
 		}
 
 		// Pseudoinverse solution: v = V * S^-1 * V^T * (ATb)
@@ -160,10 +154,7 @@ struct FQEFSolver
 		}
 
 		FVector3f QEFResult(Result[0], Result[1], Result[2]);
-		if (bAboutMassPoint)
-		{
-			QEFResult += MP;
-		}
+		QEFResult += MP;
 
 		// Clamp/blend toward mass point if outside cell bounds
 		if (!CellBounds.IsInside(QEFResult))
@@ -174,9 +165,9 @@ struct FQEFSolver
 			const float Blend = FMath::Clamp(DistOutside / FMath::Max(CellSize, 0.001f) * BiasStrength * 2.0f, 0.0f, 1.0f);
 			QEFResult = FMath::Lerp(QEFResult, MP, Blend);
 			// The vertex inside its own cell (a law of the seams, #44; G81). The mass point is (on the cell's edges, its
-			// crossings average inside it), so the segment from it to the result is cut at the cell's faces. Before, a
-			// solution that was far out reached the mass point by the blend and one just outside stayed outside.
-			if (bAboutMassPoint && !CellBounds.IsInsideOrOn(QEFResult))
+			// crossings average inside it), so the segment from it to the result is cut at the cell's faces: the blend
+			// alone leaves a solution just outside the cell outside.
+			if (!CellBounds.IsInsideOrOn(QEFResult))
 			{
 				float Keep = 1.0f;
 				for (int32 Axis = 0; Axis < 3; Axis++)
@@ -203,14 +194,13 @@ private:
 	 * Jacobi eigenvalue decomposition for a 3x3 symmetric matrix.
 	 * Finds eigenvalues and eigenvectors via iterative Givens rotations.
 	 *
-	 * Each rotation zeroes the pivot on both sides of the diagonal (G81). Before, only A[p][q] was zeroed: the search reads
-	 * the upper triangle, but the next rotation's update reads A[r][p] and A[r][q] below the diagonal too, so the stale
-	 * A[q][p] fed the decomposition and it "converged" to wrong eigenpairs (a rank-1 matrix 3 n n^T at a planet's
-	 * diagonal normal gave 3.16 and -0.16 for 3 and 0). Where a cell's normals were nearly parallel, an eigenvalue over
-	 * the SVD threshold that should not be there moved the vertex a voxel or more off the surface (the GPU port, since
-	 * deleted, zeroed both sides).
+	 * Each rotation zeroes the pivot on both sides of the diagonal (G81): the search reads the upper triangle, but the next
+	 * rotation's update reads A[r][p] and A[r][q] below the diagonal too, so a stale A[q][p] feeds the decomposition and
+	 * it "converges" to wrong eigenpairs (a rank-1 matrix 3 n n^T at a planet's diagonal normal gave 3.16 and -0.16 for 3
+	 * and 0): where a cell's normals were nearly parallel, an eigenvalue over the SVD threshold that should not be there
+	 * moved the vertex a voxel or more off the surface.
 	 */
-	static void JacobiEigen3x3(float M[3][3], float OutEigenvalues[3], float OutEigenvectors[3][3], bool bSymmetric)
+	static void JacobiEigen3x3(float M[3][3], float OutEigenvalues[3], float OutEigenvectors[3][3])
 	{
 		// Initialize eigenvectors to identity
 		for (int32 i = 0; i < 3; i++)
@@ -263,10 +253,7 @@ private:
 			const float Tau = s / (1.0f + c);
 			const float Apq = A[p][q];
 			A[p][q] = 0.0f;
-			if (bSymmetric)
-			{
-				A[q][p] = 0.0f;
-			}
+			A[q][p] = 0.0f;
 			A[p][p] -= t * Apq;
 			A[q][q] += t * Apq;
 

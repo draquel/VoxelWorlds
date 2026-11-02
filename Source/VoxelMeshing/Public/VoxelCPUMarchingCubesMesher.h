@@ -75,10 +75,9 @@ public:
 	 * voxel.Seam.MCStats logs them by job type and stage).
 	 *
 	 * @param OutJobs Face, edge and corner seam jobs meshed
-	 * @param OutInPlaceJobs Those whose frames read the participants in place (voxel.Seam.MCReadInPlace 1)
 	 * @param OutWorkerMs Their time in the mesher, milliseconds
 	 */
-	static void GetSeamJobStats(int64& OutJobs, int64& OutInPlaceJobs, double& OutWorkerMs);
+	static void GetSeamJobStats(int64& OutJobs, double& OutWorkerMs);
 
 	/** Clears the counters GetSeamJobStats and voxel.Seam.MCStats read. */
 	static void ResetSeamJobStats();
@@ -165,7 +164,7 @@ private:
 
 	/**
 	 * The shading normal at a point at voxel resolution (G62): the density gradient fitted to the voxels the request holds
-	 * around it (VoxelCrossingGradient::FitNormal, voxel.Mesh.CrossingGradientNormals 1), else CalculateGradientNormal.
+	 * around it (VoxelCrossingGradient::FitNormal), or CalculateGradientNormal where the fit is ill-conditioned.
 	 * LOD 0's vertex normals, and G61's normal at a strided edge's voxel crossing.
 	 *
 	 * @param Request The meshing request with voxel data
@@ -251,31 +250,12 @@ private:
 		FVector3f& Vertex) const;
 
 	/**
-	 * The coordinate at which the coarse-LOD iso-surface (density on the stride-CoarserStride lattice, trilinear between
-	 * its points) crosses the line along Axis through V, the crossing nearest V: the boundary geomorph's target along the
-	 * axis nearest the chunk's local up (+Z on a heightmap world, spherical SP-D2 on a planet; one body for every up,
-	 * code review CR2, MESH-30).
-	 *
-	 * @param Request The meshing request
-	 * @param V Vertex position in voxel units (fine resolution)
-	 * @param Axis 0 = X, 1 = Y, 2 = Z
-	 * @param CoarserStride The coarse neighbour's stride (E)
-	 * @param OutCoord Out: the crossing's coordinate along Axis, voxel units
-	 * @return true if a crossing was found within the search band
-	 */
-	bool ComputeCoarseSurfaceAlongAxis(
-		const FVoxelMeshingRequest& Request,
-		const FVector3f& V, int32 Axis,
-		int32 CoarserStride,
-		float& OutCoord) const;
-
-	/**
-	 * The morph target with voxel.Mesh.VoxelLODCrossings (G80): the coarse cells' vertices lie at the voxel crossings on
-	 * their edges (FindEdgeVoxelCrossing), so the coarse surface along the line along Axis through V is the bilinear
-	 * blend, over the coarse lattice, of the crossings on the four coarse edges along Axis around the line (each the
-	 * crossing nearest V within ComputeCoarseSurfaceAlongAxis's search band). On a coarse edge column it is that edge's
-	 * vertex, as the coarser neighbour and the ribbon's outer contour have it. Face-parallel columns are clamped to the
-	 * chunk as ComputeCoarseSurfaceAlongAxis clamps its samples.
+	 * The boundary geomorph's target along the axis nearest the chunk's local up (+Z on a heightmap world, spherical SP-D2
+	 * on a planet; one body for every up, code review CR2, MESH-30). The coarse cells' vertices lie at the voxel crossings
+	 * on their edges (FindEdgeVoxelCrossing, G80), so the coarse surface along the line along Axis through V is the
+	 * bilinear blend, over the coarse lattice, of the crossings on the four coarse edges along Axis around the line (each
+	 * the crossing nearest V within four coarse cells either side). On a coarse edge column it is that edge's vertex, as
+	 * the coarser neighbour and the ribbon's outer contour have it. Face-parallel columns are clamped to the chunk.
 	 *
 	 * @param Request The meshing request
 	 * @param V Vertex position in voxel units (fine resolution)

@@ -19,8 +19,6 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
-#include "HAL/IConsoleManager.h"
-#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelCPUMarchingCubesMesher.h"
 #include "VoxelMeshingTestFixtures.h"
 #include "VoxelMeshingTypes.h"
@@ -1377,9 +1375,9 @@ bool FMCLODBoundaryT12TableContractTest::RunTest(const FString& Parameters)
 // The boundary geomorph ramps the fine surface to the coarse height near the transition, so the
 // measured seam step (fine surface just inside the boundary vs coarse surface just outside) must
 // stay small — without punching holes. Measured on the steep Cliff field (largest mismatch).
-// The step was the strided vertices' (voxel.Mesh.VoxelLODCrossings 0): with voxel crossings (G80)
-// both sides' vertices lie on LOD 0's surface, so the step is gone, and the morph, now toward the
-// coarse cells' voxel crossings, keeps it so with no hole.
+// The step was the strided vertices': with voxel crossings (G80) both sides' vertices lie on LOD 0's
+// surface, so the step is gone, and the morph, toward the coarse cells' voxel crossings, keeps it so
+// with no hole.
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMCLODBoundaryT13BoundaryMorphTest, "VoxelWorlds.Meshing.MarchingCubes.LODBoundary.T13_BoundaryMorphStep",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1428,26 +1426,15 @@ bool FMCLODBoundaryT13BoundaryMorphTest::RunTest(const FString& Parameters)
 		return MaxStep;
 	};
 
-	// The seam step and A's interior holes with the morph (always on), for strided vertices and for voxel crossings.
-	float Step[2] = {};
-	int32 Holes[2] = {};
-	for (int32 Crossings = 0; Crossings < 2; ++Crossings)
-	{
-		VoxelTesting::FScopedCVar C(TEXT("voxel.Mesh.VoxelLODCrossings"), Crossings);
-		FChunkMeshData Coarse;
-		MeshChunk(RequestB, true, Coarse);
-		MeshB = Coarse;
-		Step[Crossings] = MeasureStep();
-		FChunkMeshData MeshA;
-		MeshChunk(RequestA, true, MeshA);
-		Holes[Crossings] = CountInteriorOpenEdges(MeshA);
-		AddInfo(FString::Printf(TEXT("T13 NonLinearZ +X (LOD1|LOD2), crossings %d: step=%.1f units, holes=%d"),
-			Crossings, Step[Crossings], Holes[Crossings]));
-	}
+	// The seam step and A's interior holes with the morph (always on).
+	const float Step = MeasureStep();
+	FChunkMeshData MeshA;
+	MeshChunk(RequestA, true, MeshA);
+	const int32 Holes = CountInteriorOpenEdges(MeshA);
+	AddInfo(FString::Printf(TEXT("T13 NonLinearZ +X (LOD1|LOD2): step=%.1f units, holes=%d"), Step, Holes));
 
-	TestEqual(TEXT("strided vertices: morph keeps the seam watertight (no interior holes)"), Holes[0], 0);
-	TestTrue(*FString::Printf(TEXT("voxel crossings: no seam step with the morph (%.1f, under 15 units)"), Step[1]), Step[1] < 15.0f);
-	TestEqual(TEXT("voxel crossings: morph keeps the seam watertight (no interior holes)"), Holes[1], 0);
+	TestTrue(*FString::Printf(TEXT("no seam step with the morph (%.1f, under 15 units)"), Step), Step < 15.0f);
+	TestEqual(TEXT("morph keeps the seam watertight (no interior holes)"), Holes, 0);
 
 	return true;
 }
