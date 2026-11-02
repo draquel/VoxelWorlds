@@ -147,7 +147,7 @@ public:
 		SHADER_PARAMETER(FVector3f, PlanetAnchorDir)
 		SHADER_PARAMETER(float, PlanetAnchorDist)
 		SHADER_PARAMETER(float, PlanetAnchorAltitude)
-		// The planet Simplex noise's corner kernel (voxel.Planet.ContinuousSimplex; G43).
+		// The Simplex noise's corner kernel: always 1, the continuous one (G43; the shader's classic leg kept for its codegen, G97).
 		SHADER_PARAMETER(int32, SimplexContinuous)
 		// The cave configuration's underwater minimum depth and biome overrides (GpuCaveCarve), 1 float4 each:
 		// [BiomeID, CaveScale, MinDepthOverride, 0].

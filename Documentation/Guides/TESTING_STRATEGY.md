@@ -19,7 +19,7 @@ use `WITH_AUTOMATION_TESTS`). The project's test roots:
 | `Dungeon.*` | ProceduralDungeonPlugin |
 | `ItemInventory.*` | ItemInventoryPlugin (crafting and storage included) |
 | `Equipment.*` | EquipmentPlugin |
-| `Interaction.Flow.*`, `Interaction.WorldItem.*` | InteractionPlugin |
+| `Interaction.Channeled.*`, `Interaction.Flow.*`, `Interaction.WorldItem.*` | InteractionPlugin |
 | `VoxelWorldSave.*` | VoxelWorldSave |
 | `WorldClock.*` | WorldClockPlugin |
 
@@ -29,10 +29,11 @@ The headless run is `Scripts/qa/run_suite.ps1 [-Tag t] [-Filter roots]`: with th
 UnrealEditor-Cmd.exe VoxelEngine.uproject -ExecCmds="Automation RunTests <filter>; Quit" -nullrhi -unattended -nopause -NoSound -abslog=Saved/Logs/qa_<tag>.log
 ```
 
-with the filter `Dungeon+Equipment+Interaction.Flow+Interaction.WorldItem+ItemInventory+VoxelCharacter+VoxelWorldSave+VoxelWorlds+WorldClock`,
-and prints the wall time, the result counts and every failure. The suite is about 747 tests (CR4 added
-`VoxelWorlds.Bench.ParseArgs` and `VoxelWorlds.Config.SettingsOverride` to 745) and takes about 12 minutes. The filter
-names `Interaction.Flow` and `Interaction.WorldItem` rather than `Interaction` because the bare root also catches an
+with the filter `Dungeon+Equipment+Interaction.Channeled+Interaction.Flow+Interaction.WorldItem+ItemInventory+VoxelCharacter+VoxelWorldSave+VoxelWorlds+WorldClock`,
+and prints the wall time, the result counts and every failure. The suite is about 751 tests (CR4 added
+`VoxelWorlds.Bench.ParseArgs` and `VoxelWorlds.Config.SettingsOverride` to 745, the framework's authority fixes eight,
+VoxelWorlds 8 took four away) and takes about 12 minutes. The filter names `Interaction.Channeled`, `Interaction.Flow`
+and `Interaction.WorldItem` rather than `Interaction` because the bare root also catches an
 engine Metasound test. Use the D: engine (`D:\Program Files\Epic Games\UE_5.8`, or `UE_ENGINE_ROOT`) and never run the
 suite during a build. `logwarnings.py <before> <after>` compares two runs' warning kinds.
 
@@ -97,8 +98,9 @@ GPU against the CPU:
    the 12 GPU and proxy tests plus the six crossfade tests that also run headless, **18 results**, each expected to be
    a single `Success`.
 3. It extracts the **parity lines** (the parity tests' `[N voxels]: density~` lines, one per case and LOD: density,
-   material, biome and metadata agreement and the GPU's CRC) and compares all **114** with the record,
-   `Documentation/CodeReview/CR2/gpu_parity_lines_2026-11-01.txt` (`parity_lines.py`). A changed line is a finding to
+   material, biome and metadata agreement and the GPU's CRC) and compares all **111** with the record,
+   `Documentation/CodeReview/VW8/gpu_parity_lines_2026-11-02.txt` (`parity_lines.py`; CR2's 114 less the three
+   `BlendDither off` cases, gone with `voxel.Biome.BlendDither` in VoxelWorlds 8). A changed line is a finding to
    explain, not a tolerance to widen: a change that should not touch generation leaves every line identical.
 4. It copies the editor's log to `Saved/QA/editor/`.
 

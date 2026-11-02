@@ -41,7 +41,7 @@ node budget grows with the cells per area (`MaxNodes` × (150 / V)²), so a sear
 cells. With the smooth rule at 150 uu cells, cell centres two blocks apart turned a one-block staircase into a 150 uu
 rise (refused), while the isosurface it sampled made a two-block step a slope it could take, so nav and movement
 disagreed (KC7).
-`voxel.Nav.BlockSteps 0` keeps the smooth rule in a cubic world. Searches cost about 1.7-3.5× the smooth rule's on the
+Searches cost about 1.7-3.5× the smooth rule's on the
 same routes (four times the cells; G73). Test: `Navigation.Cubic.BlockSteps`.
 
 ### Subsystem API
@@ -56,7 +56,7 @@ same routes (four times the cells; G73). Test: `Navigation.Cubic.BlockSteps`.
 ### CVars
 
 `voxel.Nav.CellSize` (150), `voxel.Nav.MaxNodes` (4096), `voxel.Nav.MaxStepRise` (100), `voxel.Nav.MaxWadeDepth`
-(60), `voxel.Nav.MaxRadius` (20000), `voxel.Nav.BlockSteps` (1: block worlds use the block rule above), `voxel.Nav.Debug` (0).
+(60), `voxel.Nav.MaxRadius` (20000), `voxel.Nav.Debug` (0).
 
 ### Costs
 

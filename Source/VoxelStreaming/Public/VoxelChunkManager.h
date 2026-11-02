@@ -756,7 +756,7 @@ public:
 	 * the block column's topmost block, not the density isosurface up to a block under it, and anything placed on a pad or
 	 * the generated ground should stand on SnapToBlockTop of its height.
 	 *
-	 * @return True in a cubic heightmap world (with voxel.Cubic.BlockSurface on)
+	 * @return True in a cubic heightmap world
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
 	bool IsBlockSurface() const;

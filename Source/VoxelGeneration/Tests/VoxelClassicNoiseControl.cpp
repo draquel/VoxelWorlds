@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelClassicNoiseControl.h"
+#include "VoxelNoise.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -378,6 +379,49 @@ float ClassicFBM3D(const FVector& Position, const FVoxelNoiseParams& Params)
 
 	// Normalize to [-1, 1] range
 	return Total / MaxValue;
+}
+
+double HashedSimplexClassicKernel(const FVector& P, int32 Seed)
+{
+	// FVoxelNoise::ReferenceSample's skew, corner order and lattice hash; the corner kernel (0.6 - d^2)^4 and its scale.
+	auto Wrap = [](double Floored) { return static_cast<uint32>(static_cast<int64>(Floored)); };
+	auto Corner = [](uint32 HashValue, double X, double Y, double Z)
+	{
+		const int32* G = Grad3[HashValue % 12u];
+		double R = 0.6 - X * X - Y * Y - Z * Z;
+		if (R < 0.0)
+		{
+			return 0.0;
+		}
+		R *= R;
+		return R * R * (G[0] * X + G[1] * Y + G[2] * Z);
+	};
+	const double S = (P.X + P.Y + P.Z) / 3.0;
+	const double QX = P.X + S, QY = P.Y + S, QZ = P.Z + S;
+	const double CX = FMath::FloorToDouble(QX), CY = FMath::FloorToDouble(QY), CZ = FMath::FloorToDouble(QZ);
+	const double FX = QX - CX, FY = QY - CY, FZ = QZ - CZ;
+	const double T = (FX + FY + FZ) / 6.0;
+	const double X0 = FX - T, Y0 = FY - T, Z0 = FZ - T;
+	int32 I1, J1, K1, I2, J2, K2;
+	if (X0 >= Y0)
+	{
+		if (Y0 >= Z0) { I1 = 1; J1 = 0; K1 = 0; I2 = 1; J2 = 1; K2 = 0; }
+		else if (X0 >= Z0) { I1 = 1; J1 = 0; K1 = 0; I2 = 1; J2 = 0; K2 = 1; }
+		else { I1 = 0; J1 = 0; K1 = 1; I2 = 1; J2 = 0; K2 = 1; }
+	}
+	else
+	{
+		if (Y0 < Z0) { I1 = 0; J1 = 0; K1 = 1; I2 = 0; J2 = 1; K2 = 1; }
+		else if (X0 < Z0) { I1 = 0; J1 = 1; K1 = 0; I2 = 0; J2 = 1; K2 = 1; }
+		else { I1 = 0; J1 = 1; K1 = 0; I2 = 1; J2 = 1; K2 = 0; }
+	}
+	const double G = 1.0 / 6.0;
+	const uint32 BX = Wrap(CX), BY = Wrap(CY), BZ = Wrap(CZ);
+	const double N0 = Corner(FVoxelNoise::LatticeHash(BX, BY, BZ, Seed), X0, Y0, Z0);
+	const double N1 = Corner(FVoxelNoise::LatticeHash(BX + I1, BY + J1, BZ + K1, Seed), X0 - I1 + G, Y0 - J1 + G, Z0 - K1 + G);
+	const double N2 = Corner(FVoxelNoise::LatticeHash(BX + I2, BY + J2, BZ + K2, Seed), X0 - I2 + 2.0 * G, Y0 - J2 + 2.0 * G, Z0 - K2 + 2.0 * G);
+	const double N3 = Corner(FVoxelNoise::LatticeHash(BX + 1u, BY + 1u, BZ + 1u, Seed), X0 - 1.0 + 3.0 * G, Y0 - 1.0 + 3.0 * G, Z0 - 1.0 + 3.0 * G);
+	return 32.0 * (N0 + N1 + N2 + N3);
 }
 
 } // namespace VoxelClassicNoiseControl

@@ -2,8 +2,6 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
-#include "HAL/IConsoleManager.h"
-#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelNoise.h"
 #include "VoxelNoiseTypes.h"
@@ -24,8 +22,8 @@
 //   1e6 noise units along X where the classic noise repeats every 256 / frequency uu (non-vacuous: the control is shown to
 //   repeat); its spread is the classic noise's.
 // - WorldModes.Plane.NoiseCreases: the generated terrain height across the line X = Y, where every octave's simplex
-//   boundary lies, steps no more and its slope changes no more than at a control of points off the line; with the classic
-//   kernel (voxel.Noise.ContinuousSimplex 0) the height steps there (G43's creases, about a quarter voxel).
+//   boundary lies, steps no more and its slope changes no more than at a control of points off the line (with the classic
+//   kernel, before MP4, the height stepped there: G43's creases, about a quarter voxel).
 // ---------------------------------------------------------------------------
 
 namespace VoxelHeightmapNoiseTestUtils
@@ -211,22 +209,16 @@ bool FVoxelPlaneNoiseCreasesTest::RunTest(const FString& Parameters)
 		return Out;
 	};
 
-	FStats OnLine[2], Control[2]; // [kernel: 0 classic, 1 continuous]
-	for (int32 Kernel = 0; Kernel < 2; ++Kernel)
-	{
-		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Noise.ContinuousSimplex"), Kernel);
-		OnLine[Kernel] = Measure(true, 0x11 + Kernel);
-		Control[Kernel] = Measure(false, 0x21 + Kernel);
-		AddInfo(FString::Printf(TEXT("%s kernel: across X = Y the height steps up to %.4f uu (control off the line %.4f), the slope changes by up to %.4f (control %.4f)"),
-			Kernel == 1 ? TEXT("Continuous") : TEXT("Classic"), OnLine[Kernel].MaxStep, Control[Kernel].MaxStep, OnLine[Kernel].MaxSlopeJump, Control[Kernel].MaxSlopeJump));
-	}
+	const FStats OnLine = Measure(true, 0x12);
+	const FStats Control = Measure(false, 0x22);
+	AddInfo(FString::Printf(TEXT("Across X = Y the height steps up to %.4f uu (control off the line %.4f), the slope changes by up to %.4f (control %.4f)"),
+		OnLine.MaxStep, Control.MaxStep, OnLine.MaxSlopeJump, Control.MaxSlopeJump));
 	// The step over 2e-3 uu of a smooth 800 uu slope is at most a few thousandths of a uu; a crease is a step of a
-	// fraction of a voxel (the classic kernel's, non-vacuous), and no larger than the control for the continuous kernel.
-	TestTrue(*FString::Printf(TEXT("Classic kernel: the height steps across X = Y (%.4f uu, non-vacuous)"), OnLine[0].MaxStep), OnLine[0].MaxStep > 10.0 * Control[0].MaxStep);
-	TestTrue(*FString::Printf(TEXT("Continuous kernel: no step across X = Y (%.4f against the control's %.4f)"), OnLine[1].MaxStep, Control[1].MaxStep),
-		OnLine[1].MaxStep <= 2.0 * Control[1].MaxStep + 1.0e-3);
-	TestTrue(*FString::Printf(TEXT("Continuous kernel: the slope is as continuous across X = Y as off it (%.4f against %.4f)"), OnLine[1].MaxSlopeJump, Control[1].MaxSlopeJump),
-		OnLine[1].MaxSlopeJump <= 2.0 * Control[1].MaxSlopeJump + 1.0e-2);
+	// fraction of a voxel. The continuous kernel's is no larger than the control's.
+	TestTrue(*FString::Printf(TEXT("No step across X = Y (%.4f against the control's %.4f)"), OnLine.MaxStep, Control.MaxStep),
+		OnLine.MaxStep <= 2.0 * Control.MaxStep + 1.0e-3);
+	TestTrue(*FString::Printf(TEXT("The slope is as continuous across X = Y as off it (%.4f against %.4f)"), OnLine.MaxSlopeJump, Control.MaxSlopeJump),
+		OnLine.MaxSlopeJump <= 2.0 * Control.MaxSlopeJump + 1.0e-2);
 	return true;
 }
 

@@ -29,9 +29,6 @@ static TAutoConsoleVariable<float> CVarNavMaxWadeDepth(TEXT("voxel.Nav.MaxWadeDe
 	TEXT("Cells this far below the water surface are still walkable."));
 static TAutoConsoleVariable<float> CVarNavMaxRadius(TEXT("voxel.Nav.MaxRadius"), 20000.f,
 	TEXT("Cells farther than this from the start are never expanded."));
-static TAutoConsoleVariable<int32> CVarNavBlockSteps(TEXT("voxel.Nav.BlockSteps"), 1,
-	TEXT("Cubic (block) worlds: one cell per block column and a step of one block (1, world modes review WM-C7), or the smooth ")
-	TEXT("rules at voxel.Nav.CellSize and voxel.Nav.MaxStepRise (0, as before)."));
 static TAutoConsoleVariable<int32> CVarNavDebug(TEXT("voxel.Nav.Debug"), 0,
 	TEXT("1 = draw the walkability grid around the debug focus and recent routes."));
 
@@ -221,7 +218,7 @@ void UVoxelSurfaceNavigationSubsystem::ApplyCVars()
 			// A block world (cubic, WM-C7, D29): one cell per block column on the voxel grid, heights the block tops the
 			// surface queries return there (WM-C5), and a step of one block up or down; the node budget grows with the
 			// cells per area, so a search still covers the ground it covers at the configured cell size.
-			if (ChunkMgr->IsBlockSurface() && CVarNavBlockSteps.GetValueOnGameThread() != 0)
+			if (ChunkMgr->IsBlockSurface())
 			{
 				const float ConfiguredCellSize = Params.CellSize;
 				Params.bBlockSteps = true;

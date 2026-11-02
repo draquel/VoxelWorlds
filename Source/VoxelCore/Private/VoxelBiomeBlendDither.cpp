@@ -2,15 +2,6 @@
 
 #include "VoxelBiomeBlendDither.h"
 #include "VoxelHash.h"
-#include "HAL/IConsoleManager.h"
-
-static TAutoConsoleVariable<int32> CVarBiomeBlendDither(
-	TEXT("voxel.Biome.BlendDither"),
-	1,
-	TEXT("Biome blend zones (world modes review G39): 1 = each voxel's material pick by 3D value noise over a 4-voxel lattice, "
-	     "equalised, walking the biomes in BiomeID order (patches); 0 = frac(W0 * 17.3 + W1 * 31.7 + depth * 0.1) in weight "
-	     "order, as before (bands along the voxel grid on slopes). Read when chunks generate; GPU and CPU alike."),
-	ECVF_Default);
 
 namespace VoxelBiomeBlendDitherPrivate
 {
@@ -79,9 +70,4 @@ FIntVector FVoxelBiomeBlendDither::KeyAt(const FVector& WorldPos, float VoxelSiz
 {
 	const double Inv = 1.0 / FMath::Max(static_cast<double>(VoxelSize), 1.0e-6);
 	return FIntVector(FMath::RoundToInt32(WorldPos.X * Inv), FMath::RoundToInt32(WorldPos.Y * Inv), FMath::RoundToInt32(WorldPos.Z * Inv));
-}
-
-bool FVoxelBiomeBlendDither::IsEnabled()
-{
-	return CVarBiomeBlendDither.GetValueOnAnyThread() != 0;
 }

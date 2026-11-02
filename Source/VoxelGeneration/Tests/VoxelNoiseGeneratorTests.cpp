@@ -14,7 +14,6 @@
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelTerrainConditioning.h"
 #include "RenderingThread.h"
-#include "HAL/IConsoleManager.h"
 #include "RHI.h"             // GUsingNullRHI: GPU tests skip under -nullrhi
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCPUNoiseGeneratorTest, "VoxelWorlds.Generation.CPUNoiseGenerator",
@@ -413,21 +412,13 @@ bool FVoxelGPUvsCPUMaterialParityTest::RunTest(const FString& Parameters)
 // G39 (WORLD_MODES_REVIEW_PLAN.md §14.1): the blend zones' dither on the GPU (GpuBiomeBlendDither, GpuBlendedMaterial in
 // BiomeMaterial.ush) equals the CPU's (FVoxelBiomeBlendDither, FVoxelBiomeSnapshot::PickBlendIndex). The default biomes
 // with a wide blend (BiomeBlendWidth 0.5), so much of the chunk is a blend zone, on a grid whose origin is off the voxel
-// grid, at LOD 0/1/2, with voxel.Biome.BlendDither 1 and 0 (the old pick). Non-vacuous: on the CPU the two settings pick
-// different materials in many voxels.
+// grid, at LOD 0/1/2.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUBlendDitherParityTest, "VoxelWorlds.Generation.GPUvsCPUBlendDitherParity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FVoxelGPUvsCPUBlendDitherParityTest::RunTest(const FString& Parameters)
 {
 	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
-
-	IConsoleVariable* DitherVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Biome.BlendDither"));
-	if (!TestNotNull(TEXT("voxel.Biome.BlendDither"), DitherVar))
-	{
-		return true;
-	}
-	const int32 PreviousDither = DitherVar->GetInt();
 
 	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
 	BiomeConfig->AddToRoot();
@@ -459,33 +450,27 @@ bool FVoxelGPUvsCPUBlendDitherParityTest::RunTest(const FString& Parameters)
 	// The chunk layer holding the surface (terrain within +-800 of Z 0)
 	Request.ChunkCoord.Z = FMath::FloorToInt32((0.0 - Request.WorldOrigin.Z) / (Request.ChunkSize * Request.VoxelSize));
 
-	// The two settings on the CPU pick differently in the blend zone: count the voxels.
-	TArray<FVoxelData> Old, New;
-	DitherVar->Set(0, ECVF_SetByConsole);
-	GPUGenerator.GenerateChunkCPU(Request, Old);
-	DitherVar->Set(1, ECVF_SetByConsole);
-	GPUGenerator.GenerateChunkCPU(Request, New);
-	int32 Different = 0, Solid = 0;
-	for (int32 i = 0; i < FMath::Min(Old.Num(), New.Num()); ++i)
+	// The chunk lies in a blend zone: two or more biomes' materials among its solid voxels (non-vacuous).
+	TArray<FVoxelData> Cpu;
+	GPUGenerator.GenerateChunkCPU(Request, Cpu);
+	TSet<uint8> Materials;
+	int32 Solid = 0;
+	for (const FVoxelData& Voxel : Cpu)
 	{
-		Solid += New[i].IsSolid() ? 1 : 0;
-		Different += (Old[i].MaterialID != New[i].MaterialID) ? 1 : 0;
+		if (Voxel.IsSolid())
+		{
+			++Solid;
+			Materials.Add(Voxel.MaterialID);
+		}
 	}
-	AddInfo(FString::Printf(TEXT("CPU, %d voxels (%d solid): %d materials differ between the old pick and the dither"), New.Num(), Solid, Different));
-	TestTrue(TEXT("The chunk lies in a blend zone (the settings pick differently; non-vacuous)"), Different >= 200);
+	AddInfo(FString::Printf(TEXT("CPU, %d voxels (%d solid), %d materials"), Cpu.Num(), Solid, Materials.Num()));
+	TestTrue(TEXT("The chunk holds several materials (non-vacuous)"), Materials.Num() >= 2);
 
-	bool bAllPass = true;
-	for (const int32 Mode : { 1, 0 })
-	{
-		DitherVar->Set(Mode, ECVF_SetByConsole);
-		bAllPass &= VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request,
-			Mode ? TEXT("BlendDither") : TEXT("BlendDither off"));
-	}
-	DitherVar->Set(PreviousDither, ECVF_SetByConsole);
+	const bool bAllPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("BlendDither"));
 
 	GPUGenerator.Shutdown();
 	BiomeConfig->RemoveFromRoot();
-	TestTrue(TEXT("GPU==CPU material parity in a blend zone, dither on and off, LOD 0/1/2"), bAllPass);
+	TestTrue(TEXT("GPU==CPU material parity in a blend zone, LOD 0/1/2"), bAllPass);
 	return true;
 }
 
