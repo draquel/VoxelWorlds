@@ -203,6 +203,8 @@ static_assert(static_cast<int32>(EVoxelNoiseType::Voronoi) == VOXELGEN_NOISE_TYP
  *
  * fBm (Fractal Brownian Motion) combines multiple octaves of noise
  * to create natural-looking terrain with both large features and fine detail.
+ * The result is normalised to about [-1, 1] (the octave sum over the sum of the octave weights, the first weight 1);
+ * callers scale it themselves (HeightScale for the terrain). There is no amplitude: one divided out (G88).
  */
 USTRUCT(BlueprintType)
 struct VOXELCORE_API FVoxelNoiseParams
@@ -224,10 +226,6 @@ struct VOXELCORE_API FVoxelNoiseParams
 	/** Base frequency of noise (lower = larger features) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.00000001", ClampMax = "1.0"))
 	float Frequency = 0.001f;
-
-	/** Base amplitude of noise */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.0", ClampMax = "10.0"))
-	float Amplitude = 1.0f;
 
 	/** Frequency multiplier per octave (typically 2.0) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "1.0", ClampMax = "4.0"))

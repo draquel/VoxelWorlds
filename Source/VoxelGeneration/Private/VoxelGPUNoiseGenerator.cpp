@@ -425,7 +425,6 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->NoiseSeed = Request.NoiseParams.Seed;
 	Parameters->NoiseOctaves = Request.NoiseParams.Octaves;
 	Parameters->NoiseFrequency = Request.NoiseParams.Frequency;
-	Parameters->NoiseAmplitude = Request.NoiseParams.Amplitude;
 	Parameters->NoiseLacunarity = Request.NoiseParams.Lacunarity;
 	Parameters->NoisePersistence = Request.NoiseParams.Persistence;
 	Parameters->WorldMode = static_cast<int32>(Request.WorldMode);

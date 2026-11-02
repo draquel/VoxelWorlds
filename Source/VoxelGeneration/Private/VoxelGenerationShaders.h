@@ -45,7 +45,6 @@ public:
 		SHADER_PARAMETER(int32, NoiseSeed)
 		SHADER_PARAMETER(int32, NoiseOctaves)
 		SHADER_PARAMETER(float, NoiseFrequency)
-		SHADER_PARAMETER(float, NoiseAmplitude)
 		SHADER_PARAMETER(float, NoiseLacunarity)
 		SHADER_PARAMETER(float, NoisePersistence)
 		SHADER_PARAMETER(int32, WorldMode)

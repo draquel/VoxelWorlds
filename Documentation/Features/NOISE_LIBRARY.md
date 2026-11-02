@@ -31,14 +31,19 @@ integers are `VOXELGEN_NOISE_TYPE_*` in `Shaders/Shared/VoxelGenerationShared.us
 ## fBm Composition
 
 ```
-Total = 0; MaxValue = 0; Amplitude = Params.Amplitude; Frequency = Params.Frequency
+Total = 0; MaxValue = 0; Amplitude = 1; Frequency = Params.Frequency
 for each octave i (Octaves, at most 16):
     Total    += Sample(Position * Frequency) * Amplitude
     MaxValue += Amplitude
     Frequency *= Lacunarity
     Amplitude *= Persistence
-Result = Total / MaxValue
+Result = MaxValue > 0 ? Total / MaxValue : 0
 ```
+
+The result is normalised: about [-1, 1] whatever the octaves and the persistence, and callers scale it themselves (the
+terrain by `HeightScale`, caves and ores against their thresholds). Until G88 the parameters had an `Amplitude`, the first
+octave's weight, which divided out and did nothing; at 0 it gave 0 / 0. It went, and the sum of the weights is now at
+least 1 unless `Persistence` is negative, the guard's only case (`VoxelWorlds.Noise.FBMNormalised`).
 
 ### Parameters (`FVoxelNoiseParams`)
 
@@ -50,10 +55,8 @@ Result = Total / MaxValue
 | `Frequency` | 0.001 | scale of features in 1/uu (lower = larger) |
 | `Lacunarity` | 2.0 | frequency step between octaves |
 | `Persistence` | 0.5 | amplitude step between octaves |
-| `Amplitude` | 1.0 | the first octave's weight; it divides out (`Result` is normalised by `MaxValue`), so it does not change the output |
 
-Fields that callers build themselves (climate, continentalness, caves, ores) set `Amplitude` 1;
-`FVoxelNoise::MakeFieldParams` builds the 2-octave fields.
+`FVoxelNoise::MakeFieldParams` builds the 2-octave fields that callers make themselves (climate, continentalness).
 
 ## How it samples
 

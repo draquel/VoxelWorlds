@@ -52,7 +52,6 @@ bool FPCGVoxelFarPointsConditionedTest::RunTest(const FString& Parameters)
 	Config->NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
 	Config->NoiseParams.Seed = 4325;
 	Config->NoiseParams.Frequency = 0.000025f;
-	Config->NoiseParams.Amplitude = 1.0f;
 	Config->NoiseParams.Octaves = 6;
 	Config->NoiseParams.Lacunarity = 2.0f;
 	Config->NoiseParams.Persistence = 0.5f;

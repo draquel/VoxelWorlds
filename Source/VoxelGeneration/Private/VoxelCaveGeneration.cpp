@@ -43,7 +43,6 @@ float FVoxelCPUNoiseGenerator::SampleCaveLayer(const FVector& WorldPos, const FC
 	CaveNoiseParams.Octaves = LayerConfig.Octaves;
 	CaveNoiseParams.Persistence = LayerConfig.Persistence;
 	CaveNoiseParams.Lacunarity = LayerConfig.Lacunarity;
-	CaveNoiseParams.Amplitude = 1.0f;
 
 	if (LayerConfig.CaveType == ECaveType::Cheese)
 	{

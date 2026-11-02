@@ -80,7 +80,6 @@ namespace VoxelPlanetPrecision
 		Config->NoiseParams.Octaves = 9;
 		Config->NoiseParams.Lacunarity = 2.0f;
 		Config->NoiseParams.Persistence = 0.5f;
-		Config->NoiseParams.Amplitude = 1.0f;
 		Config->bEnableBiomes = false;
 		Config->BiomeConfiguration = nullptr;
 		Config->bEnableCaves = false;
@@ -319,7 +318,6 @@ bool FVoxelNoiseSplitOriginTest::RunTest(const FString& Parameters)
 	Terrain.Octaves = 9;
 	Terrain.Lacunarity = 2.0f;
 	Terrain.Persistence = 0.5f;
-	Terrain.Amplitude = 1.0f;
 	FVoxelNoiseParams Caves = Terrain;
 	Caves.Frequency = 0.002f;
 	Caves.Octaves = 3;

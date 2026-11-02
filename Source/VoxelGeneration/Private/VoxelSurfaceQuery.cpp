@@ -327,7 +327,6 @@ void FVoxelSurfaceQuery::QuerySurfaceConditions(
 	TempNoiseParams.Octaves = 2;
 	TempNoiseParams.Persistence = 0.5f;
 	TempNoiseParams.Lacunarity = 2.0f;
-	TempNoiseParams.Amplitude = 1.0f;
 	TempNoiseParams.Seed = WorldSeed + BiomeSnapshot.TemperatureSeedOffset;
 	TempNoiseParams.Frequency = BiomeSnapshot.TemperatureNoiseFrequency;
 
@@ -336,7 +335,6 @@ void FVoxelSurfaceQuery::QuerySurfaceConditions(
 	MoistureNoiseParams.Octaves = 2;
 	MoistureNoiseParams.Persistence = 0.5f;
 	MoistureNoiseParams.Lacunarity = 2.0f;
-	MoistureNoiseParams.Amplitude = 1.0f;
 	MoistureNoiseParams.Seed = WorldSeed + BiomeSnapshot.MoistureSeedOffset;
 	MoistureNoiseParams.Frequency = BiomeSnapshot.MoistureNoiseFrequency;
 
@@ -354,7 +352,6 @@ void FVoxelSurfaceQuery::QuerySurfaceConditions(
 		ContNoiseParams.Octaves = 2;
 		ContNoiseParams.Persistence = 0.5f;
 		ContNoiseParams.Lacunarity = 2.0f;
-		ContNoiseParams.Amplitude = 1.0f;
 		ContNoiseParams.Seed = WorldSeed + BiomeSnapshot.ContinentalnessSeedOffset;
 		ContNoiseParams.Frequency = BiomeSnapshot.ContinentalnessNoiseFrequency;
 		Continentalness = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ContNoiseParams);
@@ -594,7 +591,6 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QuerySurfaceMaterialMix(
 		Params.Octaves = 2;
 		Params.Persistence = 0.5f;
 		Params.Lacunarity = 2.0f;
-		Params.Amplitude = 1.0f;
 		Params.Seed = WorldSeed + SeedOffset;
 		Params.Frequency = Frequency;
 		return Params;

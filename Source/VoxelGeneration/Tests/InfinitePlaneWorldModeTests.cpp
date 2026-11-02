@@ -124,7 +124,6 @@ bool FInfinitePlaneWorldModeCPUGenerationTest::RunTest(const FString& Parameters
 	Request.NoiseParams.NoiseType = EVoxelNoiseType::Perlin;
 	Request.NoiseParams.Seed = 12345;
 	Request.NoiseParams.Frequency = 0.001f;
-	Request.NoiseParams.Amplitude = 1.0f;
 	Request.NoiseParams.Octaves = 4;
 	Request.NoiseParams.Lacunarity = 2.0f;
 	Request.NoiseParams.Persistence = 0.5f;
@@ -296,7 +295,6 @@ bool FInfinitePlaneWorldModeGPUConsistencyTest::RunTest(const FString& Parameter
 	Request.NoiseParams.NoiseType = EVoxelNoiseType::Perlin;
 	Request.NoiseParams.Seed = 42;
 	Request.NoiseParams.Frequency = 0.001f;
-	Request.NoiseParams.Amplitude = 1.0f;
 	Request.NoiseParams.Octaves = 2;
 	Request.NoiseParams.Lacunarity = 2.0f;
 	Request.NoiseParams.Persistence = 0.5f;

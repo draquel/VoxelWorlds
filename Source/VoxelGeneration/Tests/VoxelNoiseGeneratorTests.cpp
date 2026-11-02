@@ -39,7 +39,6 @@ bool FVoxelCPUNoiseGeneratorTest::RunTest(const FString& Parameters)
 	Request.NoiseParams.NoiseType = EVoxelNoiseType::Perlin;
 	Request.NoiseParams.Seed = 12345;
 	Request.NoiseParams.Frequency = 0.013f; // Avoids integer grid positions
-	Request.NoiseParams.Amplitude = 1.0f;
 	Request.NoiseParams.Octaves = 4;
 	Request.NoiseParams.Lacunarity = 2.0f;
 	Request.NoiseParams.Persistence = 0.5f;
@@ -148,7 +147,6 @@ bool FVoxelGPUNoiseGeneratorAsyncTest::RunTest(const FString& Parameters)
 	Request.NoiseParams.NoiseType = EVoxelNoiseType::Perlin;
 	Request.NoiseParams.Seed = 12345;
 	Request.NoiseParams.Frequency = 0.013f; // Avoids integer grid positions
-	Request.NoiseParams.Amplitude = 1.0f;
 	Request.NoiseParams.Octaves = 4;
 	Request.NoiseParams.Lacunarity = 2.0f;
 	Request.NoiseParams.Persistence = 0.5f;
@@ -386,7 +384,6 @@ bool FVoxelGPUvsCPUMaterialParityTest::RunTest(const FString& Parameters)
 	Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
 	Request.NoiseParams.Seed = 4325;
 	Request.NoiseParams.Frequency = 0.0025f;
-	Request.NoiseParams.Amplitude = 1.0f;
 	Request.NoiseParams.Octaves = 4;
 	Request.NoiseParams.Lacunarity = 2.0f;
 	Request.NoiseParams.Persistence = 0.5f;
@@ -437,7 +434,6 @@ bool FVoxelGPUvsCPUBlendDitherParityTest::RunTest(const FString& Parameters)
 	Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
 	Request.NoiseParams.Seed = 9177;
 	Request.NoiseParams.Frequency = 0.0004f;
-	Request.NoiseParams.Amplitude = 1.0f;
 	Request.NoiseParams.Octaves = 3;
 	Request.NoiseParams.Lacunarity = 2.0f;
 	Request.NoiseParams.Persistence = 0.5f;
@@ -511,7 +507,6 @@ bool FVoxelGPUvsCPUIslandBowlParityTest::RunTest(const FString& Parameters)
 	Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
 	Request.NoiseParams.Seed = 4325;
 	Request.NoiseParams.Frequency = 0.0025f;
-	Request.NoiseParams.Amplitude = 1.0f;
 	Request.NoiseParams.Octaves = 4;
 	Request.NoiseParams.Lacunarity = 2.0f;
 	Request.NoiseParams.Persistence = 0.5f;
@@ -619,7 +614,6 @@ bool FVoxelGPUvsCPUCavesParityTest::RunTest(const FString& Parameters)
 	Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
 	Request.NoiseParams.Seed = 4325;
 	Request.NoiseParams.Frequency = 0.0025f;
-	Request.NoiseParams.Amplitude = 1.0f;
 	Request.NoiseParams.Octaves = 4;
 	Request.NoiseParams.Lacunarity = 2.0f;
 	Request.NoiseParams.Persistence = 0.5f;
@@ -802,7 +796,6 @@ bool FVoxelGPUvsCPUNoiseTypeParityTest::RunTest(const FString& Parameters)
 		Request.NoiseParams.NoiseType = Types[ti];
 		Request.NoiseParams.Seed = 1337;
 		Request.NoiseParams.Frequency = 0.0025f;
-		Request.NoiseParams.Amplitude = 1.0f;
 		Request.NoiseParams.Octaves = 3;
 		Request.NoiseParams.Lacunarity = 2.0f;
 		Request.NoiseParams.Persistence = 0.5f;
@@ -862,7 +855,6 @@ bool FVoxelGPUvsCPUWaterParityTest::RunTest(const FString& Parameters)
 	Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
 	Request.NoiseParams.Seed = 4325;
 	Request.NoiseParams.Frequency = 0.0025f;
-	Request.NoiseParams.Amplitude = 1.0f;
 	Request.NoiseParams.Octaves = 4;
 	Request.NoiseParams.Lacunarity = 2.0f;
 	Request.NoiseParams.Persistence = 0.5f;
@@ -957,7 +949,6 @@ bool FVoxelGPUvsCPUOreVariantParityTest::RunTest(const FString& Parameters)
 	Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
 	Request.NoiseParams.Seed = 4325;
 	Request.NoiseParams.Frequency = 0.0025f;
-	Request.NoiseParams.Amplitude = 1.0f;
 	Request.NoiseParams.Octaves = 4;
 	Request.NoiseParams.Lacunarity = 2.0f;
 	Request.NoiseParams.Persistence = 0.5f;
@@ -1583,7 +1574,6 @@ bool FVoxelNoiseGeneratorPerformanceTest::RunTest(const FString& Parameters)
 	Request.NoiseParams.NoiseType = EVoxelNoiseType::Perlin;
 	Request.NoiseParams.Seed = 12345;
 	Request.NoiseParams.Frequency = 0.013f; // Avoids integer grid positions
-	Request.NoiseParams.Amplitude = 1.0f;
 	Request.NoiseParams.Octaves = 4;
 	Request.NoiseParams.Lacunarity = 2.0f;
 	Request.NoiseParams.Persistence = 0.5f;

@@ -59,7 +59,6 @@ FVoxelFieldSampleContext FVoxelFieldSampleContext::FromConfiguration(const UVoxe
 		P.Octaves = 2;
 		P.Persistence = 0.5f;
 		P.Lacunarity = 2.0f;
-		P.Amplitude = 1.0f;
 	};
 	InitClimate(Ctx.TempNoiseParams);
 	InitClimate(Ctx.MoistureNoiseParams);
