@@ -4,17 +4,10 @@
 #include "VoxelMaterialRegistry.h"
 #include "VoxelBiomeSnapshot.h"
 
-TArray<FBiomeDefinition> FVoxelBiomeRegistry::Biomes;
-bool FVoxelBiomeRegistry::bInitialized = false;
-
-void FVoxelBiomeRegistry::EnsureInitialized()
+/** The default biomes, in BiomeID order. */
+static TArray<FBiomeDefinition> BuildDefaultBiomes()
 {
-	if (bInitialized)
-	{
-		return;
-	}
-
-	Biomes.Empty();
+	TArray<FBiomeDefinition> Biomes;
 	Biomes.Reserve(EVoxelBiome::Count);
 
 	// Define biomes with their climate ranges and materials
@@ -75,12 +68,20 @@ void FVoxelBiomeRegistry::EnsureInitialized()
 		EVoxelMaterial::Stone     // Deep
 	));
 
-	bInitialized = true;
+	return Biomes;
+}
+
+const TArray<FBiomeDefinition>& FVoxelBiomeRegistry::Definitions()
+{
+	// Built on the first query, once: C++ initialises a function-local static on one thread and the others wait for it,
+	// so first queries from several threads at once (the map's tile tasks) no longer build the array together (G83)
+	static const TArray<FBiomeDefinition> Biomes = BuildDefaultBiomes();
+	return Biomes;
 }
 
 const FBiomeDefinition* FVoxelBiomeRegistry::SelectBiome(float Temperature, float Moisture)
 {
-	EnsureInitialized();
+	const TArray<FBiomeDefinition>& Biomes = Definitions();
 
 	// Clamp values to valid range
 	Temperature = FMath::Clamp(Temperature, -1.0f, 1.0f);
@@ -111,7 +112,7 @@ uint8 FVoxelBiomeRegistry::SelectBiomeID(float Temperature, float Moisture)
 
 const FBiomeDefinition* FVoxelBiomeRegistry::GetBiome(uint8 BiomeID)
 {
-	EnsureInitialized();
+	const TArray<FBiomeDefinition>& Biomes = Definitions();
 
 	if (BiomeID < Biomes.Num())
 	{
@@ -123,19 +124,17 @@ const FBiomeDefinition* FVoxelBiomeRegistry::GetBiome(uint8 BiomeID)
 
 int32 FVoxelBiomeRegistry::GetBiomeCount()
 {
-	EnsureInitialized();
-	return Biomes.Num();
+	return Definitions().Num();
 }
 
 const TArray<FBiomeDefinition>& FVoxelBiomeRegistry::GetAllBiomes()
 {
-	EnsureInitialized();
-	return Biomes;
+	return Definitions();
 }
 
 FBiomeBlend FVoxelBiomeRegistry::GetBiomeBlend(float Temperature, float Moisture, float BlendWidth)
 {
-	EnsureInitialized();
+	const TArray<FBiomeDefinition>& Biomes = Definitions();
 
 	// Clamp values to valid range
 	Temperature = FMath::Clamp(Temperature, -1.0f, 1.0f);
@@ -221,8 +220,6 @@ FBiomeBlend FVoxelBiomeRegistry::GetBiomeBlend(float Temperature, float Moisture
 
 uint8 FVoxelBiomeRegistry::GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface, const FVoxelBlendDitherKey& Dither)
 {
-	EnsureInitialized();
-
 	// The dominant biome, or a dithered weighted pick in blend zones (FVoxelBiomeSnapshot::PickBlendIndex, G39)
 	const FBiomeDefinition* Biome = GetBiome(Blend.BiomeIDs[FVoxelBiomeSnapshot::PickBlendIndex(Blend, DepthBelowSurface, Dither)]);
 	return Biome ? Biome->GetMaterialAtDepth(DepthBelowSurface) : 0;
