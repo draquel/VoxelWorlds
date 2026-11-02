@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelChunkManager.h"
+#include "VoxelStreamingBenchmark.h"
 #include "VoxelChunkManagerPrivate.h"
 #include "VoxelStreaming.h"
 #include "VoxelSeamRegistry.h"
@@ -645,6 +646,8 @@ UVoxelChunkManager::UVoxelChunkManager()
 
 	FarCompressResults = MakeShared<FFarCompressResultQueue, ESPMode::ThreadSafe>();
 }
+
+UVoxelChunkManager::UVoxelChunkManager(FVTableHelper& Helper) : Super(Helper) {}
 
 // Defaulted here (not in the header) so ~TUniquePtr<FVoxelSeamRegistry> sees the complete type.
 UVoxelChunkManager::~UVoxelChunkManager() = default;

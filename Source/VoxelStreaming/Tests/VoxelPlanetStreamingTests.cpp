@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Testing/VoxelTestChunkWorld.h"
+#include "VoxelSurfaceQuery.h"
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"

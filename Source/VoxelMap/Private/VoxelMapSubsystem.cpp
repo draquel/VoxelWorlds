@@ -3,6 +3,7 @@
 #include "VoxelMapSubsystem.h"
 #include "VoxelMap.h"
 #include "VoxelChunkManager.h"
+#include "VoxelSeaSurface.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelBiomeRegistry.h"

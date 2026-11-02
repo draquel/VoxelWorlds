@@ -6,6 +6,7 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "VoxelScatterManager.h"
+#include "VoxelScatterExtraction.h"
 #include "VoxelScatterTypes.h"
 #include "VoxelWorldConfiguration.h"
 #include "IVoxelWorldMode.h"

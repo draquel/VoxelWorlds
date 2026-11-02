@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelScatterManager.h"
+#include "VoxelScatterExtraction.h"
 #include "VoxelSurfaceQuery.h"
 #include "VoxelScatterRenderer.h"
 #include "VoxelScatterConfiguration.h"
