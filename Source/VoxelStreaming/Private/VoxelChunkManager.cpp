@@ -1660,9 +1660,7 @@ void UVoxelChunkManager::Shutdown()
 	}
 
 	// Clear water tile state
-	WaterTiles.Empty();
-	DirtyWaterTileQueue.Empty();
-	DirtyWaterTileSet.Empty();
+	WaterTiles.Reset();
 
 	// Clear all chunks, water tiles, and seam meshes from renderer
 	if (MeshRenderer)
@@ -7678,26 +7676,13 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 	bool bAnyWater = FVoxelWaterMesher::BuildColumnMask(
 		EditMerged.IsValid() ? *EditMerged : State->Descriptor.GetVoxelDataForRead(), CS, PartialMask);
 
-	FIntVector2 TileCoord(ChunkCoord.X, ChunkCoord.Y);
-
 	if (bAnyWater)
 	{
 		// A new tile: the far field's edge patches over this column hide their sea under it (WM-MP1), so they re-select
 		// (the far field re-reads the window on a chunk-state version change).
-		const bool bNewTile = !WaterTiles.Contains(TileCoord);
-		FWaterTileState& Tile = WaterTiles.FindOrAdd(TileCoord);
-		if (bNewTile)
+		if (WaterTiles.Contribute(ChunkCoord, MoveTemp(PartialMask)))
 		{
 			++ChunkStateVersion;
-		}
-		Tile.PartialMasks.Add(ChunkCoord.Z, MoveTemp(PartialMask));
-
-		// Mark dirty and queue
-		Tile.bDirty = true;
-		if (!DirtyWaterTileSet.Contains(TileCoord))
-		{
-			DirtyWaterTileQueue.Add(TileCoord);
-			DirtyWaterTileSet.Add(TileCoord);
 		}
 	}
 	else
@@ -7711,7 +7696,7 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 
 bool UVoxelChunkManager::HasWaterTile(const FIntPoint& Column) const
 {
-	return WaterTiles.Contains(FIntVector2(Column.X, Column.Y));
+	return WaterTiles.Has(Column);
 }
 
 bool UVoxelChunkManager::GetWaterTileColumn(const FVector& WorldPosition, TArray<int32>& OutWetChunkZ) const
@@ -7721,24 +7706,7 @@ bool UVoxelChunkManager::GetWaterTileColumn(const FVector& WorldPosition, TArray
 	{
 		return false;
 	}
-	const int32 CS = Configuration->ChunkSize;
-	const FIntVector Voxel = FVoxelCoordinates::WorldToVoxel(WorldPosition - Configuration->WorldOrigin, Configuration->VoxelSize);
-	const FIntVector2 TileCoord(FMath::FloorToInt32(double(Voxel.X) / CS), FMath::FloorToInt32(double(Voxel.Y) / CS));
-	const FWaterTileState* Tile = WaterTiles.Find(TileCoord);
-	if (!Tile)
-	{
-		return false;
-	}
-	const int32 Column = (Voxel.X - TileCoord.X * CS) + (Voxel.Y - TileCoord.Y * CS) * CS;
-	for (const TPair<int32, TArray<bool>>& Layer : Tile->PartialMasks)
-	{
-		if (Layer.Value.IsValidIndex(Column) && Layer.Value[Column])
-		{
-			OutWetChunkZ.Add(Layer.Key);
-		}
-	}
-	OutWetChunkZ.Sort();
-	return true;
+	return WaterTiles.GetColumn(WorldPosition, GetWaterTileGrid(), OutWetChunkZ);
 }
 
 void UVoxelChunkManager::AuditWaterTiles(int32 MaxList, const FIntPoint& DetailColumn)
@@ -7772,7 +7740,7 @@ void UVoxelChunkManager::AuditWaterTiles(int32 MaxList, const FIntPoint& DetailC
 			Columns.Add(FIntVector2(Pair.Key.X, Pair.Key.Y));
 		}
 	}
-	for (const TPair<FIntVector2, FWaterTileState>& Pair : WaterTiles)
+	for (const TPair<FIntVector2, FVoxelWaterTiles::FTile>& Pair : WaterTiles.GetTiles())
 	{
 		Columns.Add(Pair.Key);
 	}
@@ -7783,7 +7751,7 @@ void UVoxelChunkManager::AuditWaterTiles(int32 MaxList, const FIntPoint& DetailC
 	{
 		FColumnAudit A;
 		A.Tile = TileCoord;
-		const FWaterTileState* Tile = WaterTiles.Find(TileCoord);
+		const FVoxelWaterTiles::FTile* Tile = WaterTiles.Find(TileCoord);
 		A.bTile = Tile != nullptr;
 		TArray<bool> Wet;
 		Wet.SetNumZeroed(CS * CS);
@@ -7845,13 +7813,13 @@ void UVoxelChunkManager::AuditWaterTiles(int32 MaxList, const FIntPoint& DetailC
 		const double CY = Configuration->WorldOrigin.Y + (A.Tile.Y + 0.5) * ChunkWorld;
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("  chunk column (%d, %d) centre (%.0f, %.0f): tile %s; wet %d, under the plane %d, missing %d, extra %d"),
 			A.Tile.X, A.Tile.Y, CX, CY, A.bTile ? TEXT("yes") : TEXT("NO"), A.Wet, A.ShouldBeWet, A.Missing, A.Extra);
-		const FWaterTileState* Tile = WaterTiles.Find(A.Tile);
+		const FVoxelWaterTiles::FTile* Tile = WaterTiles.Find(A.Tile);
 		if (Tile && MeshRenderer)
 		{
 			FString RendererLine;
 			MeshRenderer->GetWaterTileDrawInfo(A.Tile, RendererLine);
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("    tile dirty %s, in the dirty queue %s; renderer: %s"),
-				Tile->bDirty ? TEXT("yes") : TEXT("no"), DirtyWaterTileSet.Contains(A.Tile) ? TEXT("yes") : TEXT("no"), *RendererLine);
+				Tile->bDirty ? TEXT("yes") : TEXT("no"), WaterTiles.IsQueued(A.Tile) ? TEXT("yes") : TEXT("no"), *RendererLine);
 		}
 		for (TPair<FIntVector, FVoxelChunkState>& Pair : ChunkStates)
 		{
@@ -7930,54 +7898,17 @@ void UVoxelChunkManager::AuditWaterTiles(int32 MaxList, const FIntPoint& DetailC
 
 int32 UVoxelChunkManager::ResendWaterTiles()
 {
-	for (TPair<FIntVector2, FWaterTileState>& Tile : WaterTiles)
-	{
-		Tile.Value.bDirty = true;
-		if (!DirtyWaterTileSet.Contains(Tile.Key))
-		{
-			DirtyWaterTileQueue.Add(Tile.Key);
-			DirtyWaterTileSet.Add(Tile.Key);
-		}
-	}
+	WaterTiles.MarkAllDirty();
 	return WaterTiles.Num();
 }
 
 void UVoxelChunkManager::RemoveWaterTileContribution(const FIntVector& ChunkCoord)
 {
-	FIntVector2 TileCoord(ChunkCoord.X, ChunkCoord.Y);
-	FWaterTileState* Tile = WaterTiles.Find(TileCoord);
-	if (!Tile)
+	// A tile that goes with its last contributor: the far field's edge patches over this column drew no sea under it
+	// (WM-MP1): a chunk-state version change has them re-select.
+	if (WaterTiles.Remove(ChunkCoord, MeshRenderer))
 	{
-		return;
-	}
-
-	if (Tile->PartialMasks.Remove(ChunkCoord.Z) == 0)
-	{
-		// This chunk contributed nothing — the tile's combined mask is unchanged
-		return;
-	}
-
-	if (Tile->PartialMasks.IsEmpty())
-	{
-		// No more contributors — remove the tile entirely. The far field's edge patches over this column drew no sea
-		// under it (WM-MP1): a chunk-state version change has them re-select.
-		if (MeshRenderer)
-		{
-			MeshRenderer->RemoveWaterTile(TileCoord);
-		}
-		WaterTiles.Remove(TileCoord);
-		DirtyWaterTileSet.Remove(TileCoord);
 		++ChunkStateVersion;
-	}
-	else
-	{
-		// Still has contributors — mark dirty for re-evaluation
-		Tile->bDirty = true;
-		if (!DirtyWaterTileSet.Contains(TileCoord))
-		{
-			DirtyWaterTileQueue.Add(TileCoord);
-			DirtyWaterTileSet.Add(TileCoord);
-		}
 	}
 }
 
@@ -8008,15 +7939,7 @@ void UVoxelChunkManager::RecoverLostRenderData()
 		SubmitSeamOwnerBucket(Owner);
 	}
 
-	for (TPair<FIntVector2, FWaterTileState>& Tile : WaterTiles)
-	{
-		Tile.Value.bDirty = true;
-		if (!DirtyWaterTileSet.Contains(Tile.Key))
-		{
-			DirtyWaterTileQueue.Add(Tile.Key);
-			DirtyWaterTileSet.Add(Tile.Key);
-		}
-	}
+	WaterTiles.MarkAllDirty();
 
 	UE_LOG(LogVoxelStreaming, Log, TEXT("Renderer lost its geometry (scene proxy recreated): re-meshing %d chunk(s), re-sending %d seam bucket(s) and %d water tile(s)"),
 		Remeshed, SeamOwners.Num(), WaterTiles.Num());
@@ -8028,62 +7951,17 @@ void UVoxelChunkManager::ProcessDirtyWaterTiles(int32 MaxTilesPerFrame)
 	{
 		return;
 	}
+	WaterTiles.ProcessDirty(MaxTilesPerFrame, GetWaterTileGrid(), *MeshRenderer);
+}
 
-	int32 Processed = 0;
-	while (DirtyWaterTileQueue.Num() > 0 && Processed < MaxTilesPerFrame)
-	{
-		FIntVector2 TileCoord = DirtyWaterTileQueue.Last();
-		DirtyWaterTileQueue.Pop();
-		DirtyWaterTileSet.Remove(TileCoord);
-
-		FWaterTileState* Tile = WaterTiles.Find(TileCoord);
-		if (!Tile || !Tile->bDirty)
-		{
-			continue;
-		}
-		Tile->bDirty = false;
-
-		// Combine all partial masks via OR
-		const int32 CS = Configuration->ChunkSize;
-		TArray<bool> CombinedMask;
-		CombinedMask.SetNumZeroed(CS * CS);
-
-		for (auto& Pair : Tile->PartialMasks)
-		{
-			for (int32 i = 0; i < CS * CS; i++)
-			{
-				if (Pair.Value[i])
-				{
-					CombinedMask[i] = true;
-				}
-			}
-		}
-
-		// Generate water mesh from combined mask
-		const float ChunkExtent = static_cast<float>(CS) * Configuration->VoxelSize;
-		const FVector TileWorldPos(
-			Configuration->WorldOrigin.X + TileCoord.X * ChunkExtent,
-			Configuration->WorldOrigin.Y + TileCoord.Y * ChunkExtent,
-			Configuration->WorldOrigin.Z);
-
-		FChunkMeshData WaterMeshData;
-		FVoxelWaterMesher::GenerateWaterMeshFromMask(
-			CombinedMask, CS, Configuration->VoxelSize,
-			TileWorldPos, Configuration->WaterLevel, WaterMeshData);
-
-		if (WaterMeshData.IsValid())
-		{
-			MeshRenderer->UpdateWaterTileMesh(TileCoord, WaterMeshData);
-			UE_LOG(LogVoxelStreaming, Log, TEXT("Water tile (%d,%d): mesh submitted — %d verts, %d tris"),
-				TileCoord.X, TileCoord.Y,
-				WaterMeshData.GetVertexCount(), WaterMeshData.GetTriangleCount());
-		}
-		else
-		{
-			MeshRenderer->RemoveWaterTile(TileCoord);
-		}
-		++Processed;
-	}
+FVoxelWaterTileGrid UVoxelChunkManager::GetWaterTileGrid() const
+{
+	FVoxelWaterTileGrid Grid;
+	Grid.ChunkSize = Configuration->ChunkSize;
+	Grid.VoxelSize = Configuration->VoxelSize;
+	Grid.WorldOrigin = Configuration->WorldOrigin;
+	Grid.WaterLevel = Configuration->WaterLevel;
+	return Grid;
 }
 
 // ==================== Queue Management ====================
