@@ -28,6 +28,8 @@
 #include "DynamicRHI.h"
 #include "ProfilingDebugging/MiscTrace.h"
 #include "VoxelResidencyStats.h"
+#include "VoxelStreaming.h"
+#include "Engine/Engine.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelBench, Log, All);
 
@@ -1157,3 +1159,289 @@ void FVoxelStreamingBenchmark::WriteReport()
 		*Config.Tag, TraverseDur, CatchUpDurationSec, PeakMesh, PeakGen, PeakUnload,
 		Percentile(FrameMsArr, 0.95f), Percentile(TotalMsArr, 0.95f), Thrash, ThrashLOD, ThrashDirty, ThrashOther, UnloadLagMean, UnloadLagMax, UnloadDistMean, UnloadDistMax, *ReportCsvPath);
 }
+
+// ==================== voxel.Bench.Run ====================
+
+// Console: voxel.Bench.Run [tag] [velocityUU] [distanceUU] [key=value ...]
+// Starts a deterministic traverse from the current view position and writes a report under
+// Saved/VoxelBench/. Optional key=value arguments (':' separates components and '/' separates route
+// points, because -ExecCmds splits commands on commas):
+//   dir=X:Y[:Z]            straight-path direction (default +X); dir=up: local up at the start (a climb)
+//   climb=Lat:Lon[:Alt]    planets: climb along local up from Alt (default 500) over the ground at a latitude and
+//                          longitude (spherical Phase 6; the distance is how high it climbs); on a heightmap world
+//                          climb=X:Y[:Alt] (world modes review WM-MP11), straight up from the ground at (X, Y)
+//   descend=Lat:Lon:Alt    planets: descend along local down from Alt over the ground (spherical Phase 6, WM-BP10:
+//                          through the voxel cut-over; the distance is how far down, at most Alt - 300); on a heightmap
+//                          world descend=X:Y:Alt
+//   start=X:Y[:Z]          start point instead of the player view; Z defaults to 500 above the surface
+//   route=X:Y[:Z]/X:Y/...  fly a polyline from the start through these points (distance 0 = whole route)
+//   orbit=CX:CY:R          fly a circle around (CX, CY) (distance 0 = one lap)
+//   follow=Alt             fly Alt uu above the analytic surface (heightmap world modes)
+//   warmup=Sec             max settle time before the traverse (record how long a world takes to build)
+//   catchup=Sec            max drain time after the traverse
+//   build=Label            free-form build label for the report (the sweep script passes the commit)
+static bool ParseBenchVector(const FString& Value, FVector& Out, bool& bOutHasZ)
+{
+	TArray<FString> Parts;
+	Value.ParseIntoArray(Parts, TEXT(":"), true);
+	if (Parts.Num() < 2 || Parts.Num() > 3)
+	{
+		return false;
+	}
+	Out = FVector(FCString::Atod(*Parts[0]), FCString::Atod(*Parts[1]), Parts.Num() == 3 ? FCString::Atod(*Parts[2]) : 0.0);
+	bOutHasZ = Parts.Num() == 3;
+	return true;
+}
+
+void FVoxelBenchConfig::ParseArgs(const TArray<FString>& Args, UVoxelChunkManager& Manager, UWorld& World, FVoxelBenchConfig& OutConfig)
+{
+	FVoxelBenchConfig& Config = OutConfig;
+	UVoxelChunkManager* CM = &Manager;
+	UWorld* TargetWorld = &World;
+	TArray<FString> Positional;
+	bool bHasStart = false, bStartHasZ = false, bDistanceGiven = false, bHasGreatCircle = false;
+	bool bHasClimb = false, bDirUp = false;
+	FVector StartArg = FVector::ZeroVector;
+	for (const FString& Arg : Args)
+	{
+		FString Key, Value;
+		if (!Arg.Split(TEXT("="), &Key, &Value))
+		{
+			Positional.Add(Arg);
+			continue;
+		}
+		Key = Key.ToLower();
+		bool bHasZ = false;
+		FVector Vec;
+		if (Key == TEXT("dir") && Value.Equals(TEXT("up"), ESearchCase::IgnoreCase))
+		{
+			bDirUp = true; // local up at the start, resolved once the start is known
+		}
+		else if (Key == TEXT("dir") && ParseBenchVector(Value, Vec, bHasZ))
+		{
+			Config.Direction = Vec;
+		}
+		else if (Key == TEXT("climb"))
+		{
+			// A climb along local up (spherical Phase 6, WM-BP3): from Alt over the generated ground at Lat, Lon; on a
+			// heightmap world (WM-MP11) straight up from the ground at (X, Y).
+			TArray<FString> Parts;
+			Value.ParseIntoArray(Parts, TEXT(":"), true);
+			const UVoxelWorldConfiguration* Cfg = CM->GetConfiguration();
+			if (Parts.Num() >= 2 && Cfg && Cfg->WorldMode == EWorldMode::SphericalPlanet)
+			{
+				const double Lat = FCString::Atod(*Parts[0]);
+				const double Lon = FCString::Atod(*Parts[1]);
+				const FVector Direction = FVoxelCubeSphere::LatLonToDirection(Lat, Lon);
+				const FVector Ground = CM->GetGeneratedSurfacePoint(Cfg->WorldOrigin + Direction * Cfg->WorldRadius);
+				FVoxelStreamingBenchmark::MakeClimb(Config, Cfg->WorldOrigin, Ground, Parts.Num() > 2 ? FCString::Atof(*Parts[2]) : 500.0f,
+					FVector2D(Lat, Lon));
+				bHasClimb = true;
+			}
+			else if (Parts.Num() >= 2 && Cfg)
+			{
+				const double X = FCString::Atod(*Parts[0]);
+				const double Y = FCString::Atod(*Parts[1]);
+				const FVector Ground(X, Y, CM->GetGeneratedSurfacePoint(FVector(X, Y, 0.0)).Z);
+				FVoxelStreamingBenchmark::MakeClimbAlong(Config, FVector::UpVector, Ground, Parts.Num() > 2 ? FCString::Atof(*Parts[2]) : 500.0f,
+					FVector2D(X, Y));
+				bHasClimb = true;
+			}
+			else
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: climb=Lat:Lon[:Alt] (a planet) or climb=X:Y[:Alt] (a heightmap world) needs two values"));
+			}
+		}
+		else if (Key == TEXT("descend"))
+		{
+			// A descent along local down (spherical Phase 6, WM-BP10): from Alt over the generated ground at Lat, Lon; on a
+			// heightmap world (WM-MP11) straight down onto the ground at (X, Y).
+			TArray<FString> Parts;
+			Value.ParseIntoArray(Parts, TEXT(":"), true);
+			const UVoxelWorldConfiguration* Cfg = CM->GetConfiguration();
+			if (Parts.Num() >= 3 && Cfg && Cfg->WorldMode == EWorldMode::SphericalPlanet)
+			{
+				const double Lat = FCString::Atod(*Parts[0]);
+				const double Lon = FCString::Atod(*Parts[1]);
+				const FVector Direction = FVoxelCubeSphere::LatLonToDirection(Lat, Lon);
+				const FVector Ground = CM->GetGeneratedSurfacePoint(Cfg->WorldOrigin + Direction * Cfg->WorldRadius);
+				FVoxelStreamingBenchmark::MakeDescent(Config, Cfg->WorldOrigin, Ground, FCString::Atof(*Parts[2]), FVector2D(Lat, Lon));
+				bHasClimb = true;
+			}
+			else if (Parts.Num() >= 3 && Cfg)
+			{
+				const double X = FCString::Atod(*Parts[0]);
+				const double Y = FCString::Atod(*Parts[1]);
+				const FVector Ground(X, Y, CM->GetGeneratedSurfacePoint(FVector(X, Y, 0.0)).Z);
+				FVoxelStreamingBenchmark::MakeDescentAlong(Config, FVector::UpVector, Ground, FCString::Atof(*Parts[2]), FVector2D(X, Y));
+				bHasClimb = true;
+			}
+			else
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: descend=Lat:Lon:Alt (a planet) or descend=X:Y:Alt (a heightmap world) needs three values"));
+			}
+		}
+		else if (Key == TEXT("start") && ParseBenchVector(Value, StartArg, bStartHasZ))
+		{
+			bHasStart = true;
+		}
+		else if (Key == TEXT("route"))
+		{
+			TArray<FString> Points;
+			Value.ParseIntoArray(Points, TEXT("/"), true);
+			for (const FString& Point : Points)
+			{
+				if (ParseBenchVector(Point, Vec, bHasZ))
+				{
+					// No Z given: a sentinel, replaced by the start altitude once the start is known.
+					Config.RoutePoints.Add(FVector(Vec.X, Vec.Y, bHasZ ? Vec.Z : TNumericLimits<double>::Max()));
+				}
+			}
+			Config.PathType = EVoxelBenchPath::Route;
+		}
+		else if (Key == TEXT("orbit"))
+		{
+			TArray<FString> Parts;
+			Value.ParseIntoArray(Parts, TEXT(":"), true);
+			if (Parts.Num() == 3)
+			{
+				Config.OrbitCenter = FVector2D(FCString::Atod(*Parts[0]), FCString::Atod(*Parts[1]));
+				Config.OrbitRadius = FCString::Atof(*Parts[2]);
+				Config.PathType = EVoxelBenchPath::Orbit;
+			}
+		}
+		else if (Key == TEXT("gc"))
+		{
+			// A planet's great circle (spherical Phase 4, SP-I4): latitude, longitude, heading from north, flight altitude.
+			TArray<FString> Parts;
+			Value.ParseIntoArray(Parts, TEXT(":"), true);
+			const UVoxelWorldConfiguration* Cfg = CM->GetConfiguration();
+			if (Parts.Num() >= 3 && Cfg && Cfg->WorldMode == EWorldMode::SphericalPlanet)
+			{
+				FVoxelStreamingBenchmark::MakeGreatCircle(Config, Cfg->WorldOrigin, Cfg->WorldRadius, FCString::Atod(*Parts[0]),
+					FCString::Atod(*Parts[1]), FCString::Atod(*Parts[2]), Parts.Num() > 3 ? FCString::Atof(*Parts[3]) : 500.0f);
+				bHasGreatCircle = true;
+			}
+			else
+			{
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: gc=Lat:Lon:Heading[:Alt] needs a planet world and three values"));
+			}
+		}
+		else if (Key == TEXT("follow")) { Config.FollowTerrainAltitude = FCString::Atof(*Value); }
+		else if (Key == TEXT("warmup")) { Config.WarmupTimeoutSec = FCString::Atof(*Value); }
+		else if (Key == TEXT("catchup")) { Config.CatchUpTimeoutSec = FCString::Atof(*Value); }
+		else if (Key == TEXT("build")) { Config.BuildLabel = Value; }
+		else
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: ignoring unrecognised argument '%s'"), *Arg);
+		}
+	}
+	if (Positional.Num() > 0) { Config.Tag = Positional[0]; }
+	if (Positional.Num() > 1) { Config.VelocityUU = FCString::Atof(*Positional[1]); }
+	if (Positional.Num() > 2) { Config.TraverseDistance = FCString::Atof(*Positional[2]); bDistanceGiven = true; }
+	// Route and orbit default to the whole path; FVoxelStreamingBenchmark resolves <= 0 to its length.
+	if (Config.PathType != EVoxelBenchPath::Straight && !bDistanceGiven)
+	{
+		Config.TraverseDistance = 0.0f;
+	}
+	// A descent stops 300 uu over the ground it started over.
+	if (Config.bDescend)
+	{
+		const float MaxDescent = FMath::Max(Config.ClimbLatLonAltitude.Z - 300.0, 0.0);
+		if (!bDistanceGiven || Config.TraverseDistance > MaxDescent)
+		{
+			Config.TraverseDistance = MaxDescent;
+		}
+	}
+
+	// Start: an explicit start= (Z defaults to 500 above the analytic surface), else the player view
+	// (on the ground, so the leading edge stays at LOD0), else the chunk-manager owner.
+	FVector Start = FVector::ZeroVector;
+	if (bHasGreatCircle || bHasClimb)
+	{
+		Start = Config.StartPosition; // the great circle's or the climb's own start
+	}
+	else if (bHasStart)
+	{
+		Start = StartArg;
+		if (!bStartHasZ)
+		{
+			// 500 above the analytic surface (along local up on a planet).
+			if (CM->GetWorldBounds().Shape == EVoxelWorldBoundsShape::Shell)
+			{
+				const FVector Surface = CM->GetGeneratedSurfacePoint(Start);
+				Start = Surface + CM->GetUpVectorAt(Surface) * 500.0;
+			}
+			else
+			{
+				Start.Z = CM->GetGeneratedSurfacePoint(FVector(Start.X, Start.Y, 0.0)).Z + 500.0;
+			}
+		}
+	}
+	else if (APlayerController* PC = TargetWorld->GetFirstPlayerController())
+	{
+		FVector Loc; FRotator Rot;
+		PC->GetPlayerViewPoint(Loc, Rot);
+		Start = Loc;
+	}
+	if (!bHasStart && Start.IsNearlyZero())
+	{
+		if (const AActor* Owner = CM->GetOwner()) { Start = Owner->GetActorLocation(); }
+		Start.Z += 500.0f; // keep slightly above the surface
+	}
+	Config.StartPosition = Start;
+	if (bDirUp && !bHasClimb)
+	{
+		// dir=up: a climb along local up at the start (radial on a planet, +Z on a heightmap world).
+		Config.Direction = CM->GetUpVectorAt(Start);
+		Config.PathType = EVoxelBenchPath::Straight;
+		Config.bClimb = true;
+		Config.ClimbLatLonAltitude = FVector(-999.0, -999.0, 0.0); // no latitude: a start= point
+	}
+	for (FVector& Point : Config.RoutePoints)
+	{
+		if (Point.Z == TNumericLimits<double>::Max()) { Point.Z = Start.Z; }
+	}
+}
+
+static FAutoConsoleCommandWithWorldAndArgs GVoxelBenchRunCmd(
+	TEXT("voxel.Bench.Run"),
+	TEXT("Run a streaming benchmark: voxel.Bench.Run [tag] [velocityUU] [distanceUU] [dir=X:Y[:Z]|up] [start=X:Y[:Z]] ")
+	TEXT("[route=X:Y[:Z]/X:Y[:Z]/...] [orbit=CX:CY:R] [gc=Lat:Lon:Heading[:Alt]] [climb=Lat:Lon[:Alt] | climb=X:Y[:Alt]] [descend=Lat:Lon:Alt | descend=X:Y:Alt] [follow=AltUU] [warmup=Sec] [catchup=Sec] [build=Label]"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		// Target the ticking game/PIE world, not the editor world the command may arrive on.
+		UWorld* TargetWorld = (World && (World->WorldType == EWorldType::PIE || World->WorldType == EWorldType::Game)) ? World : nullptr;
+		if (!TargetWorld && GEngine)
+		{
+			for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+			{
+				if (Ctx.World() && (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game))
+				{
+					TargetWorld = Ctx.World();
+					break;
+				}
+			}
+		}
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+
+		UVoxelChunkManager* CM = UVoxelChunkManager::Find(TargetWorld, /*bRequireInitialized*/ false);
+		if (!CM)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run: no UVoxelChunkManager found in the game world"));
+			return;
+		}
+
+		FVoxelBenchConfig Config;
+		FVoxelBenchConfig::ParseArgs(Args, *CM, *TargetWorld, Config);
+		const FVector Start = Config.StartPosition;
+
+		CM->StartBenchmark(Config);
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Bench.Run '%s': world=%s start=(%.0f,%.0f,%.0f) vel=%.0f dist=%.0f path=%d follow=%.0f"),
+			*Config.Tag, *TargetWorld->GetName(), Start.X, Start.Y, Start.Z, Config.VelocityUU, Config.TraverseDistance,
+			static_cast<int32>(Config.PathType), Config.FollowTerrainAltitude);
+	}));
