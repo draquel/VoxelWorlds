@@ -5,6 +5,10 @@
 
 #include "VoxelChunkManager.h"
 #include "VoxelStreaming.h"
+#include "Diagnostics/VoxelConsoleHelpers.h"
+#include "VoxelTreeInjector.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/Pawn.h"
 #include "UObject/UObjectIterator.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
@@ -149,4 +153,62 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelAuditResidencyCmd(
 		{
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Stream.AuditResidency: no UVoxelChunkManager found"));
 		}
+	}));
+
+// Console: voxel.Trees.List [metres=40]
+// A cubic world's standing voxel trees near the player (code review CR4, FW-30: was the game module's vox.Trees, which runs
+// this now): each tree's template, base and trunk / leaf blocks left.
+static FAutoConsoleCommandWithWorldAndArgs GVoxelTreesListCmd(
+	TEXT("voxel.Trees.List"),
+	TEXT("List a cubic world's standing voxel trees near the player: voxel.Trees.List [metres=40] (template, base, trunk and leaf blocks)"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		UWorld* World = VoxelEditAuditHelpers::FindGameWorld(InWorld);
+		APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+		APawn* Player = PC ? PC->GetPawn() : nullptr;
+		UVoxelChunkManager* ChunkMgr = World ? UVoxelChunkManager::Find(World) : nullptr;
+		if (!Player || !ChunkMgr)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Trees.List: need a player pawn and a chunk manager."));
+			return;
+		}
+		if (!ChunkMgr->HasVoxelTrees())
+		{
+			UE_LOG(LogVoxelStreaming, Display, TEXT("voxel.Trees.List: this world has no voxel trees (cubic meshing, TreeMode VoxelData or Both, templates)."));
+			return;
+		}
+		const float Metres = Args.Num() >= 1 ? FCString::Atof(*Args[0]) : 40.f;
+		TArray<FVoxelTreeInstance> Trees;
+		ChunkMgr->FindVoxelTreesNear(Player->GetActorLocation(), Metres * 100.f, Trees);
+		UE_LOG(LogVoxelStreaming, Display, TEXT("voxel.Trees.List: %d standing voxel tree(s) within %.0f m:"), Trees.Num(), Metres);
+		TArray<FVoxelTreeVoxel> Blocks;
+		for (int32 i = 0; i < FMath::Min(Trees.Num(), 20); ++i)
+		{
+			ChunkMgr->GetVoxelTreeBlocks(Trees[i], Blocks);
+			const int32 Trunk = Blocks.FilterByPredicate([](const FVoxelTreeVoxel& B) { return B.bTrunk; }).Num();
+			const FVector Base = ChunkMgr->GlobalVoxelToWorldCentre(Trees[i].BaseVoxel);
+			UE_LOG(LogVoxelStreaming, Display, TEXT("  %d. template %d at %s (base voxel %s), %.0f m: %d trunk, %d leaf blocks"), i + 1,
+				Trees[i].TemplateIndex, *Base.ToCompactString(), *Trees[i].BaseVoxel.ToString(), FVector::Dist2D(Base, Player->GetActorLocation()) / 100.f,
+				Trunk, Blocks.Num() - Trunk);
+		}
+	}));
+
+// Console: voxel.Stream.Enabled 0|1
+// Pause or resume a game world's chunk streaming (UVoxelChunkManager::SetStreamingEnabled; code review CR4, FW-30: the
+// plugin's own switch for what vox.Freeze's streaming flag does).
+static FAutoConsoleCommandWithWorldAndArgs GVoxelStreamEnabledCmd(
+	TEXT("voxel.Stream.Enabled"),
+	TEXT("Pause (0) or resume (1) the game world's chunk streaming: voxel.Stream.Enabled 0|1"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		UWorld* World = VoxelEditAuditHelpers::FindGameWorld(InWorld);
+		UVoxelChunkManager* ChunkMgr = World ? UVoxelChunkManager::Find(World) : nullptr;
+		if (!ChunkMgr || Args.Num() < 1)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Stream.Enabled: usage voxel.Stream.Enabled 0|1 (needs a game world with a chunk manager)"));
+			return;
+		}
+		const bool bEnabled = FCString::Atoi(*Args[0]) != 0;
+		ChunkMgr->SetStreamingEnabled(bEnabled);
+		UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.Stream.Enabled: streaming %s."), bEnabled ? TEXT("on") : TEXT("paused"));
 	}));
