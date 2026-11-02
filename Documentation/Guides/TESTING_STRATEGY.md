@@ -1,416 +1,175 @@
 # Testing Strategy
 
-Comprehensive testing approach for VoxelWorlds plugin.
+> State as of 2026-11-02 (code review CR5).
 
-## Testing Layers
+How the project's automation tests are organised and run: the headless suite, the GPU and render-proxy tests it
+cannot run, the in-editor gate that runs them, the mesh digest, the shared fixtures, and the traps the code review
+met. Which gate a change needs is decided in `Scripts/qa/README.md`; this guide does not repeat it.
 
-### 1. Unit Tests
-Test individual components in isolation.
+## The suite
 
-### 2. Integration Tests
-Test interaction between modules.
+Every test is an Unreal automation test (`IMPLEMENT_SIMPLE_AUTOMATION_TEST` and friends), compiled only in
+development builds (`WITH_DEV_AUTOMATION_TESTS`; ItemInventoryPlugin, EquipmentPlugin and some of VoxelCharacterPlugin's
+use `WITH_AUTOMATION_TESTS`). The project's test roots:
 
-### 3. Performance Tests
-Validate performance targets.
+| Root | Plugin |
+|---|---|
+| `VoxelWorlds.*` | VoxelWorlds (every module), and VoxelWorldPOI under `VoxelWorlds.POI.*` |
+| `VoxelCharacter.*` | VoxelCharacterPlugin |
+| `Dungeon.*` | ProceduralDungeonPlugin |
+| `ItemInventory.*` | ItemInventoryPlugin (crafting and storage included) |
+| `Equipment.*` | EquipmentPlugin |
+| `Interaction.Flow.*`, `Interaction.WorldItem.*` | InteractionPlugin |
+| `VoxelWorldSave.*` | VoxelWorldSave |
+| `WorldClock.*` | WorldClockPlugin |
 
-### 4. Visual Tests
-Verify rendering quality.
+The headless run is `Scripts/qa/run_suite.ps1 [-Tag t] [-Filter roots]`: with the editor closed it runs
 
----
-
-## Unit Tests
-
-### VoxelCore Module
-
-**Test: FVoxelData Packing**
-```cpp
-TEST(VoxelCore, VoxelDataSize) {
-    EXPECT_EQ(sizeof(FVoxelData), 4);
-}
-
-TEST(VoxelCore, VoxelDataPacking) {
-    FVoxelData Data;
-    Data.MaterialID = 42;
-    Data.Density = 127;
-    Data.BiomeID = 3;
-    Data.Metadata = 0xFF;
-    
-    EXPECT_EQ(Data.MaterialID, 42);
-    EXPECT_EQ(Data.Density, 127);
-    EXPECT_EQ(Data.BiomeID, 3);
-    EXPECT_EQ(Data.Metadata, 0xFF);
-}
+```
+UnrealEditor-Cmd.exe VoxelEngine.uproject -ExecCmds="Automation RunTests <filter>; Quit" -nullrhi -unattended -nopause -NoSound -abslog=Saved/Logs/qa_<tag>.log
 ```
 
-**Test: FChunkDescriptor**
-```cpp
-TEST(VoxelCore, ChunkDescriptorMemory) {
-    FChunkDescriptor Chunk;
-    Chunk.ChunkSize = 32;
-    Chunk.VoxelData.SetNum(32 * 32 * 32);
-    
-    size_t ExpectedSize = 32 * 32 * 32 * sizeof(FVoxelData);
-    EXPECT_EQ(Chunk.VoxelData.Num() * sizeof(FVoxelData), ExpectedSize);
-}
+with the filter `Dungeon+Equipment+Interaction.Flow+Interaction.WorldItem+ItemInventory+VoxelCharacter+VoxelWorldSave+VoxelWorlds+WorldClock`,
+and prints the wall time, the result counts and every failure. The suite is about 747 tests (CR4 added
+`VoxelWorlds.Bench.ParseArgs` and `VoxelWorlds.Config.SettingsOverride` to 745) and takes about 12 minutes. The filter
+names `Interaction.Flow` and `Interaction.WorldItem` rather than `Interaction` because the bare root also catches an
+engine Metasound test. Use the D: engine (`D:\Program Files\Epic Games\UE_5.8`, or `UE_ENGINE_ROOT`) and never run the
+suite during a build. `logwarnings.py <before> <after>` compares two runs' warning kinds.
+
+A single root or test runs the same way with `-Filter` (for example `-Filter VoxelWorlds.Streaming.SeamRegistry`), or
+in a running editor from the console (`Automation RunTests <filter>`), the Session Frontend, or the `unreal-mcp`
+server's automation test toolset.
+
+## Where tests live
+
+Each module keeps its tests in a `Tests/` folder, in one of two places:
+
+- at the module root (`Source/<Module>/Tests/`): every VoxelWorlds module (`VoxelCore`, `VoxelGeneration`,
+  `VoxelLOD`, `VoxelMap`, `VoxelMeshing`, `VoxelNavigation`, `VoxelPCG`, `VoxelRendering`, `VoxelScatter`,
+  `VoxelStreaming`, `VoxelWorldsEditor`), InteractionPlugin, VoxelWorldPOI, VoxelWorldSave and WorldClockPlugin;
+- under `Private/Tests/`: EquipmentPlugin, ItemInventoryPlugin, ProceduralDungeonPlugin and VoxelCharacterPlugin.
+
+The code review recorded the split (FW-08 in `Documentation/CODE_REVIEW_PLAN.md` §9.3.10, one placement at the module
+root proposed); new tests follow the module's existing folder. A test file is named for what it covers
+(`VoxelSeamRegistryTests.cpp`, `VoxelEditRemeshTests.cpp`), and a test's name says the rule it pins, with the review ID
+in the file's comment (`VoxelWorlds.Streaming.EditRemesh.Plane`, G56/G57).
+
+The game module's `Source/VoxelEngine/Private/Testing/` holds no tests, only the world collector (below).
+
+## Tests that need a GPU or a render scene
+
+Under `-nullrhi` there is no GPU to dispatch to and components create no scene proxy. These tests check
+`GUsingNullRHI`, log `Skipped: ...` with `AddInfo` and **return success**, so a headless run reports them green
+without running them:
+
+| Test | Needs | In the editor gate |
+|---|---|---|
+| `VoxelWorlds.Generation.GPUNoiseGeneratorAsync` | GPU generation | yes |
+| `VoxelWorlds.Generation.GPUvsCPUMaterialParity` | GPU generation | yes |
+| `VoxelWorlds.Generation.GPUvsCPUBlendDitherParity` | GPU generation | yes |
+| `VoxelWorlds.Generation.GPUvsCPUIslandBowlParity` | GPU generation | yes |
+| `VoxelWorlds.Generation.GPUvsCPUCavesParity` | GPU generation | yes |
+| `VoxelWorlds.Generation.GPUvsCPUNoiseTypeParity` | GPU generation | yes |
+| `VoxelWorlds.Generation.GPUvsCPUWaterParity` | GPU generation | yes |
+| `VoxelWorlds.Generation.GPUvsCPUOreVariantParity` | GPU generation | yes |
+| `VoxelWorlds.Generation.GPUvsCPUSphericalParity` | GPU generation | yes |
+| `VoxelWorlds.Rendering.Crossfade.SwapReachesProxy` | a scene proxy | yes |
+| `VoxelWorlds.Streaming.EditReachesProxy.Smooth` | a scene proxy | yes |
+| `VoxelWorlds.Streaming.EditReachesProxy.Cubic` | a scene proxy | yes |
+| `VoxelWorlds.WorldModes.InfinitePlane.GPUConsistency` | GPU generation | no |
+| `VoxelWorlds.Generation.Performance` | GPU generation | no (a timing report, not a check) |
+
+The skip sites are in `Source/VoxelGeneration/Tests/VoxelNoiseGeneratorTests.cpp`,
+`Source/VoxelGeneration/Tests/InfinitePlaneWorldModeTests.cpp`, `Source/VoxelRendering/Tests/VoxelCrossfadeProxyTests.cpp`
+and `Source/VoxelStreaming/Tests/VoxelEditReachesProxyTests.cpp`. A new test that needs either belongs in the same
+pattern and in the editor gate's filter. **A green headless suite says nothing about GPU generation or the renderer.**
+The chunk-manager tests stream on the CPU into a recording renderer (below), so they run headless.
+
+## The in-editor gate
+
+`Scripts/qa/editor_gate.py <tag> [--port=8081] [--record=<file>]` runs those tests in a running editor and checks the
+GPU against the CPU:
+
+1. It waits for an editor on a Claudius port (`Scripts/qa/launch_gate_editor.ps1 -Port 8081` starts one beside the
+   main checkout's editor on 8080) and turns off its background throttle (`disable_bg_throttle.py`: an unfocused
+   editor pins itself to 3 FPS and a run stalls).
+2. It runs `Automation RunTests VoxelWorlds.Generation.GPUvsCPU+VoxelWorlds.Generation.GPUNoiseGeneratorAsync+VoxelWorlds.Rendering.Crossfade+VoxelWorlds.Streaming.EditReachesProxy`:
+   the 12 GPU and proxy tests plus the six crossfade tests that also run headless, **18 results**, each expected to be
+   a single `Success`.
+3. It extracts the **parity lines** (the parity tests' `[N voxels]: density~` lines, one per case and LOD: density,
+   material, biome and metadata agreement and the GPU's CRC) and compares all **114** with the record,
+   `Documentation/CodeReview/CR2/gpu_parity_lines_2026-11-01.txt` (`parity_lines.py`). A changed line is a finding to
+   explain, not a tolerance to widen: a change that should not touch generation leaves every line identical.
+4. It copies the editor's log to `Saved/QA/editor/`.
+
+This is the gate for anything touching meshing, generation or rendering. The same tests can be run through
+`unreal-mcp`'s automation test toolset; the parity comparison then needs `parity_lines.py` on the editor's log.
+
+## The mesh digest
+
+`VoxelWorlds.Meshing.Digest` (`Source/VoxelMeshing/Tests/MeshingDigestTests.cpp`, pure CPU, runs headless) meshes
+fixed scenes through every CPU meshing path: both smooth meshers' chunk meshes at LOD 0, 1 and 2 in the Interior and
+WholeChunk domains (with every neighbour plane, and with most missing), Marching Cubes' transition ribbon and geomorph
+along +Z and a tilted up, both meshers' face, edge and corner seams at uniform and mixed LODs, each under the default
+cvars and with each meshing cvar off. It logs one line per case,
+
+```
+[MeshDigest] <cvar state>.<mesher>.<terrain>.<path>.<lod> crc=<hex> v=<vertices> i=<indices>
 ```
 
-### VoxelLOD Module
+and a total. `Scripts/qa/mesh_digest.py <a.log> <b.log>` compares two suite logs' lines (1,457 since CR3): a change
+that should leave the meshers' output alone leaves every line identical. The first record is
+`Documentation/CodeReview/CR2/mesh_digest_2026-10-31.txt`.
 
-**Test: Distance Band LOD**
-```cpp
-TEST(VoxelLOD, DistanceBandBasic) {
-    FDistanceBandLODStrategy Strategy;
-    
-    // Configure bands
-    Strategy.LODBands = {
-        { 0.0f, 512.0f, 0, 1, 32, 64.0f },
-        { 512.0f, 1024.0f, 1, 2, 32, 64.0f }
-    };
-    Strategy.Initialize(Config);
-    
-    // Test LOD at origin
-    FLODQueryContext Context;
-    Context.ViewerPosition = FVector::ZeroVector;
-    
-    int32 LOD0 = Strategy.GetLODForChunk(FIntVector(0,0,0), Context);
-    EXPECT_EQ(LOD0, 0);
-    
-    // Test LOD at distance
-    int32 LOD1 = Strategy.GetLODForChunk(FIntVector(20,0,0), Context);
-    EXPECT_EQ(LOD1, 1);
-}
-```
+## Test worlds and the garbage collector
 
-### VoxelRendering Module
+Tests that build worlds (`UWorld::CreateWorld`, then `DestroyWorld`) leave them to the garbage collector, and nothing
+collects garbage during an automation run. In the editor every test world keeps its render scene alive, and at about
+128 of them the D3D12 device is removed (G38). The game module collects garbage when a test ends with at least
+`vox.Tests.GCEveryWorlds` (32) worlds cleaned up since the last collection
+(`Source/VoxelEngine/Private/Testing/AutomationWorldCollector.cpp`; 0 = never). Keep it on for in-editor runs. A test
+that builds a world destroys it (or lets its fixture's destructor do so) and holds no pointer into it afterwards.
 
-**Test: Vertex Packing**
-```cpp
-TEST(VoxelRendering, VertexSize) {
-    EXPECT_EQ(sizeof(FVoxelVertex), 28);
-}
+## Shared fixtures
 
-TEST(VoxelRendering, NormalPacking) {
-    FVector3f Normal(0.707f, 0.707f, 0.0f);
-    uint8 AO = 128;
-    
-    uint32 Packed = FVoxelVertex::PackNormalAndAO(Normal, AO);
-    
-    FVector3f UnpackedNormal;
-    uint8 UnpackedAO;
-    FVoxelVertex::UnpackNormalAndAO(Packed, UnpackedNormal, UnpackedAO);
-    
-    EXPECT_NEAR(UnpackedNormal.X, Normal.X, 0.01f);
-    EXPECT_NEAR(UnpackedNormal.Y, Normal.Y, 0.01f);
-    EXPECT_NEAR(UnpackedNormal.Z, Normal.Z, 0.01f);
-}
-```
+Code review CR2 (row 17) folded each plugin's private copies into one fixture header per plugin:
 
----
+| Fixture | Header | Gives |
+|---|---|---|
+| `VoxelTesting::FTestChunkWorld` | `Source/VoxelStreaming/Public/Testing/VoxelTestChunkWorld.h` | a transient game world with a real chunk manager on an actor: `Create`, `ConfigureSmallPlane` / `ConfigureSmallPlanet` / `ConfigureThreeLODBands`, `StartManager`, `SetViewer`, `Settle`, `Stop` (the destructor stops too); CPU generation, no collision, scatter or caves by default |
+| `VoxelTesting::FRecordingMeshRenderer` | same | the tests' only mesh renderer: the latest mesh per chunk and its LOD, the seam bucket per owner, the water tiles, submit counts; `SimulateProxyRecreated` drops everything as a recreated scene proxy does |
+| `VoxelTesting::FScopedCVar` | `Source/VoxelCore/Public/Testing/VoxelTestScopedCVar.h` | a console variable set for a scope (see the traps below) |
+| `VoxelMeshingTestFixtures` | `Source/VoxelMeshing/Tests/VoxelMeshingTestFixtures.h` | the test chunk, both meshers' configurations, voxels from a solid predicate, the closed-surface checks' keys |
+| `VoxelScatterTesting` | `Source/VoxelScatter/Tests/VoxelScatterTestFixtures.h`, `Source/VoxelScatter/Public/Testing/VoxelScatterTestDefinitions.h` | a world with a scatter manager, heightmap chunk voxels per column, the scatter definitions the tests use |
+| `VoxelFarFieldTestRig` | `Source/VoxelStreaming/Tests/VoxelFarFieldTestRig.h` | a far field with synchronous builds for the sphere and the plane |
+| `VCTesting::FPlayWorld` | `Plugins/VoxelCharacterPlugin/Source/VoxelCharacterPlugin/Public/Testing/VCTestWorld.h` | a world that has begun play, for characters, controllers and interactables (VoxelWorldPOI uses it too) |
+| `DungeonCoreTesting`, `DungeonVoxelTesting` | `DungeonCoreTestFixtures.h`, `DungeonVoxelTestFixtures.h` under ProceduralDungeonPlugin's `Private/Tests/` | dungeon configurations, results and tile sets; a voxel world for stamps |
 
-## Integration Tests
+A suite with its own configuration derives from the shared fixture and keeps only what differs. A few suites keep a
+hand-built world for a reason recorded in `Documentation/CODE_REVIEW_PLAN.md` §16.2.
 
-### LOD + ChunkManager
+## Traps the code review met
 
-**Test: Chunk Loading**
-```cpp
-TEST(Integration, ChunkLoading) {
-    UVoxelChunkManager* Manager = NewObject<UVoxelChunkManager>();
-    Manager->Initialize(Config);
-    
-    // Request chunk
-    FIntVector ChunkCoord(0, 0, 0);
-    Manager->RequestChunkGeneration(ChunkCoord, 0);
-    
-    // Process queue
-    Manager->ProcessGenerationQueue(10.0f);
-    
-    // Verify loaded
-    EXPECT_TRUE(Manager->IsChunkLoaded(ChunkCoord));
-}
-```
+- **`AddExpectedMessage` patterns are regular expressions** (`IsRegex` defaults to true). A message with `[`, `(`,
+  `.` or `+` in it does not match itself: CR4's `Bench.ParseArgs` first expected `[:Alt]`, a character class. Escape
+  the pattern or use `AddExpectedMessagePlain`.
+- **Set cvars with `VoxelTesting::FScopedCVar`, never `Set(..., ECVF_SetByCode)` by hand.** A set below the priority a
+  variable already holds is ignored with only a console-manager log line ("ignored as it is lower priority"): once any
+  earlier test in the run (or a person at the console) set it from the console, a later set by code silently does
+  nothing and the test runs on the wrong rule. In CR2 that made the mesh digest's rule-before cases run on the current
+  rule inside the full suite (546 lines differed from the digest-only record). `FScopedCVar` sets and restores at the
+  priority the variable holds.
+- **A world a test builds is left to the garbage collector** (above): in the editor, keep `vox.Tests.GCEveryWorlds`
+  on, and do not keep pointers into a destroyed world.
+- **GPU and proxy tests pass headless by skipping** (above): run the editor gate.
+- **An unfocused editor runs at 3 FPS**: in-editor runs and PIE numbers are meaningless until `disable_bg_throttle.py`
+  has run.
+- **Benchmarks are not tests.** Streaming performance is compared with `bench_gate.py` (three runs per route at the
+  same PIE viewport) and `bench_table.py`, never inferred from the suite's wall time.
 
-**Test: LOD Transitions**
-```cpp
-TEST(Integration, LODTransitions) {
-    UVoxelChunkManager* Manager = NewObject<UVoxelChunkManager>();
-    // ... setup
-    
-    // Move camera
-    FLODQueryContext Context;
-    Context.ViewerPosition = FVector(1000, 0, 0);
-    
-    Manager->Update(0.016f);
-    
-    // Verify chunks transitioned
-}
-```
+## Which gate
 
-### Generation + Meshing
-
-**Test: Full Pipeline**
-```cpp
-TEST(Integration, GenerationToMesh) {
-    // Generate voxel data
-    FChunkDescriptor Chunk;
-    GenerateChunkData(Chunk);
-    
-    EXPECT_GT(Chunk.VoxelData.Num(), 0);
-    
-    // Mesh the data
-    FChunkRenderData RenderData;
-    MeshChunk(Chunk, RenderData);
-    
-    EXPECT_GT(RenderData.VertexCount, 0);
-    EXPECT_GT(RenderData.IndexCount, 0);
-}
-```
-
----
-
-## Performance Tests
-
-### Memory Tests
-
-**Test: Chunk Memory Budget**
-```cpp
-TEST(Performance, ChunkMemoryBudget) {
-    FChunkDescriptor Chunk;
-    Chunk.ChunkSize = 32;
-    Chunk.VoxelData.SetNum(32 * 32 * 32);
-    
-    size_t VoxelMemory = Chunk.VoxelData.Num() * sizeof(FVoxelData);
-    
-    // Should be ~128 KB
-    EXPECT_LT(VoxelMemory, 150 * 1024);
-}
-
-TEST(Performance, ThousandChunksMemory) {
-    TArray<FChunkDescriptor> Chunks;
-    Chunks.SetNum(1000);
-    
-    for (auto& Chunk : Chunks) {
-        Chunk.ChunkSize = 32;
-        Chunk.VoxelData.SetNum(32 * 32 * 32);
-    }
-    
-    size_t TotalMemory = Chunks.Num() * 32 * 32 * 32 * sizeof(FVoxelData);
-    
-    // Should be ~200 MB
-    EXPECT_LT(TotalMemory, 250 * 1024 * 1024);
-}
-```
-
-### Timing Tests
-
-**Test: LOD Query Performance**
-```cpp
-TEST(Performance, LODQuerySpeed) {
-    FDistanceBandLODStrategy Strategy;
-    // ... configure
-    
-    FLODQueryContext Context;
-    Context.ViewerPosition = FVector::ZeroVector;
-    
-    // Time 1000 queries
-    double StartTime = FPlatformTime::Seconds();
-    
-    for (int32 i = 0; i < 1000; ++i) {
-        FIntVector ChunkCoord(i % 10, i / 10, 0);
-        Strategy.GetLODForChunk(ChunkCoord, Context);
-    }
-    
-    double ElapsedMs = (FPlatformTime::Seconds() - StartTime) * 1000.0;
-    
-    // Should be < 1ms for 1000 queries (< 1μs per query)
-    EXPECT_LT(ElapsedMs, 1.0);
-}
-```
-
-**Test: Streaming Throughput**
-```cpp
-TEST(Performance, StreamingThroughput) {
-    UVoxelChunkManager* Manager = NewObject<UVoxelChunkManager>();
-    // ... setup
-    
-    // Request 100 chunks
-    for (int32 i = 0; i < 100; ++i) {
-        Manager->RequestChunkGeneration(FIntVector(i, 0, 0), 0);
-    }
-    
-    // Process with time budget (2ms per frame)
-    double StartTime = FPlatformTime::Seconds();
-    
-    while (Manager->GetGenerationQueueSize() > 0) {
-        Manager->ProcessGenerationQueue(2.0f);
-    }
-    
-    double ElapsedSeconds = FPlatformTime::Seconds() - StartTime;
-    
-    // Should process at 4 chunks/frame @ 60 FPS = 240 chunks/sec
-    // 100 chunks should take < 0.5 seconds
-    EXPECT_LT(ElapsedSeconds, 0.5);
-}
-```
-
----
-
-## Visual Tests
-
-### Rendering Quality
-
-**Manual Test Checklist**:
-- [ ] No gaps between chunks
-- [ ] LOD transitions are smooth
-- [ ] Materials display correctly
-- [ ] Ambient occlusion looks correct
-- [ ] No z-fighting or flickering
-- [ ] Collision matches visual mesh
-
-### Screenshot Comparison
-
-Store reference screenshots:
-```
-Tests/ReferenceImages/
-├── CubicMesh_Basic.png
-├── SmoothMesh_Basic.png
-├── LODTransition_0to1.png
-└── BiomeBlending.png
-```
-
-Compare during testing:
-```cpp
-// Pseudo-code
-FString ScreenshotPath = CaptureScreenshot();
-float Similarity = CompareImages(ScreenshotPath, ReferenceImagePath);
-EXPECT_GT(Similarity, 0.95f); // 95% match
-```
-
----
-
-## Automated Testing
-
-### Continuous Integration
-
-**Build Pipeline**:
-1. Compile all modules
-2. Run unit tests
-3. Run integration tests
-4. Run performance tests
-5. Generate coverage report
-
-**Example GitHub Actions**:
-```yaml
-name: VoxelWorlds Tests
-
-on: [push, pull_request]
-
-jobs:
-  test:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v2
-      - name: Build
-        run: UE5Editor-Cmd.exe VoxelEngine.uproject -run=Build
-      - name: Test
-        run: UE5Editor-Cmd.exe VoxelEngine.uproject -ExecCmds="Automation RunTests VoxelWorlds" -unattended
-```
-
----
-
-## Test Organization
-
-### Directory Structure
-```
-Plugins/VoxelWorlds/
-├── Source/
-│   ├── VoxelCore/
-│   │   └── Tests/
-│   │       └── VoxelCoreTests.cpp
-│   ├── VoxelLOD/
-│   │   └── Tests/
-│   │       └── LODStrategyTests.cpp
-│   └── VoxelRendering/
-│       └── Tests/
-│           └── VertexFactoryTests.cpp
-└── Tests/
-    ├── Integration/
-    ├── Performance/
-    └── Visual/
-```
-
-### Running Tests
-
-**In Editor**:
-```
-Window > Test Automation
-Filter: "VoxelWorlds"
-Run Tests
-```
-
-**Command Line**:
-```bash
-UE5Editor-Cmd.exe VoxelEngine.uproject \
-  -ExecCmds="Automation RunTests VoxelWorlds" \
-  -unattended \
-  -nopause \
-  -testexit="Automation Test Queue Empty"
-```
-
----
-
-## Test Coverage Goals
-
-### Phase 1 (Foundation)
-- Unit test coverage: 80%+
-- All core data structures tested
-- LOD interface tested
-- Integration tests for basic flow
-
-### Phase 2 (Generation)
-- GPU compute shader validation
-- Noise generation tests
-- Biome selection tests
-
-### Phase 3 (Advanced Meshing)
-- Greedy meshing correctness
-- Ambient occlusion validation
-- Custom VF performance benchmarks
-
-### Final (All Phases)
-- Overall coverage: 70%+
-- All performance targets validated
-- Full integration test suite
-- Visual regression tests
-
----
-
-## Debugging Failed Tests
-
-### Common Issues
-
-**Test: Chunk loading fails**
-- Check module dependencies in .Build.cs
-- Verify chunk manager initialization
-- Check LOD strategy configuration
-
-**Test: Performance test fails**
-- Run on consistent hardware
-- Disable background tasks
-- Check for debug builds (use shipping)
-- Profile with Unreal Insights
-
-**Test: Visual test fails**
-- Verify graphics settings consistent
-- Check for platform-specific rendering
-- Ensure deterministic generation (fixed seeds)
-
----
-
-## Next Steps
-
-1. Set up test framework in Phase 1
-2. Write tests as you implement features
-3. Run tests before committing
-4. Add performance tests in Phase 3
-5. Visual tests in Phase 4+
-
+`Scripts/qa/README.md` maps each kind of change to its gate: documentation only, any code (build warnings, the suite,
+a non-unity build for code moves), meshing, generation and rendering (add the editor gate and the mesh digest),
+scatter, the map, rendering captures, streaming benches, headers. Both sides of a comparison are built and run in the
+same checkout, and never in the user's main checkout while they work in it.
