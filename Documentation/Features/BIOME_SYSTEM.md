@@ -13,7 +13,9 @@ scatter reads the voxel's biome and material (`SCATTER_SYSTEM.md`).
 
 A world uses biomes when its `UVoxelWorldConfiguration::BiomeConfiguration` names a `UVoxelBiomeConfiguration` asset.
 Without one, generation falls back to the static four-biome table `FVoxelBiomeRegistry` (Plains, Forest, Mountain,
-Ocean; `VoxelBiomeRegistry.h`) with a fixed blend width of 0.15.
+Ocean; `VoxelBiomeRegistry.h`) with a fixed blend width of 0.15. The table is built once, by the first query on any
+thread (a function-local static, which C++ initialises on one thread while the others wait); before G83 it was built
+lazily with no lock, and the first queries of several map tile tasks at once crashed a run of `VoxelWorlds.Map` alone.
 
 ## Biome definition
 

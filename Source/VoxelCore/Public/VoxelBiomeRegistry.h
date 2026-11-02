@@ -23,6 +23,7 @@ namespace EVoxelBiome
 /**
  * Static registry of biome definitions.
  * Provides biome selection based on temperature and moisture values.
+ * The definitions are fixed and built on the first query, safely from any thread (G83).
  */
 class VOXELCORE_API FVoxelBiomeRegistry
 {
@@ -83,12 +84,9 @@ public:
 	static uint8 GetBlendedMaterial(const FBiomeBlend& Blend, float DepthBelowSurface, const FVoxelBlendDitherKey& Dither = FVoxelBlendDitherKey());
 
 private:
-	/** Array of all biome definitions */
-	static TArray<FBiomeDefinition> Biomes;
-
-	/** Whether the registry has been initialized */
-	static bool bInitialized;
-
-	/** Initialize the registry with default biomes */
-	static void EnsureInitialized();
+	/**
+	 * The default biomes in BiomeID order, built once on the first call (a function-local static: thread-safe).
+	 * @return The biome definitions
+	 */
+	static const TArray<FBiomeDefinition>& Definitions();
 };
