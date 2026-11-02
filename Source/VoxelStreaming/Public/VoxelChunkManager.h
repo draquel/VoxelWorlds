@@ -19,8 +19,7 @@
 #include "VoxelSeamRegistry.h"
 #include "VoxelSeamTransitionHolds.h"
 #include "VoxelLODEvalSchedule.h"
-#include "VoxelFarOcean.h"
-#include "VoxelPlanetOcean.h"
+#include "VoxelWorldComponentOwners.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelSurfaceQuery.h"
 #include "VoxelTreeInjector.h"
@@ -882,7 +881,7 @@ public:
 	 * @return Wall count
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
-	int32 GetWorldBoundaryWallCount() const { return WorldBoundaryWalls.Num(); }
+	int32 GetWorldBoundaryWallCount() const { return WorldBoundary.Num(); }
 
 	/** Turn the edge walls' collision on or off (voxel.World.Boundary). The walls stay; only their collision changes. */
 	void SetWorldBoundaryCollisionEnabled(bool bEnabled);
@@ -896,7 +895,7 @@ public:
 	 * @return True when the far ocean's meshes exist (they may be hidden by voxel.World.FarOcean 0)
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
-	bool HasFarOcean() const { return FarOceanStatic != nullptr; }
+	bool HasFarOcean() const { return FarOcean.GetComponent() != nullptr; }
 
 /** Show or hide the far ocean (voxel.World.FarOcean). */
 	void SetFarOceanVisible(bool bVisible);
@@ -905,10 +904,10 @@ public:
 	FString GetFarOceanDebugString() const;
 
 	/** The far ocean's meshes: section 0 the seabed, 1 the open-sea water, 2 its underside (null without one). */
-	UProceduralMeshComponent* GetFarOceanStaticComponent() const { return FarOceanStatic; }
+	UProceduralMeshComponent* GetFarOceanStaticComponent() const { return FarOcean.GetComponent(); }
 
 	/** The settings the far ocean was built with. */
-	const FVoxelFarOceanSettings& GetFarOceanSettings() const { return FarOceanSettings; }
+	const FVoxelFarOceanSettings& GetFarOceanSettings() const { return FarOcean.GetSettings(); }
 
 	// ==================== Planet Ocean (spherical SP-E2) ====================
 
@@ -919,13 +918,13 @@ public:
 	 * @return True when the ocean's mesh exists (it may be hidden by voxel.World.PlanetOcean 0)
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
-	bool HasPlanetOcean() const { return PlanetOcean != nullptr; }
+	bool HasPlanetOcean() const { return PlanetOcean.GetComponent() != nullptr; }
 
 	/** The planet ocean: section 0 the top (faces outward), section 1 the underside (null without an ocean). */
-	UProceduralMeshComponent* GetPlanetOceanComponent() const { return PlanetOcean; }
+	UProceduralMeshComponent* GetPlanetOceanComponent() const { return PlanetOcean.GetComponent(); }
 
 	/** Whether the planet ocean's underside is shown now (the viewer is inside the sea radius). */
-	bool IsPlanetOceanUndersideShown() const { return bPlanetOceanUndersideShown; }
+	bool IsPlanetOceanUndersideShown() const { return PlanetOcean.IsUndersideShown(); }
 
 	/** Show or hide the planet ocean (voxel.World.PlanetOcean). */
 	void SetPlanetOceanVisible(bool bVisible);
@@ -2657,38 +2656,20 @@ private:
 
 	/** Invisible collision walls at the world's edge, owned by this component's actor (see FVoxelWorldBoundary) */
 	UPROPERTY(Transient)
-	TArray<TObjectPtr<UBoxComponent>> WorldBoundaryWalls;
+	FVoxelWorldBoundaryOwner WorldBoundary;
 
 	/** Build the edge walls from the world mode's bounds (game worlds, bounded worlds, bWorldBoundary on). */
 	void RebuildWorldBoundary();
-
-	/** Destroy the edge walls. */
-	void DestroyWorldBoundary();
 
 	// ==================== Far Ocean (WM-E1) ====================
 
 	/** The far ocean's meshes (owned by this component's actor): the seabed (section 0, terrain material) and the open sea
 	 *  (section 1, water; section 2 its underside). Inside the footprint's box the far field draws the land and the sea. */
 	UPROPERTY(Transient)
-	TObjectPtr<UProceduralMeshComponent> FarOceanStatic;
-
-	/** What the far ocean was built with */
-	FVoxelFarOceanSettings FarOceanSettings;
-
-	/** Whether the water's undersides (sections 2) are shown: only while the viewer is under the water plane */
-	bool bFarOceanUndersideShown = false;
-
-	/** Show the water's undersides when the viewer is under the water plane, hide them when it is not. */
-	/** A sea underside's visibility: shown while the viewer is under it, applied only when that changes (CM-19). */
-	static void UpdateUnderside(bool bBelow, bool& bShown, TFunctionRef<void(bool)> Apply);
-
-	void UpdateFarOceanUnderside(const FVector& ViewerPosition);
+	FVoxelFarOceanOwner FarOcean;
 
 	/** Build the far ocean from the world mode's bounds and the island's seabed (game worlds, islands, bIslandFarOcean). */
 	void RebuildFarOcean();
-
-	/** Destroy the far ocean's component. */
-	void DestroyFarOcean();
 
 	/** The voxel material generation gives the seabed beyond the edge (the most common one around it). */
 	uint8 ResolveFarSeabedMaterial(const FIslandBowlParams& Island) const;
@@ -2701,25 +2682,13 @@ private:
 	 * centre; built once when the world starts.
 	 */
 	UPROPERTY(Transient)
-	TObjectPtr<UProceduralMeshComponent> PlanetOcean;
-
-	/** What the planet ocean was built with */
-	FVoxelPlanetOceanSettings PlanetOceanSettings;
-
-	/** Whether the planet ocean's underside (section 1) is shown: only while the viewer is inside the sea radius */
-	bool bPlanetOceanUndersideShown = false;
+	FVoxelPlanetOceanOwner PlanetOcean;
 
 	/**
 	 * Build the planet ocean (game worlds, planets with water on and a WaterMeshMaterial), unless the far field draws the
 	 * sea (at scale).
 	 */
 	void RebuildPlanetOcean();
-
-	/** Destroy the planet ocean's component. */
-	void DestroyPlanetOcean();
-
-	/** Show the planet ocean's underside while the viewer is inside the sea radius, hide it outside. */
-	void UpdatePlanetOceanUnderside(const FVector& ViewerPosition);
 
 	/** Planets: move the world settings' KillZ below the planet when it would cut through it (spherical SP-F5). */
 	void ApplyPlanetKillZ();

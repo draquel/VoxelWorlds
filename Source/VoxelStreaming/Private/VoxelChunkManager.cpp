@@ -43,17 +43,16 @@
 #include "VoxelScatterRenderer.h"
 #include "VoxelTreeInjector.h"
 #include "VoxelTreeTypes.h"
-#include "VoxelWorldBoundary.h"
 #include "VoxelFarOcean.h"
 #include "VoxelFarField.h"
 #include "VoxelPlanetOcean.h"
+#include "VoxelWorldComponentOwners.h"
 #include "Engine/GameViewportClient.h"
 #include "IslandBowlWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelSurfaceQuery.h"
 #include "VoxelBiomeSnapshot.h"
 #include "ProceduralMeshComponent.h"
-#include "Components/BoxComponent.h"
 #include "UObject/UObjectIterator.h"
 #include "Engine/World.h"
 #include "GameFramework/WorldSettings.h"
@@ -1038,12 +1037,12 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	// === Far ocean (WM-E1) ===
 	// The open sea's underside shows only while the viewer is under the water plane.
-	if (FarOceanStatic)
+	if (FarOcean.GetComponent())
 	{
-		UpdateFarOceanUnderside(CurrentViewerPosition);
+		FarOcean.UpdateUnderside(CurrentViewerPosition);
 	}
 // A planet's sea surface shows its underside only while the viewer is in the sea (SP-E2).
-	UpdatePlanetOceanUnderside(CurrentViewerPosition);
+	PlanetOcean.UpdateUnderside(CurrentViewerPosition);
 
 	// === Planet far field (spherical Phase 6, WM-BP9) ===
 	// After this tick's generation results, meshes and unloads: an edge patch shows in the tick its chunks leave and
@@ -1792,10 +1791,10 @@ void UVoxelChunkManager::Shutdown()
 	}
 
 	WorldMode.Reset();
-	DestroyWorldBoundary();
-	DestroyFarOcean();
+	WorldBoundary.Destroy();
+	FarOcean.Destroy();
 	DestroyFarField();
-	DestroyPlanetOcean();
+	PlanetOcean.Destroy();
 
 	// Clear pending mesh queue
 	PendingMeshQueue.Empty();
@@ -3171,25 +3170,9 @@ double UVoxelChunkManager::GetDistanceToWorldEdge(double WorldX, double WorldY) 
 
 // ==================== World Boundary (WM-I5) ====================
 
-namespace VoxelWorldBoundaryPrivate
-{
-	/** Walls 5 m thick: a sweep cannot tunnel through, and the outer side never matters */
-	constexpr double WallThickness = 500.0;
-
-	/** A circle's chords stay within 50 uu of R + F (63 walls for island S, 158 for M, 223 for L) */
-	constexpr double MaxChordError = 50.0;
-
-	/** Height of the walls above the highest terrain: higher than a pawn can climb, build or jump */
-	constexpr double HeightAboveTerrain = 50000.0;
-
-	/** Keep a mode's "no bound" height range (IVoxelWorldMode's default) from making boxes millions of km tall */
-	constexpr double MaxAbsZ = 2.0e6;
-}
-
 void UVoxelChunkManager::RebuildWorldBoundary()
 {
-	using namespace VoxelWorldBoundaryPrivate;
-	DestroyWorldBoundary();
+	WorldBoundary.Destroy();
 
 	UWorld* World = GetWorld();
 	AActor* Owner = GetOwner();
@@ -3197,141 +3180,16 @@ void UVoxelChunkManager::RebuildWorldBoundary()
 	{
 		return;
 	}
-	const FVoxelWorldBounds Bounds = WorldMode->GetWorldBounds();
-	const double BottomZ = FMath::Max(static_cast<double>(Bounds.MinZ) - Configuration->GetChunkWorldSize(), -MaxAbsZ);
-	const double TopZ = FMath::Min(static_cast<double>(Bounds.MaxZ) + HeightAboveTerrain, MaxAbsZ);
-	TArray<FVoxelWorldBoundaryWall> Walls;
-	FVoxelWorldBoundary::BuildWalls(Bounds, WallThickness, MaxChordError, BottomZ, TopZ, Walls);
-	if (Walls.Num() == 0)
-	{
-		return;
-	}
-
-	const bool bCollision = CVarWorldBoundary.GetValueOnGameThread() != 0;
-	WorldBoundaryWalls.Reserve(Walls.Num());
-	for (int32 i = 0; i < Walls.Num(); ++i)
-	{
-		const FVoxelWorldBoundaryWall& Wall = Walls[i];
-		UBoxComponent* Box = NewObject<UBoxComponent>(Owner, *FString::Printf(TEXT("VoxelWorldBoundary_%d"), i), RF_Transient);
-		Box->SetUsingAbsoluteLocation(true);
-		Box->SetUsingAbsoluteRotation(true);
-		Box->SetUsingAbsoluteScale(true);
-		Box->SetupAttachment(Owner->GetRootComponent());
-		Box->SetBoxExtent(Wall.HalfExtent, /*bUpdateOverlaps=*/false);
-		Box->SetHiddenInGame(true);
-		Box->SetCanEverAffectNavigation(false);
-		Box->SetGenerateOverlapEvents(false);
-		// Blocks everything that moves (pawns, NPCs, ragdolls, dropped items); traces for sight, interaction and the
-		// camera pass, so nothing aimed at the sea stops on an invisible wall.
-		Box->SetCollisionObjectType(ECC_WorldStatic);
-		Box->SetCollisionResponseToAllChannels(ECR_Block);
-		Box->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
-		Box->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
-		Box->SetCollisionEnabled(bCollision ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
-		Box->SetWorldLocationAndRotation(Wall.Center, Wall.Rotation);
-		Box->RegisterComponent();
-		WorldBoundaryWalls.Add(Box);
-	}
-
-	UE_LOG(LogVoxelStreaming, Log,
-		TEXT("World boundary: %d wall(s) at the world's edge (%s, centre (%.0f, %.0f), half extent (%.0f, %.0f)), Z %.0f to %.0f, collision %s"),
-		WorldBoundaryWalls.Num(), *StaticEnum<EVoxelWorldBoundsShape>()->GetNameStringByValue(static_cast<int64>(Bounds.Shape)),
-		Bounds.Center.X, Bounds.Center.Y, Bounds.HalfExtent.X, Bounds.HalfExtent.Y, BottomZ, TopZ, bCollision ? TEXT("on") : TEXT("off"));
-}
-
-void UVoxelChunkManager::DestroyWorldBoundary()
-{
-	for (UBoxComponent* Box : WorldBoundaryWalls)
-	{
-		if (IsValid(Box))
-		{
-			Box->DestroyComponent();
-		}
-	}
-	WorldBoundaryWalls.Reset();
+	WorldBoundary.Build(Owner, WorldMode->GetWorldBounds(), Configuration->GetChunkWorldSize(),
+		CVarWorldBoundary.GetValueOnGameThread() != 0);
 }
 
 void UVoxelChunkManager::SetWorldBoundaryCollisionEnabled(bool bEnabled)
 {
-	for (UBoxComponent* Box : WorldBoundaryWalls)
-	{
-		if (IsValid(Box))
-		{
-			Box->SetCollisionEnabled(bEnabled ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
-		}
-	}
-	if (WorldBoundaryWalls.Num() > 0)
-	{
-		UE_LOG(LogVoxelStreaming, Log, TEXT("World boundary: %d wall(s), collision %s"), WorldBoundaryWalls.Num(), bEnabled ? TEXT("on") : TEXT("off"));
-	}
+	WorldBoundary.SetCollisionEnabled(bEnabled);
 }
 
 // ==================== Far Ocean (WM-E1) ====================
-
-namespace VoxelFarOceanManagerPrivate
-{
-	/** Hand a mesh to a procedural mesh section (no collision). Clears the section when the mesh is empty. */
-	void SetSection(UProceduralMeshComponent* Component, int32 Section, const FChunkMeshData& Mesh, UMaterialInterface* Material)
-	{
-		if (!Component)
-		{
-			return;
-		}
-		if (Mesh.Positions.Num() == 0 || Mesh.Indices.Num() == 0)
-		{
-			Component->ClearMeshSection(Section);
-			return;
-		}
-		const int32 N = Mesh.Positions.Num();
-		TArray<FVector> Vertices;
-		TArray<FVector> Normals;
-		TArray<FVector2D> UV0;
-		TArray<FVector2D> UV1;
-		TArray<FProcMeshTangent> Tangents;
-		Vertices.SetNumUninitialized(N);
-		Normals.SetNumUninitialized(N);
-		UV0.SetNumUninitialized(N);
-		UV1.SetNumUninitialized(N);
-		Tangents.Init(FProcMeshTangent(1.0f, 0.0f, 0.0f), N);
-		for (int32 i = 0; i < N; ++i)
-		{
-			Vertices[i] = FVector(Mesh.Positions[i]);
-			Normals[i] = FVector(Mesh.Normals[i]);
-			UV0[i] = FVector2D(Mesh.UVs[i]);
-			UV1[i] = FVector2D(Mesh.UV1s[i]);
-		}
-		TArray<int32> Triangles;
-		Triangles.SetNumUninitialized(Mesh.Indices.Num());
-		for (int32 i = 0; i < Mesh.Indices.Num(); ++i)
-		{
-			Triangles[i] = static_cast<int32>(Mesh.Indices[i]);
-		}
-		const TArray<FVector2D> NoUV;
-		Component->CreateMeshSection(Section, Vertices, Triangles, Normals, UV0, UV1, NoUV, NoUV, Mesh.Colors, Tangents,
-			/*bCreateCollision=*/false);
-		if (Material)
-		{
-			Component->SetMaterial(Section, Material);
-		}
-	}
-
-	UProceduralMeshComponent* MakeComponent(AActor* Owner, const TCHAR* Name, const FVector& Location)
-	{
-		UProceduralMeshComponent* Component = NewObject<UProceduralMeshComponent>(Owner, Name, RF_Transient);
-		Component->SetUsingAbsoluteLocation(true);
-		Component->SetUsingAbsoluteRotation(true);
-		Component->SetUsingAbsoluteScale(true);
-		Component->SetupAttachment(Owner->GetRootComponent());
-		Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		Component->SetCanEverAffectNavigation(false);
-		Component->SetGenerateOverlapEvents(false);
-		Component->SetCastShadow(false);
-		Component->bUseAsyncCooking = false;
-		Component->SetWorldLocationAndRotation(Location, FRotator::ZeroRotator);
-		Component->RegisterComponent();
-		return Component;
-	}
-}
 
 uint8 UVoxelChunkManager::ResolveFarSeabedMaterial(const FIslandBowlParams& Island) const
 {
@@ -3388,8 +3246,7 @@ uint8 UVoxelChunkManager::ResolveFarSeabedMaterial(const FIslandBowlParams& Isla
 
 void UVoxelChunkManager::RebuildFarOcean()
 {
-	using namespace VoxelFarOceanManagerPrivate;
-	DestroyFarOcean();
+	FarOcean.Destroy();
 
 	UWorld* World = GetWorld();
 	AActor* Owner = GetOwner();
@@ -3406,7 +3263,7 @@ void UVoxelChunkManager::RebuildFarOcean()
 	}
 	const double StartTime = FPlatformTime::Seconds();
 	const FIslandBowlParams Island = FVoxelWorldModeFactory::MakeIslandParams(*Configuration);
-	FarOceanSettings = FVoxelFarOceanSettings();
+	FVoxelFarOceanSettings FarOceanSettings;
 	FarOceanSettings.Bounds = Bounds;
 	FarOceanSettings.GridOrigin = FVector2D(Configuration->WorldOrigin.X, Configuration->WorldOrigin.Y);
 	FarOceanSettings.ColumnSize = Configuration->GetChunkWorldSize();
@@ -3425,89 +3282,23 @@ void UVoxelChunkManager::RebuildFarOcean()
 	};
 	FarOceanSettings.SeabedMaterialID = ResolveFarSeabedMaterial(Island);
 
-	const FVector Origin = FarOceanSettings.GetMeshOrigin();
-	const bool bVisible = CVarFarOcean.GetValueOnGameThread() != 0;
-
-	// The seabed and the open sea never change: one component. The seabed takes the terrain's own material instance
-	// (the atlas parameters), so it reads as the voxel seabed it continues.
-	FarOceanStatic = MakeComponent(Owner, TEXT("VoxelFarOceanStatic"), Origin);
-	FChunkMeshData Mesh;
-	const int32 SeabedTriangles = FVoxelFarOcean::BuildSeabed(FarOceanSettings, Mesh);
-	SetSection(FarOceanStatic, 0, Mesh, MeshRenderer ? MeshRenderer->GetSurfaceMaterial() : nullptr);
-
-	// The water needs the water tiles' material (without it the world actor draws its fallback plane). Inside the bounds box
-	// the far field draws the terrain and the sea (WM-MP1, D37); the open sea starts at the box.
+	// The water needs the water tiles' material (without it the world actor draws its fallback plane).
 	const bool bWater = Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial;
-	int32 OpenSeaQuads = 0;
-	if (bWater)
-	{
-		FChunkMeshData Underside;
-		OpenSeaQuads = FVoxelFarOcean::BuildOpenSeaWater(FarOceanSettings, Mesh, &Underside);
-		SetSection(FarOceanStatic, 1, Mesh, Configuration->WaterMeshMaterial);
-		SetSection(FarOceanStatic, 2, Underside, Configuration->WaterMeshMaterial);
-		FarOceanStatic->SetTranslucentSortPriority(0);
-	}
-	FarOceanStatic->SetVisibility(bVisible);
-	bFarOceanUndersideShown = true; // force the first update to hide it
-	UpdateFarOceanUnderside(CurrentViewerPosition);
-
-	FIntPoint GridMin, GridMax;
-	FVoxelFarOcean::GetGridColumns(FarOceanSettings, GridMin, GridMax);
-	UE_LOG(LogVoxelStreaming, Log,
-		TEXT("Far ocean: seabed %d triangle(s) (material %d, %.0f uu under the profile), %s from the %dx%d column box; reaches %.0f uu past the edge; built in %.2f ms%s"),
-		SeabedTriangles, FarOceanSettings.SeabedMaterialID, FarOceanSettings.SeabedOffset,
-		bWater ? *FString::Printf(TEXT("open sea %d quad(s)"), OpenSeaQuads) : TEXT("no water (needs bEnableWaterLevel and WaterMeshMaterial)"),
-		GridMax.X - GridMin.X + 1, GridMax.Y - GridMin.Y + 1, FarOceanSettings.OuterDistance,
-		(FPlatformTime::Seconds() - StartTime) * 1000.0, bVisible ? TEXT("") : TEXT(" (hidden: voxel.World.FarOcean 0)"));
-}
-
-void UVoxelChunkManager::DestroyFarOcean()
-{
-	if (IsValid(FarOceanStatic))
-	{
-		FarOceanStatic->DestroyComponent();
-	}
-	FarOceanStatic = nullptr;
-	bFarOceanUndersideShown = false;
-}
-
-void UVoxelChunkManager::UpdateUnderside(bool bBelow, bool& bShown, TFunctionRef<void(bool)> Apply)
-{
-	// A sea's underside shows only while the viewer is under its surface (code review CR2, CM-19: the one rule for the
-	// far ocean, the planet ocean and the far field's sea).
-	if (bBelow == bShown)
-	{
-		return;
-	}
-	bShown = bBelow;
-	Apply(bBelow);
-}
-
-void UVoxelChunkManager::UpdateFarOceanUnderside(const FVector& ViewerPosition)
-{
-	UpdateUnderside(ViewerPosition.Z < FarOceanSettings.WaterZ, bFarOceanUndersideShown, [this](bool bBelow)
-	{
-		if (IsValid(FarOceanStatic) && FarOceanStatic->GetNumSections() > 2)
-		{
-			FarOceanStatic->SetMeshSectionVisible(2, bBelow);
-		}
-	});
+	FarOcean.Build(Owner, FarOceanSettings, MeshRenderer ? MeshRenderer->GetSurfaceMaterial() : nullptr,
+		bWater ? Configuration->WaterMeshMaterial.Get() : nullptr, CVarFarOcean.GetValueOnGameThread() != 0, CurrentViewerPosition,
+		StartTime);
 }
 
 void UVoxelChunkManager::SetFarOceanVisible(bool bVisible)
 {
-	if (IsValid(FarOceanStatic))
-	{
-		FarOceanStatic->SetVisibility(bVisible);
-		UE_LOG(LogVoxelStreaming, Log, TEXT("Far ocean %s"), bVisible ? TEXT("shown") : TEXT("hidden"));
-	}
+	FarOcean.SetVisible(bVisible);
 }
 
 // ==================== Planet Ocean (spherical SP-E2) ====================
 
 void UVoxelChunkManager::RebuildPlanetOcean()
 {
-	DestroyPlanetOcean();
+	PlanetOcean.Destroy();
 
 	UWorld* World = GetWorld();
 	AActor* Owner = GetOwner();
@@ -3522,6 +3313,7 @@ void UVoxelChunkManager::RebuildPlanetOcean()
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("Planet ocean: not drawn, the configuration has no WaterMeshMaterial."));
 		return;
 	}
+	const FVoxelPlanetOceanSettings& PlanetOceanSettings = PlanetOcean.GetSettings();
 	if (FVoxelFarField::ShouldDrawSea(Configuration->WaterRadius, PlanetOceanSettings.MaxSag, PlanetOceanSettings.MinSegments,
 		PlanetOceanSettings.MaxSegments))
 	{
@@ -3534,84 +3326,17 @@ void UVoxelChunkManager::RebuildPlanetOcean()
 					PlanetOceanSettings.MaxSegments)), PlanetOceanSettings.MaxSegments);
 		return;
 	}
-	const double StartTime = FPlatformTime::Seconds();
-	PlanetOceanSettings = FVoxelPlanetOceanSettings();
-	PlanetOceanSettings.Center = Configuration->WorldOrigin; // the planet centre (FVoxelWorldModeFactory::MakePlanetParams)
-	PlanetOceanSettings.Radius = Configuration->WaterRadius;
-	PlanetOceanSettings.VoxelSize = Configuration->VoxelSize;
-
-	FVoxelPlanetOceanMesh Top;
-	FVoxelPlanetOceanMesh Underside;
-	int32 Segments = 0;
-	const int32 Quads = FVoxelPlanetOcean::Build(PlanetOceanSettings, Top, &Underside, Segments);
-	if (Quads == 0)
-	{
-		return;
-	}
-
-	PlanetOcean = VoxelFarOceanManagerPrivate::MakeComponent(Owner, TEXT("VoxelPlanetOcean"), PlanetOceanSettings.Center);
-	auto MakeTangents = [](const TArray<FVector>& In)
-	{
-		TArray<FProcMeshTangent> Out;
-		Out.Reserve(In.Num());
-		for (const FVector& T : In)
-		{
-			Out.Add(FProcMeshTangent(T, false));
-		}
-		return Out;
-	};
-	const TArray<FVector2D> NoUV;
-	PlanetOcean->CreateMeshSection(0, Top.Positions, Top.Triangles, Top.Normals, Top.UV0, Top.UV1, NoUV, NoUV, Top.Colors,
-		MakeTangents(Top.Tangents), /*bCreateCollision=*/false);
-	PlanetOcean->CreateMeshSection(1, Underside.Positions, Underside.Triangles, Underside.Normals, Underside.UV0, Underside.UV1,
-		NoUV, NoUV, Underside.Colors, MakeTangents(Underside.Tangents), /*bCreateCollision=*/false);
-	PlanetOcean->SetMaterial(0, Configuration->WaterMeshMaterial);
-	PlanetOcean->SetMaterial(1, Configuration->WaterMeshMaterial);
-	PlanetOcean->SetVisibility(CVarPlanetOcean.GetValueOnGameThread() != 0);
-	bPlanetOceanUndersideShown = true; // force the first update to decide
-	UpdatePlanetOceanUnderside(CurrentViewerPosition);
-
-	UE_LOG(LogVoxelStreaming, Log,
-		TEXT("Planet ocean: radius %.0f, %d quads a face edge (%d quads, sag at most %.1f uu), built in %.2f ms%s"),
-		PlanetOceanSettings.Radius, Segments, Quads, FVoxelPlanetOcean::MeasureMaxSag(PlanetOceanSettings.Radius, Segments),
-		(FPlatformTime::Seconds() - StartTime) * 1000.0,
-		CVarPlanetOcean.GetValueOnGameThread() != 0 ? TEXT("") : TEXT(" (hidden: voxel.World.PlanetOcean 0)"));
-}
-
-void UVoxelChunkManager::DestroyPlanetOcean()
-{
-	if (IsValid(PlanetOcean))
-	{
-		PlanetOcean->DestroyComponent();
-	}
-	PlanetOcean = nullptr;
-	bPlanetOceanUndersideShown = false;
-}
-
-void UVoxelChunkManager::UpdatePlanetOceanUnderside(const FVector& ViewerPosition)
-{
-	if (!PlanetOcean)
-	{
-		return;
-	}
-	const bool bInside = FVector::DistSquared(ViewerPosition, PlanetOceanSettings.Center)
-		< PlanetOceanSettings.Radius * PlanetOceanSettings.Radius;
-	UpdateUnderside(bInside, bPlanetOceanUndersideShown, [this](bool bBelow)
-	{
-		if (PlanetOcean->GetNumSections() > 1)
-		{
-			PlanetOcean->SetMeshSectionVisible(1, bBelow);
-		}
-	});
+	FVoxelPlanetOceanSettings Settings;
+	Settings.Center = Configuration->WorldOrigin; // the planet centre (FVoxelWorldModeFactory::MakePlanetParams)
+	Settings.Radius = Configuration->WaterRadius;
+	Settings.VoxelSize = Configuration->VoxelSize;
+	PlanetOcean.Build(Owner, Settings, Configuration->WaterMeshMaterial, CVarPlanetOcean.GetValueOnGameThread() != 0,
+		CurrentViewerPosition);
 }
 
 void UVoxelChunkManager::SetPlanetOceanVisible(bool bVisible)
 {
-	if (IsValid(PlanetOcean))
-	{
-		PlanetOcean->SetVisibility(bVisible);
-		UE_LOG(LogVoxelStreaming, Log, TEXT("Planet ocean %s"), bVisible ? TEXT("shown") : TEXT("hidden"));
-	}
+	PlanetOcean.SetVisible(bVisible);
 }
 
 // ==================== The far field (spherical Phase 6 WM-BP9; every world mode since MP3) ====================
@@ -4168,7 +3893,7 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 		ApplyVisibility(Key);
 	}
 	// The sea's undersides show only while the viewer is inside the sea radius (as the sea sphere's).
-	UpdateUnderside(bUnderSea, bFarFieldUndersideShown, [&](bool)
+	FVoxelSeaUnderside::Update(bUnderSea, bFarFieldUndersideShown, [&](bool)
 	{
 		for (const TPair<uint64, TObjectPtr<UProceduralMeshComponent>>& Pair : FarFieldComponents)
 		{
@@ -4250,15 +3975,7 @@ FString UVoxelChunkManager::GetFarFieldDebugString() const
 
 FString UVoxelChunkManager::GetFarOceanDebugString() const
 {
-	if (!FarOceanStatic)
-	{
-		return TEXT("no far ocean (not an island, bIslandFarOcean off, or not a game world)");
-	}
-	FIntPoint GridMin, GridMax;
-	FVoxelFarOcean::GetGridColumns(FarOceanSettings, GridMin, GridMax);
-	return FString::Printf(TEXT("visible=%d box %dx%d column(s) water=%s seabed material=%d reaches %.0f uu past the edge"),
-		FarOceanStatic->IsVisible() ? 1 : 0, GridMax.X - GridMin.X + 1, GridMax.Y - GridMin.Y + 1,
-		FarOceanStatic->GetNumSections() > 1 ? TEXT("yes") : TEXT("no"), FarOceanSettings.SeabedMaterialID, FarOceanSettings.OuterDistance);
+	return FarOcean.Describe();
 }
 
 void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
