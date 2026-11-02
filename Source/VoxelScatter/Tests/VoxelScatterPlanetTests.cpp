@@ -4,6 +4,7 @@
 #include "VoxelScatterTestFixtures.h"
 #include "Misc/AutomationTest.h"
 #include "VoxelScatterManager.h"
+#include "VoxelScatterExtraction.h"
 #include "VoxelScatterTypes.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelWorldModeFactory.h"
