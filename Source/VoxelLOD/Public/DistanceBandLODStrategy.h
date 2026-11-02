@@ -619,7 +619,7 @@ protected:
 	 * balance rule). The mesher's single-level Transvoxel transition cells can only
 	 * bridge a one-level gap, so larger gaps are refined (coarser chunks pulled
 	 * finer) until every adjacency is within this delta. See
-	 * Documentation/LOD_SEAM_INVESTIGATION.md (P2-B).
+	 * Documentation/Research/Archive/LOD_SEAM_INVESTIGATION.md (P2-B).
 	 */
 	int32 MaxNeighborLODDelta = 1;
 

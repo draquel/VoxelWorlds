@@ -1,11 +1,13 @@
-# DC Material Blend Plan (Phase 4 — deferred)
+# DC Material Blend Plan
+
+> State as of 2026-11-02 (code review CR5). Open research: scoped, not started. The voxel meshes keep crisp material
+> borders; only the far field blends materials (G45, below).
 
 Soft cross-fade transitions at Dual Contouring material borders. Follow-up to the
 material-border striping fix (per-quad materials + border vertex duplication,
-`fix/dc-material-border-stripes`, VoxelWorlds PR #13). **Status: DEFERRED — scoped,
-not started.**
+`fix/dc-material-border-stripes`, VoxelWorlds PR #13).
 
-> **The planet far field blends this way since G45** (2026-10-24, WORLD_MODES_REVIEW_PLAN.md §20.27, decision D28):
+> **The far field blends this way since G45** (2026-10-24, decision D28; every world mode since MP3):
 > primary in UV1.x and secondary in colour R, both flat per triangle, the secondary's weight in colour A
 > (255 − weight), and instead of two samples and a `lerp` the master material's `FarFieldMaterialPick` node
 > picks one of the two per pixel against a temporal dither (MATERIAL_SYSTEM.md "Far-Field Material Blend").

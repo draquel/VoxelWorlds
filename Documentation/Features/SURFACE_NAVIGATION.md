@@ -1,5 +1,7 @@
 # Surface Navigation (VoxelNavigation module)
 
+> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+
 Pathfinding over the voxel terrain without an engine navmesh. Built for surface NPCs (game feature 10), usable by
 anything that needs "how do I walk from A to B over the terrain" — on loaded chunks and beyond them.
 
@@ -7,9 +9,9 @@ anything that needs "how do I walk from A to B over the terrain" — on loaded c
 
 A runtime navmesh would have to re-rasterise the tri-mesh chunk collision inside the collision radius (200 m in the
 demo) every time a chunk cooks, knows nothing about terrain that has no collision yet, and voxel chunks / scatter
-already opt out of navigation. The terrain, however, is a function: the generated surface height exists
-everywhere (`UVoxelChunkManager::GetGeneratedSurfaceHeight`), and the edit-merged surface exists wherever a chunk is
-loaded (`QueryEditMergedSurface`). A 2.5-D grid over those two queries gives a cheap, deterministic pathfinder.
+already opt out of navigation. The terrain, however, is a function: the generated surface exists everywhere
+(`UVoxelChunkManager::GetGeneratedSurfacePoint`), and the edit-merged surface exists wherever a chunk is loaded
+(`QueryEditMergedSurfacePoint`). A 2.5-D grid over those two queries gives a cheap, deterministic pathfinder.
 
 ## Pieces
 
@@ -17,11 +19,13 @@ loaded (`QueryEditMergedSurface`). A 2.5-D grid over those two queries gives a c
 |-------|------|------|
 | `FVoxelSurfaceNavParams` | `Public/VoxelSurfacePathfinder.h` | Cell size (150 = two demo voxels), `MaxStepRise` (100: ~34° per cell, a wide margin under a capsule's walkable angle because voxel terrain is locally steeper than the cell average), water level + `MaxWadeDepth`, slope cost, `MaxNodes`, `MaxSearchRadius`, goal snapping, partial routes. |
 | `FVoxelSurfacePathfinder` | `Public/VoxelSurfacePathfinder.h` | Pure A* over cells. Height comes from a `TFunction` sampler, blocked cells from an optional query: unit-testable without a world. 8-connected, no corner cutting, octile heuristic, slope-weighted cost, string-pulled output, nearest-walkable goal snap, partial route to the closest cell when the budget runs out. |
-| `UVoxelSurfaceNavigationSubsystem` | `Public/VoxelSurfaceNavigationSubsystem.h` | World subsystem (Game / PIE). Finds the chunk manager, caches heights per cell in 32 × 32 tiles (edit-merged when loaded, analytic otherwise; analytic cells re-sample when their chunk loads, edited cells drop on `OnChunkEdited`), blocked boxes + temporary blocked cells, cvars, stats, debug drawing. |
+| `FVoxelNavFrame` | `Public/VoxelSurfaceNavigationSubsystem.h` | A search's frame: the identity on a heightmap world (one region holds every cell), a region's tangent frame on a planet (below). |
+| `UVoxelSurfaceNavigationSubsystem` | `Public/VoxelSurfaceNavigationSubsystem.h` | World subsystem (Game / PIE). Finds the chunk manager, caches heights per cell in 32 × 32 tiles per region (edit-merged when loaded, analytic otherwise; analytic cells re-sample when their chunk loads, edited cells drop on `OnChunkEdited`), blocked boxes + temporary blocked cells, cvars, stats, debug drawing. Every search, projection and walkability test runs in the frame of its start's region. |
 
 ### Walkability rule
 
-A step between neighbouring cells is allowed when both cells are above `WaterLevel − MaxWadeDepth`, neither is
+A step between neighbouring cells is allowed when both cells are above `WaterLevel − MaxWadeDepth` (the sea's one
+plane in world Z, wherever `WorldOrigin` is: G19, `Navigation.Plane.SeaWithOrigin`), neither is
 blocked, and `|Δheight| ≤ MaxStepRise` (× √2 on diagonals). Every cell outside the world mode's bounds is blocked
 (`UVoxelChunkManager::IsInsideWorld`; world modes review WM-I2), water on or off: past an island's `R + FalloffWidth`
 generation writes only the seabed, which with water off would otherwise read as walkable ground. Diagonals additionally need both orthogonal neighbours
@@ -38,7 +42,7 @@ cells. With the smooth rule at 150 uu cells, cell centres two blocks apart turne
 rise (refused), while the isosurface it sampled made a two-block step a slope it could take, so nav and movement
 disagreed (KC7).
 `voxel.Nav.BlockSteps 0` keeps the smooth rule in a cubic world. Searches cost about 1.7-3.5× the smooth rule's on the
-same routes (four times the cells; G73).
+same routes (four times the cells; G73). Test: `Navigation.Cubic.BlockSteps`.
 
 ### Subsystem API
 
@@ -69,7 +73,7 @@ grid provider. The surface spawner uses `IsWalkableAt` to reject spawn points.
 
 ### On a planet (spherical Phase 4, SP-G4)
 
-A search runs in the tangent-plane frame of the **region** its start lies in (`FVoxelPlanetNavFrame`): regions are cells
+A search runs in the tangent-plane frame of the **region** its start lies in (`FVoxelNavFrame::MakePlanet`): regions are cells
 of a cube-sphere grid about 19,200 uu across (21 along a face edge on `Review_Planet`); a frame is gnomonic at the
 region centre on the datum sphere, east and north from the tangent frame (north toward +Z), and frame coordinates (x, y)
 map to the world through the direction of O + x·E + y·N from the centre (`ToFrame` refuses points past 60°). The
@@ -85,8 +89,9 @@ sphere's depth along local up), its output turned back into world points.
   test planet held the game thread for minutes).
 - Blocked boxes are 3D on a planet (a cell is blocked when its surface point is inside the box), temporary blocks 3D
   spheres; `ProjectToSurface` and `IsWalkableAt` work along local up; the debug grid and routes are drawn along it.
-- Heightmap worlds keep the old samplers, cache and blocks (`Navigation.Plane.SubsystemUnchanged`: the subsystem over a
-  plane chunk manager gives the old route, bit for bit).
+- A heightmap world runs the same code in the identity frame: one region that never expires, blocked boxes by their XY
+  footprint (`FVoxelNavFrame::BlocksInSpace` is false), heights in world Z (`Navigation.Plane.SubsystemUnchanged`: the
+  subsystem over a plane chunk manager gives the route the heightmap-only code gave, bit for bit).
 
 NPC AI steers in the gravity frame (VoxelCharacterPlugin `FVCGravityFrame`), so routes on a planet are followed on the
 tangent plane.
@@ -97,8 +102,9 @@ tangent plane.
 pure pathfinder over lambda heightfields; `WorldBounds` blocks the cells outside an island footprint over flat dry ground
 (water off), as the subsystem does. On planets (`Tests/VoxelNavigationPlanetTests.cpp`): `Navigation.Planet.RegionFrames`
 (round trips, cells within 2% of their size 33 km out), `.Path` (at 45° and across a cube-face edge: waypoints on the
-surface, the goal reached, the region cache reused, walkability by the sea sphere), `.Blocks`;
-`Navigation.Plane.SubsystemUnchanged`.
+surface, the goal reached, the region cache reused, walkability by the sea sphere), `.Blocks`, `.PathAtScale`;
+`Navigation.Plane.SubsystemUnchanged`, `Navigation.Plane.SeaWithOrigin`; `Navigation.Cubic.BlockSteps`
+(`Tests/VoxelNavigationCubicTests.cpp`).
 
 ### Related streaming fix
 
@@ -107,7 +113,7 @@ chunks and used to run only when the pawn moved, so a pawn that stood still righ
 `vox.TP`) kept collision only under its own feet — creatures could not spawn and anything walking there would fall
 through. The sweep now also re-runs periodically while stationary.
 
-### Follow-ups
+### Not built
 
 Async searches on a worker (tile sampling must stay on the game thread for the edit-merged query), hierarchical
 search for routes beyond `MaxSearchRadius`, jump / drop links, swimming.

@@ -17,7 +17,7 @@
 // coarser neighbour, ramp the fine surface toward the coarse-LOD surface so the boundary
 // contour meets the coarse neighbour with no vertical step. Baked at mesh time (the chunk is
 // re-meshed when its own or a neighbour's LOD changes), so it needs no vertex-format or shader
-// change on the CPU path. See Documentation/GEOMORPH_IMPLEMENTATION_PLAN.md.
+// change on the CPU path. See Documentation/Research/Archive/GEOMORPH_IMPLEMENTATION_PLAN.md.
 TAutoConsoleVariable<float> CVarMCBoundaryMorphWidth(
 	TEXT("voxel.Mesh.MCBoundaryMorphWidth"),
 	2.0f,

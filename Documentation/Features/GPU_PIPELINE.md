@@ -1,18 +1,27 @@
 # GPU Compute Pipeline
 
-**Modules**: VoxelGeneration
+> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+
+**Module**: VoxelGeneration
 **Dependencies**: VoxelCore
 
 ## Overview
 
-The GPU compute pipeline generates each chunk's voxel data (the density, biome and material fields, then the water
-and underground post-passes) in one render graph and reads the finished voxels back. Meshing is not on the GPU: the
-chunk meshers run on CPU workers (`MARCHING_CUBES_MESHING.md`, `DUAL_CONTOURING.md`); the GPU meshers that once
-followed generation here were never dispatched by a world and were deleted in code review CR1.
+The GPU pipeline generates each chunk's voxel data (density, biome and material, caves and ores, then the water and
+underground post-passes) in one render graph and reads the finished voxels back. Only generation runs on the GPU. The
+chunk meshers run on CPU workers (`MARCHING_CUBES_MESHING.md`, `DUAL_CONTOURING.md`); the GPU Dual Contouring and
+Marching Cubes meshers, never dispatched by a world, were deleted in code review CR1, and scatter extraction reads the
+voxels on the CPU since G27.
+
+Every world mode generates on the GPU when it is allowed: `UVoxelWorldConfiguration::bUseGPUGeneration` (default true),
+the `voxel.Stream.GPUGeneration` cvar (0 forces CPU without a restart) and the `-VoxelForceCPU` switch (headless and
+`-nullrhi` runs, where compute cannot dispatch). The CPU generator (`FVoxelCPUNoiseGenerator`) computes the same voxels
+and is the reference the parity tests compare against.
 
 ## Module Configuration
 
-**IMPORTANT**: Modules that use global shaders (via `IMPLEMENT_GLOBAL_SHADER`) must be configured with `LoadingPhase: PostConfigInit` in the `.uplugin` file. This ensures the shader system is initialized before the module loads.
+Modules that use global shaders (`IMPLEMENT_GLOBAL_SHADER`) must load at `PostConfigInit` in the `.uplugin`, so the
+shader system is initialised before the module loads. VoxelGeneration, VoxelMeshing and VoxelRendering do.
 
 ```json
 {
@@ -22,123 +31,78 @@ followed generation here were never dispatched by a world and were deleted in co
 }
 ```
 
-Failure to set this loading phase will cause editor crashes during startup with access violations in `CreatePackage` or `ProcessNewlyLoadedUObjects`.
+A later loading phase crashes the editor at startup with access violations in `CreatePackage` or
+`ProcessNewlyLoadedUObjects`.
 
-### Header Best Practices
+### Header practice
 
-To avoid static initialization issues in GPU modules:
+To avoid static initialisation problems in GPU modules:
 
-1. **Minimize RDG includes in headers** - Forward declare types like `FRDGPooledBuffer` instead of including heavy headers
-2. **Move heavy includes to .cpp files** - `RenderGraphBuilder.h`, `RenderGraphResources.h`, etc.
-3. **Use `RHIFwd.h`** for forward declarations of RHI types in headers
+1. Forward-declare RDG types such as `FRDGPooledBuffer` in headers rather than including the render graph headers.
+2. Include `RenderGraphBuilder.h`, `RenderGraphResources.h` and the like in `.cpp` files (or private headers such as
+   `VoxelGenerationShaders.h`).
+3. Use `RHIFwd.h` for RHI forward declarations in headers.
+
+## Shaders
+
+| File | Contents |
+|------|----------|
+| `Shaders/Private/GenerateVoxelDensity.usf` | `MainCS` (`FGenerateVoxelDensityCS`), 4x4x4 threads, one thread per voxel |
+| `Shaders/Private/VoxelPostPasses.usf` | the water and underground post-passes (below) |
+| `WorldModeSDF.ush`, `IslandFalloff.ush` | the heightmap terrain and the island's edge falloff |
+| `SphericalPlanet.ush`, `PlanetFrame.ush` | the planet branch, in the chunk's frame |
+| `VoxelNoise.ush`, `VoxelNoiseCommon.ush` | the hashed split-origin noise (`NOISE_LIBRARY.md`) |
+| `CaveGeneration.ush` | `GpuCaveCarve`, one carve for every world mode (`CAVE_SYSTEM.md`) |
+| `BiomeMaterial.ush` | biome selection, the dithered blend, height rules, ores (`BIOME_SYSTEM.md`, `ORE_VEINS.md`) |
+| `Shaders/Shared/VoxelGenerationShared.ush`, `VoxelHash.ush` | the enum integers, flag bits, strides and tables (C++ includes the same file), and the lattice hash (mirrors `VoxelHash.h`) |
+
+The shader classes are declared in `Source/VoxelGeneration/Private/VoxelGenerationShaders.h` and implemented in
+`VoxelGenerationShaders.cpp`.
 
 ## Pipeline Stages
 
-### Stage 1: Voxel Generation
+### Stage 1: Density, biome and material
 
-**Input**: Chunk coordinate, LOD level, world configuration
-**Output**: VoxelData buffer (GPU memory)
+`MainCS` generates at the base voxel size whatever the chunk's LOD (the LOD stride is applied by the meshers, as on
+the CPU). Per voxel, in the CPU generator's order:
 
-```hlsl
-// GenerateVoxelData.usf
-[numthreads(4,4,4)]
-void GenerateVoxelData(uint3 DispatchThreadID : SV_DispatchThreadID) {
-    // Calculate world position
-    float3 WorldPos = ChunkCoord * ChunkSize * VoxelSize + DispatchThreadID * VoxelSize;
-    
-    // Sample noise for base terrain
-    float Density = SampleNoise(WorldPos, NoiseParams);
-    
-    // Apply world mode SDF: the InfinitePlane / IslandBowl heightmap, or the SphericalPlanet radial height
-    // (SphericalPlanet.ush, spherical Phase 2; WORLD_MODES.md "GPU Implementation")
-    Density = ApplyHeightmapWorldMode(WorldPos, Density);
-    
-    // Determine biome
-    float Temperature = SampleNoise(WorldPos, TempNoiseParams);
-    float Moisture = SampleNoise(WorldPos, MoistureNoiseParams);
-    uint BiomeID = SelectBiome(Temperature, Moisture, Density);
-    
-    // Determine material
-    uint MaterialID = GetMaterialForBiome(BiomeID, Density, WorldPos);
-    
-    // Apply edit layer
-    if (HasEdits) {
-        ApplyEdits(DispatchThreadID, Density, MaterialID);
-    }
-    
-    // Write output
-    VoxelData Output;
-    Output.Density = saturate(Density) * 255;
-    Output.MaterialID = MaterialID;
-    Output.BiomeID = BiomeID;
-    Output.Metadata = 0;
-    
-    OutputBuffer[FlatIndex(DispatchThreadID)] = Output;
-}
-```
+1. **Terrain.** On a heightmap world (InfinitePlane, IslandBowl, cubic on either) the terrain noise at the chunk's
+   noise origin plus the voxel's offset (`NoiseOrigins`, MP4), continentalness, the island falloff, the conditioning
+   zones, then the signed distance to the surface. On a planet the radial height along the voxel's direction
+   (`SphericalPlanet.ush`).
+2. **Biome blend** from temperature, moisture and continentalness, before the caves (the caves read the leading
+   biome's cave overrides).
+3. **Caves**: `GpuCaveCarve` with the biome's overrides and the sea's minimum depth.
+4. **Material**: the blended biome material (dithered in blend zones, G39), underwater materials, height rules, the
+   cave-wall override and ore veins.
+5. Pack density, material, biome and flags into one `uint` per voxel.
 
-### Stage 1b: Post-passes
+### Stage 2: Post-passes
 
 The water fill and the underground classification run as compute passes in the same render graph
-(`VoxelPostPasses.usf`, dispatched by `AddVoxelPostPassDispatches`), so the readback returns finished voxel data and
-no thread does per-voxel work after it. Heightmap modes scan world-Z columns; a planet scans digital lines along each
-chunk's local down (`WaterLineSeedCS`, `UndergroundLinesCS`, one thread per line, on the lines `FVoxelDownLines`
-computes for the CPU passes) and floods inside the sea sphere (`WaterFloodSweepRadialCS`). The `GPUvsCPU*Parity`
-tests compare the finished data with the CPU's.
+(`AddVoxelPostPassDispatches` in `VoxelGPUNoiseGenerator.cpp`), so the readback returns finished voxel data and no
+thread does per-voxel work after it. Heightmap modes scan world-Z columns (`WaterColumnSeedCS`, `WaterFloodSweepCS`,
+`UndergroundColumnCS`, `UndergroundMarkCS`, `UndergroundApplyCS`); a planet scans digital lines along each chunk's local
+down (`WaterLineSeedCS`, `UndergroundLinesCS`, one thread per line, on the lines `FVoxelDownLines` computes for the CPU
+passes) and floods inside the sea sphere (`WaterFloodSweepRadialCS`).
 
-## C++ Integration
+### Stage 3: Readback
 
-### Dispatching Compute Shaders
+The streaming path never stalls a thread. `FVoxelGPUNoiseGenerator::BeginGenerateChunkGPU` enqueues the graph and an
+`FRHIGPUBufferReadback` copy in one render command and returns a handle; the chunk manager calls
+`PollGenerateChunkGPU` once a frame until it reports `Ready` (or `Failed`). A landed result is scanned for a uniform
+value (all air, all rock, open sea) so the chunk can be stored collapsed (G67). `GenerateChunkAsync` with the blocking
+`ReadbackToCPU` remains for tests and editor tools.
 
-```cpp
-void UVoxelChunkManager::GenerateChunkOnGPU(FIntVector ChunkCoord, int32 LOD) {
-    FRDGBuilder GraphBuilder(RHICmdList);
-    
-    // Create output buffer
-    FRDGBufferDesc VoxelBufferDesc = FRDGBufferDesc::CreateStructuredDesc(
-        sizeof(FVoxelData),
-        ChunkSize * ChunkSize * ChunkSize
-    );
-    FRDGBufferRef VoxelBuffer = GraphBuilder.CreateBuffer(VoxelBufferDesc, TEXT("VoxelDataBuffer"));
-    
-    // Dispatch generation shader
-    FVoxelGenerationCS::FParameters* Params = GraphBuilder.AllocParameters<FVoxelGenerationCS::FParameters>();
-    Params->ChunkCoord = ChunkCoord;
-    Params->LODLevel = LOD;
-    Params->OutputBuffer = GraphBuilder.CreateUAV(VoxelBuffer);
-    
-    TShaderMapRef<FVoxelGenerationCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
-    
-    FIntVector GroupCount = FIntVector(
-        FMath::DivideAndRoundUp(ChunkSize, 4),
-        FMath::DivideAndRoundUp(ChunkSize, 4),
-        FMath::DivideAndRoundUp(ChunkSize, 4)
-    );
-    
-    FComputeShaderUtils::AddPass(
-        GraphBuilder,
-        RDG_EVENT_NAME("GenerateVoxelData"),
-        ComputeShader,
-        Params,
-        GroupCount
-    );
-    
-    GraphBuilder.Execute();
-}
-```
+## Parity tests
 
-## Performance Characteristics
+Generation on the GPU must equal the CPU's within float rounding. The `VoxelWorlds.Generation.GPUvsCPU*Parity` tests
+(`Material`, `BlendDither`, `IslandBowl`, `Caves`, `NoiseType`, `Water`, `OreVariant`, `Spherical`) and
+`Generation.GPUNoiseGeneratorAsync` compare whole chunks and log a CRC per case. They need a real RHI: under
+`-nullrhi` they skip themselves, so run them in the editor (the project `CLAUDE.md`, "Running correctness tests").
 
-**Voxel Generation** (32³ chunk):
-- Thread groups: 8×8×8 = 512 groups
-- Threads per group: 4×4×4 = 64 threads
-- Total threads: 32,768 (one per voxel)
-- Estimated time: 0.3-0.5ms
+## Performance
 
-## Optimization Strategies
-
-1. **Batch multiple chunks** per dispatch
-2. **Use async compute** queues
-3. **Cache noise samples** for overlapping chunks
-4. **Implement early-out** for empty/full chunks
-
+A 32^3 chunk dispatches 8x8x8 groups of 64 threads (one thread per voxel); a 64^3 chunk 16x16x16. The shaders keep
+their branches and loops un-inlined (`[branch]`, `[loop]`, one cellular search for Cellular and Voronoi) so FXC
+compiles them for SM5 (DX11) in seconds rather than hours (F2.13, `VISUAL_POLISH_PLAN.md`).

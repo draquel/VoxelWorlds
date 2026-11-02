@@ -1,6 +1,8 @@
 # LOD System Architecture
 
-**Module**: VoxelLOD  
+> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+
+**Module**: VoxelLOD
 **Dependencies**: VoxelCore
 
 ## Table of Contents
@@ -8,30 +10,21 @@
 1. [Overview](#overview)
 2. [Interface Design](#interface-design)
 3. [Distance Band Strategy](#distance-band-strategy)
-4. [Future Strategies](#future-strategies)
-5. [Integration with ChunkManager](#integration-with-chunkmanager)
-6. [Performance Considerations](#performance-considerations)
-7. [Implementation Guide](#implementation-guide)
+4. [Mode-Specific Culling](#mode-specific-culling) (the vertical window, islands, planets, the far field, the cut-over)
+5. [Far Compression and Uniform Chunks](#far-compression-and-uniform-chunks)
+6. [Integration with ChunkManager](#integration-with-chunkmanager)
+7. [Debugging](#debugging)
+8. [LOD Seam Handling](#lod-seam-handling)
 
 ---
 
 ## Overview
 
-The LOD (Level of Detail) system determines which chunks should be loaded and at what detail level based on viewer position and other criteria. The system is **pluggable** via the `IVoxelLODStrategy` interface, allowing different LOD implementations to be swapped without modifying core systems.
-
-### Design Goals
-
-- **Pluggable**: Easy to swap strategies without refactoring
-- **Flexible**: Support multiple world modes and use cases
-- **Performant**: Fast queries (called frequently)
-- **Predictable**: Clear memory and performance budgets
-- **Extensible**: Can add new strategies later
-
-### Current Implementations
-
-1. **FDistanceBandLODStrategy** (Default) - Distance-based LOD rings
-2. **FQuadtreeLODStrategy** (Future) - Screen-space adaptive for 2D terrain
-3. **FOctreeLODStrategy** (Future) - 3D adaptive for spherical/cave systems
+The LOD (Level of Detail) system determines which chunks should be loaded and at what detail level based on viewer
+position and other criteria: the **voxel window**. The system is **pluggable** via the `IVoxelLODStrategy` interface;
+`FDistanceBandLODStrategy` is the one implementation, used by every world mode. Past the voxel window the **far field**
+draws the terrain ([The Far Field](#the-far-field-spherical-planet-heightmap-worlds-since-wm-mp1)); it is not a
+strategy, and the window keeps its size.
 
 ---
 
@@ -39,366 +32,94 @@ The LOD (Level of Detail) system determines which chunks should be loaded and at
 
 ### IVoxelLODStrategy
 
+`Source/VoxelLOD/Public/IVoxelLODStrategy.h` (abridged; the header documents each method):
+
 ```cpp
-/**
- * LOD Strategy Interface
- * 
- * All LOD implementations must conform to this interface. Strategies determine
- * which chunks should be loaded/rendered at what detail level.
- * 
- * Performance: GetLODForChunk() is called frequently and must be fast (< 1μs).
- * Thread Safety: All const methods must be thread-safe.
- */
-class IVoxelLODStrategy {
+class IVoxelLODStrategy
+{
 public:
-    virtual ~IVoxelLODStrategy() = default;
-    
-    // ==================== Core Queries ====================
-    
-    /**
-     * Get LOD level for a chunk at given coordinate.
-     * @param ChunkCoord Chunk position in chunk space
-     * @param Context Query context with viewer state
-     * @return LOD level (0 = finest detail, higher = coarser)
-     */
-    virtual int32 GetLODForChunk(
-        FIntVector ChunkCoord, 
-        const FLODQueryContext& Context
-    ) const = 0;
-    
-    /**
-     * Get the LOD level of the distance band a chunk falls in, even with the LOD
-     * system off (then GetLODForChunk is 0 everywhere). Used by systems keyed on
-     * distance rather than detail: far-chunk compression. See "LOD Off and Cubic Meshing".
-     * Default: GetLODForChunk.
-     */
-    virtual int32 GetDistanceBandLOD(
-        FIntVector ChunkCoord, 
-        const FLODQueryContext& Context
-    ) const;
-    
-// ==================== Visibility & Streaming ====================
-    
-    /**
-     * Get all chunks that should be visible this frame.
-     * @param Context Query context with viewer state
-     * @return Array of chunk requests with LOD and priority
-     */
-    virtual TArray<FChunkLODRequest> GetVisibleChunks(
-        const FLODQueryContext& Context
-    ) const = 0;
-    
-    /**
-     * Get chunks that need to be loaded (not currently loaded).
-     * @param OutLoad Output array of chunks to load
-     * @param Context Query context with viewer state
-     */
-    virtual void GetChunksToLoad(
-        TArray<FChunkLODRequest>& OutLoad, 
-        const FLODQueryContext& Context
-    ) const = 0;
-    
-    /**
-     * Get EVERY chunk that is out of range, farthest first. No per-frame cap here: the chunk
-     * manager vetoes candidates it must keep (mid-pipeline, edit-pinned) and only then applies
-     * MaxChunksToUnloadPerFrame via SelectUnloadCandidates, so refused chunks never use up the
-     * budget (R23d, VOXEL_QA_FOLLOWUPS_PLAN.md).
-     * @param OutUnload Output array of chunks to unload
-     * @param Context Query context with viewer state
-     */
-    virtual void GetChunksToUnload(
-        TArray<FIntVector>& OutUnload, 
-        const FLODQueryContext& Context
-    ) const = 0;
+    // Core queries. GetLODForChunk is called often and must be fast; const methods are thread-safe.
+    virtual int32 GetLODForChunk(const FIntVector& ChunkCoord, const FLODQueryContext& Context) const = 0;
+    // The LOD of the distance band a chunk falls in, even with the LOD system off (far compression reads it).
+    virtual int32 GetDistanceBandLOD(const FIntVector& ChunkCoord, const FLODQueryContext& Context) const;
 
-    /** Veto first, cap second: pick this frame's unloads from a farthest-first candidate list. */
-    static int32 SelectUnloadCandidates(const TArray<FIntVector>& Candidates,
-        TFunctionRef<bool(const FIntVector&)> CanUnload, int32 MaxPerFrame, TArray<FIntVector>& OutSelected);
+    // Visibility and streaming
+    virtual TArray<FChunkLODRequest> GetVisibleChunks(const FLODQueryContext& Context) const = 0;
+    virtual void GetChunksToLoad(TArray<FChunkLODRequest>& OutLoad, const TSet<FIntVector>& LoadedChunks,
+        const FLODQueryContext& Context) const = 0;
+    // EVERY out-of-range chunk, farthest first; the chunk manager vetoes the ones it must keep (mid-pipeline,
+    // edit-pinned) and only then applies MaxChunksToUnloadPerFrame (R23d).
+    virtual void GetChunksToUnload(TArray<FIntVector>& OutUnload, const TSet<FIntVector>& LoadedChunks,
+        const FLODQueryContext& Context) const = 0;
+    static int32 SelectUnloadCandidates(/* veto first, cap second */);
 
-    /** Unload horizon (ViewDistance * UnloadDistanceMultiplier for distance bands; -1 = none). */
-    virtual float GetUnloadDistance() const;
-
-    /** Load horizon (the view distance; -1 = none). Edit-pinned chunks pin-load within it and stay
-     *  resident out to GetUnloadDistance(), so they never appear alone past the terrain edge. */
-    virtual float GetLoadDistance() const;
-
-    /** The distance both horizons are measured in, viewer to chunk centre. Default 3D; distance
-     *  bands: horizontal in heightmap worlds (see "The Vertical Window"). The chunk manager's queue
-     *  eviction, stale-cull, edit pins and residency audit all use it, so nothing disagrees with the
-     *  strategy's own unload rule (KI11 in WORLD_MODES_REVIEW_PLAN.md). */
-    virtual float GetStreamingHorizon(const FVector& ChunkCenter, const FVector& ViewerPosition) const;
-    
-    // ==================== Lifecycle ====================
-    
-    /**
-     * Initialize strategy from world configuration.
-     * Called once at world creation.
-     */
-    virtual void Initialize(const FVoxelWorldConfiguration& WorldConfig) = 0;
-    
-    /**
-     * Update strategy state.
-     * Called every frame from game thread.
-     * @param Context Query context with viewer state
-     * @param DeltaTime Time since last update
-     */
+    // Lifecycle
+    virtual void Initialize(const UVoxelWorldConfiguration* WorldConfig) = 0;
     virtual void Update(const FLODQueryContext& Context, float DeltaTime) = 0;
-    
-    // ==================== Optional Optimization ====================
-    
-    // ShouldUpdateChunk and GetChunkPriority: deleted in CR1 (STREAM-10)
-    
-    // ==================== Debugging ====================
-    
-    /**
-     * Get debug information string.
-     * Used for on-screen display and logging.
-     */
+
+    // Horizons: load (the view distance), unload (x UnloadDistanceMultiplier), and the distance both are measured in
+    // (horizontal in heightmap worlds, along the ground on a planet; the chunk manager's eviction, edit pins and
+    // residency audit use it too)
+    virtual float GetLoadDistance() const;
+    virtual float GetUnloadDistance() const;
+    virtual float GetStreamingHorizon(const FVector& ChunkCenter, const FVector& ViewerPosition) const;
+
+    // The voxel cut-over (see "Orbit and Back")
+    virtual bool IsWindowSuspended() const;
+    virtual double GetCutoverAltitude() const;        // in force: 0 without a far field
+    virtual void SetFarFieldActive(bool bActive);     // the chunk manager says when the far field is built or released
+    virtual double GetViewerSurfaceAltitude() const;
+
+    // Debugging
     virtual FString GetDebugInfo() const = 0;
-    
-    /**
-     * Draw debug visualization in viewport.
-     * Optional: Draw LOD zones, chunk bounds, etc.
-     */
-    virtual void DrawDebugVisualization(
-        UWorld* World, 
-        const FLODQueryContext& Context
-    ) const {}
+    virtual void DrawDebugVisualization(UWorld* World, const FLODQueryContext& Context) const;
 };
 ```
 
 ### FLODQueryContext
 
-```cpp
-/**
- * LOD Query Context
- * 
- * Encapsulates all viewer and world state needed for LOD queries.
- * Passed to all LOD strategy methods.
- */
-struct FLODQueryContext {
-    // ==================== Camera/Viewer State ====================
-    
-    /** Current viewer (camera) position in world space */
-    FVector ViewerPosition;
-    
-    /** Viewer forward direction (normalized) */
-    FVector ViewerForward;
+`Source/VoxelCore/Public/LODTypes.h`: what a query knows of the viewer and the world.
 
-    // ViewerRight, ViewerUp, ViewDistance, AspectRatio, WorldRadius, MaxChunksToLoadPerFrame, TimeSliceMS,
-    // FrameNumber, GameTime, DeltaTime deleted in CR1 (STREAM-11)
-    
-    /** Field of view in degrees */
-    float FieldOfView;
-    
-    /** Frustum planes for culling (optional) */
-    TArray<FPlane> FrustumPlanes;
-    
-    // ==================== World State ====================
-    
-    /** World origin (for spherical: planet center; bowl: island center) */
-    FVector WorldOrigin;
-    
-    /** World mode (Infinite, Spherical, Island) */
-    EWorldMode WorldMode;
-    
-    // ==================== Performance Budgets ====================
-    
-    /** Maximum chunks to unload per frame */
-    int32 MaxChunksToUnloadPerFrame = 8;
-    
-    // ==================== Optional Extended Data ====================
-    
-    /** Biome system reference (for biome-aware LOD) */
-    const FBiomeSystem* BiomeSystem = nullptr;
-    
-    /** Edit layer reference (for edit-aware LOD) */
-    const FEditLayer* EditLayer = nullptr;
-};
-```
+| Field | Meaning |
+|-------|---------|
+| `ViewerPosition`, `ViewerForward` | The streaming viewer (the camera, or ahead of it under the descent prefetch) |
+| `ViewerLead` | How far the streaming viewer is ahead of the camera, so the strategy knows the camera's altitude (G49) |
+| `bFarFieldActive` | The chunk manager has a far field; the cut-over is in force only then (D38, G78) |
+| `FieldOfView`, `FrustumPlanes` | The view |
+| `WorldOrigin`, `WorldMode` | The world (a planet's centre, an island's centre) |
+| `MaxChunksToUnloadPerFrame` | The unload pace (8) |
 
 ### FChunkLODRequest
 
-```cpp
-/**
- * Chunk LOD Request
- * 
- * Request to load/render a specific chunk at a specific LOD level.
- * Used for streaming and rendering decisions.
- */
-struct FChunkLODRequest {
-    /** Chunk coordinate in chunk space */
-    FIntVector ChunkCoord;
-    
-    /** LOD level to load (0 = finest) */
-    int32 LODLevel;
-    
-    /** Priority for sorting (higher = more important) */
-    float Priority;
-
-    /** Comparison operator for priority queue (descending order) */
-    bool operator<(const FChunkLODRequest& Other) const {
-        return Priority > Other.Priority;
-    }
-};
-```
+A chunk to load or render: `ChunkCoord`, `LODLevel` (0 = finest), `Priority` (higher first).
 
 ---
 
 ## Distance Band Strategy
 
-The **FDistanceBandLODStrategy** is the default LOD implementation. It uses concentric distance rings around the viewer to determine LOD levels.
+The **FDistanceBandLODStrategy** uses concentric distance rings around the viewer to determine LOD levels.
 
 ### Configuration
 
-```cpp
-class FDistanceBandLODStrategy : public IVoxelLODStrategy {
-public:
-    /** LOD band configuration */
-    struct FLODBand {
-        float MinDistance;      // Meters from viewer
-        float MaxDistance;      // Meters from viewer
-        int32 LODLevel;         // 0 = finest detail
-        int32 VoxelStride;      // Sampling stride (1, 2, 4, 8, ...)
-        int32 ChunkSize;        // Voxels per chunk edge
-    };
+The bands are the world configuration's `LODBands` (`FLODBand`: `MinDistance` and `MaxDistance` in uu, `LODLevel`,
+`VoxelStride`, `ChunkSize`), with `ViewDistance`, `UnloadDistanceMultiplier` (1.2), `bEnableLOD` and
+`bSurfaceSlabCulling`. The demo's bands are stride 1 to 7,000 uu, stride 2 to 14,000 uu and stride 4 beyond, out to a
+40,000 uu view; the test planets use the same bands.
 
-    /** LOD bands (sorted by distance) */
-    TArray<FLODBand> LODBands;
+### LOD per Chunk
 
-    /** Enable frustum culling? */
-    bool bViewFrustumCulling = true;
-};
-```
+A chunk's raw LOD is the band its 3D distance from the viewer falls in (the coarsest band past the last). What
+`GetLODForChunk` returns is the **balanced** LOD (`RebuildBalancedLODCache`):
 
-### Example Configurations
+- **Hysteresis.** A chunk changes band only past a deadband, asymmetric: it refines `RefineHysteresisFraction` (0.25)
+  of a chunk width before the band edge and coarsens `CoarsenHysteresisFraction` (0.5) after it, so a viewer near a band
+  edge does not flip chunks back and forth (tests `LOD.Hysteresis.*`).
+- **2:1 balance.** Neighbouring chunks differ by at most one LOD level, which the seam meshers rely on.
+- **When it is rebuilt.** The cache covers every candidate of the keep window and is rebuilt when the viewer enters
+  another chunk or moves `BalancedLODCacheMoveThreshold` (100 uu), or when the origin or a balance input changes (tests
+  `LOD.BalancedCache.*`). A chunk outside it falls back to the raw band.
 
-**Infinite Plane:**
-```cpp
-LODBands = {
-    { 0.0f,    512.0f,  0, 1,  32,  64.0f  },  // Close: Full detail
-    { 512.0f,  1024.0f, 1, 2,  32,  64.0f  },  // Mid: Half detail
-    { 1024.0f, 2048.0f, 2, 4,  32,  128.0f },  // Far: Quarter detail
-    { 2048.0f, 4096.0f, 3, 8,  64,  256.0f },  // Very far: Coarse, big chunks
-    { 4096.0f, 8192.0f, 4, 16, 128, 512.0f },  // Horizon: Very coarse
-};
-```
-
-**Spherical Planet:** the same bands as any world (the test planets use the demo's), measured in 3D from the viewer
-(see "The Window and Culling (Spherical Planet)" below).
-
-**Island/Bowl:**
-```cpp
-LODBands = {
-    { 0.0f,    256.0f,  0, 1,  32,  32.0f  },  // High detail island
-    { 256.0f,  512.0f,  1, 2,  32,  32.0f  },
-    { 512.0f,  1024.0f, 2, 4,  32,  64.0f  },
-    { 1024.0f, 2048.0f, 3, 8,  64,  128.0f },
-};
-```
-
-### Implementation
-
-```cpp
-int32 FDistanceBandLODStrategy::GetLODForChunk(
-    FIntVector ChunkCoord, 
-    const FLODQueryContext& Context) const
-{
-    // Convert chunk coord to world position
-    FVector ChunkCenter = ChunkCoordToWorldPosition(ChunkCoord, Context);
-    
-    // Calculate distance to viewer
-    float Distance = GetDistanceToViewer(ChunkCenter, Context);
-    
-    // Find matching band
-    for (const FLODBand& Band : LODBands) {
-        if (Distance >= Band.MinDistance && Distance < Band.MaxDistance) {
-            return Band.LODLevel;
-        }
-    }
-    
-    // Beyond all bands - use coarsest LOD
-    return LODBands.Last().LODLevel;
-}
-
-TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
-    const FLODQueryContext& Context) const
-{
-    TArray<FChunkLODRequest> Requests;
-    
-    // Iterate through each LOD band
-    for (const FLODBand& Band : LODBands) {
-        int32 ChunkWorldSize = Band.ChunkSize * GetVoxelSize();
-        int32 ChunkRadius = FMath::CeilToInt(Band.MaxDistance / ChunkWorldSize);
-        
-        FIntVector ViewerChunk = WorldPositionToChunkCoord(
-            Context.ViewerPosition, 
-            ChunkWorldSize
-        );
-        
-        // Grid iteration within this band's range
-        for (int32 x = -ChunkRadius; x <= ChunkRadius; ++x) {
-            for (int32 y = -ChunkRadius; y <= ChunkRadius; ++y) {
-                for (int32 z = GetMinZ(Context); z <= GetMaxZ(Context); ++z) {
-                    FIntVector ChunkCoord = ViewerChunk + FIntVector(x, y, z);
-                    
-                    // Distance check (is this chunk in this band?)
-                    FVector ChunkCenter = ChunkCoordToWorldPosition(ChunkCoord, Context);
-                    float Distance = GetDistanceToViewer(ChunkCenter, Context);
-                    
-                    if (Distance < Band.MinDistance || Distance >= Band.MaxDistance) {
-                        continue; // Not in this band
-                    }
-                    
-                    // Frustum culling (optional)
-                    if (bViewFrustumCulling && !IsChunkInFrustum(ChunkCoord, Context)) {
-                        continue;
-                    }
-                    
-                    // Create request
-                    FChunkLODRequest Request;
-                    Request.ChunkCoord = ChunkCoord;
-                    Request.LODLevel = Band.LODLevel;
-                    Request.Priority = CalculatePriority(ChunkCoord, Context);
-
-                    Requests.Add(Request);
-                }
-            }
-        }
-    }
-    
-    // Sort by priority
-    Requests.Sort();
-    
-    return Requests;
-}
-```
-
-### Priority Calculation
-
-```cpp
-float FDistanceBandLODStrategy::CalculatePriority(
-    FIntVector ChunkCoord, 
-    const FLODQueryContext& Context) const
-{
-    FVector ChunkCenter = ChunkCoordToWorldPosition(ChunkCoord, Context);
-    float Distance = GetDistanceToViewer(ChunkCenter, Context);
-    
-    // Base priority: inverse distance (closer = higher priority)
-    float Priority = 1.0f / FMath::Max(Distance, 1.0f);
-    
-    // Boost for chunks in view direction
-    FVector ToChunk = (ChunkCenter - Context.ViewerPosition).GetSafeNormal();
-    float DotProduct = FVector::DotProduct(ToChunk, Context.ViewerForward);
-    
-    if (DotProduct > 0) {
-        // Forward chunks get up to 2x priority boost
-        Priority *= (1.0f + DotProduct);
-    }
-    
-    return Priority;
-}
-```
+Requests carry a priority: inverse distance, up to twice that for chunks ahead of the viewer (`CalculatePriority`).
 
 ### Distance Calculation
 
@@ -432,7 +153,7 @@ and, from 40,000 uu up, all of it. With the horizon horizontal the ground under 
 the LOD distance keeps the far-away and the far-below coarse.
 
 A planet's LOD distance stays Euclidean (3D, SP-C3): near the viewer it matches the distance along the surface. Its
-horizon has been the distance along the ground since spherical Phase 6 (WM-BP8, WORLD_MODES_REVIEW_PLAN.md §20.4): with a
+horizon has been the distance along the ground since spherical Phase 6 (WM-BP8): with a
 3D horizon a viewer about the view distance above the ground loaded nothing, the planet's version of what D8 fixed for
 heightmaps.
 
@@ -441,8 +162,7 @@ heightmaps.
 `bEnableLOD` off turns the LOD system off: every chunk is LOD 0 (full detail), and there are no LOD
 re-meshes, crossfades, 2:1 balance or seam holds. Read the effective value through
 `UVoxelWorldConfiguration::IsLODEnabled()`, not the property: **cubic meshing always runs with LOD
-off**, whatever `bEnableLOD` says (decision D7 in
-[WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §8). The cubic mesher never reads the
+off**, whatever `bEnableLOD` says (decision D7; test `LOD.LODOff.CubicForcesOff`). The cubic mesher never reads the
 LOD level, so LOD changes would only re-mesh and crossfade identical geometry; greedy meshing is
 cubic's answer to distance instead. The chunk manager logs `LOD system disabled for cubic mode` once
 at initialisation when a cubic config has `bEnableLOD` on. The asset is not modified, so the same
@@ -454,7 +174,7 @@ chunk is rather than *how coarse* it is:
 | System | Rule | With LOD on | With LOD off |
 |--------|------|-------------|--------------|
 | Near window (heightmap worlds, see "The Vertical Window") | Within band 0's `MaxDistance` plus two chunk widths, a column also loads the viewer's layer ± 2 | Same | Same: keyed on band 0's distance, not the LOD level |
-| Far-chunk compression (`voxel.FarCompression.*`) | A settled, idle chunk is compressed once its distance band's stride (`1 << LODLevel`) reaches `voxel.FarCompression.MinStride` (default 4) | The band is the chunk's LOD level (distance plus hysteresis and 2:1 balance), as before | The band its distance falls in, from `GetDistanceBandLOD` (no hysteresis) |
+| Far-chunk compression (`voxel.FarCompression.*`, [below](#far-compression-and-uniform-chunks)) | A settled, idle chunk is compressed once its distance band's stride (`1 << LODLevel`) reaches `voxel.FarCompression.MinStride` (default 4) | The band is the chunk's LOD level (distance plus hysteresis and 2:1 balance) | The band its distance falls in, from `GetDistanceBandLOD` (no hysteresis) |
 
 So with the demo bands (stride 1 to 7,000 uu, stride 2 to 14,000 uu, stride 4 beyond) and the default
 `MinStride` of 4, chunks more than 14,000 uu away compress in both modes. A one-band config (band 0 out to
@@ -468,8 +188,8 @@ The LOD strategy includes mode-specific culling optimizations that skip chunks g
 
 ### The Vertical Window (Infinite Plane & Island/Bowl)
 
-Heightmap worlds take their vertical streaming range from the terrain, not from the viewer's altitude (decision D8
-in [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §8, work item WM-S1). Each chunk column has its own window
+Heightmap worlds take their vertical streaming range from the terrain, not from the viewer's altitude (decision D8,
+work item WM-S1; tests `LOD.VerticalWindow.*`). Each chunk column has its own window
 of layers (`FDistanceBandLODStrategy::GetColumnLayerRange`):
 
 | Part | Layers | Where |
@@ -519,14 +239,13 @@ bool FDistanceBandLODStrategy::ShouldCullIslandBoundary(
 }
 ```
 
-**Island Extent**: `IslandRadius + FalloffWidth`. Until M6 (WORLD_MODES_REVIEW_PLAN.md §14.10) a circle kept every chunk
+**Island Extent**: `IslandRadius + FalloffWidth`. Until M6 a circle kept every chunk
 whose centre was within the extent plus a chunk diagonal: a ring of columns wholly past the edge, holding the old floor and
 water there. The far ocean draws the sea past what streams now (WORLD_MODES.md, "Beyond the edge").
 
 ### The Window and Culling (Spherical Planet)
 
-A planet streams by chunk, with the heightmap rules of D8 on a sphere (spherical Phase 6, WM-BP8;
-WORLD_MODES_REVIEW_PLAN.md §20.4). `FDistanceBandLODStrategy::IsInPlanetWindow` decides each chunk:
+A planet streams by chunk, with the heightmap rules of D8 on a sphere (spherical Phase 6, WM-BP8). `FDistanceBandLODStrategy::IsInPlanetWindow` decides each chunk:
 
 - **The horizon, along the ground** (`GetStreamingHorizon` → `GetPlanetGroundDistance`): the arc between the viewer's
   direction from the planet centre and the chunk centre's, on the sphere through the viewer's ground point (the analytic
@@ -556,8 +275,9 @@ WORLD_MODES_REVIEW_PLAN.md §20.4). `FDistanceBandLODStrategy::IsInPlanetWindow`
   band reaches no higher, and a viewer above the ceiling takes none. Until G52 the band followed the viewer at any
   altitude inside the shell: a viewer descending onto the 50 km or 1,000 km test planet from 100 km up streamed a new
   layer of air every second, taking the generation its ground disk needed, and loaded the last layers over the ground in
-  its last second (WORLD_MODES_REVIEW_PLAN.md §20.7). The keep window is unchanged, so a viewer crossing the ceiling
-  unloads nothing.
+  its last second. The keep window is unchanged, so a viewer crossing the ceiling unloads nothing (test
+  `LOD.Planet.NearBand`). A heightmap world needs no such ceiling: its near layers are already clipped to the terrain's
+  height bounds (MP1).
 - **The cull** (`ShouldCullBeyondHorizon`, SP-C2), a superset of the window: a chunk wholly inside the shell's inner
   radius or outside its outer one, or whose nearest point lies beyond the horizon, the sum of the two tangent distances to
   the datum sphere, `sqrt(2Rh + h^2) + sqrt(2RH + H^2)` (`GetVisibilityHorizon`; R the radius, h the viewer's altitude,
@@ -576,8 +296,7 @@ altitude band. Load, unload (`GetChunksToUnload`, the keep window) and the balan
 
 So the window is the ground disk of the view distance, a few chunks thick around the surface wherever it is: 950 to
 1,160 chunks on the 2.5 km planet and on a 1,000 km one with km-scale relief alike (`LOD.Planet.SurfaceSlab`; the whole
-shell would be 1,000-1,200 and 17,700), and 1,080-1,260 live on the 50 km and 1,000 km test planets
-(WORLD_MODES_REVIEW_PLAN.md §20.4), against 2,800-3,000 for them before WM-BP8, whose
+shell would be 1,000-1,200 and 17,700), and 1,080-1,260 live on the 50 km and 1,000 km test planets, against 2,800-3,000 for them before WM-BP8, whose
 shells were thicker than the view distance, so their windows were the whole sphere of it around the viewer. A climbing
 viewer keeps its ground disk (`LOD.Planet.GroundHorizon`): until WM-BP8 the window was clipped to the viewer's Z ± the
 view distance and measured in 3D from the viewer, so it held nothing from about the view distance up (the planet's G13).
@@ -589,10 +308,9 @@ Beyond the window the far field draws the planet (below).
 
 The voxel window has one chunk size and generates every chunk at full resolution, so it cannot reach the horizon (58,000
 chunks on the ground of a 50 km planet) or orbit. Past it a planet draws its far field (spherical Phase 6, WM-BP9,
-decision D19; WORLD_MODES_REVIEW_PLAN.md §20.5): `FVoxelFarField` (VoxelStreaming), a cube-sphere quadtree of
+decision D19): `FVoxelFarField` (VoxelStreaming), a cube-sphere quadtree of
 patches of the analytic surface. It is not an `IVoxelLODStrategy`: its patches are heightfields with their own
-primitives, and the voxel window keeps its size. Since the world modes review's MP3 (WM-MP1, decision D36;
-WORLD_MODES_REVIEW_PLAN.md §23) a plane and an island draw the same far field over the XY plane ("On a heightmap world"
+primitives, and the voxel window keeps its size. Since the world modes review's MP3 (WM-MP1, decision D36) a plane and an island draw the same far field over the XY plane ("On a heightmap world"
 below): before, nothing was drawn past the voxel window but an island's far ocean.
 
 - **Patches.** Six face quadtrees on the planet's surface coordinate (`FVoxelCubeSphere`'s faces and tangent warp; level 0
@@ -602,7 +320,7 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   of samples past its edges), the surface's materials (below), and skirts deep enough to close the gap to a neighbour up
   to three levels coarser or finer. A shared cube edge is the same direction from both faces (the gnomonic coordinate exactly +-1 there),
   so the terrain's step across the edge's plane (G43) never splits it.
-- **Materials** (G45, decision D28; WORLD_MODES_REVIEW_PLAN.md §20.27). Each grid vertex samples the surface's material
+- **Materials** (G45, decision D28; tests `FarField.Planet.MaterialMix`, `.MaterialBlend`). Each grid vertex samples the surface's material
   mix (`FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt`: in a biome blend zone the two leading biomes' surface
   materials, height rules applied, and the second's share, which is what generation's dithered per-voxel picks cover
   there; one material outside the zones). A quad carries its corners' two largest materials and, at each corner, the
@@ -622,12 +340,13 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   patch the voxel chunks cover covers its area without a mesh, a patch culled in its last visit (coming up over the
   horizon) waits for its build drawing nothing, and a chunk re-meshing counts as drawn. Before, the nearest built
   ancestor stood in, often a face's root (the others released), and its coarse surface flashed over the voxel terrain
-  and the horizon for a frame or more ([VISUAL_POLISH_PLAN.md](../VISUAL_POLISH_PLAN.md) "VP4 terrain flicker").
+  and the horizon for a frame or more (test `FarField.{Planet,Plane}.NoStandInOverWindow`; history:
+  [VISUAL_POLISH_PLAN.md](../VISUAL_POLISH_PLAN.md) "VP4 terrain flicker").
   The chunk manager updates the far field in its tick (`TG_PrePhysics`) with the player camera manager's camera, the
   frame before's (the camera managers update after `TG_PostPhysics`); after a cut, a camera more than a chunk from that
   one, it updates it again in `TG_PostUpdateWork` for this frame's (`FVoxelFarFieldCameraTickFunction`,
   `UpdateFarFieldForCamera`; F4.3, `voxel.World.FarFieldCameraUpdate`), so the frame of a teleport draws the far field
-  where the camera arrived rather than the old position's selection.
+  where the camera arrived rather than the old position's selection (test `FarField.{Planet,Plane}.CameraAfterCut`).
 - **The hole.** Within the window's reach of the viewer's ground point (the unload distance plus a chunk's half
   diagonal, along the ground as the window measures its horizons) patches split down to the edge level, one to two
   chunks across (`FVoxelFarFieldSettings::ComputeEdgeLevel`: 64 a face edge on the 2.5 km planet, 1,024 on a 50 km one,
@@ -643,12 +362,13 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   builds while it draws nothing, VP4). Every root is built from the first updates, also a face under the horizon, so
   after a teleport onto a face the camera never saw its root stands in at once (F4.2,
   `voxel.World.FarFieldBuildAllRoots`, 1; before, a root was built once some of its face came into view and the first
-  update there drew no far field).
+  update there drew no far field; test `FarField.Planet.TeleportOntoUnseenFace`).
 - **The sea**, at scale: where the sea sphere would sag past its budget (`ShouldDrawSea`: from about R 3.3 x 10^5) each
   patch draws a sea section over the cells near or under the sea, 8 x 8 cells a patch, over the voxel window too (a
   planet has no voxel water tiles), with an underside near the window shown from under the sea. The small planet keeps
   its sea sphere.
-- **On a heightmap world** (world modes review WM-MP1, decisions D36 and D37; WORLD_MODES_REVIEW_PLAN.md §23.10) the same
+- **On a heightmap world** (world modes review WM-MP1, decisions D36 and D37; tests `FarField.Plane.*`,
+  `FarField.Island.Bounds`, `FarField.Cubic.BlockTop`) the same
   class runs with a heightmap frame: the key's face is `FVoxelFarFieldPatchKey::HeightmapFace` and its X and Y are signed
   cell indices of one quadtree over the XY plane whose level-0 cells are **root tiles** of `voxel.World.FarFieldRootChunks`
   chunks aligned to the chunk grid (0, the default: about a quarter of the far distance in chunks rounded to a power of
@@ -687,16 +407,17 @@ voxel window but a small planet's sea sphere or an island's open sea and seabed)
 
 From high up the voxel window adds little the far field does not draw: its ground disk is a narrow cone under the
 viewer, all of it in the coarsest band. So a planet's window empties above a cut-over altitude and streams back on the
-way down (spherical Phase 6, WM-BP10, decision D18; WORLD_MODES_REVIEW_PLAN.md §20.6). A plane's or an island's window
+way down (spherical Phase 6, WM-BP10, decision D18). A plane's or an island's window
 does the same since the world modes review's MP3 (WM-MP2, decision D38): the altitude is measured over the generated
 ground under the streaming viewer or the sea where higher, `VoxelCutoverAltitude` and the three-view-distance
 default, `voxel.Stream.VoxelCutover` and G49's guard apply as on a planet, a suspended heightmap window returns no column
 (`GetVisibleChunks`, the balanced LOD cache) and unloads every chunk, and the cut-over is in force only while the chunk
 manager has a far field (`FLODQueryContext::bFarFieldActive`): without one `GetCutoverAltitude` is 0 (the configured
-altitude stays readable as `GetPlanetCutoverAltitude`) and the window keeps its ground disk at any altitude (D8), since
-a suspended window with nothing drawn under it is a hole in the world. The same gate holds on a planet since G78
-(world modes review §23.13): `voxel.World.FarField 0` there once left the cut-over in force, so from orbit nothing drew
-the planet; now it keeps the window, and `vox.Planet` reports "cut-over off: no far field".
+altitude stays readable as `GetConfiguredCutoverAltitude`) and the window keeps its ground disk at any altitude (D8), since
+a suspended window with nothing drawn under it is a hole in the world. The same gate holds on a planet since G78:
+`voxel.World.FarField 0` there once left the cut-over in force, so from orbit nothing drew the planet; now it keeps the
+window, and `vox.Planet` reports "cut-over off: no far field" (tests `LOD.Planet.CutoverFarFieldGate`,
+`Streaming.Planet.CutoverFarFieldGate`, `LOD.Plane.Cutover`).
 
 - **The cut-over** (`FDistanceBandLODStrategy`, `IVoxelLODStrategy::IsWindowSuspended`): decided in `Update` from the
   streaming viewer's altitude over the surface under it, the analytic terrain along its direction or the sea where that
@@ -707,7 +428,7 @@ the planet; now it keeps the window, and `vox.Planet` reports "cut-over off: no 
   disk at any altitude as WM-BP8 made it). A suspended window resumes only with the camera under the cut-over as well
   (`FLODQueryContext::ViewerLead` gives the strategy the camera's altitude; G49, `voxel.World.CutoverResumeGuard`, 0 =
   the streaming viewer alone decides, the rule before): the descent prefetch below can bring a resume forward to the
-  cut-over but no higher.
+  cut-over but no higher (tests `LOD.Planet.CutoverResumeGuard`, `Streaming.Planet.CutoverDescentStop`).
 - **Suspended**, `GetVisibleChunks` returns nothing, `GetChunksToUnload` every loaded chunk and the balanced LOD cache is
   empty; the chunk manager evicts its generation queue, stale-culls whatever finishes generating, and neither pins nor
   keeps edited chunks (their edits stay in the edit layers and load with the window when it resumes). The window
@@ -720,7 +441,8 @@ the planet; now it keeps the window, and `vox.Planet` reports "cut-over off: no 
 - **The far field** cuts its hole while chunks are held; once the window holds none, it refines by its screen error alone
   (`EdgeRadius` 0: no edge patches forced for an empty window). When the window resumes the band returns, its patches
   build while their parents draw, and the chunks fade in over them (the appearance fade, measured from the camera).
-- **The descent prefetch** (`UVoxelChunkManager::ApplyDescentPrefetch`): under a camera descending faster than
+- **The descent prefetch** (`UVoxelChunkManager::ApplyDescentPrefetch`, through `FVoxelStreamingViewerPolicy`; every
+  world mode since MP1): under a camera descending faster than
   `voxel.Stream.DescentMinSpeed` (1,500 uu/s) the streaming viewer goes ahead of it along local down by what it covers
   in `voxel.Stream.DescentLead` seconds (3), at most half its altitude and never within two chunks of the surface
   (`ComputeDescentLead`; the camera's radial speed smoothed, a jump of ten chunks in a frame treated as a teleport). The
@@ -782,401 +504,95 @@ bounded by geometry:
   unloading, not residency.
 
 On the demo geometry (4,800 uu chunks, 40,000 uu view) that is about 980 chunks settled and 1,080-1,220 at peak while
-moving, for InfinitePlane and an island alike; a fully resident island S (0.8 km across) holds about 1,020. Measured in
-[WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §14.8.
+moving, for InfinitePlane and an island alike; a fully resident island S (0.8 km across) holds about 1,020 (M4; history:
+`WORLD_MODES_REVIEW_PLAN.md` §14.8).
 
 ---
 
-## Future Strategies
+## Far Compression and Uniform Chunks
 
-### Quadtree LOD (Future)
+A chunk's voxels are 1 MB at 64^3. Two rules keep the window's memory down without changing what any reader sees:
 
-**Use Case**: Infinite plane worlds with view-dependent LOD
+- **Far compression.** A settled, idle chunk (`voxel.FarCompression.IdleFrames`, 300 frames unchanged) whose distance
+  band's stride reaches `voxel.FarCompression.MinStride` (4: LOD 2 and beyond) is compacted: to one value when uniform,
+  else with `voxel.FarCompression.Codec` (3, Oodle). The sweep is time-sliced (`voxel.FarCompression.MaxScansPerTick`,
+  `MaxInFlight`). A reader of a compressed chunk without edits does not expand it: its snapshot is decoded by a worker
+  task from a copy of the compact form (`FVoxelCompactSource`), started when a chunk in its neighbourhood is queued for a
+  mesh or a collision cook; mesh jobs, seam jobs and cooks wait for it on their own workers, and the chunk stays
+  compressed. Before, every reader expanded the chunk on the game thread as the viewer came near, about 0.3 ms each and
+  half of them repeats (G65; `voxel.FarCompression.SnapshotReads`, tests `Compression.Codec.CompactSource`,
+  `Streaming.{Planet,Plane}.FarReadsOffGameThread`).
+- **Uniform at generation.** A chunk whose every voxel is the same (all air, all rock, open sea) is collapsed to that
+  value where it is generated (the CPU worker, the tree injector, a GPU readback as it lands;
+  `FChunkDescriptor::CollapseToUniform`), not when the sweep reaches it; its snapshot is a shared array per value and a
+  point read returns the value without expanding it. After a teleport this roughly halved the window's peak voxel data
+  on the big planets (G67; `voxel.FarCompression.UniformAtGeneration`, tests `Compression.CollapseToUniform`,
+  `Streaming.{Planet,Plane}.UniformAtGeneration`).
 
-**Approach**:
-- 2D quadtree (X/Y plane)
-- Screen-space subdivision criterion
-- 4-way branching
-- T-junction handling required
-
-**Pros**:
-- Adaptive to terrain complexity
-- Screen-space optimization
-- Lower memory than distance bands
-
-**Cons**:
-- Complex meshing (T-junctions)
-- Tree traversal overhead
-- Harder to debug
-
-**When to implement**: If profiling shows distance bands are inefficient for flat, large-scale worlds.
-
-### Octree LOD (Future)
-
-**Use Case**: Spherical planets, cave systems, true 3D worlds
-
-**Approach**:
-- Full 3D octree
-- Surface vs interior importance
-- 8-way branching
-- 3D T-junction handling
-
-**Pros**:
-- Optimal for 3D terrain
-- Efficient for sparse volumes (caves)
-- Can deprioritize underground
-
-**Cons**:
-- Very complex meshing
-- High implementation cost
-- Tree management overhead
-
-**When to implement**: Only if spherical planet mode requires interior detail or extensive cave systems.
+The snapshot cache those readers share (shells for collision cooks, copy-on-write resident arrays) is described in
+[STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md). `voxel.FarCompression.Stats` logs residency and compression memory,
+`voxel.FarCompression.Decodes` where compressed data was expanded.
 
 ---
 
 ## Integration with ChunkManager
 
-### ChunkManager Update Loop
+Each tick `UVoxelChunkManager`:
 
-The ChunkManager has been optimized with streaming decision caching to minimize per-frame overhead:
-
-```cpp
-void UVoxelChunkManager::TickComponent(float DeltaTime) {
-    // 1. Build query context from camera
-    FLODQueryContext Context = BuildQueryContext();
-    FIntVector CurrentViewerChunk = WorldToChunkCoord(Context.ViewerPosition);
-
-    // 2. Check if streaming update is needed (Phase 2 optimization)
-    bool bViewerChunkChanged = (CurrentViewerChunk != CachedViewerChunk);
-    bool bNeedStreamingUpdate = bForceStreamingUpdate || bViewerChunkChanged;
-
-    // 3. Always update LOD strategy
-    LODStrategy->Update(Context, DeltaTime);
-
-    // 4. Streaming decisions only when viewer crosses chunk boundary
-    if (bNeedStreamingUpdate) {
-        TArray<FChunkLODRequest> ToLoad;
-        TArray<FIntVector> ToUnload;
-
-        LODStrategy->GetChunksToLoad(ToLoad, LoadedChunkCoords, Context);
-        LODStrategy->GetChunksToUnload(ToUnload, LoadedChunkCoords, Context);
-
-        // Queue with O(1) duplicate detection (Phase 1 optimization)
-        for (const FChunkLODRequest& Request : ToLoad) {
-            AddToGenerationQueue(Request);  // Uses TSet for dedup
-        }
-
-        CachedViewerChunk = CurrentViewerChunk;
-        bForceStreamingUpdate = false;
-    }
-
-    // 5. Process queues (time-sliced)
-    ProcessGenerationQueue(Configuration->StreamingTimeSliceMS); // Context.TimeSliceMS deleted in CR1 (STREAM-11)
-    ProcessUnloadQueue(Context.MaxChunksToUnloadPerFrame);
-
-    // 6. LOD transitions only when viewer moved significantly
-    float PositionDeltaSq = FVector::DistSquared(Context.ViewerPosition, LastLODUpdatePosition);
-    if (bViewerChunkChanged || PositionDeltaSq > LODUpdateThresholdSq) {
-        UpdateLODTransitions(Context);
-        LastLODUpdatePosition = Context.ViewerPosition;
-    }
-}
-```
-
-### Building Query Context
-
-```cpp
-FLODQueryContext UVoxelChunkManager::BuildQueryContext() const {
-    FLODQueryContext Context;
-    
-    // Get player camera
-    APlayerController* PC = GetWorld()->GetFirstPlayerController();
-    if (PC) {
-        FVector Location;
-        FRotator Rotation;
-        PC->GetPlayerViewPoint(Location, Rotation);
-        
-        Context.ViewerPosition = Location;
-        Context.ViewerForward = Rotation.Vector();
-        
-        // FOV and frustum
-        Context.FieldOfView = PC->PlayerCameraManager->GetFOVAngle();
-        Context.FrustumPlanes = CalculateFrustumPlanes(Location, Rotation, Context.FieldOfView);
-    }
-    
-    // World-specific data
-    Context.WorldOrigin = WorldConfiguration->GetWorldOrigin();
-    Context.WorldMode = WorldConfiguration->GetWorldMode();
-    // (the view distance, radius, budgets and frame fields were deleted in CR1, STREAM-11)
-    
-    // Optional extensions
-    Context.BiomeSystem = BiomeSystem;
-    Context.EditLayer = EditLayer;
-    
-    return Context;
-}
-```
+1. Builds the query context from the camera (`BuildQueryContext`), with the streaming viewer placed by
+   `FVoxelStreamingViewerPolicy` (the descent prefetch's lead) and `bFarFieldActive` set.
+2. Calls `Update` on the strategy (the cut-over state, the balanced LOD cache).
+3. Makes streaming decisions when the viewer enters another chunk (`CachedViewerChunk`) or an update is forced
+   (`bForceStreamingUpdate`): `GetChunksToLoad` into the generation queue, `GetChunksToUnload` through the chunk
+   manager's vetoes into `SelectUnloadCandidates`. After a camera cut (more than a chunk) it runs a second streaming
+   pass in the same frame for the new camera (`voxel.Stream.CameraCutUpdate`, every world mode since MP1).
+4. Re-meshes chunks whose balanced LOD changed (with a crossfade, `RENDERING_SYSTEM.md`) and updates the far field.
 
 ---
 
-## Performance Considerations
+## Debugging
 
-### Query Frequency
+| Command | What it shows |
+|---------|---------------|
+| `voxel.World.Stats` | The world's bounds and sea, the window's reach, the far field, the cut-over and the descent prefetch |
+| `vox.World` / `vox.Planet` (game module) | The window's reach per LOD and layer, the far field, the cut-over state, the lead |
+| `voxel.Stream.AuditResidency` | Chunks tracked past the unload radius, renderer chunks and seam buckets with no owner, stuck jobs (0 findings once settled) |
+| `voxel.World.FarFieldStats`, `voxel.World.FarFieldTrace 1` | The far field's patches and memory; every update with a stand-in |
+| `voxel.FarCompression.Stats`, `voxel.FarCompression.Decodes` | Compression memory; where compressed data was expanded |
 
-With **Phase 2 streaming optimizations**, query frequency is dramatically reduced:
-
-**Before optimization**:
-- `GetVisibleChunks()` called every frame
-- 1000 visible chunks × 60 FPS = 60,000 LOD queries/sec
-
-**After optimization**:
-- `GetVisibleChunks()` called only when viewer crosses chunk boundary
-- At walking speed (~600 cm/s) with 3200 unit chunks: ~0.19 crossings/sec
-- Reduces to ~190 LOD queries/sec (99.7% reduction)
-
-### Implemented Optimizations
-
-**Phase 1: Queue Management**
-1. **O(1) Duplicate Detection**: TSet tracking alongside queue arrays
-2. **Sorted Insertion**: `Algo::LowerBound()` for O(log n) insert instead of O(n²) re-sort
-3. **Queue Growth Limiting**: Cap at 2× processing rate per frame
-
-**Phase 2: Decision Caching**
-1. **Chunk Boundary Caching**: `CachedViewerChunk` tracks viewer's current chunk
-2. **Cached Position**: `LastStreamingUpdatePosition`
-
-**Future Phase 3: LOD Hysteresis** (if needed)
-1. **Buffer Zones**: Prevent rapid LOD switching at band boundaries
-2. **Asymmetric Thresholds**: Different distances for upgrade vs downgrade
-3. **Implementation**: Add ~50-100 unit hysteresis per LOD band boundary
-
-### Additional Optimization Strategies
-
-1. **Spatial Indexing**: Use grid or tree for visibility queries
-2. **Frustum Culling**: Early-out for off-screen chunks
-3. **SIMD**: Vectorize distance calculations
-
-### Memory Overhead
-
-**Distance Bands**: Minimal state (just band configuration)
-**Streaming Cache**: ~48 bytes (FIntVector + 2× FVector + bool)
-**Quadtree**: ~16 bytes per node × ~1000 nodes = 16 KB
-**Octree**: ~32 bytes per node × ~10,000 nodes = 320 KB
-
----
-
-## Implementation Guide
-
-### Step 1: Define Interface
-
-```cpp
-// Source/VoxelLOD/Public/IVoxelLODStrategy.h
-class IVoxelLODStrategy {
-    // ... (full interface as shown above)
-};
-```
-
-### Step 2: Implement Distance Bands
-
-```cpp
-// Source/VoxelLOD/Private/DistanceBandLODStrategy.cpp
-class FDistanceBandLODStrategy : public IVoxelLODStrategy {
-    // ... (implementation as shown above)
-};
-```
-
-### Step 3: Create UObject Wrapper
-
-```cpp
-// Source/VoxelLOD/Public/VoxelLODStrategyBase.h
-UCLASS(Abstract, Blueprintable, EditInlineNew)
-class UVoxelLODStrategyBase : public UObject {
-    virtual IVoxelLODStrategy* GetImplementation() PURE_VIRTUAL(...);
-};
-
-UCLASS()
-class UDistanceBandLODStrategy : public UVoxelLODStrategyBase {
-    UPROPERTY(EditAnywhere)
-    TArray<FLODBandConfig> Bands;
-    
-    virtual IVoxelLODStrategy* GetImplementation() override {
-        if (!Impl) {
-            Impl = MakeUnique<FDistanceBandLODStrategy>();
-            // Configure from Bands array
-        }
-        return Impl.Get();
-    }
-    
-private:
-    TUniquePtr<FDistanceBandLODStrategy> Impl;
-};
-```
-
-### Step 4: Integrate with ChunkManager
-
-```cpp
-// Source/VoxelStreaming/Private/VoxelChunkManager.cpp
-void UVoxelChunkManager::Initialize(UVoxelWorldConfiguration* Config) {
-    // Create LOD strategy
-    if (Config->LODConfig && Config->LODConfig->StrategyClass) {
-        LODStrategy = NewObject<UVoxelLODStrategyBase>(this, Config->LODConfig->StrategyClass);
-        LODStrategy->GetImplementation()->Initialize(*Config);
-    }
-}
-```
-
-### Step 5: Add Configuration Asset
-
-```cpp
-// Content/Config/DA_DefaultLODConfig.uasset
-UCLASS()
-class UVoxelLODConfiguration : public UDataAsset {
-    UPROPERTY(EditAnywhere)
-    TSubclassOf<UVoxelLODStrategyBase> StrategyClass;
-    
-    UPROPERTY(EditAnywhere, Instanced)
-    UVoxelLODStrategyBase* StrategyInstance;
-};
-```
-
-### Step 6: Test
-
-```cpp
-// Unit test
-TEST(VoxelLOD, DistanceBandBasic) {
-    FDistanceBandLODStrategy Strategy;
-    // Configure bands
-    // Test GetLODForChunk at various distances
-    // Verify correct LOD levels
-}
-```
-
----
-
-## Debugging Tools
-
-### Debug Visualization
-
-```cpp
-void FDistanceBandLODStrategy::DrawDebugVisualization(
-    UWorld* World, 
-    const FLODQueryContext& Context) const
-{
-    // Draw LOD rings
-    for (const FLODBand& Band : LODBands) {
-        FColor Color = GetLODColor(Band.LODLevel);
-        DrawDebugCircle(
-            World, 
-            Context.ViewerPosition, 
-            Band.MaxDistance, 
-            32, 
-            Color
-        );
-    }
-    
-    // Draw visible chunk bounds
-    TArray<FChunkLODRequest> Visible = GetVisibleChunks(Context);
-    for (const FChunkLODRequest& Request : Visible) {
-        FColor Color = GetLODColor(Request.LODLevel);
-        FBox Bounds = GetChunkBounds(Request.ChunkCoord);
-        DrawDebugBox(World, Bounds.GetCenter(), Bounds.GetExtent(), Color);
-    }
-}
-```
-
-### Debug Console Commands
-
-```cpp
-// Register console commands
-static FAutoConsoleCommand ShowLODZones(
-    TEXT("voxel.lod.showzones"),
-    TEXT("Toggle LOD zone visualization"),
-    FConsoleCommandDelegate::CreateLambda([]() {
-        // Toggle debug draw
-    })
-);
-```
+`FDistanceBandLODStrategy::GetDebugInfo` and `DrawDebugVisualization` give the bands and visible chunk bounds. The
+streaming bench (`voxel.Bench.Run`) reports the window, the far field and the cut-over per frame.
 
 ---
 
 ## LOD Seam Handling
 
-When adjacent chunks render at different LOD levels, their boundary vertices may not align, creating visible seams. The VoxelWorlds system handles this differently for each meshing mode:
+When adjacent chunks render at different LOD levels, their boundary vertices do not align. Every meshing mode closes
+chunk boundaries by **seam ownership**: a chunk mesh covers only the cells that read no neighbour (the Interior
+domain), and each face, edge and corner between chunks is meshed once by a seam job from the voxels of every chunk
+that touches it, at each participant's own LOD. The scheduling is in [STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md);
+the mesher rules per mode:
 
 ### Cubic Meshing
 
-Cubic runs without the LOD system (see [LOD Off and Cubic Meshing](#lod-off-and-cubic-meshing)), so every chunk is LOD 0 and there are no LOD boundaries to stitch. Chunk boundaries go through the seam-ownership pipeline like every other mode (world modes review WM-C1, [WORLD_MODES_REVIEW_PLAN.md](../WORLD_MODES_REVIEW_PLAN.md) §14.9): a chunk mesh is the Interior domain, every face except those on the chunk's six boundary planes, read from the chunk's own voxels only; the faces on a shared plane belong to that pair's face seam job, which culls them against both chunks' voxels. No cubic face lies only on a chunk edge or corner, so the seam registry tracks face seams alone for cubic (`FVoxelSeamRegistry::SetFaceSeamsOnly`). A chunk never waits for a neighbour's data and is meshed once; a neighbour arriving or changing rebuilds a face seam, not the chunk. At the edge of the loaded region a plane whose other side is not loaded has no seam yet, so it shows no faces (the legacy path drew walls there, KC13).
+Cubic runs without the LOD system (see [LOD Off and Cubic Meshing](#lod-off-and-cubic-meshing)), so every chunk is LOD 0 and there are no LOD boundaries to stitch. A chunk mesh is the Interior domain, every face except those on the chunk's six boundary planes, read from the chunk's own voxels only; the faces on a shared plane belong to that pair's face seam job, which culls them against both chunks' voxels (WM-C1). No cubic face lies only on a chunk edge or corner, so the seam registry tracks face seams alone for cubic (`FVoxelSeamRegistry::SetFaceSeamsOnly`). At the edge of the loaded region a plane whose other side is not loaded has no seam yet, so it shows no faces.
 
-### Marching Cubes (Transvoxel)
+### Marching Cubes
 
-Marching Cubes has mismatched vertices at LOD boundaries because vertex positions depend on density interpolation. The **Transvoxel algorithm** solves this:
+Where a face borders a coarser chunk, the face seam job, in the finer participant's frame, emits a **Transvoxel
+ribbon** (zero-thickness transition cells on the boundary plane, 9 samples on the fine side) and geomorphs the fine
+band toward the coarse contour with a ramp that ends at the band's inner edge. At a stride, vertices are LOD 0's
+crossings on their edges (G80). See [MARCHING_CUBES_MESHING.md](MARCHING_CUBES_MESHING.md).
 
-1. **Transition Detection**: The chunk manager detects which faces border lower-LOD neighbors
-2. **Transition Cells**: Boundary cells use special 9-sample transition cells instead of standard 8-corner cubes
-3. **Seamless Geometry**: Transition cells produce geometry that correctly connects to both LOD levels
+### Dual Contouring
 
-See [MARCHING_CUBES_MESHING.md](MARCHING_CUBES_MESHING.md) for detailed Transvoxel documentation.
-
-### Dual Contouring (Boundary Cell Merging)
-
-Dual Contouring uses **LOD boundary cell merging** instead of Transvoxel transition cells. When a chunk face borders a coarser neighbor:
-
-1. **Merge Ratio**: Computed from `CoarserStride / CurrentStride`
-2. **Cell Grouping**: Fine boundary cells are grouped into `MergeRatio x MergeRatio` blocks
-3. **QEF Re-solve**: The grouped edge crossings are merged into a single QEF and re-solved
-4. **Vertex Aliasing**: All fine cells in the group point to the merged vertex
-
-This approach is simpler than Transvoxel (no lookup tables) and naturally extends to arbitrary LOD level differences.
-
-See [DUAL_CONTOURING.md](DUAL_CONTOURING.md) for detailed boundary merging documentation.
+The mixed-LOD face, edge and corner seam meshers recompute each side's ring cells at that side's own stride and stitch
+at the finest participant's stride: every fine crossing fans onto the coarser side's cell vertices. A coarse cell with
+no crossing at its own stride facing a fine crossing gets a boundary fallback vertex (G17). No lookup tables, and any
+LOD difference the 2:1 balance allows. See [DUAL_CONTOURING.md](DUAL_CONTOURING.md).
 
 ### Configuration
 
-```cpp
-// Marching Cubes LOD transitions
-bool bUseTransvoxel = true;  // Recommended for MC (the skirt fallback was deleted in CR1, MESH-05)
-
-// Dual Contouring LOD transitions
-// No explicit config — uses NeighborLODLevels from FVoxelMeshingRequest
-// QEF solver settings affect merged vertex quality:
-float QEFSVDThreshold = 0.1f;
-float QEFBiasStrength = 0.5f;
-```
-
-### Chunk Manager Integration
-
-The chunk manager populates LOD transition data in the meshing request:
-
-```cpp
-// For Marching Cubes: set TransitionFaces bitmask
-if (NeighborState->LODLevel > CurrentLOD) {
-    MeshRequest.TransitionFaces |= TransitionFlags[face];
-}
-
-// For Dual Contouring: set NeighborLODLevels array
-MeshRequest.NeighborLODLevels[face] = NeighborState->LODLevel;
-```
-
----
-
-## Next Steps
-
-1. ~~Implement `IVoxelLODStrategy` interface~~ ✓
-2. ~~Implement `FDistanceBandLODStrategy`~~ ✓
-3. ~~Create UObject wrappers~~ ✓
-4. ~~Integrate with ChunkManager~~ ✓
-5. ~~Test with simple scene~~ ✓
-6. Add debug visualization
-7. ~~Profile and optimize~~ ✓ (Phase 1 & 2 streaming optimizations)
-8. ~~Implement Transvoxel for smooth meshing LOD seams~~ ✓
-9. ~~Mode-specific culling~~ ✓ (Terrain bounds, island boundary, horizon/shell)
-10. ~~LOD material selection fix~~ ✓ (Upward surface scanning)
-11. **(Future)** Phase 3: LOD hysteresis if thrashing observed at large view distances
-12. **(Future)** Octree LOD for orbital-scale spherical planet viewing
-
-See [IMPLEMENTATION_PHASES.md](../Research/Archive/IMPLEMENTATION_PHASES.md) for detailed roadmap.
-
----
-
-**Status**: Implemented - Distance band LOD with mode-specific culling, Transvoxel seam handling, and streaming optimizations
+The world configuration's `bEnableLODSeams` (on) keeps Marching Cubes' ribbon (`FVoxelMeshingConfig::bUseTransvoxel`).
+Dual Contouring's seams take the QEF settings (`QEFSVDThreshold`, `QEFBiasStrength`). Seam requests carry the
+participants' LOD levels (`NeighborLODLevels`, and for Marching Cubes `TransitionFaces`); chunk meshes carry none.

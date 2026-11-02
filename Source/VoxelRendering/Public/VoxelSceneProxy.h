@@ -235,7 +235,7 @@ public:
 	void SetMaterial_RenderThread(UMaterialInterface* InMaterial, const FMaterialRelevance& InMaterialRelevance);
 
 	// ==================== Mesh-Swap Crossfade (Render Thread) ====================
-	// See Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md §5. The game-thread driver
+	// See Documentation/Research/Archive/SEAM_OWNERSHIP_ARCHITECTURE.md §5. The game-thread driver
 	// is UVoxelRegionComponent (cvars voxel.MeshFade / voxel.MeshFade.Duration).
 
 	/**

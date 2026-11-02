@@ -1,26 +1,25 @@
 # Edit Layer System
 
-**Module**: VoxelCore (VoxelEditTypes.h, VoxelEditManager.h/cpp)
-**Dependencies**: VoxelCore, VoxelStreaming
-**Status**: ✅ COMPLETE (Phase 6)
+> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+
+**Module**: VoxelCore (`VoxelEditTypes.h`, `VoxelEditManager.h/.cpp`); the chunk manager (VoxelStreaming) reacts to edits.
 
 ## Overview
 
-The edit layer allows runtime modification of voxel terrain with add/subtract/paint operations, undo/redo support, and serialization.
+The edit layer modifies voxel terrain at runtime with add, subtract, set and paint edits, keeps an undo and redo
+history, and saves the edits to a file. The February design specification is archived as
+[EDIT_LAYER_SPEC_2026-02.md](../Research/Archive/EDIT_LAYER_SPEC_2026-02.md); the code is the reference.
 
-> The February design specification this document used to carry is archived as
-> [EDIT_LAYER_SPEC_2026-02.md](../Research/Archive/EDIT_LAYER_SPEC_2026-02.md). The code is the reference:
-> - Source files: `VoxelCore/Public/VoxelEditTypes.h`, `VoxelCore/Public/VoxelEditManager.h`
+## How it is built
 
-## Implementation Highlights
-
-The actual implementation uses an **overlay architecture**:
-- Edits stored in `FChunkEditLayer` using sparse `TMap<int32, FVoxelEdit>` (memory-efficient)
-- Edits merged at mesh time via `ApplyToProceduralData()` (not stored in procedural data)
-- Relative edits with `DensityDelta` and `BrushMaterialID` for accumulation
-- Binary serialization format v2 with magic number `VETI`
-- Input-based testing via the game module's `AVoxelDemoActor` with mouse/keyboard controls
-- Discrete editing mode (`bUseDiscreteEditing`) for single-block operations
+The edit layer is an **overlay** on the generated voxels:
+- `UVoxelEditManager` keeps one `FChunkEditLayer` per edited chunk, a sparse `TMap<int32, FVoxelEdit>` by voxel index.
+- Edits are never written into the generated data; a reader merges them with `FVoxelEdit::ApplyToProceduralData()`.
+- An edit's mode is `EEditMode` (`Set`, `Add`, `Subtract`, `Paint`). `Add` and `Subtract` are relative (`DensityDelta`),
+  `Add` and `Paint` carry `BrushMaterialID`, `Set` carries the whole voxel (`NewData`).
+- `SaveEditsToFile` / `LoadEditsFromFile` write a binary file with the magic `VETI`, version 3 (version 2 still loads).
+- The game module's `AVoxelDemoActor` drives edits from the mouse and keyboard; `bUseDiscreteEditing` (or a cubic world)
+  edits single blocks.
 
 ### How a new edit combines with the edit already on a voxel
 
@@ -29,13 +28,13 @@ The actual implementation uses an **overlay architecture**:
 | Existing edit | New edit | Result |
 |---------------|----------|--------|
 | Add / Subtract | Add / Subtract | One relative edit with the summed delta; a sum of 0 removes the edit (or becomes a Paint when the new Add carries a material) |
-| Set / Smooth (absolute) | Add / Subtract / Paint | A Set whose voxel is the new edit applied to the existing voxel: a dig under a POI pad takes density from the pad, not from the procedural terrain under it. Undo restores the pad's Set (below) |
-| anything | Set / Smooth | The new absolute edit replaces it |
+| Set (absolute) | Add / Subtract / Paint | A Set whose voxel is the new edit applied to the existing voxel: a dig under a POI pad takes density from the pad, not from the procedural terrain under it. Undo restores the pad's Set (below) |
+| anything | Set | The new Set replaces it |
 | Add / Subtract | Paint | The Paint replaces it (the delta is lost) |
 
 Until 2026-10-14 a relative edit on a Set voxel replaced the Set, so the voxel fell back to procedural data minus
 the delta; one dig under a pad standing over air removed the aimed voxel and its four face neighbours, which had
-only received the brush falloff (WORLD_MODES_REVIEW_PLAN.md G2). Tests: `VoxelWorlds.Edit.Composition.*`.
+only received the brush falloff (world modes review G2). Tests: `VoxelWorlds.Edit.Composition.*`.
 
 ### What `OnChunkEdited` tells its listeners
 
@@ -83,7 +82,7 @@ it ends the source, brush centre and radius it broadcast. The history (undo and 
   flood put beyond the edit's voxels stays.
   The world's own generation is outside it too (G68): dungeon stamps (`UDungeonVoxelStamper`) and their entrances
   (`UDungeonEntranceStitcher`; the runtime campsite levelling that was the third went in code review CR1, D-CR17), so
-  an undo takes back the player's own last edit, never a POI.Until 2026-10-22 they were undo steps: on `Review_Planet_L` four POI operations
+  an undo takes back the player's own last edit, never a POI. Until 2026-10-22 they were undo steps: on `Review_Planet_L` four POI operations
   around a site held 94 MB of history, and an undo took back the last of them. As with the flood, undoing a player's
   edit made before a stamp puts back that edit's voxels as they were before it, the stamp's there with them.
 - A clear (`ClearChunkEdits`, `ClearAllEdits`) is outside the history; a load (`LoadEditsFromFile`) clears it.
@@ -95,7 +94,7 @@ air), redo wrote every edit into the operation's first chunk and broadcast only 
 radius. So a brush across a chunk face came back in one chunk, a voxel's previous relative edit (a dig under a dig), a
 previous Set to air and an edit removed by cancelling deltas did not come back, and a system edit redone as a player's
 re-extracted no scatter. Water propagation's flood was an undo step of its own, and its undo removed the dig at the voxels
-it had reached (world modes review G60, WORLD_MODES_REVIEW_PLAN.md §19.17). Tests: `VoxelWorlds.Edit.UndoRedo.Records`,
+it had reached (world modes review G60; history: `WORLD_MODES_REVIEW_PLAN.md` §19.17). Tests: `VoxelWorlds.Edit.UndoRedo.Records`,
 `VoxelWorlds.Streaming.WaterPropagation.Undo.Plane`, `.Planet`; `Streaming.EditRemesh.*` edits 6 and 7 and
 `Scatter.EditReaders.{Plane,Planet}` undo and redo too.
 

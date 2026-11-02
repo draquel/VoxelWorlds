@@ -1,20 +1,21 @@
 # Performance Targets
 
-Performance budgets and optimization guidelines for VoxelWorlds.
+> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
 
-The first section is the measured baseline that changes are judged against today. The sections after it are the
-original design targets from 2026-02, written for 32³ chunks of 100 uu voxels and 1,000 chunks; the demo outgrew them
-(64³ chunks of 75 uu, a 40,000 uu view, about 1,100-1,300 chunks), so they are kept as history and are not pass/fail.
+The measured baseline that changes are judged against, and the thresholds a new configuration must meet. The section
+after it, "History: the original design targets (2026-02)", is the February plan for 32³ chunks of 100 uu voxels and
+1,000 chunks; the demo outgrew it (64³ chunks of 75 uu, a 40,000 uu view, about 1,100-1,300 chunks), so it is kept as
+history and is not pass/fail.
 
 ## Current baseline: the demo (2026-10)
 
-From the InfinitePlane smooth control of the world modes review (WORLD_MODES_REVIEW_PLAN.md §12.2, §12.8, §13.3,
-§13.4, §13.11). **How changes are judged:** against a control run of the same build in the same batch, on the same
+From the InfinitePlane smooth control of the world modes review (history: `WORLD_MODES_REVIEW_PLAN.md` §12.2, §12.8,
+§13.3, §13.4, §13.11). **How changes are judged:** against a control run of the same build in the same batch, on the same
 machine, viewport and route, not against these absolute numbers. Re-mesh counts move with frame rate and machine load
-(§13.10), and the control itself moved with G6 (§12.8).
+(KI12), and the control itself moved with G6.
 
 **Setup.** `VoxelDemo` with `DemoSmoothWorldConfig` (Dual Contouring, voxel 75 uu, 64³ chunks = 4,800 uu, view distance
-40,000 uu, three LOD bands, GPU generation, CPU meshing), applied through `voxel.ConfigOverride` so every run starts from a
+40,000 uu, three LOD bands, GPU generation, CPU meshing), applied through `voxel.World.ConfigOverride` so every run starts from a
 fresh world. PIE in the level viewport (2874×1360, D3D12 SM6), editor in the foreground, background throttle off. Bench:
 `voxel.Bench.Run <tag> <v> 40000 start=0:0 dir=1:0 warmup=120`, one cold PIE per run (STREAMING_PERFORMANCE.md).
 
@@ -41,11 +42,11 @@ Headless (`-game -nullrhi -VoxelForceCPU`, VoxelWorldsTest, CPU generation and m
 manager P95 5.8 ms, catch-up 8.5 s, peak voxel 230 MB, systems 566 MB. Headless runs are focus-immune and compare CPU
 work; their frame times are not comparable to PIE.
 
-**Where the manager's slowest ticks go** (v3000, mean over the slowest 5% of traverse ticks, §12.8): collision 4.6 ms,
+**Where the manager's slowest ticks go** (v3000, mean over the slowest 5% of traverse ticks): collision 4.6 ms,
 seam pipeline 3.8, render submit 3.0, scatter 2.2, meshing 1.7, far-compression sweep 0.5. The LOD cache rebuild
-(`LODUpdateMs`) measured 1.3-1.9 ms a tick on the control's chord and 0.6-0.7 ms standing still before WM-H1 (§13.11).
+(`LODUpdateMs`) measured 1.3-1.9 ms a tick on the control's chord and 0.6-0.7 ms standing still before the cache was rebuilt only when the viewer moves (G12, WM-H1).
 
-**Thresholds for another configuration** (a world mode, meshing mode or tier, against the same-build control; §1):
+**Thresholds for another configuration** (a world mode, meshing mode or tier, against the same-build control):
 
 | Metric | Threshold |
 |--------|-----------|
@@ -64,27 +65,27 @@ tier. The control peaks at 1.05-1.27 GB.
 (Oodle) or collapsed to one uniform value, which is how 1,123 chunks fit in 134 MB settled. A rendered chunk's mesh averages
 about 55 KB of GPU memory (23 MB over about 424 chunks with geometry).
 
-## Original design targets (2026-02, 32³ chunks)
+## History: the original design targets (2026-02)
 
-Everything from here to the end is the original plan, unchanged apart from this note: budgets for 32³ chunks of
-100 uu voxels (128 KB of voxel data each) and 1,000 chunks.
+Everything from here to the end is the February plan, its headings one level down and otherwise unchanged: budgets for
+32³ chunks of 100 uu voxels (128 KB of voxel data each) and 1,000 chunks. The checkmarks were goals, not results.
 
-## Target Specifications
+### Target Specifications
 
-### Hardware Baseline
+#### Hardware Baseline
 - **GPU**: GTX 1060 / RX 580 equivalent (6GB VRAM)
 - **CPU**: Intel i5-8400 / Ryzen 5 2600
 - **RAM**: 16GB
 - **Target Resolution**: 1920×1080
 
-### Frame Rate Target
+#### Frame Rate Target
 **60 FPS minimum** (16.6ms frame budget)
 
 ---
 
-## Memory Budgets
+### Memory Budgets
 
-### Per-Chunk Memory (LOD 0, 32³)
+#### Per-Chunk Memory (LOD 0, 32³)
 
 | Component | Size | Notes |
 |-----------|------|-------|
@@ -93,7 +94,7 @@ Everything from here to the end is the original plan, unchanged apart from this 
 | Index Buffer | ~30 KB | Typical quad count |
 | **Total** | **~210 KB** | Per chunk baseline |
 
-### Total Memory Targets
+#### Total Memory Targets
 
 | Scenario | Chunks | Memory | Status |
 |----------|--------|--------|--------|
@@ -101,7 +102,7 @@ Everything from here to the end is the original plan, unchanged apart from this 
 | Target | 1000 | 210 MB | Phase 6 target |
 | Maximum | 2000 | 420 MB | Stretch goal |
 
-### Memory Breakdown (1000 chunks)
+#### Memory Breakdown (1000 chunks)
 
 ```
 Voxel Data:     128 MB  (128 KB × 1000)
@@ -116,9 +117,9 @@ Total:          228 MB
 
 ---
 
-## Compute Time Budgets (Per Frame)
+### Compute Time Budgets (Per Frame)
 
-### GPU Compute Budget: 5ms
+#### GPU Compute Budget: 5ms
 
 | Operation | Budget | Target | Notes |
 |-----------|--------|--------|-------|
@@ -128,7 +129,7 @@ Total:          228 MB
 | Collision | 0.5 ms | Async | Lower priority |
 | **Total** | **5.0 ms** | | 30% of frame |
 
-### CPU Time Budget: 2ms
+#### CPU Time Budget: 2ms
 
 | Operation | Budget | Notes |
 |-----------|--------|-------|
@@ -143,22 +144,22 @@ Total:          228 MB
 
 ---
 
-## Streaming Throughput Targets
+### Streaming Throughput Targets
 
-### Load/Unload Rates
+#### Load/Unload Rates
 
 **Per Frame @ 60 FPS**:
 - **Load**: 4 chunks/frame = 240 chunks/sec
 - **Unload**: 8 chunks/frame = 480 chunks/sec
 
-### Player Movement Response
+#### Player Movement Response
 
 At player speed 1000 cm/s (10 m/s):
 - Crosses ~0.3 chunks/second (32m chunks)
 - Load rate: 240 chunks/sec
 - **Safety margin**: 800× faster than needed
 
-### Streaming Latency
+#### Streaming Latency
 
 | Operation | Frames | Time @ 60 FPS |
 |-----------|--------|---------------|
@@ -172,9 +173,9 @@ At player speed 1000 cm/s (10 m/s):
 
 ---
 
-## Phase-Specific Targets
+### Phase-Specific Targets
 
-### Phase 2: Generation & Basic Rendering
+#### Phase 2: Generation & Basic Rendering
 
 **Memory**:
 - 100 visible chunks
@@ -192,7 +193,7 @@ At player speed 1000 cm/s (10 m/s):
 - ✅ Smooth camera movement
 - ✅ Materials display correctly
 
-### Phase 3: Advanced Meshing
+#### Phase 3: Advanced Meshing
 
 **Memory**:
 - 500 visible chunks
@@ -210,7 +211,7 @@ At player speed 1000 cm/s (10 m/s):
 - ✅ < 5ms GPU compute per frame
 - ✅ No LOD popping
 
-### Phase 6: Final Polish
+#### Phase 6: Final Polish
 
 **Memory**:
 - 1000+ visible chunks
@@ -231,9 +232,9 @@ At player speed 1000 cm/s (10 m/s):
 
 ---
 
-## GPU Performance Breakdown
+### GPU Performance Breakdown
 
-### Compute Shader Timings (32³ chunk)
+#### Compute Shader Timings (32³ chunk)
 
 | Shader | Threads | Time | Notes |
 |--------|---------|------|-------|
@@ -243,7 +244,7 @@ At player speed 1000 cm/s (10 m/s):
 | GreedyMesh | Variable | 0.3-0.7ms | Quad merging |
 | AO Calculation | Variable | 0.1-0.3ms | 3×3×3 sampling |
 
-### Rendering Timings
+#### Rendering Timings
 
 | Operation | Time | Notes |
 |-----------|------|-------|
@@ -256,9 +257,9 @@ At player speed 1000 cm/s (10 m/s):
 
 ---
 
-## Optimization Strategies
+### Optimization Strategies
 
-### Memory Optimization
+#### Memory Optimization
 
 1. **Chunk Pooling**: Reuse allocations
 2. **Sparse Storage**: Don't store air-only chunks
@@ -266,7 +267,7 @@ At player speed 1000 cm/s (10 m/s):
 4. **Lazy Generation**: Generate only when visible
 5. **Atlas Compression**: Compress material textures
 
-### Compute Optimization
+#### Compute Optimization
 
 1. **Batch Dispatch**: Multiple chunks per shader call
 2. **Async Compute**: Overlap with rendering
@@ -274,7 +275,7 @@ At player speed 1000 cm/s (10 m/s):
 4. **Cache Noise**: Reuse overlapping samples
 5. **GPU Occlusion**: Don't generate invisible chunks
 
-### CPU Optimization
+#### CPU Optimization
 
 1. **Spatial Hashing**: Fast chunk lookups
 2. **Cache LOD Queries**: Don't recompute every frame
@@ -282,7 +283,7 @@ At player speed 1000 cm/s (10 m/s):
 4. **Temporal Coherence**: Skip updates if camera static
 5. **Chunk Pooling**: Avoid allocations
 
-### Streaming Optimizations (Implemented)
+#### Streaming Optimizations (Implemented)
 
 **Phase 1: Queue Management**
 - O(1) duplicate detection with TSet tracking
@@ -311,9 +312,9 @@ command-line tuning knobs, and the full lever-by-lever findings.
 
 ---
 
-## Profiling Guidelines
+### Profiling Guidelines
 
-### What to Profile
+#### What to Profile
 
 **Phase 2**:
 - Chunk generation time
@@ -333,7 +334,7 @@ command-line tuning knobs, and the full lever-by-lever findings.
 - Memory fragmentation
 - Streaming latency spikes
 
-### Profiling Tools
+#### Profiling Tools
 
 **Unreal Insights**:
 - GPU timing (compute shaders)
@@ -354,9 +355,9 @@ command-line tuning knobs, and the full lever-by-lever findings.
 
 ---
 
-## Performance Monitoring
+### Performance Monitoring
 
-### Runtime Stats
+#### Runtime Stats
 
 Display in development builds:
 ```
@@ -370,7 +371,7 @@ Frame Time: 16.1ms
 Memory: 198 MB / 250 MB
 ```
 
-### Warning Thresholds
+#### Warning Thresholds
 
 Trigger warnings when:
 - FPS < 55 for 3 consecutive seconds
@@ -381,9 +382,9 @@ Trigger warnings when:
 
 ---
 
-## Stress Testing
+### Stress Testing
 
-### Test Scenarios
+#### Test Scenarios
 
 **Camera Movement**:
 - Fly at max speed for 5 minutes
@@ -400,7 +401,7 @@ Trigger warnings when:
 - Enable all features simultaneously
 - Sustained play for 30 minutes
 
-### Acceptance Criteria
+#### Acceptance Criteria
 
 All stress tests must:
 - ✅ Maintain 55+ FPS
@@ -411,28 +412,28 @@ All stress tests must:
 
 ---
 
-## Platform Considerations
+### Platform Considerations
 
-### PC (Primary Target)
+#### PC (Primary Target)
 - RTX 2060 / RX 5700 XT
 - Settings: High
 - 1920×1080 @ 60 FPS
 
-### Console (Future)
+#### Console (Future)
 - PS5 / Xbox Series X
 - May need lower chunk count
 - 4K @ 30 FPS or 1440p @ 60 FPS
 
-### Mobile (Stretch Goal)
+#### Mobile (Stretch Goal)
 - High-end tablets
 - Significantly reduced targets
 - 720p @ 30 FPS with 100 chunks
 
 ---
 
-## Scatter System Performance (Phase 7D)
+### Scatter System Performance (Phase 7D)
 
-### Compute Time Budget
+#### Compute Time Budget
 
 | System | Before 7D | After 7D-1 (Async) | After 7D-2 (GPU) |
 |--------|-----------|---------------------|-------------------|
@@ -440,7 +441,7 @@ All stress tests must:
 | Scatter (thread pool) | 0ms | ~0.5-1.0ms | ~0.3ms (placement only) |
 | Scatter (GPU) | 0ms | 0ms | ~0.1-0.2ms (extraction) |
 
-### Surface Extraction Methods
+#### Surface Extraction Methods
 
 | Method | Path | LOD-Independent | Notes |
 |--------|------|-----------------|-------|
@@ -450,12 +451,12 @@ All stress tests must:
 
 The voxel-based path (7D-5) is the default because it produces consistent scatter regardless of LOD level, preventing density changes and position shifts when chunks change LOD.
 
-### Configuration Defaults
+#### Configuration Defaults
 - `MaxAsyncScatterTasks = 2`: Concurrent thread pool tasks
 - `MaxScatterGenerationsPerFrame = 2`: Queue drain rate
 - `bUseGPUScatterExtraction`: retired in world modes review G27 and ignored; scatter extracts surface points from voxels on the CPU
 
-### Scatter Stress Test
+#### Scatter Stress Test
 - Fly fast through dense scatter terrain (Grass 50%, Rocks 5%, Trees 2%)
 - Target: No frame drops below 55 FPS
 - Target: No missing scatter or visual artifacts

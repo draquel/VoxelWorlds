@@ -1,12 +1,13 @@
 # Editor Tools — Procedural Field Visualization
 
+> State as of 2026-11-02 (code review CR5).
+
 Editor-only authoring tools for **iterating on world configuration by seeing the anticipated
 procedural result** — terrain shape, biome placement, cave presence, and climate — over regions
 **larger than the runtime view distance**, without streaming or entering PIE.
 
-This is Milestone 1 of the editor toolset. It is intentionally a *foundation*: the field/registry
-core is designed so new visualizations and future tools (non-streaming 3D preview, edit authoring,
-claim/POI visualization) are additive.
+The field and registry core is a foundation: new visualizations and tools are additive (see the end
+of this document for the ones not built).
 
 ---
 
@@ -28,7 +29,7 @@ All user-facing surfaces are thin shells over one core, so adding a visualizatio
 
 | Type | File | Role |
 |---|---|---|
-| `FVoxelFieldSampleContext` | `Public/VoxelFieldTypes.h` | Immutable snapshot built from a `UVoxelWorldConfiguration` — instantiates the matching `IVoxelWorldMode` (with biome context, exactly like `UVoxelChunkManager::Initialize`) and resolves the biome-climate noise params. Chunk-independent + thread-safe for read. |
+| `FVoxelFieldSampleContext` | `Public/VoxelFieldTypes.h` | Immutable snapshot built from a `UVoxelWorldConfiguration` — creates the world mode with `FVoxelWorldModeFactory::Create` (as generation and the chunk manager do), a `FVoxelBiomeSnapshot` and the sea, and resolves the biome-climate noise params. Its surface samples come from `FVoxelSurfaceQuery::SampleSurfacePoint` (`SurfaceAbove`). Chunk-independent + thread-safe for read. |
 | `FVoxelEditorField` | `Public/VoxelFieldTypes.h` | A registered field: id, display name, `EVoxelFieldKind` (Scalar2D / Categorical / Scalar3D), color mapping, and a `Sample` delegate. |
 | `FVoxelFieldRegistry` | `Public/VoxelFieldTypes.h` | Static registry of fields. Built-ins registered on module startup. |
 | `FVoxelFieldImageBaker` | `Public/VoxelFieldImageBaker.h` | Samples a field over a region into an `FColor` array / transient `UTexture2D`. Row = world Y ascending, col = world X ascending — matches `UVoxelMapSubsystem` tiles, so a Height/Biome bake matches the minimap. |
@@ -40,6 +41,10 @@ All user-facing surfaces are thin shells over one core, so adding a visualizatio
 `CavePresence`. Scalars use a heatmap ramp (Height auto-ranges for contrast); `SurfaceMaterial` uses
 the voxel material palette; `Biome` uses a distinct hashed hue; `CavePresence` is a 3D field sampled
 at `SampleZ`.
+
+On a planet (`EWorldMode::SphericalPlanet`) the 2D fields show the surface on the upper hemisphere above (X, Y): `Height`
+is its altitude, `Slope` is measured against local up, and the climate fields are sampled at the direction's point on the
+datum sphere, as generation samples them. `CavePresence` shows nothing on a planet (the cave query takes a Z height).
 
 ### Adding a new field (the extension point)
 
@@ -91,8 +96,12 @@ one saved in a level you intend to ship.**
 - **Correctness (headless):** automation test `VoxelWorlds.Editor.FieldSampler.Parity`
   (`Tests/VoxelFieldSamplerTests.cpp`) asserts the `Height` field is bit-identical to
   `FVoxelSurfaceQuery::GetSurfaceHeight`, cave presence stays in [0,1], and the baker output is sized
-  correctly — so the tools cannot silently drift from real generation. Run headless:
-  `UnrealEditor-Cmd <project> -ExecCmds="Automation RunTests VoxelWorlds.Editor.FieldSampler.Parity" -unattended -nullrhi -nosplash -TestExit="Automation Test Queue Empty"`.
+  correctly — so the tools cannot silently drift from real generation. `VoxelWorlds.Editor.FieldSampler.Planet`
+  checks the planet fields above. Run headless:
+
+  ```
+  UnrealEditor-Cmd <project> -ExecCmds="Automation RunTests VoxelWorlds.Editor.FieldSampler" -unattended -nullrhi -nosplash -TestExit="Automation Test Queue Empty"
+  ```
 - **Visual:** open the panel, bake `Height`/`Biome` for a config, and cross-check against the
   `UVoxelMapSubsystem` minimap for the same config (shared math ⇒ they should agree).
 
@@ -103,9 +112,9 @@ Adding the module or the actor `UCLASS` cannot Live-Code hot-reload — close th
 
 ---
 
-## Future expansion (foundation is ready for these)
+## Not built yet (the core is ready for these)
 
-- **Non-streaming 3D "config-test" preview** — CPU generate+mesh a bounded region into a PMC preview.
+- **Non-streaming 3D "config-test" preview** — CPU generate+mesh a bounded region into a preview mesh.
 - **Edit authoring + authored claims** — editor brushes → `UVoxelEditManager`, persisted with a config.
 - **Claim / edit / scatter / POI visualization** — new registry fields + gizmos (claims read from placed
   `AWorldClaimVolume` actors, present in the editor world).

@@ -366,7 +366,7 @@ TAutoConsoleVariable<float> CVarStreamMeshStuckSeconds(
 
 // ==================== Seam-ownership pipeline ====================
 // Every mesher meshes chunk interiors only and gives each chunk boundary to one single-owner seam job
-// (Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md §2). FVoxelSeamRegistry tracks canonical
+// (Documentation/Research/Archive/SEAM_OWNERSHIP_ARCHITECTURE.md §2). FVoxelSeamRegistry tracks canonical
 // (min-coordinate) ownership of every boundary, dirty-tracks seams off content-version and rendered-LOD
 // changes, and schedules seam jobs by priority; the chunk manager runs them on workers and submits the
 // results as per-owner seam buckets. Cubic joined in world modes review M5 (WM-C1), which deleted the

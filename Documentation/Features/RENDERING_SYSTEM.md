@@ -1,21 +1,25 @@
 ﻿# Rendering System Architecture
 
-**Module**: VoxelRendering  
+> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+
+**Module**: VoxelRendering
 **Dependencies**: VoxelCore
 
 ## Table of Contents
 
 1. [Overview](#overview)
 2. [Architecture](#architecture)
-3. [Vertex Factory Evolution](#vertex-factory-evolution)
-4. [Current Implementation](#current-implementation)
-5. [Renderer Interface](#renderer-interface)
-6. [Custom Vertex Factory](#custom-vertex-factory)
-7. [Vertex Color Encoding](#vertex-color-encoding)
-8. [Water Tile Rendering](#water-tile-rendering)
-9. [Collision System](#collision-system)
-10. [Integration Flow](#integration-flow)
-11. [Implementation Guide](#implementation-guide)
+3. [Key Components](#key-components)
+4. [Render Regions](#render-regions)
+5. [Shadow Culling](#shadow-culling)
+6. [Crossfades](#crossfades)
+7. [Vertex Format and Colour Encoding](#vertex-format-and-colour-encoding)
+8. [Renderer Interface](#renderer-interface)
+9. [Water Tile Rendering](#water-tile-rendering)
+10. [What the Renderer Does Not Draw](#what-the-renderer-does-not-draw)
+11. [Collision](#collision)
+12. [Integration Flow](#integration-flow)
+13. [Debugging](#debugging)
 
 ---
 
@@ -32,175 +36,138 @@ the seam, fade, lost-data or water-draw members since seam ownership. The stream
 - **Performance**: no CPU-side copy of a mesh after its upload
 - **Maintainability**: one renderer behind one interface, the chunk manager's view of it
 
+### Why FLocalVertexFactory
+
+The first design was a custom `FVoxelVertexFactory` with the mesher's packed 28-byte vertex, a per-chunk LOD morph
+uniform and GPU mesher buffers bound directly. It drew terrain attached to the camera, translucent-looking or blank
+under UE5's large world coordinates, and the project switched to Epic's `FLocalVertexFactory`: a larger vertex
+(40 bytes), no vertex-shader morph (LOD changes crossfade between meshes instead), full material compatibility. The
+GPU meshers it was built for were deleted in CR1 (D-CR12); meshes are uploaded from the CPU.
+
 ---
 
 ## Architecture
 
 ```
-IVoxelMeshRenderer (Interface)
-    │
-    └── FVoxelMeshRenderer
-        ├── UVoxelRegionComponent (one per render region, WM-BP7)
-        ├── FVoxelSceneProxy (Scene integration)
-        └── FLocalVertexFactory per chunk, seam and water-tile mesh
-```
-
----
-
-## Vertex Factory Evolution
-
-### Original Design: Custom FVoxelVertexFactory
-
-The initial design called for a fully custom `FVoxelVertexFactory` that would:
-- Use an optimized 28-byte vertex format (`FVoxelVertex`)
-- Support LOD morphing via uniform buffer parameters
-- Directly bind GPU compute shader output buffers
-- Provide maximum control over vertex shader behavior
-
-### Issues Encountered
-
-During implementation, the custom vertex factory exhibited persistent rendering problems:
-
-1. **Terrain attached to camera**: Geometry followed camera movement instead of staying in world space
-2. **Translucent appearance**: Meshes rendered as if depth testing was disabled
-3. **Materials going blank**: After certain operations, all materials would stop rendering
-4. **World coordinate issues**: UE5's Large World Coordinates (LWC) and Translated World Space caused positioning problems
-
-These issues proved difficult to diagnose and resolve despite:
-- Multiple architectural approaches (component-owned vs renderer-owned vertex factory)
-- Various initialization patterns (direct RHI buffer binding, RDG conversion)
-- Different shader permutation configurations
-
-### Decision: FLocalVertexFactory
-
-After extensive debugging, the project switched to using Epic's **FLocalVertexFactory**:
-
-**Rationale:**
-- Battle-tested implementation that works reliably with UE5's rendering pipeline
-- Proper handling of LWC and Translated World Space
-- Full material compatibility without special setup
-- Maintained GPU efficiency (vertex data stays on GPU)
-
-**Tradeoffs:**
-- Slightly larger vertex format (32 bytes vs 28 bytes)
-- LOD morphing requires Material Parameter Collection instead of vertex shader uniforms
-- Less control over vertex shader behavior
-
-**Conclusion:** The stability and reliability of FLocalVertexFactory outweighs the minor performance overhead of the larger vertex format.
-
----
-
-## Current Implementation
-
-### Architecture Overview
-
-```
 AVoxelWorldActor
     │
     ├── UVoxelChunkManager (component)
-    │   └── Coordinates chunk streaming
+    │   └── Coordinates chunk streaming, meshing and the far field
     │
     └── IVoxelMeshRenderer (interface)
         │
         └── FVoxelMeshRenderer
-            └── UVoxelRegionComponent (per render region)
+            └── UVoxelRegionComponent (one per render region)
                 └── FVoxelSceneProxy
-                    └── FLocalVertexFactory (per mesh)
-```
-
-### Key Components
-
-**FVoxelMeshRenderer** (`VoxelRendering/Private/VoxelMeshRenderer.cpp`)
-- Implements `IVoxelMeshRenderer` interface
-- Creates and manages `UVoxelRegionComponent` internally
-- Forwards chunk updates and LOD configuration to the component
-
-**UVoxelRegionComponent** (`VoxelRendering/Public/VoxelRegionComponent.h`)
-- `UPrimitiveComponent` that bridges game thread and render thread
-- Creates `FVoxelSceneProxy` for actual rendering
-- Manages Material Parameter Collection for LOD morphing
-- Exposes statistics and chunk queries
-
-**Render regions** (`FVoxelRenderRegions`, `VoxelCore/Public/VoxelRenderRegions.h`; spherical Phase 6, WM-BP7, D23)
-- The terrain renders in regions of `voxel.Render.RegionChunks`^3 chunks in every world mode (16 by default, 76,800 uu; 0
-  turns them off; planets since WM-BP7, heightmap worlds since world modes review WM-MP5, D40, since a plane 100 km from
-  its origin loses float precision as a big planet does): `FVoxelMeshRenderer` keeps one `UVoxelRegionComponent` per region at the region's origin (its min
-  corner, in double) and routes each chunk, seam, water tile and fade to it, creating it on demand with the material,
-  RVTs, atlas, LOD collection, distances and viewer replayed, and retiring it when it holds nothing
-  (`UVoxelRegionComponent::HasRenderContent`). The primary component is region (0, 0, 0) and stays. A region holding
-  only water tiles draws them (world modes review G77, fixed 2026-10-26, §23.14): a water tile goes to the region of
-  its column's Z-0 chunk, which over a lake is air with no mesh, and such a component drew nothing, since the proxy's
-  `GetDynamicMeshElements` returned at once with no chunk mesh (a lake drawn without water in a block of chunk columns
-  at a region's corner, seen from altitude; the block came and went with a chunk mesh at the region's Z-0 layer). With
-  the same fix a component's render bounds (`CalcBounds`) are the union of its chunk meshes and its water tiles' boxes
-  (`WaterTileWorldBounds`), padded by a chunk, and the scene's copy of them is sent by the component's tick
-  (`MarkRenderTransformDirty` when they moved), which every bounds change schedules (`RequestRenderBoundsRefresh`;
-  the component ticks only while a fade runs, so a region whose content changed without a fade kept the scene's
-  registration-time box).
-- Heightmap worlds keep one region: a single component at the world origin, as before.
-- The scene proxy stores vertices relative to its component's location (`FVoxelSceneProxy::RenderOrigin`,
-  `ToRenderOffset`), so a float offset is at most a region across (under 0.01 uu anywhere;
-  `Rendering.Planet.RegionPrecision`). Scatter keeps one HISM per type and
-  region (`FVoxelScatterHISMKey`) at the region's origin.
-
-**FVoxelSceneProxy** (`VoxelRendering/Private/VoxelSceneProxy.cpp`)
-- Manages per-chunk `FLocalVertexFactory` instances
-- Culls chunk and seam batches per view in `GetDynamicMeshElements()` (`FVoxelViewCull`): against the view's frustum,
-  and in a shadow depth pass against the shadow's caster volume (`FSceneView::GetDynamicMeshElementsShadowCullFrustum`,
-  boxes moved by `GetPreShadowTranslation`). A shadow pass calls with a snapshot of the camera's view whose
-  `ViewFrustum` is still the camera's; culling with it left every chunk out of view out of the shadow map, so hills
-  behind or beside the camera cast no shadow until turned into view (visual polish VP3-O1). A shadow pass also skips
-  the RVT clones and water, which cast no shadow. `voxel.Render.ShadowCullFrustum` (1 by default, 0 = the camera's
-  frustum as before); `FVoxelBatchCounters::FCounts::ShadowDrawn` and the bench's `ShadowBatchN` column count the
-  batches drawn into shadow maps
-- Issues draw calls in `GetDynamicMeshElements()`
-- Handles game→render thread chunk buffer updates
-- Holds the only copy of the GPU geometry: the engine recreates the proxy on material and render-state changes
-  (also in the first second of play, when the scatter system compiles its runtime billboard material), and a new
-  proxy starts empty. `CreateSceneProxy` flags it, `IVoxelMeshRenderer::ConsumeLostRenderData` reports it once, and the
-  chunk manager re-meshes the chunks that had a mesh and re-sends every seam bucket and water tile
-  (`UVoxelChunkManager::RecoverLostRenderData`). Test `Streaming.Cubic.RendererProxyRecreated`
-
-**FVoxelLocalVertex** (`VoxelRendering/Public/VoxelLocalVertexFactory.h`)
-- 32-byte vertex format compatible with FLocalVertexFactory
-- Converts from `FVoxelVertex` (28-byte mesher output)
-- Encodes MaterialID, BiomeID, and AO in vertex color
-
-### Data Flow
-
-```
-[Mesher Output]
-    FVoxelVertex (28 bytes)
-    ↓
-[Conversion in UpdateChunkFromCPUData_RenderThread]
-    FVoxelLocalVertex (32 bytes)
-    ↓
-[GPU Buffer Creation]
-    FBufferRHIRef (vertex + index)
-    ↓
-[FLocalVertexFactory Setup]
-    Stream components bound
-    ↓
-[GetDynamicMeshElements]
-    Frustum culling → FMeshBatch → Draw
+                    └── FLocalVertexFactory per chunk, seam and water-tile mesh
 ```
 
 ---
 
-## Vertex Color Encoding
+## Key Components
 
-### Channel Layout
+**FVoxelMeshRenderer** (`VoxelRendering/Private/VoxelMeshRenderer.cpp`)
+- Implements `IVoxelMeshRenderer`
+- Keeps one `UVoxelRegionComponent` per render region and routes every chunk, seam, water tile and fade to its region
+- Converts the mesher's `FChunkMeshData` to vertices (`ConvertToVoxelVertices`) and assigns the configuration's
+  runtime virtual textures before registration
 
-The vertex color encodes per-vertex data for material graph access:
+**UVoxelRegionComponent** (`VoxelRendering/Public/VoxelRegionComponent.h`)
+- `UPrimitiveComponent` that bridges game thread and render thread
+- Creates `FVoxelSceneProxy` for actual rendering
+- Drives the crossfades (`FVoxelFadeScheduler`, the fade material instances)
+- Pushes the `voxel.Material.*` switches into `MPC_VoxelMaterial` ([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md))
+- Exposes statistics and chunk queries (`GetChunkDrawInfo`)
 
-| Channel | Data | Range | Material Access |
-|---------|------|-------|-----------------|
-| R | MaterialID | 0-255 | `round(VertexColor.R * 255)` |
-| G | BiomeID | 0-255 | `round(VertexColor.G * 255)` |
-| B | AO (top 2 bits) | 0-192 | `floor(VertexColor.B * 4)` → 0-3 |
-| A | Reserved | 255 | - |
+**FVoxelSceneProxy** (`VoxelRendering/Private/VoxelSceneProxy.cpp`)
+- Manages per-chunk `FLocalVertexFactory` instances, created in `ProcessBatchUpdate_RenderThread`
+- Culls chunk and seam batches per view and issues draw calls in `GetDynamicMeshElements()` (at most 2,000 batches a
+  frame: chunks, their RVT clones, seam buckets, water tiles)
+- Opts into the runtime virtual texture pass when the component has RVTs and emits the RVT batches
+- Holds the only copy of the GPU geometry: the engine recreates the proxy on material and render-state changes
+  (also in the first second of play, when the scatter system compiles its runtime billboard material), and a new
+  proxy starts empty. `CreateSceneProxy` flags it, `IVoxelMeshRenderer::ConsumeLostRenderData` reports it once, and the
+  chunk manager re-meshes the chunks that had a mesh and re-sends every seam bucket and water tile
+  (`UVoxelChunkManager::RecoverLostRenderData`; G15, test `Streaming.Cubic.RendererProxyRecreated`)
 
-### AO Calculation
+**FVoxelLocalVertex** (`VoxelRendering/Public/VoxelLocalVertexFactory.h`)
+- 40-byte vertex format compatible with `FLocalVertexFactory`
+- Converts from `FVoxelVertex` (the mesher's 28-byte output)
+- Encodes MaterialID, face type, BiomeID and AO in UV1 and the vertex colour (below)
+
+---
+
+## Render Regions
+
+The terrain renders in regions of `voxel.Render.RegionChunks`^3 chunks (`FVoxelRenderRegions`,
+`VoxelCore/Public/VoxelRenderRegions.h`; 16 by default, 0 turns them off) in every world mode: planets since
+spherical Phase 6 (WM-BP7, D23), heightmap worlds since the world modes review's MP2 (WM-MP5, D40), since a plane
+100 km from its origin loses float precision as a big planet does.
+
+- `FVoxelMeshRenderer` keeps one `UVoxelRegionComponent` per region at the region's origin (its min corner, in double),
+  creating it on demand with the material, RVTs, atlas, distances and viewer replayed, and retiring it when it holds
+  nothing (`UVoxelRegionComponent::HasRenderContent`). The primary component is region (0, 0, 0) and stays.
+- The scene proxy stores vertices relative to its component's location (`FVoxelSceneProxy::RenderOrigin`,
+  `ToRenderOffset`), so a float offset is at most a region across: a vertex 1,000 km from the origin is within
+  0.0005 uu of the double reference, on a plane and on a planet (test `Rendering.Planet.RegionPrecision`).
+- Scatter keeps one HISM per type and region (`FVoxelScatterHISMKey`) at the region's origin.
+- **Water-only regions (G77).** A water tile goes to the region of its column's Z-0 chunk, which over a lake is often
+  air with no mesh. Such a region draws its water tiles: the proxy draws with water tiles alone, the component's render
+  bounds (`CalcBounds`) are the union of its chunk meshes and its water tiles' boxes (`WaterTileWorldBounds`) padded by
+  a chunk, and every bounds change schedules the tick that sends them to the scene (`RequestRenderBoundsRefresh`).
+  Before, a lake under such a region drew its bed without water in a block of chunk columns seen from altitude
+  (test `Rendering.WaterTile.ComponentBounds`; `voxel.Water.ResendTiles`).
+
+---
+
+## Shadow Culling
+
+The proxy culls each batch per view (`FVoxelViewCull`): against the view's frustum, and in a shadow depth pass
+against the shadow's caster volume (`FSceneView::GetDynamicMeshElementsShadowCullFrustum`, boxes moved by
+`GetPreShadowTranslation`). A shadow pass calls with a snapshot of the camera's view whose `ViewFrustum` is still the
+camera's; culling with it left every chunk out of view out of the shadow map, so hills behind or beside the camera
+cast no shadow until turned into view. With the caster volume a hill out of view casts again, and shadow-pass voxel
+batches fell from about 1,070 to 335 a frame at no GPU cost (VP3-O1). A shadow pass also skips the RVT clones and
+water, which cast no shadow. `voxel.Render.ShadowCullFrustum` (1; 0 = the camera's frustum);
+`FVoxelBatchCounters::FCounts::ShadowDrawn` and the bench's `ShadowBatchN` column count the batches drawn into shadow
+maps.
+
+---
+
+## Crossfades
+
+A chunk's mesh is never swapped in one frame. When a chunk re-meshes (an LOD change, a correction) the proxy keeps the
+previous mesh and draws both with complementary dither masks for `voxel.MeshFade.Duration` (0.35 s) through the
+auto-derived Masked `<Master>_Fade` material; `voxel.MeshFade 0` swaps at once. `FVoxelFadeScheduler` keeps the clock:
+interiors and seam buckets share one scheduler so everything released together fades together.
+
+- **Holds** (R24). An LOD-change interior swap holds at the old mesh until its rebuilt seams land, then fades in with
+  them (`voxel.MeshFade.SeamHoldMs`, 1,000 ms, a failsafe; a ring sweep releases in 0.2-0.6 s). The chunk manager
+  drives them through `SetChunkFadeHold` / `SetSeamFadeHold`.
+- **Appearances** (R24). New geometry at the streaming frontier fades in from nothing, held until its ready seams land
+  (`voxel.MeshFade.AppearHold`); only geometry beyond `voxel.MeshFade.AppearMinDistance` (7,000 uu, the LOD 0 band's
+  edge) fades, so nothing near the player turns see-through. The distance is measured from the camera
+  (`SetViewerPosition`), not from the streaming viewer, which a descending camera's prefetch puts below it.
+- `voxel.MeshFade.MaxConcurrent` (512) caps fades in flight; `voxel.MeshFade.Stats [fades] [x y z]` lists them, the
+  holds, the proxy's fade states and what the last frame drew of a chunk (tests `Rendering.Crossfade.SwapReachesProxy`,
+  `Streaming.EditReachesProxy.*`, which need a real RHI).
+
+The scheduling side (when a swap is held, seam buckets) is in [STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md).
+
+---
+
+## Vertex Format and Colour Encoding
+
+`FVoxelLocalVertex` (40 bytes): position, tangent X and Z (`FPackedNormal`), UV0 (the face UVs for tiling), UV1, colour.
+
+| Attribute | Data | Material access |
+|-----------|------|-----------------|
+| UV1.x | MaterialID (exact float) | `MF_GetMaterialID` |
+| UV1.y | Face type against local up: 0 top, 1 side, 2 bottom (on a planet the radial direction) | |
+| Colour R | MaterialID (0-255); in the far field the quad's second material (G45) | `round(VertexColor.R * 255)` |
+| Colour G | BiomeID (0-255) | `round(VertexColor.G * 255)` |
+| Colour B | AO in the top 2 bits (0, 64, 128, 192) | `floor(VertexColor.B * 4)` → 0-3 |
+| Colour A | 255; in the far field 255 less the second material's weight at the vertex (G45) | |
 
 ```cpp
 // In material:
@@ -213,796 +180,91 @@ FinalColor = BaseColor * AOFactor;
 
 ## Renderer Interface
 
-### IVoxelMeshRenderer
+`Source/VoxelRendering/Public/IVoxelMeshRenderer.h`, called from the game thread only. The groups:
 
-```cpp
-/**
- * Voxel Mesh Renderer Interface
- * 
- * Abstract interface for rendering voxel chunks: what the chunk manager
- * asks of the renderer.
- * 
- * Thread Safety: All methods called from game thread only.
- */
-class IVoxelMeshRenderer {
-public:
-    virtual ~IVoxelMeshRenderer() = default;
-    
-    // ==================== Lifecycle ====================
-    
-    /**
-     * Initialize renderer with world and configuration.
-     * @param World The UWorld to render in
-     * @param Config World configuration
-     */
-    virtual void Initialize(
-        UWorld* World, 
-        const FVoxelWorldConfiguration& Config
-    ) = 0;
-    
-    /**
-     * Shutdown and cleanup resources.
-     */
-    virtual void Shutdown() = 0;
-    
-    // ==================== Mesh Updates ====================
-    
-    /**
-     * Update or create a chunk's mesh from CPU-side mesh data (the chunk manager's path).
-     */
-    virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) = 0;
-    
-    /**
-     * Remove chunk mesh from rendering.
-     * @param ChunkCoord Chunk to remove
-     */
-    virtual void RemoveChunk(FIntVector ChunkCoord) = 0;
-    
-    /**
-     * Clear all chunks.
-     */
-    virtual void ClearAllChunks() = 0;
-    
-    // ==================== Material Management ====================
-    
-    /**
-     * Set primary material for all chunks.
-     * @param Material Material to use
-     */
-    virtual void SetMaterial(UMaterialInterface* Material) = 0;
-    
-    /**
-     * Update material parameters (e.g., atlas texture).
-     */
-    virtual void UpdateMaterialParameters() = 0;
-
-    // ==================== Queries ====================
-    
-    /**
-     * Is this chunk currently loaded/rendered?
-     */
-    virtual bool IsChunkLoaded(FIntVector ChunkCoord) const = 0;
-    
-    /**
-     * Get number of currently loaded chunks.
-     */
-    virtual int32 GetLoadedChunkCount() const = 0;
-    
-    /**
-     * Get total GPU memory usage (approximate).
-     */
-    virtual uint64 GetGPUMemoryUsage() const = 0;
-    
-    // ==================== Debugging ====================
-    
-    /**
-     * Get debug statistics string.
-     */
-    virtual FString GetDebugStats() const = 0;
-    
-    /**
-     * Draw debug visualization.
-     */
-    virtual void DrawDebugVisualization(const FLODQueryContext& Context) const {}
-};
-```
-
----
-
-## Custom Vertex Factory
-
-> The code in this section is the original design's custom `FVoxelVertexFactory` with a per-chunk uniform buffer; the
-> shipped renderer uses `FLocalVertexFactory` (see "Vertex Factory Evolution") and has no LOD morph uniform: LOD flips
-> crossfade between meshes instead (code review CR1 deleted the unused morph chain, REND-05).
-
-The Custom Vertex Factory implementation provides maximum performance by keeping all data on GPU and avoiding CPU-GPU transfers.
-
-### Architecture
-
-```
-ChunkManager
-    ↓
-FChunkMeshData (the mesher's output)
-    ↓
-FVoxelMeshRenderer::UpdateChunkMeshFromCPU()
-    ↓
-Upload on the render thread (UpdateChunkFromCPUData_RenderThread)
-    ↓
-FVoxelVertexFactory::UpdateBuffers()
-    ↓
-FVoxelSceneProxy::MarkDirty()
-    ↓
-Rendering (vertex shader reads GPU buffers)
-```
-
-### Optimized Vertex Format
-
-```cpp
-/**
- * Optimized vertex format for voxel rendering.
- * 
- * Total: 28 bytes per vertex
- * Packed data reduces memory bandwidth and cache misses.
- */
-struct FVoxelVertex {
-    /** Position in local space (12 bytes) */
-    FVector3f Position;
-    
-    /** Packed normal (10/10/10) + AO (8-bit) + padding (2-bit) (4 bytes) */
-    uint32 PackedNormalAndAO;
-    
-    /** UV coordinates for texturing (8 bytes) */
-    FVector2f UV;
-    
-    /** MaterialID (8) + BiomeID (8) + Metadata (16) (4 bytes) */
-    uint32 PackedMaterialData;
-    
-    // ==================== Packing Utilities ====================
-    
-    /**
-     * Pack normal vector and ambient occlusion into single uint32.
-     * Normal uses 10 bits per component, AO uses 8 bits.
-     */
-    static uint32 PackNormalAndAO(FVector3f Normal, uint8 AO) {
-        // Normalize to -1 to 1
-        FVector3f N = Normal.GetSafeNormal();
-        
-        // Convert to 10-bit signed integers (-511 to 511)
-        int32 X = FMath::Clamp(FMath::RoundToInt(N.X * 511.0f), -511, 511);
-        int32 Y = FMath::Clamp(FMath::RoundToInt(N.Y * 511.0f), -511, 511);
-        int32 Z = FMath::Clamp(FMath::RoundToInt(N.Z * 511.0f), -511, 511);
-        
-        // Pack: XXXXXXXXXXYYYYYYYYYYZZZZZZZZZZAA
-        uint32 Packed = 0;
-        Packed |= (X & 0x3FF) << 22;  // 10 bits X
-        Packed |= (Y & 0x3FF) << 12;  // 10 bits Y
-        Packed |= (Z & 0x3FF) << 2;   // 10 bits Z
-        Packed |= (AO >> 6) & 0x3;    // 2 bits AO (high bits, rest in normal W)
-        
-        return Packed;
-    }
-    
-    /**
-     * Unpack normal and AO from uint32.
-     */
-    static void UnpackNormalAndAO(uint32 Packed, FVector3f& OutNormal, uint8& OutAO) {
-        // Extract 10-bit signed values
-        int32 X = (Packed >> 22) & 0x3FF;
-        int32 Y = (Packed >> 12) & 0x3FF;
-        int32 Z = (Packed >> 2) & 0x3FF;
-        
-        // Sign extend (10-bit to 32-bit signed)
-        if (X & 0x200) X |= 0xFFFFFC00;
-        if (Y & 0x200) Y |= 0xFFFFFC00;
-        if (Z & 0x200) Z |= 0xFFFFFC00;
-        
-        // Convert to normalized float
-        OutNormal.X = (float)X / 511.0f;
-        OutNormal.Y = (float)Y / 511.0f;
-        OutNormal.Z = (float)Z / 511.0f;
-        
-        // Extract AO
-        OutAO = (Packed & 0x3) << 6;
-    }
-    
-    /**
-     * Pack material data (MaterialID, BiomeID, Metadata).
-     */
-    static uint32 PackMaterialData(uint8 MaterialID, uint8 BiomeID, uint16 Metadata) {
-        return ((uint32)MaterialID << 24) | ((uint32)BiomeID << 16) | (uint32)Metadata;
-    }
-    
-    /**
-     * Unpack material data.
-     */
-    static void UnpackMaterialData(uint32 Packed, uint8& MaterialID, uint8& BiomeID, uint16& Metadata) {
-        MaterialID = (Packed >> 24) & 0xFF;
-        BiomeID = (Packed >> 16) & 0xFF;
-        Metadata = Packed & 0xFFFF;
-    }
-};
-```
-
-### Vertex Factory Implementation
-
-```cpp
-/**
- * Custom Vertex Factory for Voxel Rendering
- * 
- * Handles vertex stream setup and shader bindings for voxel meshes.
- * Integrates with Unreal's rendering pipeline via FVertexFactory.
- */
-class FVoxelVertexFactory : public FVertexFactory {
-    DECLARE_VERTEX_FACTORY_TYPE(FVoxelVertexFactory);
-    
-public:
-    /**
-     * Data type for vertex factory.
-     * Defines vertex stream components.
-     */
-    struct FDataType {
-        /** Position stream */
-        FVertexStreamComponent PositionComponent;
-        
-        /** Packed normal + AO stream */
-        FVertexStreamComponent PackedNormalAOComponent;
-        
-        /** UV stream */
-        FVertexStreamComponent UVComponent;
-        
-        /** Material data stream */
-        FVertexStreamComponent MaterialDataComponent;
-    };
-    
-    /**
-     * Initialize vertex factory with data.
-     */
-    void Init(const FDataType& InData) {
-        Data = InData;
-    }
-    
-    /**
-     * Modify shader compilation environment.
-     * Defines shader macros for this vertex factory.
-     */
-    static void ModifyCompilationEnvironment(
-        const FVertexFactoryShaderPermutationParameters& Parameters,
-        FShaderCompilerEnvironment& OutEnvironment)
-    {
-        FVertexFactory::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-        
-        OutEnvironment.SetDefine(TEXT("VOXEL_VERTEX_FACTORY"), 1);
-        OutEnvironment.SetDefine(TEXT("SUPPORT_LOD_MORPHING"), 1);
-        OutEnvironment.SetDefine(TEXT("USE_PACKED_NORMALS"), 1);
-    }
-    
-    /**
-     * Should cache this vertex factory for given shader type?
-     */
-    static bool ShouldCompilePermutation(
-        const FVertexFactoryShaderPermutationParameters& Parameters)
-    {
-        // Only compile for voxel materials
-        return Parameters.MaterialParameters.bIsUsedWithVoxelMeshes || 
-               Parameters.MaterialParameters.bIsSpecialEngineMaterial;
-    }
-    
-    /**
-     * Initialize RHI resources.
-     */
-    virtual void InitRHI() override {
-        // Create vertex declaration
-        FVertexDeclarationElementList Elements;
-        
-        // Position (3x float)
-        Elements.Add(AccessStreamComponent(Data.PositionComponent, 0));
-        
-        // Packed normal + AO (1x uint32)
-        Elements.Add(AccessStreamComponent(Data.PackedNormalAOComponent, 1));
-        
-        // UV (2x float)
-        Elements.Add(AccessStreamComponent(Data.UVComponent, 2));
-        
-        // Material data (1x uint32)
-        Elements.Add(AccessStreamComponent(Data.MaterialDataComponent, 3));
-        
-        // Initialize declaration
-        InitDeclaration(Elements);
-    }
-    
-    /**
-     * Update vertex buffers from GPU compute shader output.
-     * This is the key optimization - buffers stay on GPU!
-     */
-    void UpdateFromComputeBuffer(
-        FRHICommandListImmediate& RHICmdList,
-        FRDGBuilder& GraphBuilder,
-        FRDGBufferRef ComputeVertexBuffer,
-        FRDGBufferRef ComputeIndexBuffer)
-    {
-        // Convert RDG buffers to persistent RHI buffers
-        // Buffers NEVER touch CPU - direct GPU→GPU transfer
-        VertexBufferRHI = GraphBuilder.ConvertToExternalBuffer(ComputeVertexBuffer);
-        IndexBufferRHI = GraphBuilder.ConvertToExternalBuffer(ComputeIndexBuffer);
-        
-        // Update stream components to point to new buffers
-        FDataType NewData;
-        NewData.PositionComponent = FVertexStreamComponent(
-            VertexBufferRHI,
-            STRUCT_OFFSET(FVoxelVertex, Position),
-            sizeof(FVoxelVertex),
-            VET_Float3
-        );
-        NewData.PackedNormalAOComponent = FVertexStreamComponent(
-            VertexBufferRHI,
-            STRUCT_OFFSET(FVoxelVertex, PackedNormalAndAO),
-            sizeof(FVoxelVertex),
-            VET_UInt
-        );
-        NewData.UVComponent = FVertexStreamComponent(
-            VertexBufferRHI,
-            STRUCT_OFFSET(FVoxelVertex, UV),
-            sizeof(FVoxelVertex),
-            VET_Float2
-        );
-        NewData.MaterialDataComponent = FVertexStreamComponent(
-            VertexBufferRHI,
-            STRUCT_OFFSET(FVoxelVertex, PackedMaterialData),
-            sizeof(FVoxelVertex),
-            VET_UInt
-        );
-        
-        Init(NewData);
-    }
-    
-private:
-    FDataType Data;
-    FBufferRHIRef VertexBufferRHI;
-    FBufferRHIRef IndexBufferRHI;
-};
-```
-
-### Scene Proxy
-
-```cpp
-/**
- * Scene proxy for voxel world.
- * 
- * Manages rendering of all voxel chunks as a single primitive.
- * Integrates with Unreal's rendering thread.
- */
-class FVoxelSceneProxy : public FPrimitiveSceneProxy {
-public:
-    FVoxelSceneProxy(UVoxelRegionComponent* InComponent)
-        : FPrimitiveSceneProxy(InComponent)
-        , VertexFactory(GetScene().GetFeatureLevel())
-    {
-        // Initialize vertex factory
-        // Setup material
-    }
-    
-    /**
-     * Get dynamic mesh elements for rendering.
-     * Called by render thread.
-     */
-    virtual void GetDynamicMeshElements(
-        const TArray<const FSceneView*>& Views,
-        const FSceneViewFamily& ViewFamily,
-        uint32 VisibilityMap,
-        FMeshElementCollector& Collector) const override
-    {
-        // For each visible chunk
-        for (const auto& Pair : ChunkBuffers) {
-            FIntVector ChunkCoord = Pair.Key;
-            const FVoxelChunkGPUBuffers& Buffers = Pair.Value;
-            
-            // Create mesh batch
-            FMeshBatch& MeshBatch = Collector.AllocateMesh();
-            MeshBatch.VertexFactory = &VertexFactory;
-            MeshBatch.MaterialRenderProxy = Material->GetRenderProxy();
-            MeshBatch.Type = PT_TriangleList;
-            MeshBatch.DepthPriorityGroup = SDPG_World;
-            
-            // Setup mesh element
-            FMeshBatchElement& BatchElement = MeshBatch.Elements[0];
-            BatchElement.IndexBuffer = Buffers.IndexBuffer;
-            BatchElement.FirstIndex = 0;
-            BatchElement.NumPrimitives = Buffers.IndexCount / 3;
-            BatchElement.MinVertexIndex = 0;
-            BatchElement.MaxVertexIndex = Buffers.VertexCount - 1;
-            
-            // LOD morph factor uniform
-            BatchElement.UserData = &Buffers.LODMorphFactor;
-            
-            Collector.AddMesh(ViewId, MeshBatch);
-        }
-    }
-    
-    /**
-     * Update chunk GPU buffers.
-     * Called when chunk mesh is generated.
-     */
-    void UpdateChunkBuffers(FIntVector ChunkCoord, const FVoxelChunkGPUBuffers& Buffers) {
-        // Thread-safe update (use lock or render command)
-        ENQUEUE_RENDER_COMMAND(UpdateVoxelChunkBuffers)(
-            [this, ChunkCoord, Buffers](FRHICommandListImmediate& RHICmdList) {
-                ChunkBuffers.Add(ChunkCoord, Buffers);
-            }
-        );
-    }
-    
-    /**
-     * Update LOD transition morph factor.
-     */
-    void SetChunkLODMorphFactor(FIntVector ChunkCoord, float MorphFactor) {
-        ENQUEUE_RENDER_COMMAND(SetVoxelChunkLODMorph)(
-            [this, ChunkCoord, MorphFactor](FRHICommandListImmediate& RHICmdList) {
-                if (FVoxelChunkGPUBuffers* Buffers = ChunkBuffers.Find(ChunkCoord)) {
-                    Buffers->LODMorphFactor = MorphFactor;
-                }
-            }
-        );
-    }
-    
-private:
-    /** Vertex factory instance */
-    FVoxelVertexFactory VertexFactory;
-    
-    /** Per-chunk GPU buffer handles */
-    TMap<FIntVector, FVoxelChunkGPUBuffers> ChunkBuffers;
-    
-    /** Material */
-    UMaterialInterface* Material;
-};
-```
-
-### Custom VF Renderer Implementation
-
-```cpp
-/**
- * GPU-driven voxel mesh renderer using Custom Vertex Factory.
- * 
- * Optimized for runtime performance with zero CPU overhead.
- */
-class FVoxelMeshRenderer : public IVoxelMeshRenderer {
-public:
-    virtual void Initialize(UWorld* World, const FVoxelWorldConfiguration& Config) override {
-        // Create scene component
-        OriginRegionComponent = NewObject<UVoxelRegionComponent>(World);
-        OriginRegionComponent->RegisterComponent();
-        
-        // Create scene proxy
-        SceneProxy = MakeShared<FVoxelSceneProxy>(OriginRegionComponent);
-        
-        // Set material
-        SetMaterial(Config.VoxelMaterial);
-    }
-    
-    virtual void UpdateChunkMesh(const FChunkRenderData& RenderData) override {
-        // Key optimization: GPU buffers stay on GPU!
-        FRDGBuilder GraphBuilder(FRHICommandListExecutor::GetImmediateCommandList());
-        
-        // Convert RDG → RHI (no CPU readback!)
-        FBufferRHIRef VertexBuffer = 
-            GraphBuilder.ConvertToExternalBuffer(RenderData.ComputeVertexBuffer);
-        FBufferRHIRef IndexBuffer = 
-            GraphBuilder.ConvertToExternalBuffer(RenderData.ComputeIndexBuffer);
-        
-        // Store buffer handles
-        FVoxelChunkGPUBuffers Buffers;
-        Buffers.VertexBuffer = VertexBuffer;
-        Buffers.IndexBuffer = IndexBuffer;
-        Buffers.VertexCount = RenderData.VertexCount;
-        Buffers.IndexCount = RenderData.IndexCount;
-        Buffers.LODMorphFactor = 0.0f;
-        
-        ChunkBuffers.Add(RenderData.ChunkCoord, Buffers);
-        
-        // Update scene proxy
-        SceneProxy->UpdateChunkBuffers(RenderData.ChunkCoord, Buffers);
-    }
-    
-    virtual void RemoveChunk(FIntVector ChunkCoord) override {
-        ChunkBuffers.Remove(ChunkCoord);
-        SceneProxy->RemoveChunk(ChunkCoord);
-    }
-    
-    virtual void UpdateLODTransition(FIntVector ChunkCoord, float MorphFactor) override {
-        if (FVoxelChunkGPUBuffers* Buffers = ChunkBuffers.Find(ChunkCoord)) {
-            Buffers->LODMorphFactor = MorphFactor;
-            SceneProxy->SetChunkLODMorphFactor(ChunkCoord, MorphFactor);
-        }
-    }
-    
-private:
-    /** Scene proxy (rendering thread) */
-    TSharedPtr<FVoxelSceneProxy> SceneProxy;
-    
-    /** World component (game thread) */
-    UVoxelRegionComponent* OriginRegionComponent;
-    
-    /** Per-chunk GPU buffers */
-    TMap<FIntVector, FVoxelChunkGPUBuffers> ChunkBuffers;
-};
-```
-
-### Vertex Shader (HLSL)
-
-```hlsl
-// VoxelVertexFactory.usf
-
-#include "/Engine/Private/VertexFactoryCommon.ush"
-
-// Uniform buffer for LOD morphing
-BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FVoxelVertexFactoryUniformBuffer, )
-    SHADER_PARAMETER(float, LODMorphFactor)
-    SHADER_PARAMETER(int, CurrentLODLevel)
-    SHADER_PARAMETER(int, NextLODLevel)
-END_GLOBAL_SHADER_PARAMETER_STRUCT()
-
-struct FVoxelVertexFactoryInput {
-    float3 Position : ATTRIBUTE0;
-    uint PackedNormalAO : ATTRIBUTE1;
-    float2 UV : ATTRIBUTE2;
-    uint PackedMaterialData : ATTRIBUTE3;
-};
-
-struct FVoxelVertexFactoryInterpolantsVSToPS {
-    float4 Position : SV_POSITION;
-    float3 WorldPosition : TEXCOORD0;
-    float3 Normal : TEXCOORD1;
-    float2 UV : TEXCOORD2;
-    float AO : TEXCOORD3;
-    nointerpolation uint MaterialID : TEXCOORD4;
-    nointerpolation uint BiomeID : TEXCOORD5;
-};
-
-// Unpack 10/10/10 normal from uint32
-float3 UnpackNormal(uint Packed) {
-    int X = (int)(Packed >> 22) & 0x3FF;
-    int Y = (int)(Packed >> 12) & 0x3FF;
-    int Z = (int)(Packed >> 2) & 0x3FF;
-    
-    // Sign extend
-    X = (X << 22) >> 22;
-    Y = (Y << 22) >> 22;
-    Z = (Z << 22) >> 22;
-    
-    return normalize(float3(X, Y, Z) / 511.0);
-}
-
-// Calculate next LOD position for morphing
-float3 CalculateNextLODPosition(float3 CurrentPos, int CurrentLOD) {
-    // Snap to next LOD grid
-    int Stride = 1 << (CurrentLOD + 1);
-    return floor(CurrentPos / Stride) * Stride;
-}
-
-// Morph between LOD levels
-float3 MorphVertex(float3 CurrentPos, float3 NextLODPos, float MorphFactor) {
-    return lerp(CurrentPos, NextLODPos, MorphFactor);
-}
-
-FVoxelVertexFactoryInterpolantsVSToPS Main(FVoxelVertexFactoryInput Input) {
-    FVoxelVertexFactoryInterpolantsVSToPS Output;
-    
-    // Unpack normal and AO
-    float3 Normal = UnpackNormal(Input.PackedNormalAO);
-    float AO = (float)((Input.PackedNormalAO & 0x3) << 6) / 255.0;
-    
-    // Unpack material data
-    uint MaterialID = (Input.PackedMaterialData >> 24) & 0xFF;
-    uint BiomeID = (Input.PackedMaterialData >> 16) & 0xFF;
-    
-    // LOD morphing
-    float3 Position = Input.Position;
-    if (VoxelUniforms.LODMorphFactor > 0.01) {
-        float3 NextLODPos = CalculateNextLODPosition(Position, VoxelUniforms.CurrentLODLevel);
-        Position = MorphVertex(Position, NextLODPos, VoxelUniforms.LODMorphFactor);
-    }
-    
-    // Transform to world space
-    float3 WorldPosition = mul(float4(Position, 1.0), Primitive.LocalToWorld).xyz;
-    float3 WorldNormal = mul(Normal, (float3x3)Primitive.LocalToWorld);
-    
-    // Output
-    Output.Position = mul(float4(WorldPosition, 1.0), View.WorldToClip);
-    Output.WorldPosition = WorldPosition;
-    Output.Normal = WorldNormal;
-    Output.UV = Input.UV;
-    Output.AO = AO;
-    Output.MaterialID = MaterialID;
-    Output.BiomeID = BiomeID;
-    
-    return Output;
-}
-```
+| Group | Members |
+|-------|---------|
+| Lifecycle | `Initialize`, `Shutdown`, `IsInitialized`, `FlushPendingOperations` |
+| Chunk meshes | `UpdateChunkMeshFromCPU`, `RemoveChunk`, `ClearAllChunks` |
+| Seam meshes | `UpdateSeamMeshFromCPU`, `RemoveSeamMesh`, `ClearAllSeamMeshes`, `GetSeamMeshOwners` |
+| Fades | `SetChunkFadeHold`, `SetSeamFadeHold`, `GetSeamFadeRemainingSeconds`, `WillFadeInChunk`, `SetViewerPosition` |
+| Materials | `SetMaterial`, `GetMaterial`, `GetSurfaceMaterial`, `UpdateMaterialParameters`, `SetMaterialAtlas`, `GetMaterialAtlas` |
+| Water | `SetWaterMaterial`, `UpdateWaterTileMesh`, `RemoveWaterTile`, `ClearAllWaterTiles`, `GetWaterTileDrawInfo` |
+| Recovery | `ConsumeLostRenderData` |
+| Queries | `IsChunkLoaded`, `GetLoadedChunkCount`, `GetLoadedChunks`, `GetGPUMemoryUsage`, `GetTotalVertexCount`, `GetTotalTriangleCount`, `GetChunkBounds`, `GetTotalBounds` |
+| Debugging | `GetDebugStats`, `DrawDebugVisualization`, `GetRendererTypeName` |
 
 ---
 
 ## Water Tile Rendering
 
-The renderer draws water tiles through the `IVoxelMeshRenderer` water tile API.Water tiles are keyed by `FIntVector2` (XY chunk column), separate from terrain chunks keyed by `FIntVector`.
-
-See [WATER_SYSTEM.md](WATER_SYSTEM.md) for the full water system architecture (flag storage, propagation, meshing, tile management).
-
-An island's far ocean (WM-E1) is not drawn by the renderer: the chunk manager builds it on its own procedural mesh
-components, using `IVoxelMeshRenderer::GetSurfaceMaterial()` (the material terrain is drawn with: the world component's
-atlas instance) for its seabed.
-
-The far field (a planet's since spherical Phase 6, WM-BP9; a plane's and an island's since the world modes review's
-WM-MP1; [LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field") is not drawn by the renderer either: the chunk manager keeps one
-procedural mesh component per resident patch (`FarFieldComponents`), at the patch's origin in double with float offsets
-of the patch's size (the render regions' rule, a patch being its own region): section 0 the terrain with
-`GetSurfaceMaterial()`, 1 the sea and 2 its underside with the water material. A far-field terrain vertex is a voxel
-terrain vertex as the voxel vertex factory presents it (`FVoxelLocalVertex::FromVoxelVertex` with the planet's radial
-face up, +Z on a heightmap world): UV1 = (material id, face type against local up), colour (the quad's second material,
-biome, AO 0, alpha 255 less the second material's weight at the vertex; G45), the tangent cross(Z, N), UV0 the position
-on the normal's dominant plane in voxels (relative to the patch). Both materials are flat per triangle (vertices
-duplicated where quads' pairs differ) and the terrain material picks between them per pixel by the interpolated weight
-([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Far-Field Material Blend"); every voxel chunk vertex has alpha 255, weight 0.
-With `voxel.World.FarFieldMaterialBlend 0` colour R is the material itself and alpha 255: one material per triangle, as
-before G45. Sections are shown and hidden with `SetMeshSectionVisible` (a render
-command), so the window's hole moving costs no proxy rebuild; a component is created when its patch is built and goes
-when the patch is released or pruned. They are about 200 bytes a vertex (the component's CPU copy and the GPU one):
-29-56 MB at the surveyed sites of the three test planets, up to 83 MB looking down on the small one from orbit
-(WORLD_MODES_REVIEW_PLAN.md §20.5).
-
-Above the voxel cut-over (spherical Phase 6, WM-BP10; [LOD_SYSTEM.md](LOD_SYSTEM.md) "Orbit and Back") the window holds
-no chunk and the far field is all that draws the planet: on the 50 km test planet 145 patches (18.5 MB) at 600 m, 59
-(9 MB) from 1 R and 41 (6 MB) from 2 R. The renderer's appearance fade measures from the camera
-(`SetViewerPosition(CurrentCameraPosition)`), not from the streaming viewer, which a descending camera's prefetch puts
-below it: chunks streaming back on a descent fade in at their distance from the eye.
-
-### Interface
-
-```cpp
-virtual void SetWaterMaterial(UMaterialInterface* Material) { }
-virtual void UpdateWaterTileMesh(
-    const FIntVector2& TileCoord,
-    const FChunkMeshData& WaterMeshData) { }
-virtual void RemoveWaterTile(const FIntVector2& TileCoord) { }
-virtual void ClearAllWaterTiles() { }
-```
-
-### Custom VF Water Rendering
-
-The GPU renderer renders water tiles as a **second pass** in `GetDynamicMeshElements`, after the terrain chunk loop:
+Water tiles are keyed by `FIntVector2` (XY chunk column), separate from terrain chunks keyed by `FIntVector`. See
+[WATER_SYSTEM.md](WATER_SYSTEM.md) for the water system (flag storage, propagation, meshing, tile management).
 
 ```
 FVoxelMeshRenderer::UpdateWaterTileMesh()
     ↓ ConvertToVoxelVertices (FChunkMeshData → FVoxelVertex[])
-    ↓
+    ↓ the tile's render region
 UVoxelRegionComponent::UpdateWaterTileFromCPUData()
     ↓ ENQUEUE_RENDER_COMMAND
-    ↓
 FVoxelSceneProxy::UpdateWaterTileFromCPUData_RenderThread()
-    ↓ Create GPU buffers (vertex, color SRV, tangent SRV, texcoord SRV, index)
-    ↓ Create FLocalVertexFactory
-    ↓ Store in WaterTile* maps (FIntVector2-keyed)
+    ↓ GPU buffers, an FLocalVertexFactory, stored by FIntVector2
 
 FVoxelSceneProxy::GetDynamicMeshElements()
-    ├── [Pass 1] Terrain chunks (existing)
-    └── [Pass 2] Water tiles
-        ├── Uses WaterMaterial (separate from terrain)
-        ├── Same frustum culling as terrain
-        ├── CastShadow = false
-        ├── bUseAsOccluder = false
-        └── Shares 500 mesh batch limit with terrain
+    ├── [Pass 1] Terrain chunks and seams
+    └── [Pass 2] Water tiles: WaterMaterial, the same culling, no shadow, not an occluder
 ```
 
-**GetViewRelevance**: Water material relevance is OR'd with terrain material relevance so the scene proxy correctly reports translucency support when water uses a translucent or Single Layer Water material.
-
-**CreateSceneProxy**: When the scene proxy is recreated, water material is re-synced via `ENQUEUE_RENDER_COMMAND`.
+**GetViewRelevance**: Water material relevance is OR'd with terrain material relevance so the scene proxy correctly
+reports translucency support when water uses a translucent or Single Layer Water material. **CreateSceneProxy**: the
+water material is re-synced to a recreated proxy.
 
 ### Water Material Requirements
 
-- Should be **translucent** or **Single Layer Water** shading model
-- Must NOT be opaque (water renders in a separate pass and needs correct sorting)
-- Configured via `UVoxelWorldConfiguration::WaterMeshMaterial`
-- When null, the system falls back to a static water plane
+- **Translucent** or **Single Layer Water** shading model, not opaque (water draws in a separate pass and needs sorting)
+- Configured via `UVoxelWorldConfiguration::WaterMeshMaterial`; when null no water is drawn (the demo actor's
+  fallback plane aside, `AVoxelDemoActor::bShowWaterPlane`)
 
 ---
 
-## Collision System
+## What the Renderer Does Not Draw
 
-Collision is managed separately from visual rendering, using a fully async pipeline to eliminate game-thread stutter.
+**An island's far ocean** (WM-E1): the chunk manager builds it on its own procedural mesh components, using
+`IVoxelMeshRenderer::GetSurfaceMaterial()` (the material terrain is drawn with: the world component's atlas instance)
+for its seabed.
 
-### Architecture
+**The far field** (a planet's since spherical Phase 6, WM-BP9; a plane's and an island's since MP3, WM-MP1;
+[LOD_SYSTEM.md](LOD_SYSTEM.md) "The Far Field"): the chunk manager's `FVoxelFarFieldPresenter` keeps one procedural
+mesh component per built patch, at the patch's origin in double with float offsets of the patch's size (the render
+regions' rule, a patch being its own region): section 0 the terrain with `GetSurfaceMaterial()`, 1 the sea and 2 its
+underside with the water material.
 
-The collision system uses a three-stage async pipeline:
+- A far-field terrain vertex is a voxel terrain vertex as the voxel vertex factory presents it
+  (`FVoxelLocalVertex::FromVoxelVertex` with the planet's radial face up, +Z on a heightmap world): UV1 = (material id,
+  face type), colour (the quad's second material, biome, AO 0, alpha 255 less the second material's weight; G45), the
+  tangent cross(Z, N), UV0 the position on the normal's dominant plane in voxels (relative to the patch).
+- Both materials are flat per triangle (vertices duplicated where quads' pairs differ) and the terrain material picks
+  between them per pixel by the interpolated weight ([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Far-Field Material
+  Blend"); every voxel chunk vertex has alpha 255, weight 0. With `voxel.World.FarFieldMaterialBlend 0` colour R is
+  the material itself and alpha 255: one material per triangle.
+- Sections are shown and hidden with `SetMeshSectionVisible` (a render command), so the window's hole moving costs no
+  proxy rebuild; a component is created when its patch is built and goes when the patch is released or pruned. They
+  are about 200 bytes a vertex (the component's CPU copy and the GPU one): 29-56 MB at the surveyed sites of the three
+  test planets, up to 83 MB looking down on the small one from orbit (P6.4).
+- Above the voxel cut-over ([LOD_SYSTEM.md](LOD_SYSTEM.md) "Orbit and Back") the window holds no chunk and the far
+  field is all that draws the terrain: on the 50 km test planet 145 patches (18.5 MB) at 600 m, 59 (9 MB) from 1 R and
+  41 (6 MB) from 2 R.
 
-1. **Data Preparation** (game thread, lightweight): Copy voxel data, merge edits, extract neighbor slices
-2. **Mesh Generation + Trimesh Construction** (thread pool, ~3-5ms): Run `GenerateMeshCPU()` at collision LOD, build `Chaos::FTriangleMeshImplicitObject`
-3. **Physics Registration** (game thread, ~0.5ms): Create `UBodySetup`, register collision component
+---
 
-```cpp
-/**
- * Voxel Collision Manager — Async Pipeline
- *
- * Manages physics collision for voxel chunks independently from visual mesh.
- * Heavy work (mesh gen + trimesh) runs on thread pool; only lightweight
- * physics registration happens on the game thread.
- */
-class UVoxelCollisionManager : public UObject {
-public:
-    // Called every frame from ChunkManager tick
-    void Update(const FVector& ViewerPosition, float DeltaTime) {
-        // 1. Drain completed async results (game thread, ~0.5ms per apply)
-        ProcessCompletedCollisionCooks();
+## Collision
 
-        // 2. Update collision decisions (distance-based load/unload)
-        if (ViewerMovedEnough || bPendingInitialUpdate) {
-            UpdateCollisionDecisions(ViewerPosition);
-        }
-
-        // 3. Process dirty chunks from edits (just queues requests)
-        ProcessDirtyChunks(ViewerPosition);
-
-        // 4. Launch async tasks from priority queue
-        ProcessCookingQueue();
-    }
-
-private:
-    // Launches async collision cook on thread pool
-    void LaunchAsyncCollisionCook(const FCollisionCookRequest& Request) {
-        // Game thread: prepare meshing request (copy data, merge edits)
-        FVoxelMeshingRequest MeshRequest;
-        ChunkManager->PrepareCollisionMeshRequest(ChunkCoord, LODLevel, MeshRequest);
-        IVoxelMesher* MesherPtr = ChunkManager->GetMesherPtr();
-
-        // Thread pool: mesh gen + Chaos trimesh construction
-        Async(EAsyncExecution::ThreadPool, [MesherPtr, MeshRequest]() {
-            FChunkMeshData MeshData;
-            MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);  // ~2-4ms
-
-            // Build Chaos::FTriangleMeshImplicitObject                // ~1-2ms
-            TRefCountPtr<Chaos::FTriangleMeshImplicitObject> TriMesh = ...;
-
-            // Enqueue for game thread (MPSC queue)
-            CompletedCollisionQueue.Enqueue(Result);
-        });
-    }
-
-    // Game thread: apply trimesh to physics
-    void ApplyCollisionResult(FAsyncCollisionResult& Result) {
-        // Create/reuse UBodySetup, set TriMeshGeometries
-        // Create UBoxComponent, override FBodyInstance::BodySetup
-        // RegisterComponent + InitBody (~0.5ms)
-    }
-
-    /** Priority queue (sorted ascending, pop from back for O(1)) */
-    TArray<FCollisionCookRequest> CookingQueue;
-
-    /** MPSC queue for thread pool → game thread results */
-    TQueue<FAsyncCollisionResult, EQueueMode::Mpsc> CompletedCollisionQueue;
-
-    /** Tracks in-flight async tasks */
-    TSet<FIntVector> AsyncCollisionInProgress;
-
-    // Config: MaxAsyncCollisionTasks (default 2), MaxAppliesPerFrame (2)
-};
-```
-
-### Key Design Decisions
-
-- **CollisionRadius**: Default 50% of ViewDistance (configurable)
-- **CollisionLODLevel**: Uses coarser meshes for physics (fewer triangles, configurable)
-- **Chaos Physics** (UE 5.8): `TriMeshGeometries` with `TRefCountPtr<FTriangleMeshImplicitObject>`
-- **Container Actor**: `CollisionContainerActor` holds all chunk `UBoxComponent` collision holders
-- **Edit Integration**: `MarkChunkDirty()` called from `EditManager->OnChunkEdited` delegate
-- **Neighbour arrival** (G32, WORLD_MODES_REVIEW_PLAN.md §19.10): a cook meshes the whole chunk with its 26 neighbours'
-  voxels, and the mesher reads a neighbour without data as air, so the boundary cells facing it come out wrong (a
-  voxel-wide strip along the face where traces miss the ground). `PrepareCollisionMeshRequest` reports the missing
-  neighbours, the cook keeps them (`FChunkCollisionData::MissingNeighborMask`), and the chunk manager's
-  `OnChunkGenerationComplete` calls `OnChunkVoxelDataAvailable` for every chunk cooked without the new one. Where the
-  voxels on both sides of that boundary are air (the arriving chunk's facing planes, and two strides of the cooked
-  chunk's, so no crossing's gradient normal reaches across) the cook is already right and nothing happens; otherwise
-  the arrival is noted (`ArrivedNeighborMask`) and `ProcessNeighborRecooks` requests one re-cook once none of the
-  chunk's other missing neighbours is still being generated, queued below every first cook. The old body stays live
-  until the re-cook replaces it. `voxel.Collision.NeighborRecook 0` turns it off (A/B); `voxel.Collision.AuditNeighbors`
-  counts cooks that read as air a neighbour that has data now (0 with the re-cook on), and `GetDebugStats` the re-cooks
-- **Thread Safety**: Data prep reads game-thread state; mesher is stateless; trimesh is pure data construction
+Collision is cooked apart from the visual meshes, on workers, by `UVoxelCollisionManager` (VoxelStreaming): chunks
+within a radius of the focus with a velocity lead, meshed with the main mesher at the collision LOD (whole-chunk
+domain, the neighbours read from their boundary shells), built into a Chaos triangle mesh off the game thread and
+registered on `UBoxComponent` holders under one container actor; edits mark chunks dirty, and a neighbour that arrives
+after a cook re-cooks it (G32). The pipeline, its cvars and its audits are in
+[STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md) "Collision cooking".
 
 ---
 
@@ -1020,67 +282,25 @@ private:
 ChunkManager::OnChunkMeshingComplete()
     ↓
     ├→ MeshRenderer->UpdateChunkMeshFromCPU(ChunkCoord, LOD, MeshData)
-    │   └→ batched upload on the render thread (ProcessBatchUpdate_RenderThread)
+    │   └→ batched upload on the render thread (ProcessBatchUpdate_RenderThread), with a crossfade
     │
-    └→ CollisionManager->QueueCollisionUpdate(RenderData)
-        └→ Async collision generation (lower LOD)
+    └→ the chunk's seams restaled and queued; collision queued if in range
 ```
 
 ---
 
-## Implementation Guide
+## Debugging
 
-### Step 1: Define Interface
+| Command | What it shows |
+|---------|---------------|
+| `voxel.MeshFade.Stats [fades] [x y z]` | Fades, holds, the proxy's fade states; what the last frame drew of a chunk |
+| `voxel.Water.ResendTiles` | Sends every water tile to its region again |
+| `voxel.Stream.AuditResidency` | Renderer chunks and seam buckets with no tracked owner |
+| `voxel.World.FarFieldStats` | The far field's patches and memory |
 
-```cpp
-// Source/VoxelRendering/Public/IVoxelMeshRenderer.h
-class IVoxelMeshRenderer {
-    // ... (interface as shown above)
-};
-```
-
-### Step 2: Implement Custom Vertex Factory
-
-```cpp
-// Source/VoxelRendering/Public/VoxelVertexFactory.h
-class FVoxelVertexFactory : public FVertexFactory {
-    // ... (implementation as shown above)
-};
-```
-
-### Step 3: Implement Vertex Shader
-
-```hlsl
-// Shaders/VoxelVertexFactory.usf
-// ... (shader as shown above)
-```
-
-### Step 4: Implement Custom VF Renderer
-
-```cpp
-// Source/VoxelRendering/Private/VoxelMeshRenderer.cpp
-class FVoxelMeshRenderer : public IVoxelMeshRenderer {
-    // ... (implementation as shown above)
-};
-```
-
----
-
-## Debugging Tips
-
-### Custom VF Debugging
-- Use RenderDoc to capture frame
-- Check GPU buffer contents
-- Verify vertex factory bindings
-- Test shader compilation
-
-### Common Issues
-- **Black meshes**: Normal packing issue, check UnpackNormal
-- **Missing chunks**: Scene proxy not updating, check render commands
-- **Crashes**: Buffer lifetime issue, ensure ConvertToExternalBuffer
-- **Poor performance**: Check for CPU-GPU sync points
-
----
-
-**Status**: Implementation Complete (Phase 3 + Per-Material Opacity)
-**Current Architecture**: FLocalVertexFactory-based renderer, mesh-swap crossfades for LOD flips (no LOD morphing; code review CR1)
+- **Missing chunks**: check the chunk's render region exists and holds it (`GetChunkDrawInfo`), and whether the proxy
+  was recreated (`ConsumeLostRenderData`)
+- **Shadows missing out of view**: `voxel.Render.ShadowCullFrustum` should be 1
+- **A swap that does not show**: judge an edit from above, not at the crosshair, where the held tool covers the cell
+  (G74)
+- Use RenderDoc to check the vertex factory's bindings and buffers

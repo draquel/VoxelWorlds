@@ -1,11 +1,13 @@
 # Scatter System
 
+> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+
 **Module**: VoxelScatter
-**Dependencies**: VoxelCore, VoxelStreaming
+**Dependencies**: VoxelCore, VoxelGeneration (the surface queries); the chunk manager (VoxelStreaming) drives it
 
 ## Overview
 
-The scatter system places vegetation (trees, grass, rocks) on voxel terrain using CPU-based placement and Hierarchical Instanced Static Mesh (HISM) rendering. The system extracts surface points from voxel data, applies placement rules, and manages HISM instances with optimized rebuild strategies. All scatter generation runs asynchronously on the thread pool.
+The scatter system places vegetation (trees, grass, rocks) on voxel terrain using CPU-based placement and Hierarchical Instanced Static Mesh (HISM) rendering. It extracts surface points from each chunk's voxels (never its mesh), applies placement rules, and manages HISM instances in pools whose writes are batched. Extraction and placement run on the thread pool.
 
 ## Architecture
 
@@ -71,7 +73,7 @@ protected:
 
 ### VoxelScatterRenderer
 
-Manages HISM components with instance pooling and deferred rebuild strategy. Instances are hidden by setting scale to zero and placed on a free list. When new instances are needed, they are recycled from the free list first via `UpdateInstanceTransform`, eliminating the visual flicker caused by `ClearInstances()`/`AddInstances()` cycling. Since world modes review G42 every write to a HISM is held and applied at most once per `voxel.Scatter.HISMBatchSeconds`, releases zero-scale each instance where it stands, a HISM whose pool outweighs its live instances is rewritten without it, and the scatter HISMs are kept in regions of 4 chunks in every world mode (`voxel.Scatter.RegionChunks`; planets since G42, heightmap worlds since world modes review WM-MP5); see [Batched HISM writes](#batched-hism-writes-world-modes-review-g42).
+Manages HISM components with instance pooling and batched writes. Instances are hidden by setting scale to zero and placed on a free list. When new instances are needed, they are recycled from the free list first via `UpdateInstanceTransform`, eliminating the visual flicker caused by `ClearInstances()`/`AddInstances()` cycling. Since world modes review G42 every write to a HISM is held and applied at most once per `voxel.Scatter.HISMBatchSeconds`, releases zero-scale each instance where it stands, a HISM whose pool outweighs its live instances is rewritten without it, and the scatter HISMs are kept in regions of 4 chunks in every world mode (`voxel.Scatter.RegionChunks`; planets since G42, heightmap worlds since world modes review WM-MP5); see [Batched HISM writes](#batched-hism-writes-world-modes-review-g42).
 
 ```cpp
 UCLASS()
@@ -122,6 +124,7 @@ struct FScatterDefinition
     // Identification
     int32 ScatterID;
     FString Name;
+    FName HarvestCategory;                   // "Tree", "Rock"...; None = not harvestable (HarvestScatterNear)
     bool bEnabled = true;
 
     // Mesh
@@ -152,11 +155,12 @@ struct FScatterDefinition
     float Density = 0.1f;                    // 0.0-1.0, probability per surface point
     float MinSlopeDegrees = 0.0f;
     float MaxSlopeDegrees = 45.0f;
-    TArray<EVoxelMaterial> AllowedMaterials;
+    TArray<uint8> AllowedMaterials;          // material IDs (empty = all)
     TArray<uint8> AllowedBiomes;
-    float MinElevation = -FLT_MAX;
-    float MaxElevation = FLT_MAX;
+    float MinElevation = -1000000.0f;        // world Z; a planet's altitude over the datum
+    float MaxElevation = 1000000.0f;
     bool bTopFacesOnly = true;
+    bool bAvoidShadowedAreas = false;        // with MaxAmbientOcclusion (2)
     float SpawnDistance = 0.0f;              // 0 = use global ScatterRadius
     int32 SurfaceLocationMask = Surface;     // bitmask of EScatterSurfaceLocationFlags
     // Surface (dry land) | Underwater | Underground — enable any combination.
@@ -190,16 +194,18 @@ struct FScatterDefinition
 Individual scatter instance data.
 
 ```cpp
-USTRUCT()
+USTRUCT(BlueprintType)
 struct FScatterSpawnPoint
 {
     FVector Position;           // World position
     FVector Normal;             // Surface normal
-    float Scale;                // Random scale
-    float YawRotation;          // Random Y rotation (radians)
     int32 ScatterTypeID;        // Reference to definition
+    uint32 InstanceSeed;        // The point's deterministic seed
+    float Scale;                // Random scale
+    float RotationYaw;          // Random yaw about local up (degrees)
+    FVector LocalUp;            // +Z on a heightmap world, the radial direction on a planet
 
-    FTransform GetTransform(bool bAlignToNormal, float SurfaceOffset) const;
+    FRotator GetRotation(bool bAlignToNormal) const;
 };
 ```
 
@@ -207,63 +213,47 @@ struct FScatterSpawnPoint
 
 ### 1. Surface Extraction
 
-Two extraction methods are available:
+Every world extracts surface points on the CPU from the chunk's **edit-merged voxels** (the chunk manager hands them over
+at each mesh submit, `HandOffChunkVoxels`), so scatter is LOD-independent: voxel data is generated at full resolution at
+any LOD, and the same chunk gives the same points at LOD 0 or LOD 3. One entry, `ExtractChunkSurfacePoints` (code review
+CR2), picks the extractor:
 
-#### CPU Path: Voxel-Based Extraction (Default)
+| World | Extractor | Points |
+|-------|-----------|--------|
+| Heightmap, smooth | `ExtractSurfacePointsByColumn` | Every surface crossing down each (X, Y) column at the point spacing's stride, Z interpolated as the mesher does, normal from the density gradient |
+| Heightmap, cubic | `ExtractSurfacePointsByBlockTop` | One point at the centre of each exposed top block face (below) |
+| Planet | `ExtractSurfacePointsByRay` | Crossings down the planet's radial rays (below) |
 
-The default path extracts surface points directly from the 32³ voxel data, which is **LOD-independent** — voxel data is always generated at full resolution regardless of the chunk's LOD level, producing identical scatter at any LOD.
+Material, biome, AO and the underground and water flags come from the voxels at the crossing; the first crossing down a
+column is open surface, the rest underground ([UNDERGROUND_CLASSIFICATION.md](UNDERGROUND_CLASSIFICATION.md)). Points
+inside a cleared volume (a player edit) or an exclusion volume are skipped. The extraction is deterministic:
+`voxel.Scatter.Digest` logs the cached spawn points' counts and a CRC per type, to compare builds.
 
-```cpp
-void UVoxelScatterManager::ExtractSurfacePointsByColumn(
-    const TArray<FVoxelData>& VoxelData,
-    const FIntVector& ChunkCoord,
-    const FVector& ChunkWorldOrigin,
-    int32 ChunkSize,      // Always 32
-    float VoxelSize,
-    float SurfacePointSpacing,
-    const TArray<FClearedScatterVolume>& ClearedVolumes,
-    FChunkSurfaceData& OutSurfaceData)
-{
-    // Stride to match SurfacePointSpacing
-    const int32 Stride = FMath::Max(1, FMath::RoundToInt(SurfacePointSpacing / VoxelSize));
+#### The voxels past the chunk
 
-    // Scan columns top-down for surface transitions
-    for (int32 X = 0; X < ChunkSize; X += Stride)
-    {
-        for (int32 Y = 0; Y < ChunkSize; Y += Stride)
-        {
-            for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
-            {
-                const FVoxelData& Voxel = VoxelData[X + Y*ChunkSize + Z*ChunkSize*ChunkSize];
-                if (!Voxel.IsSolid()) continue;
+An extractor reads a few voxels its chunk's data cannot show: on a heightmap world the voxel over each column's top
+layer (the chunk above's bottom layer), on a planet the voxels past the chunk's +X, +Y and +Z faces. All three
+extractors take them from one source, `FScatterExtractionContext::GetVoxelOutsideChunk` (code review CR2): the voxel as
+generation makes it there (`FVoxelSurfaceQuery::GenerateVoxelAt`: the generated surface with the conditioning zones,
+the cave carve from the world's `CaveConfiguration`), with the neighbour's edits there applied (`OutsideEdits`, from
+`GatherAboveLayerEdits` on a heightmap world, `GatherPlanetTouchingEdits` on a planet, through the chunk manager's edit
+layers, `SetEditLayerSource`). Tests can supply the neighbours' real voxels instead (`OutsideVoxelSource`).
 
-                // Check voxel above is air (surface transition)
-                if (Z + 1 < ChunkSize && VoxelData[...above...].IsSolid()) continue;
-
-                // Interpolate Z position (same formula as Marching Cubes edge interpolation)
-                // t = (VOXEL_SURFACE_THRESHOLD - D_solid) / (D_air - D_solid)
-                float Fraction = ...;
-                FVector WorldPos(ChunkWorldOrigin.X + X * VoxelSize,
-                                 ChunkWorldOrigin.Y + Y * VoxelSize,
-                                 ChunkWorldOrigin.Z + (Z + Fraction) * VoxelSize);
-
-                // Normal from density gradient (central differences)
-                // MaterialID/BiomeID read directly from FVoxelData
-                // Skip if inside cleared volume
-
-                break; // Found topmost surface for this column
-            }
-        }
-    }
-}
-```
-
-**Advantages**:
-- LOD-independent: Identical scatter output regardless of chunk LOD level
-- No mesh dependency: Works before mesh is fully ready
-- Direct data access: MaterialID and BiomeID read from FVoxelData without UV decoding
-
-**Known Limitation**: Uses base procedural VoxelData, not edit-merged data. Player edits are handled via `ClearedVolumesPerChunk` instead.
+What that rule fixed:
+- **The generated surface, not the natural one** (G23). A buried chunk's test and the planet's outside voxels use the
+  ground generation makes, POI pads and their falloff rings included (`ConditioningZones`, gathered by the chunk manager,
+  `SetConditioningGatherer`). Before, a pad cut below a chunk's top left its ground points underground, and the chunk
+  under a raised pad read as open surface.
+- **The voxel over a heightmap chunk's top layer** (G26, G28). Solid, the chunk's top voxel is no surface (the chunk above
+  extracts it) and the column below is covered; air, the crossing interpolates against it. Before G26 it was taken for
+  air, which copied the surface onto the chunk's top face up to 1.5 voxels under the ground; before G28 it still was
+  deeper than that, so a buried chunk's top face carried underground points inside the rock, where underground-only
+  scatter spawned. Tests: `Scatter.TopFace.*`.
+- **A planet chunk's faces** (G29, G72). The voxels past a planet chunk's faces are the planet generator's with the
+  neighbours' edits, carved by the caves (`CalculateCaveDensity` along local up, for the biome generation gives that
+  direction when the cave configuration has biome overrides). Before G72 a cave within a voxel past a chunk's max face
+  read as rock: the cave floor there got no point, and where the cave met the face the rock made a floor in the air
+  (1.3-1.6% of the points missed on `Review_Planet`, up to 7% added). Test: `Scatter.Planet.FaceCaves`.
 
 #### On a Planet: Radial Rays on the Cube-Sphere Grid (spherical Phase 4, SP-G1; world modes review G31)
 
@@ -281,24 +271,14 @@ anywhere else.
   are underground ("not the topmost", as in a column), and a ray that enters the chunk in the ground has its surface
   above it, so its floors are all underground. The air and solid corners nearest the crossing give the flags
   (underground, water) and the material, biome and AO; the normal is the trilinear gradient.
-- **Past the faces.** The chunk's last cell on each axis reaches the voxels past its +X, +Y and +Z faces, which its
-  data cannot show: they are taken as the planet generator makes them there, with the neighbour's edits applied
-  (`FScatterExtractionContext::GetVoxelOutsideChunk`; `OutsideEdits` from the seven neighbours on those sides,
-  `UVoxelScatterManager::GetPlanetShellNeighbours` / `GatherPlanetTouchingEdits`), each computed the first time a ray
-  needs it (at most 12,481 for a 64³ chunk). Since world modes review G72 (§20.23) they are carved by the caves as
-  generation carves them: `CalculateCaveDensity` at the voxel's depth along local up, for the biome generation gives
-  its direction (found only when the cave configuration has biome overrides and some layer reaches that depth), with
-  the sea's minimum depth (`FScatterExtractionContext::CaveConfiguration`). Before, a cave within a voxel past a
-  chunk's max face read as rock: the cave floor in that cell got no point, and where the cave met the face the rock
-  made a floor in the air (on `Review_Planet` 1.3-1.6% of the points missed and up to 7% added).
-  `voxel.Scatter.PlanetFaceAudit` and `UVoxelScatterManager::ComparePlanetFaceVoxels` were deleted in CR1 (SCAT-29;
-  `Scatter.Planet.FaceCaves` builds the same reference through `OutsideVoxelSource`), and the switch back to the rule
-  before (`voxel.Scatter.PlanetFaceCaves`) in CR2 with the one outside-voxel source (SCAT-13:
-  `FVoxelSurfaceQuery::GenerateVoxelAt` makes the voxel for both world modes). The voxels past the faces are the CPU formula's, which the GPU generator matches to a density step or two at a few
-  voxels (`Generation.GPUvsCPUSphericalParity`), so on the GPU path a crossing at a face is very rarely doubled (one
-  point in about two million on `Review_Planet`). A point on a face is interpolated from the same four voxels on both
-  sides (fractions within 1e-7 of a cell face snap to it), so a voxel exactly at the threshold there cannot leave the
-  crossing to neither chunk.
+- **Past the faces.** The chunk's last cell on each axis reaches the voxels past its +X, +Y and +Z faces, which it takes
+  from `GetVoxelOutsideChunk` (above), with the edits of the seven neighbours on those sides
+  (`UVoxelScatterManager::GetPlanetShellNeighbours`), each computed the first time a ray needs it (at most 12,481 for a
+  64³ chunk). The voxels past the faces are the CPU formula's, which the GPU generator matches to a density step or two
+  at a few voxels (`Generation.GPUvsCPUSphericalParity`), so on the GPU path a crossing at a face is very rarely doubled
+  (one point in about two million on `Review_Planet`). A point on a face is interpolated from the same four voxels on
+  both sides (fractions within 1e-7 of a cell face snap to it), so a voxel exactly at the threshold there cannot leave
+  the crossing to neither chunk.
 - **Classification** by the point's own radial up (the ray) and altitude: face type and slope against local up, the
   elevation filter compares the altitude above the datum (heightmap worlds: world Z, as before), the underwater class by
   the sea sphere (`FVoxelSeaSurface`).
@@ -320,77 +300,32 @@ drifting sideways by the rounded slope. Neighbouring chunks' lines did not conti
 diagonals they stepped along different axes, and elsewhere their drift rounded differently), so strips along chunk faces
 got too few points; the staircase rounding also thinned the points inside a chunk on some slopes, and a line top that
 left the chunk needed G29's rules to decide whether the neighbour made its point. The rays need none of that.
-`voxel.Scatter.LineTopAudit` was deleted in CR1 (SCAT-29; `Scatter.Planet.LineTop.*` and `Planet.DensityPerArea` cover it).
 
 Heightmap worlds keep `ExtractSurfacePointsByColumn` and the old expressions (`LocalUp` +Z, weight 1, the jitter
-call unchanged). `voxel.Scatter.Digest` logs the cached spawn points' counts and a CRC per type, to compare builds
-(extraction is deterministic; the retired GPU extractor's per-cell claim was not). Tests: `Scatter.Planet.AlongLocalUp`
+call unchanged). Tests: `Scatter.Planet.AlongLocalUp`
 (points within 8 uu of the surface, instances' up within 0.01° of the radial), `Scatter.Planet.DensityPerArea`,
 `Scatter.Planet.LineTop.{Duplicates,FlatPad,Edits}` (one open point per ray at ten sites, over a flat pad at every height
 across a chunk face, and over edits past the faces).
 
-#### Mesh-vertex extraction (retired, world modes review G27)
+#### Why not the mesh (G27)
 
-Scatter used to have two paths that took surface points from mesh vertices: the GPU extractor
-(`FVoxelGPUSurfaceExtractor`, `ScatterSurfaceExtraction.usf`, `bUseGPUScatterExtraction`, LOD 0 chunks only) and an
-uncalled CPU one (`FVoxelSurfaceExtractor`). Both were deleted in G27 (`WORLD_MODES_REVIEW_PLAN.md` §19.5). Since seam
-ownership a chunk's mesh is its interior mesh, which has no vertex in the cells along the chunk's +X, +Y and +Z faces
-(they belong to the chunk's seams), so every chunk the GPU path extracted had no point there: bare strips in the grass
-along chunk borders and along the contour where the terrain crosses a chunk layer's top. Its output buffer also held
-4,096 points, sized for 32³ chunks, and dropped whichever points came last on the GPU (not deterministic either way).
-`bUseGPUScatterExtraction` was deleted in CR1 (SCAT-06; a removed property drops silently on load), and so was
-`voxel.Scatter.BoundaryAudit` (SCAT-29; `Scatter.Boundary.EveryCellLayerCovered` covers it).
+Scatter once also took surface points from mesh vertices on the GPU. Since seam ownership a chunk's mesh is its interior
+mesh, which has no vertex in the cells along the chunk's +X, +Y and +Z faces (they belong to its seams), so those chunks
+had no point there: bare strips in the grass along chunk borders. That path was retired in world modes review G27
+(decision D25); every chunk extracts from its voxels. `Scatter.Boundary.EveryCellLayerCovered` checks that a chunk's
+points cover the cell layers along its faces.
 
 ### 2. Scatter Placement
 
-Spawn points are generated using deterministic randomness:
+`FVoxelScatterPlacement::GenerateSpawnPoints` runs each enabled definition over the chunk's surface points
+(`GenerateSpawnPointsForType`), with deterministic randomness per point:
 
-```cpp
-void FVoxelScatterPlacement::GenerateSpawnPoints(
-    const FChunkSurfaceData& SurfaceData,
-    const TArray<FScatterDefinition>& Definitions,
-    uint32 ChunkSeed,
-    FChunkScatterData& OutScatterData)
-{
-    FRandomStream Random(ChunkSeed);
-
-    for (const FVoxelSurfacePoint& Point : SurfaceData.SurfacePoints)
-    {
-        float SlopeAngle = FMath::RadiansToDegrees(FMath::Acos(Point.Normal.Z));
-
-        for (const FScatterDefinition& Def : Definitions)
-        {
-            // Check placement rules
-            if (!Def.bEnabled) continue;
-            if (SlopeAngle < Def.MinSlopeDegrees || SlopeAngle > Def.MaxSlopeDegrees) continue;
-            if (Def.AllowedMaterials.Num() > 0 && !Def.AllowedMaterials.Contains(Point.MaterialID)) continue;
-            if (Def.AllowedBiomes.Num() > 0 && !Def.AllowedBiomes.Contains(Point.BiomeID)) continue;
-            if (Point.Position.Z < Def.MinElevation || Point.Position.Z > Def.MaxElevation) continue;
-            if (Def.bTopFacesOnly && Point.FaceType != EVoxelFaceType::Top) continue;
-
-            // Density check
-            if (Random.FRand() > Def.Density) continue;
-
-            // Create spawn point
-            FScatterSpawnPoint SpawnPoint;
-            SpawnPoint.Position = Point.Position + Point.Normal * Def.SurfaceOffset;
-            SpawnPoint.Normal = Point.Normal;
-            SpawnPoint.Scale = Random.FRandRange(Def.ScaleRange.X, Def.ScaleRange.Y);
-            SpawnPoint.YawRotation = Def.bRandomYawRotation ? Random.FRand() * 2.0f * PI : 0.0f;
-            SpawnPoint.ScatterTypeID = Def.ScatterID;
-
-            // Apply position jitter
-            if (Def.PositionJitter > 0.0f)
-            {
-                SpawnPoint.Position.X += Random.FRandRange(-Def.PositionJitter, Def.PositionJitter);
-                SpawnPoint.Position.Y += Random.FRandRange(-Def.PositionJitter, Def.PositionJitter);
-            }
-
-            OutScatterData.SpawnPoints.Add(SpawnPoint);
-        }
-    }
-}
-```
+1. `FScatterDefinition::CanSpawnAt` filters the point: face type, surface location (`SurfaceLocationMask`), slope,
+   material, biome, elevation, ambient occlusion.
+2. The point's seed is a hash of its position and the chunk seed (`HashPosition`); it spawns when its first draw is
+   under `Density` × the point's `SpawnWeight` (1 on heightmap worlds; a planet ray cell's area, above).
+3. Scale, yaw and the position jitter come from the next draws (on a planet the jitter is in the tangent plane;
+   `BlockFaceSnap` scales a jitter wider than half a block face down to it), then `SurfaceOffset` along the normal.
 
 ## HISM Management
 
@@ -415,8 +350,8 @@ struct FHISMInstancePool
 
 The previous approach (`ClearInstances()` + `AddInstances()`) produced visible flicker because UE5 propagates these as separate render state updates — even when done in the same frame, there is a brief gap where the HISM has zero instances. The pool eliminates this:
 
-- **Release**: `UpdateInstanceTransform(Index, ZeroScaleTransform)` — instance becomes invisible but stays allocated in HISM internal arrays. Batched (the default) it keeps its location: an in-place change, which the HISM takes without rebuilding its cluster tree.
-- **Recycle**: `UpdateInstanceTransform(Index, RealTransform)` — instance reappears at new position. No flicker, but not free: a move is not in place, so the HISM rebuilds its cluster tree (below).
+- **Release**: `UpdateInstanceTransform` with a zero-scale transform — instance becomes invisible but stays allocated in HISM internal arrays. Batched (the default) it keeps its location: an in-place change, which the HISM takes without rebuilding its cluster tree.
+- **Recycle**: `UpdateInstanceTransform` with the new transform — instance reappears at its new position. No flicker, but not free: a move is not in place, so the HISM rebuilds its cluster tree (below).
 - **Grow**: `AddInstances()` only when free list is exhausted.
 
 The pool does not make changes cheap. In UE 5.8 a HISM keeps its instances in legacy mode: a change that is not in
@@ -437,13 +372,7 @@ void ReleaseChunkScatterType(const FIntVector& ChunkCoord, int32 ScatterTypeID)
     //    the HISM's origin, with the render state marked dirty, when voxel.Scatter.HISMBatchSeconds is 0)
     // 3. Move indices to FreeIndices
     // 4. Remove chunk from pool's ChunkInstanceIndices
-    // 5. Update ChunkScatterTypes tracking
-}
-
-// Release ALL instances for a scatter type (used by RebuildScatterType)
-void ReleaseAllForScatterType(int32 ScatterTypeID)
-{
-    // Same as above but across all chunks
+    // 5. Update ChunkScatterTypes tracking; drop the pair's queued adds (G30)
 }
 ```
 
@@ -452,7 +381,7 @@ void ReleaseAllForScatterType(int32 ScatterTypeID)
 The per-frame budget-limited flush recycles from the free list before growing:
 
 ```
-For each PendingInstanceAdd entry:
+For each FPendingInstanceAdd entry:
   1. Get/create HISM and pool for ScatterTypeID
   2. Skip entries for chunks unloaded while pending
   3. Recycle min(needed, FreeIndices.Num()): each placement held for the HISM's next batch
@@ -467,12 +396,8 @@ Both recycled and newly added instances count toward the per-frame budget (`MaxI
 #### Per-Chunk-Type Updates (no global rebuilds)
 
 All instance updates are scoped to a single (chunk, scatter type) pair — the renderer
-**never** releases and re-streams a whole scatter type across the world. That whole-type
-rebuild used to zero-scale every instance of a type in one frame and re-add them budget-limited
-over many frames, and because it was deferred until the viewer was stationary AND the generation
-pipeline was idle, it produced a world-wide "refresh flash" whenever the player stopped moving.
-It (and `QueueRebuild`/`RebuildScatterType`/`FlushPendingRebuilds`/`ReleaseAllForScatterType`)
-has been removed.
+**never** releases and re-streams a whole scatter type across the world (a whole-type rebuild
+once did, and flashed the world's scatter whenever the player stopped moving).
 
 Updates flow through two localized primitives, both flushed every `Tick()` via the per-frame
 add budget (no viewer-stationary / world-stable gate):
@@ -487,7 +412,7 @@ add budget (no viewer-stationary / world-stable gate):
 ### New Chunk Optimization
 
 New chunks (no existing scatter) group their spawn points by type and queue them as
-`PendingInstanceAdd` entries; `FlushPendingInstanceAdds` recycles from the free list first,
+`FPendingInstanceAdd` entries; `FlushPendingInstanceAdds` recycles from the free list first,
 then grows the pool. A chunk that already has scatter takes the per-chunk-type path above —
 each affected type is replaced in place, so only that one chunk's instances ever move:
 
@@ -498,7 +423,7 @@ void UVoxelScatterRenderer::UpdateChunkInstances(const FIntVector& ChunkCoord, c
 
     if (bIsNewChunk && ScatterData.bIsValid)
     {
-        // Group transforms by type, queue as PendingInstanceAdds
+        // Group transforms by type, queue as FPendingInstanceAdd entries
         // FlushPendingInstanceAdds handles pool recycling + growth
     }
     else
@@ -533,7 +458,7 @@ regrow), its cleared volumes and completed types, and both caches (`RemoveChunkS
 points). When it streams back in, its extraction is a first pass, as on its first load: the surface data is cached
 again (the distance spawn and the audits read it) and its spawn points replace nothing. Until world modes review G30 the
 two cache removals were joined by a short-circuit `||`, so a chunk with surface data kept its spawn points cached after
-unloading and its reload was taken for a supplemental pass (`WORLD_MODES_REVIEW_PLAN.md` §19.7).
+unloading and its reload was taken for a supplemental pass. Tests: `Scatter.Reload.*`.
 `voxel.Scatter.Digest` logs a second line, `caches:` (`ComputeCacheResidency`), that checks this: chunks with spawn
 points, with surface data, with spawn points but no surface data (0), spawn points against the renderer's instances
 (`UVoxelScatterRenderer::GetChunkInstanceCount`; the chunks that differ are logged per type, `file` writes them to
@@ -548,7 +473,7 @@ When scatter types go out of range, the manager calls `ReleaseChunkScatterType()
 Each change to a HISM costs all its instances (the pool section above), and streaming changes the HISMs around the
 viewer every frame: chunks loading at the window's front, unloading behind it, and distance-limited types (grass) spawned
 and released at their `SpawnDistance`. On `Review_Planet_M` and `_L` that was most of the frame time over the small
-planet's (G42, `WORLD_MODES_REVIEW_PLAN.md` §20.9): a HISM tree build and a proxy recreation nearly every frame, the
+planet's (G42): a HISM tree build and a proxy recreation nearly every frame, the
 grass HISMs of 37,000 instances (half of them pooled), and the render thread re-registering them with the distance-field
 scene (frames up to 51 ms). Writes are now batched per HISM:
 
@@ -582,7 +507,7 @@ before G42, for A/B runs): `VoxelWorlds.Scatter.HISMBatch.{SameInstances,InPlace
 
 `GetDebugStats()` reports pool health:
 ```
-ScatterRenderer: 5 HISM, 12400 instances (Active: 8200, Pooled: 4200, Util: 66%), 42 chunks, Pending: 0 rebuilds/0 adds
+ScatterRenderer: 5 HISM, 12400 instances (Active: 8200, Pooled: 4200, Util: 66%), 42 chunks, Pending: 0 adds
 ```
 
 - **Active**: Instances with real transforms (visible within CullDistance)
@@ -677,7 +602,7 @@ void UVoxelScatterManager::OnChunkUnloaded(const FIntVector& ChunkCoord)
 ### System and Editor Edits: the Chunks That Read Them
 
 A system or editor edit (a POI's terraform, a dungeon stamp, an undo, a clear, a load) re-extracts scatter. Two kinds of
-chunk need it (world modes review G33, `WORLD_MODES_REVIEW_PLAN.md` §19.11):
+chunk need it (world modes review G33):
 
 - **The edited chunk.** The chunk manager's edit handler calls `RegenerateChunkScatter` (the caches are dropped, the
   instances stay until the re-extraction replaces them per type) and marks the chunk dirty; its re-mesh hands its
@@ -703,7 +628,21 @@ Player edits are unchanged: they only clear scatter in a radius (above) and neve
 (`UVoxelScatterManager::CompareWithFreshExtraction`: the chunk's edit-merged voxels and a context made now) and lists
 the chunks whose cache differs, whether each reads an edited chunk, and what system edits did to scatter
 (`UVoxelChunkManager::GetEditScatterStats`). `voxel.Edit.System` and `voxel.Edit.SystemLayers` make system edits for it
-(a sphere, optionally on the nearest chunk edge or corner; a chunk's min-face layers).
+(a sphere, optionally on the nearest chunk edge or corner; a chunk's min-face layers). Tests: `Scatter.EditReaders.*`.
+
+### Exclusion Volumes and Harvesting
+
+A cleared volume lasts until its chunk unloads; an **exclusion volume** (`FScatterExclusionVolume`: an oriented box with
+an `Id`) lasts until it is unregistered. Registering one clears the spawn points inside it at once through the
+per-(chunk, type) replace path, filters in-flight results, and keeps chunks that stream in later bare inside it;
+unregistering it re-runs placement for the chunks it overlapped, so the foliage regrows. Game code registers volumes
+through the world subsystem `UVoxelScatterExclusionSubsystem`, which keeps the set and replays it to every scatter
+manager that initializes later (a claim footprint kept bare, for instance); VoxelWorlds attaches no meaning to them.
+
+`HarvestScatterNear` finds the nearest instance of a harvestable definition (`HarvestCategory`) within a radius and,
+with `bRemove`, removes it for good by registering a small exclusion volume around its base
+(`MakeHarvestExclusionVolume`; on a planet the box stands on local up). Scatter is local to each machine, so the server
+decides and every machine that renders scatter removes it.
 
 ## Configuration
 
@@ -771,7 +710,8 @@ types in range there, and the distance pass streams the rest in at their own dis
 stream at `ScatterRadius` like the others (and are released past it like the others, where before they stayed once
 spawned). A hand-off that finds a type in range takes the chunk out of the set, so a chunk whose next mesh comes first
 is handled as before. `voxel.Scatter.FirstExtractionAtHorizon` (1; 0 = the behaviour before), `voxel.Scatter.Stats`
-reports the chunks awaiting, the deferred hand-offs and the horizon.
+reports the chunks awaiting, the deferred hand-offs and the horizon. Tests: `Scatter.FirstExtraction.Horizon`,
+`.RuleBefore`, `Streaming.Plane.ScatterFirstExtractionAtHorizon`.
 
 With the horizon in place the distances a definition needs are only the ones `ValidateScatterDistances` already
 checks: `LODStartDistance < CullDistance` (a fade band) and `CullDistance` below the effective spawn distance (a
@@ -785,9 +725,9 @@ Enable via `bScatterDebugVisualization` in VoxelWorldConfiguration:
 - Surface normals: Blue lines
 - Scatter radius: Yellow sphere around viewer
 
-## Async Generation (Phase 7D-1)
+## Async Generation
 
-Surface extraction and scatter placement now run on the thread pool, keeping the game thread free.
+Surface extraction and scatter placement run on the thread pool, keeping the game thread free.
 
 ### Data Flow
 ```
@@ -807,52 +747,14 @@ Game Thread:               Drain Result -> Cache -> HISM Update
 - **Edit during async**: Cleared volumes updated on game thread; stale result discarded
 - **GetPendingGenerationCount()**: Returns queued + in-flight count for "world stable" check
 - **Shutdown safety**: `TWeakObjectPtr<UVoxelScatterManager>` in lambda prevents use-after-free
+- **Supplemental passes**: `CompletedScatterTypes` records which types a chunk has, so a later pass (the distance
+  stream, the horizon hand-off) adds only the types it lacks
 
 ### Key Files
 - `VoxelScatterManager.h`: `FAsyncScatterResult`, `CompletedScatterQueue`, `AsyncScatterInProgress`
 - `VoxelScatterManager.cpp`: `LaunchAsyncScatterGeneration()`, `ProcessCompletedAsyncScatter()`
 
-## GPU Surface Extraction (Phase 7D-2, retired)
-
-Retired in world modes review G27: see [Mesh-vertex extraction](#mesh-vertex-extraction-retired-world-modes-review-g27).
-Every world extracts surface points from voxels on the thread pool (3.7 ms mean, 5.9 ms P95 per 64³ chunk on
-`VoxelDemo`).
-
-## Voxel-Based Surface Extraction (Phase 7D-5)
-
-The default CPU extraction path uses voxel data instead of mesh vertices, making scatter generation **LOD-independent**.
-
-### Why Voxel-Based?
-
-Mesh-vertex-based extraction produces different results at different LOD levels because:
-- LOD stride reduces vertex count (LOD 1 = half vertices, LOD 2 = quarter, etc.)
-- Fewer surface points means lower scatter density at higher LODs
-- Vertex positions shift slightly with LOD interpolation
-
-Voxel data is **always 32³ at base VoxelSize** regardless of LOD level, so the same chunk produces identical surface points whether it's at LOD 0 or LOD 3.
-
-### Algorithm
-
-1. For each column (X, Y) at `SurfacePointSpacing` stride:
-2. Scan Z from top (ChunkSize-1) to bottom (0)
-3. Find first solid voxel (`Density >= 127`) with air above
-4. Interpolate exact Z: `t = (127 - D_solid) / (D_air - D_solid)`
-5. Compute normal from density gradient (central differences)
-6. Read MaterialID and BiomeID directly from `FVoxelData`
-7. Skip points inside cleared volumes (player edits)
-
-### Key Properties
-- **Deterministic**: Same voxel data always produces same surface points
-- **LOD-independent**: No LOD-tiered filtering needed
-- **CompletedScatterTypes**: Tracks which types have been generated per chunk to prevent duplicates
-- **Supplemental passes**: Distance-based definitions still added when player approaches
-
-### Key Files
-- `VoxelScatterManager.h`: `ExtractSurfacePointsByColumn()` declaration, `FPendingScatterGeneration::ChunkVoxelData`
-- `VoxelScatterManager.cpp`: `ExtractSurfacePointsByColumn()` implementation, integration in `LaunchAsyncScatterGeneration()`
-- `VoxelChunkManager.cpp`: Passes `VoxelData`, `ChunkSize`, `VoxelSize` via `HandOffChunkVoxels()`
-
-## Cubic Terrain Scatter (Phase 7E)
+## Cubic Terrain Scatter
 
 Cubic meshing mode uses specialized scatter behavior: block-face snapping, cross-billboard meshes for grass/flowers, and voxel tree injection for editable terrain trees.
 
@@ -868,10 +770,8 @@ When `MeshingMode == Cubic`, scatter uses `ExtractSurfacePointsByBlockTop()` ins
   than half a face is scaled down to half a face (scaled, not clamped, so instances do not pile up on the face edges);
   a smaller jitter is unchanged. `bAutoCubicScatterDefaults` sets every definition to `BlockFaceSnap` in cubic worlds.
 
-Routed automatically when `Configuration->MeshingMode == EMeshingMode::Cubic` in both sync and async scatter paths.
-Cubic worlds always extracted on the CPU (finding KC4, work item WM-C3: the GPU extractor sampled mesh vertices, which
-on greedy quads are block corners); since G27 every world does. The extractor reads voxels, not the mesh, so it is
-unaffected by cubic chunk meshes being interior-only (the faces on chunk planes are seam meshes).
+Routed automatically when `Configuration->MeshingMode == EMeshingMode::Cubic`. The extractor reads voxels, not the
+mesh, so it is unaffected by cubic chunk meshes being interior-only (the faces on chunk planes are seam meshes).
 Tests: `VoxelWorlds.Scatter.Cubic.CPUExtractionOnly`, `.BlockFaceSnapStaysOnFace`.
 
 ### Scatter Mesh Types
@@ -933,7 +833,7 @@ const float ScatterClearRadius = EditRadius + Configuration->VoxelSize * 0.6f;
 ScatterManager->ClearScatterInRadius(EditCenter, ScatterClearRadius);
 ```
 
-## Voxel Tree System (Phase 7E)
+## Voxel Tree System
 
 ### Tree Configuration
 
@@ -995,8 +895,8 @@ Stateless, thread-safe static class that stamps tree blocks into VoxelData durin
 1. Compute max tree extent from templates → neighbor search radius (usually 1 chunk each direction)
 2. For current chunk AND up to 26 neighbors, call `ComputeTreePositionsForChunk()`:
    - Deterministic seed from `HashCombine(WorldSeed, SourceChunkCoord)`
-   - `numTrees = floor(TreeDensity) + probability(fractional_part)`
-   - Random X,Y within source chunk → sample `WorldMode.GetTerrainHeightAt()` for Z
+   - `floor(TreeDensity)` trees, plus one with the fractional part's probability
+   - Random X,Y within source chunk → the world mode's generated surface there (`GetSurfaceOnUpLine`) for Z
    - Filter by placement rules: material, biome, slope, elevation, water level
 3. For each tree position, if bounding box overlaps current chunk: call `StampTree()`
 
@@ -1016,11 +916,17 @@ for each voxel in canopy bounding box:
         set MaterialID=Leaves, Density=255
 ```
 
-**Integration**: Called in `VoxelChunkManager::LaunchAsyncGeneration()` after `GenerateChunkCPU()` completes, conditioned on `MeshingMode == Cubic && TreeMode != HISM && TreeTemplates.Num() > 0`.
+**Integration**: `FVoxelTreeInjector::InjectTrees` runs on the generation worker after CPU generation
+(`UVoxelChunkManager::LaunchAsyncGeneration`) or after a GPU readback (`LaunchPostReadbackProcessing`), in a cubic
+heightmap world (`MeshingMode == Cubic`, not a planet) with `TreeMode != HISM` and tree templates.
 
-**Placement filtering**: `QuerySurfaceConditions()` replicates the CPU noise generator's biome pipeline (temperature/moisture noise → biome selection → surface material) using static `FBM3D()`. This ensures trees respect biome boundaries without requiring the full noise generator.
+**Placement filtering**: `FVoxelSurfaceQuery::QuerySurfaceConditions()` and `ComputeSlopeDegrees()` give the surface
+material, biome and slope by the generators' own pipeline, so trees respect biome boundaries without the full noise
+generator.
 
-**Edit integration**: Trees are part of VoxelData, so player edits work naturally — dig through trunks, remove leaves, etc. The edit layer preserves changes across chunk reload.
+**Edit integration**: Trees are part of VoxelData, so player edits work naturally — dig through trunks, remove leaves, etc. The edit layer preserves changes across chunk reload. A standing tree can be found and felled as a whole
+(`UVoxelChunkManager::FindVoxelTreeAt` / `FellVoxelTree`: the stamp recomputed from its seed; the game module's
+`vox.Chop` and `vox.Trees`).
 
 ### Tree Mode Filtering
 
@@ -1037,7 +943,7 @@ In `HandOffChunkVoxels()`, VoxelInjection scatter definitions are filtered based
 - **HISM**: Include VoxelInjection defs (rendered as HISM instances)
 - **Both**: Skip within `VoxelTreeMaxDistance`, include beyond
 
-### Key Files (Phase 7E)
+### Key Files
 
 | File | Purpose |
 |------|---------|
@@ -1047,18 +953,12 @@ In `HandOffChunkVoxels()`, VoxelInjection scatter definitions are filtered based
 | `VoxelScatter/Public/VoxelBillboardMeshGenerator.h` | Billboard mesh generation API |
 | `VoxelScatter/Private/VoxelBillboardMeshGenerator.cpp` | Runtime cross-billboard mesh + material |
 
-## Future Enhancements
+## Not Built
 
-1. ~~**GPU-based scatter generation**~~: COMPLETE (7D-2), retired in G27 (mesh vertices miss the chunk's boundary cells)
-2. **Foliage LOD**: Leverage HISM's built-in LOD system
-3. **Procedural variation**: Per-instance custom data for shader variation
-4. ~~**Async surface extraction**~~: COMPLETE (7D-1)
-5. ~~**Voxel-based surface extraction**~~: COMPLETE (7D-5)
-6. ~~**Cubic terrain scatter**~~: COMPLETE (7E)
-7. ~~**Instance pooling**~~: COMPLETE — Per-HISM free list recycling via `UpdateInstanceTransform`, eliminates flicker from `ClearInstances`/`AddInstances` cycling
-8. **GPU scatter placement** (7D-3): Move rule evaluation to compute shader
-9. **Direct GPU->HISM** (7D-4): Eliminate readback by writing transforms directly
-10. **Tree physics**: Unsupported leaf blocks fall when trunk is destroyed
+- **Foliage LOD**: leverage HISM's built-in LOD system
+- **Procedural variation**: per-instance custom data for shader variation
+- **GPU scatter placement**: rule evaluation in a compute shader, transforms written straight to the HISMs
+- **Tree physics**: unsupported leaf blocks fall when the trunk is destroyed
 
 ## See Also
 
@@ -1066,4 +966,4 @@ In `HandOffChunkVoxels()`, VoxelInjection scatter definitions are filtered based
 - [BIOME_SYSTEM.md](BIOME_SYSTEM.md) - Biome-scatter integration
 - [CAVE_SYSTEM.md](CAVE_SYSTEM.md) - Cave generation (density subtraction, cave types)
 - [EDIT_LAYER.md](EDIT_LAYER.md) - Edit system integration
-- [IMPLEMENTATION_PHASES.md](../Research/Archive/IMPLEMENTATION_PHASES.md) - Phase 7 details
+- [IMPLEMENTATION_PHASES.md](../Research/Archive/IMPLEMENTATION_PHASES.md) - Phase 7 history (archived)

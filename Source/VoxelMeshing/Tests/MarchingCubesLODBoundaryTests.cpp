@@ -9,7 +9,7 @@
 // face (world x = ChunkSize * VoxelSize) is watertight.
 //
 // Each test converts one hypothesis from the LOD seam investigation
-// (Plugins/VoxelWorlds/Documentation/LOD_SEAM_INVESTIGATION.md) into pass/fail:
+// (Plugins/VoxelWorlds/Documentation/Research/Archive/LOD_SEAM_INVESTIGATION.md) into pass/fail:
 //   T1  both LOD0, full slices          -> harness sanity baseline
 //   T2  both LOD1, full slices          -> is strided same-LOD boundary meshing sound?
 //   T3  both LOD2, full slices          -> same, at stride 4

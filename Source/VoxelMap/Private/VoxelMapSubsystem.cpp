@@ -204,7 +204,7 @@ namespace
 	 * (FVoxelBiomeSnapshot — plain data, no UObject reference), so the instance stays safe for tasks
 	 * that outlive the world's GC purge while GetTerrainHeightAt returns the TRUE generated surface
 	 * height (continentalness offset AND height-scale modulation, composed correctly per mode; see
-	 * Documentation/Research/MAP_ACCURACY_PLAN.md).
+	 * Documentation/Research/Archive/MAP_ACCURACY_PLAN.md).
 	 */
 	TSharedPtr<const IVoxelWorldMode> CreateStandaloneWorldMode(const UVoxelWorldConfiguration& Config)
 	{
