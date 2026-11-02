@@ -525,16 +525,8 @@ static TAutoConsoleVariable<int32> CVarFarCompressionMaxScansPerTick(
 static TAutoConsoleVariable<int32> CVarFarCompressionMaxInFlight(
 	TEXT("voxel.FarCompression.MaxInFlight"),
 	8,
-	TEXT("Async encodes in flight at most. Each holds a copy of its chunk's array (1MB for a 64^3 chunk), "
-	     "so this also caps the copies' memory."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarFarCompressionUniformAtGeneration(
-	TEXT("voxel.FarCompression.UniformAtGeneration"),
-	1,
-	TEXT("World modes review G67: 1 = a chunk whose every voxel is the same (all air, all rock, open sea) is collapsed to that "
-	     "value as it is generated (found by the generation worker, or as a GPU readback lands); 0 = it stays resident until the "
-	     "far-compression sweep collapses it (IdleFrames after it went idle), as before."),
+	TEXT("Async encodes in flight at most. Each reads its chunk's own array, shared copy-on-write (a write to the chunk "
+	     "meanwhile clones it), so this also caps the clones' memory (1MB each for a 64^3 chunk)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarBenchCountPreBenchMeshes(
@@ -546,16 +538,6 @@ static TAutoConsoleVariable<int32> CVarBenchCountPreBenchMeshes(
 	     "about twice the LOD re-meshes of a later one."),
 	ECVF_Default);
 
-static TAutoConsoleVariable<int32> CVarFarCompressionSnapshotReads(
-	TEXT("voxel.FarCompression.SnapshotReads"),
-	1,
-	TEXT("Far-compressed chunk data off the game thread's reads (world modes review G65). 1 = the snapshot of a "
-	     "far-compressed chunk without edits is decoded by a worker task, started when a chunk in its neighbourhood is "
-	     "queued for a mesh or a collision cook; mesh jobs, seam jobs and cooks wait for it on their own workers, and the "
-	     "water pull, water tile and scatter hand-off read it. The chunks stay compressed. 0 = every read expands the chunk "
-	     "in place on the game thread, as before (for A/B)."),
-	ECVF_Default);
-
 static TAutoConsoleVariable<int32> CVarWaterPullAgain(
 	TEXT("voxel.Water.PullAgain"),
 	1,
@@ -563,29 +545,6 @@ static TAutoConsoleVariable<int32> CVarWaterPullAgain(
 	     "(its own pull floods voxels on the face they share, or its generated water arrives), that neighbour pulls again, "
 	     "so the flood reaches the same voxels whatever order the chunks finish meshing in; 0 = each chunk pulls once when "
 	     "its mesh lands, as before (a flood that reached it only through a neighbour that flooded later never came)."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarCollisionNeighborShells(
-	TEXT("voxel.Collision.NeighborShells"),
-	1,
-	TEXT("Collision cooks (world modes review G69): 1 = a cook reads each of its 26 neighbours from a cached boundary shell "
-	     "(the voxels within the cook's neighbour depth of each face: one plane at collision LOD 0), a far-compressed one "
-	     "decoded on a worker and only its shell kept; 0 = from the neighbour's whole cached snapshot, as before."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarSnapshotShareUniform(
-	TEXT("voxel.Snapshot.ShareUniform"),
-	1,
-	TEXT("Seam snapshot cache (world modes review G69): 1 = the snapshot of a uniform chunk (all one voxel: air, rock, sea) "
-	     "shares one array per value; 0 = each is expanded into its own array on a worker, as before."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarSnapshotShareResident(
-	TEXT("voxel.Snapshot.ShareResident"),
-	1,
-	TEXT("Resident chunks (world modes review G71): 1 = the snapshot of a resident chunk without edits (seam jobs, collision "
-	     "cooks, the water pull) and the far-compression encode's input share the chunk's own voxel array, copy-on-write "
-	     "(a write to the chunk while one holds it clones the array first); 0 = each takes a copy, as before."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarSnapshotMaxAgeTicks(
@@ -1708,8 +1667,6 @@ void UVoxelChunkManager::Shutdown()
 	// of them. The descriptors that carried their tickets are gone with ChunkStates.
 	FarCompressResults = MakeShared<FFarCompressResultQueue, ESPMode::ThreadSafe>();
 	FarCompressJobsInFlight = 0;
-	FarCompressBytesInFlight = 0;
-	FarCompressScratchPool.Empty();
 
 	// Reset streaming decision caching
 	CachedViewerChunk = FIntVector(INT32_MAX, INT32_MAX, INT32_MAX);
@@ -3958,8 +3915,7 @@ void UVoxelChunkManager::ProcessCompletedAsyncGenerations(FVoxelTimingStats& Tim
 				State->Descriptor.SetResidentVoxelData(MoveTemp(Result.VoxelData));
 				// A uniform chunk is collapsed now rather than after far compression's idle wait (G67): its readers take
 				// the shared uniform snapshot (G69) and point queries its value, so nothing expands it again.
-				if (Result.bUniform && CVarFarCompressionUniformAtGeneration.GetValueOnGameThread() != 0
-					&& State->Descriptor.CollapseToUniform(Result.UniformValue))
+				if (Result.bUniform && State->Descriptor.CollapseToUniform(Result.UniformValue))
 				{
 					++UniformAtGenerationCount;
 				}
@@ -4063,7 +4019,7 @@ void UVoxelChunkManager::ProcessPendingGPUReadbacks()
 	// worker hop held the slot for another tick and slowed generation). The chunks that landed together are scanned across
 	// workers, so the game thread waits for about the slowest one, not their sum: a fully uniform chunk reads its whole
 	// megabyte, a chunk with any surface stops at its first block that differs. The tree injector scans after injecting.
-	if (Ready.Num() > 0 && CVarFarCompressionUniformAtGeneration.GetValueOnGameThread() != 0 && !WillInjectTreesAfterReadback())
+	if (Ready.Num() > 0 && !WillInjectTreesAfterReadback())
 	{
 		ParallelFor(Ready.Num(), [&Ready](int32 Index)
 		{
@@ -4273,8 +4229,7 @@ void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStat
 		// (rarely compressed) reads its array as before.
 		TSharedPtr<const TArray<FVoxelData>> DeferredVoxels;
 		UE::Tasks::FTask DeferredDecode;
-		if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0 && State->Descriptor.IsCompact()
-			&& !(EditManager && EditManager->ChunkHasEdits(Request.ChunkCoord)))
+		if (State->Descriptor.IsCompact() && !(EditManager && EditManager->ChunkHasEdits(Request.ChunkCoord)))
 		{
 			const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("chunk mesh"));
 			DeferredVoxels = GetVoxelSnapshot(Request.ChunkCoord, *State, &DeferredDecode);
@@ -5867,12 +5822,10 @@ TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetVoxelSnapshot(const 
 	// A far-compressed chunk without edits (G65): its snapshot is decoded by a worker task, and the chunk stays compressed.
 	// Its readers wait for the task on their own workers (seam jobs, cooks), or here (game-thread readers).
 	FVoxelCompactSource Source;
-	if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0
-		&& !(EditManager && EditManager->ChunkHasEdits(Coord))
-		&& State.Descriptor.CopyCompactSource(Source))
+	if (!(EditManager && EditManager->ChunkHasEdits(Coord)) && State.Descriptor.CopyCompactSource(Source))
 	{
 		// A uniform chunk (G69): every voxel the same, so its snapshot is the shared array for that value. Nothing to decode.
-		if (Source.Residency == EVoxelDataResidency::Uniform && CVarSnapshotShareUniform.GetValueOnGameThread() != 0)
+		if (Source.Residency == EVoxelDataResidency::Uniform)
 		{
 			FVoxelSnapshotEntry& Entry = VoxelSnapshotCache.FindOrAdd(Coord);
 			Entry = FVoxelSnapshotEntry();
@@ -5901,15 +5854,13 @@ TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetVoxelSnapshot(const 
 			},
 			UE::Tasks::ETaskPriority::BackgroundHigh);
 		++SnapshotDecodeTasks;
-		const ESnapshotKind Kind = (Source.Residency == EVoxelDataResidency::Uniform) ? ESnapshotKind::DecodedUniform
-			: ESnapshotKind::DecodedCompressed;
 		FVoxelSnapshotEntry& Entry = VoxelSnapshotCache.FindOrAdd(Coord);
 		Entry = FVoxelSnapshotEntry();
 		Entry.ContentVersion = Version;
 		Entry.LastUsedTick = SeamTickCounter;
 		Entry.Data = Decoded;
 		Entry.Ready = Decode;
-		NoteSnapshotMade(Coord, Entry, Kind);
+		NoteSnapshotMade(Coord, Entry, ESnapshotKind::DecodedCompressed);
 		HandOutSnapshotDecode(Decode, OutReady, Coord);
 		return Decoded;
 	}
@@ -5922,7 +5873,7 @@ TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetVoxelSnapshot(const 
 	const bool bWithEdits = EditManager && EditManager->ChunkHasEdits(Coord);
 	TSharedPtr<const TArray<FVoxelData>> Data;
 	ESnapshotKind Kind = ESnapshotKind::Copied;
-	if (!bWithEdits && CVarSnapshotShareResident.GetValueOnGameThread() != 0)
+	if (!bWithEdits)
 	{
 		Data = State.Descriptor.ShareVoxelData();
 		Kind = ESnapshotKind::SharedResident;
@@ -5952,14 +5903,9 @@ TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetVoxelSnapshot(const 
 	return Entry.Data;
 }
 
-bool UVoxelChunkManager::UsesCollisionNeighborShells() const
-{
-	return CVarCollisionNeighborShells.GetValueOnGameThread() != 0;
-}
-
 bool UVoxelChunkManager::ShouldUseCollisionShells(int32 Depth) const
 {
-	return UsesCollisionNeighborShells() && Configuration && 8 * Depth <= Configuration->ChunkSize;
+	return Configuration && 8 * Depth <= Configuration->ChunkSize;
 }
 
 TSharedPtr<const FVoxelFaceSlabs> UVoxelChunkManager::StoreChunkFaceSlabs(const FIntVector& Coord, uint32 Version, int32 Depth,
@@ -6040,7 +5986,7 @@ TSharedPtr<const FVoxelFaceSlabs> UVoxelChunkManager::GetChunkFaceSlabs(const FI
 
 	// A far-compressed chunk without edits: decode on a worker and keep only the shell (the chunk stays compressed).
 	FVoxelCompactSource Source;
-	if (!bEdits && CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0 && State.Descriptor.CopyCompactSource(Source))
+	if (!bEdits && State.Descriptor.CopyCompactSource(Source))
 	{
 		if (Source.Residency == EVoxelDataResidency::Uniform)
 		{
@@ -6087,8 +6033,7 @@ TSharedPtr<const FVoxelFaceSlabs> UVoxelChunkManager::GetChunkFaceSlabs(const FI
 		return CutFromSnapshot(Snap, SnapReady);
 	}
 
-	// A resident chunk without edits: cut the faces from its array here (with voxel.FarCompression.SnapshotReads 0 a
-	// compact chunk is expanded in place first, as before G65).
+	// A resident chunk without edits: cut the faces from its array here.
 	TSharedPtr<FVoxelFaceSlabs> Shell = MakeShared<FVoxelFaceSlabs>();
 	if (!FVoxelFaceSlabs::Extract(State.Descriptor.GetVoxelDataForRead(), CS, Depth, *Shell))
 	{
@@ -6099,10 +6044,6 @@ TSharedPtr<const FVoxelFaceSlabs> UVoxelChunkManager::GetChunkFaceSlabs(const FI
 
 void UVoxelChunkManager::PrefetchCollisionInputs(const FIntVector& ChunkCoord, int32 LODLevel)
 {
-	if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() == 0)
-	{
-		return;
-	}
 	if (!Configuration)
 	{
 		return;
@@ -6142,10 +6083,6 @@ void UVoxelChunkManager::PrefetchCollisionInputs(const FIntVector& ChunkCoord, i
 
 void UVoxelChunkManager::PrefetchVoxelSnapshotsAround(const FIntVector& ChunkCoord)
 {
-	if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() == 0)
-	{
-		return;
-	}
 	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("prefetch"));
 	for (int32 DZ = -1; DZ <= 1; ++DZ)
 	{
@@ -6170,7 +6107,7 @@ void UVoxelChunkManager::PrefetchVoxelSnapshotsAround(const FIntVector& ChunkCoo
 FString UVoxelChunkManager::DescribeSnapshotCache() const
 {
 	static const TCHAR* KindNames[] = { TEXT("copied"), TEXT("copied with edits"), TEXT("decoded compressed"),
-		TEXT("decoded uniform"), TEXT("shared uniform"), TEXT("shared with the resident chunk") };
+		TEXT("shared uniform"), TEXT("shared with the resident chunk") };
 	constexpr int32 NumKinds = static_cast<int32>(ESnapshotKind::Num);
 	const double ToMB = 1.0 / (1024.0 * 1024.0);
 
@@ -6190,7 +6127,6 @@ FString UVoxelChunkManager::DescribeSnapshotCache() const
 	int32 DistN[4] = {};
 	int32 Compact = 0, Resident = 0, Gone = 0;
 	TMap<FString, int32> ByFirst, ByLast;
-	TMap<uint32, int32> UniformValues;
 	// Who took each snapshot (ESnapshotReader bits, prefetch aside): a seam job or a chunk mesh; only collision cooks as a
 	// neighbour; only its own cook; both; anything else.
 	int32 ReadN[5] = {};
@@ -6264,12 +6200,6 @@ FString UVoxelChunkManager::DescribeSnapshotCache() const
 		}
 		ByFirst.FindOrAdd(Snap.FirstReason ? Snap.FirstReason : TEXT("(untagged)"))++;
 		ByLast.FindOrAdd(Snap.LastReason ? Snap.LastReason : TEXT("(untagged)"))++;
-		if (Kind == static_cast<int32>(ESnapshotKind::DecodedUniform) && !bPending && Snap.Data->Num() > 0)
-		{
-			const FVoxelData& V = (*Snap.Data)[0];
-			UniformValues.FindOrAdd(static_cast<uint32>(V.MaterialID) | (static_cast<uint32>(V.Density) << 8)
-				| (static_cast<uint32>(V.BiomeID) << 16) | (static_cast<uint32>(V.Metadata) << 24))++;
-		}
 	}
 
 	auto Join = [](const TMap<FString, int32>& Map)
@@ -6299,15 +6229,14 @@ FString UVoxelChunkManager::DescribeSnapshotCache() const
 	{
 		SharedMB += P.Value.IsValid() ? P.Value->GetAllocatedSize() * ToMB : 0.0;
 	}
-	Out += FString::Printf(TEXT("uniform snapshots: %d distinct values among the decoded; shared arrays %d (%.1f MB, in the total ")
-		TEXT("memory stats, not above)\n"), UniformValues.Num(), UniformSnapshotArrays.Num(), SharedMB);
+	Out += FString::Printf(TEXT("uniform snapshots: shared arrays %d (%.1f MB, in the total memory stats, not above)\n"),
+		UniformSnapshotArrays.Num(), SharedMB);
 	{
 		int64 Clones = 0;
 		double CloneMs = 0.0;
 		VoxelResidencyStats::GetSharedArrayClones(Clones, CloneMs);
-		Out += FString::Printf(TEXT("resident arrays shared (voxel.Snapshot.ShareResident %d): %d entries, %.1f MB the chunks hold (in ")
-			TEXT("the voxel data, not above); copy-on-write clones %lld (%.1f ms)\n"), CVarSnapshotShareResident.GetValueOnGameThread(),
-			SharedN, SharedResidentMB, Clones, CloneMs);
+		Out += FString::Printf(TEXT("resident arrays shared: %d entries, %.1f MB the chunks hold (in the voxel data, not above); ")
+			TEXT("copy-on-write clones %lld (%.1f ms)\n"), SharedN, SharedResidentMB, Clones, CloneMs);
 	}
 	Out += FString::Printf(TEXT("since last read (ticks): <16 %d (%.0f MB), 16-63 %d (%.0f MB), 64-127 %d (%.0f MB), >=128 %d (%.0f MB)\n"),
 		AgeN[0], AgeMB[0], AgeN[1], AgeMB[1], AgeN[2], AgeMB[2], AgeN[3], AgeMB[3]);
@@ -6387,8 +6316,8 @@ FString UVoxelChunkManager::DescribeSnapshotCache() const
 					: static_cast<double>(E.Shell->GetAllocatedSize())) * ToMB;
 			}
 		}
-		Out += FString::Printf(TEXT("shells (voxel.Collision.NeighborShells %d): %d, %.1f MB (%d filling): %s %d, %s %d, %s %d, %s %d; ")
-			TEXT("session made %lld / %lld / %lld / %lld, hits %lld\n"), UsesCollisionNeighborShells() ? 1 : 0, FaceSlabsCache.Num(), ShellMB,
+		Out += FString::Printf(TEXT("shells: %d, %.1f MB (%d filling): %s %d, %s %d, %s %d, %s %d; ")
+			TEXT("session made %lld / %lld / %lld / %lld, hits %lld\n"), FaceSlabsCache.Num(), ShellMB,
 			ShellPending, FaceSlabsKindNames[0], ShellN[0], FaceSlabsKindNames[1], ShellN[1], FaceSlabsKindNames[2], ShellN[2], FaceSlabsKindNames[3],
 			ShellN[3], FaceSlabsMade[0], FaceSlabsMade[1], FaceSlabsMade[2], FaceSlabsMade[3], ShellHits);
 	}
@@ -6432,18 +6361,12 @@ void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Cont
 		return (1 << FMath::Clamp(BandLOD, 0, 7)) >= MinStride;
 	};
 
-	// Install finished async encodes. Drained even with the sweep off, so their copies come back.
+	// Install finished async encodes. Drained even with the sweep off.
 	int32 Applied = 0;
 	FFarCompressResult Result;
 	while (FarCompressResults->Dequeue(Result))
 	{
 		--FarCompressJobsInFlight;
-		FarCompressBytesInFlight -= Result.Scratch.GetAllocatedSize();
-		if (Result.Scratch.Max() > 0 && FarCompressScratchPool.Num() + FarCompressJobsInFlight < MaxInFlight)
-		{
-			FarCompressScratchPool.Add(MoveTemp(Result.Scratch));
-		}
-		Result.Scratch.Empty(); // frees a copy the pool had no room for
 
 		// A mismatched ticket means the chunk unloaded, or its array was written or changed residency
 		// after the copy was taken (every write path clears the ticket): the form no longer describes it.
@@ -6465,10 +6388,6 @@ void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Cont
 
 	if (!bEnabled)
 	{
-		if (FarCompressJobsInFlight == 0)
-		{
-			FarCompressScratchPool.Empty();
-		}
 		return;
 	}
 
@@ -6508,16 +6427,6 @@ void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Cont
 		DispatchFarCompression(Pair.Key, D, Codec);
 	}
 	Timing.FarCompressDispatchCount = Budget;
-
-	// Keep the scratch arrays while encodes keep coming; release them once the sweep has been idle.
-	if (Budget > 0 || FarCompressJobsInFlight > 0)
-	{
-		FarCompressLastBusyFrame = CurrentFrame;
-	}
-	else if (FarCompressScratchPool.Num() > 0 && (CurrentFrame - FarCompressLastBusyFrame) >= IdleFrames)
-	{
-		FarCompressScratchPool.Empty();
-	}
 }
 
 void UVoxelChunkManager::DispatchFarCompression(const FIntVector& ChunkCoord, FChunkDescriptor& Descriptor, EVoxelChunkCodec Codec)
@@ -6531,36 +6440,21 @@ void UVoxelChunkManager::DispatchFarCompression(const FIntVector& ChunkCoord, FC
 
 	// The resident array stays readable (neighbour reads, seam snapshots, point queries) and writable while the worker
 	// runs, and a write clears the ticket, which voids the result. The worker encodes the chunk's own array, shared
-	// copy-on-write (G71: a write meanwhile clones it), or with voxel.Snapshot.ShareResident 0 a copy, a memcpy into a
-	// pooled array, as before; against ~3.5 ms for the encode.
-	TSharedPtr<const TArray<FVoxelData>> Shared;
-	TArray<FVoxelData> Copy;
-	if (CVarSnapshotShareResident.GetValueOnGameThread() != 0)
-	{
-		Shared = Descriptor.ShareVoxelData();
-	}
-	else
-	{
-		Copy = FarCompressScratchPool.Num() > 0 ? FarCompressScratchPool.Pop(EAllowShrinking::No) : TArray<FVoxelData>();
-		const TArray<FVoxelData>& Resident = Descriptor.GetResidentArray();
-		Copy.SetNumUninitialized(Resident.Num(), EAllowShrinking::No);
-		FMemory::Memcpy(Copy.GetData(), Resident.GetData(), static_cast<SIZE_T>(Resident.Num()) * sizeof(FVoxelData));
-		FarCompressBytesInFlight += Copy.GetAllocatedSize();
-	}
+	// copy-on-write (G71: a write meanwhile clones it).
+	TSharedPtr<const TArray<FVoxelData>> Shared = Descriptor.ShareVoxelData();
 	++FarCompressJobsInFlight;
 
 	// Background priority, outside the thread pool that runs generation, meshing and seam jobs:
 	// compression only saves memory, so it never delays the streaming front.
 	UE::Tasks::Launch(UE_SOURCE_LOCATION,
-		[Results = FarCompressResults, ChunkCoord, Ticket, Codec, ChunkSize = Descriptor.ChunkSize, Shared = MoveTemp(Shared),
-			Copy = MoveTemp(Copy)]() mutable
+		[Results = FarCompressResults, ChunkCoord, Ticket, Codec, ChunkSize = Descriptor.ChunkSize, Shared = MoveTemp(Shared)]() mutable
 		{
 			FFarCompressResult Done;
 			Done.ChunkCoord = ChunkCoord;
 			Done.Ticket = Ticket;
-			Done.Form = FChunkDescriptor::ComputeCompactForm(Shared.IsValid() ? *Shared : Copy, Codec, ChunkSize);
+			static const TArray<FVoxelData> NoVoxels;
+			Done.Form = FChunkDescriptor::ComputeCompactForm(Shared.IsValid() ? *Shared : NoVoxels, Codec, ChunkSize);
 			Shared.Reset(); // let go before the result lands, so the chunk's array is unique again when it is installed
-			Done.Scratch = MoveTemp(Copy);
 			Results->Enqueue(MoveTemp(Done));
 		},
 		UE::Tasks::ETaskPriority::BackgroundNormal);
@@ -6630,7 +6524,7 @@ void UVoxelChunkManager::HandOffChunkScatter(const FIntVector& ChunkCoord, FVoxe
 		EditManager->ApplyEditsToVoxelData(ChunkCoord, EditMergedVoxels);
 		ScatterManager->HandOffChunkVoxels(ChunkCoord, EditMergedVoxels, State.Descriptor.ChunkSize, Configuration->VoxelSize);
 	}
-	else if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0 && State.Descriptor.IsCompact())
+	else if (State.Descriptor.IsCompact())
 	{
 		// A far-compressed chunk hands scatter its snapshot (decoded on a worker, prefetched when the chunk was queued for
 		// its mesh) and stays compressed (G65).
@@ -6967,11 +6861,10 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	// The seed search reads only (G65): a far-compressed chunk without edits through its snapshot (decoded on a worker,
 	// usually prefetched when the chunk was queued), so a chunk no water flows into is neither expanded nor marked
 	// mutated. The chunk's own array is taken for writing once a seed is found.
-	const bool bSnapshotReads = CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0;
-	auto ReadVoxels = [this, bSnapshotReads](const FIntVector& Coord, FVoxelChunkState& ReadState,
+	auto ReadVoxels = [this](const FIntVector& Coord, FVoxelChunkState& ReadState,
 		TSharedPtr<const TArray<FVoxelData>>& OutHold) -> const TArray<FVoxelData>&
 	{
-		if (bSnapshotReads && ReadState.Descriptor.IsCompact() && !(EditManager && EditManager->ChunkHasEdits(Coord)))
+		if (ReadState.Descriptor.IsCompact() && !(EditManager && EditManager->ChunkHasEdits(Coord)))
 		{
 			OutHold = GetVoxelSnapshot(Coord, ReadState);
 			return *OutHold;
@@ -7296,7 +7189,7 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 	{
 		EditMerged = GetVoxelSnapshot(ChunkCoord);
 	}
-	else if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0 && State->Descriptor.IsCompact())
+	else if (State->Descriptor.IsCompact())
 	{
 		// A far-compressed chunk reads its snapshot (the generated voxels, no edits), decoded on a worker (G65).
 		EditMerged = GetVoxelSnapshot(ChunkCoord, *State);
@@ -7484,7 +7377,7 @@ void UVoxelChunkManager::AuditWaterTiles(int32 MaxList, const FIntPoint& DetailC
 				{
 					EditMerged = GetVoxelSnapshot(Coord);
 				}
-				else if (CVarFarCompressionSnapshotReads.GetValueOnGameThread() != 0 && State.Descriptor.IsCompact())
+				else if (State.Descriptor.IsCompact())
 				{
 					EditMerged = GetVoxelSnapshot(Coord, State);
 				}

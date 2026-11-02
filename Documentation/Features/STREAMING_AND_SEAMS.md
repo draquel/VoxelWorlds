@@ -84,8 +84,8 @@ zones the chunk touches) and launches it within `voxel.Stream.MaxAsyncGenTasks` 
 
 Either path scans the result for a uniform chunk (all air, all rock, open sea) as it is made (`bUniform`); the chunk
 is then stored collapsed (`FChunkDescriptor::CollapseToUniform`), its readers take a shared array and a point query
-reads its value, so after a teleport the window's uniform chunks hold no 1 MB arrays (G67;
-`voxel.FarCompression.UniformAtGeneration`, test `Streaming.{Plane,Planet}.UniformAtGeneration`).
+reads its value, so after a teleport the window's uniform chunks hold no 1 MB arrays (G67; test
+`Streaming.{Plane,Planet}.UniformAtGeneration`).
 
 Only the dispatch that owns a chunk's in-flight slot may complete it: each dispatch is stamped with a serial
 (`FAsyncJobStamp`, `AcceptAsyncResult`), so a result for a chunk that unloaded, or that the watchdog re-queued, is
@@ -228,11 +228,11 @@ hands out on the game thread.
 
 | Kind | When | Cost |
 |---|---|---|
-| `SharedResident` | resident, no edits | none: the chunk's own array, shared copy-on-write (G71, `voxel.Snapshot.ShareResident`) |
+| `SharedResident` | resident, no edits | none: the chunk's own array, shared copy-on-write (G71) |
 | `CopiedWithEdits` | resident, with edits | a copy with the edits applied, on the game thread |
-| `SharedUniform` | uniform | none: one array per value (`UniformSnapshotArrays`; G69, `voxel.Snapshot.ShareUniform`) |
-| `DecodedCompressed` | far-compressed, no edits | a worker task decodes a copy of the compact form (`FVoxelCompactSource`); the chunk stays compressed (G65, `voxel.FarCompression.SnapshotReads`) |
-| `Copied`, `DecodedUniform` | only with an A/B cvar at 0 | |
+| `SharedUniform` | uniform | none: one array per value (`UniformSnapshotArrays`; G69) |
+| `DecodedCompressed` | far-compressed, no edits | a worker task decodes a copy of the compact form (`FVoxelCompactSource`); the chunk stays compressed (G65) |
+| `Copied` | resident, no edits, when the chunk has no array to share | a copy, on the game thread |
 
 Copy-on-write: a chunk's array is `FChunkDescriptor::VoxelArray`; `ShareVoxelData` hands it out, and a write
 (`GetVoxelDataMutable`, `SetVoxel`) clones it first while a reader still holds it (`DetachVoxelArray`). The water
@@ -251,7 +251,7 @@ shares (`VoxelNeighborSlices::GetNeighborDepth`: one plane at collision LOD 0, s
 neighbour's `FVoxelFaceSlabs` (96 KB at 64³ and depth 1, against 1 MB) from `FaceSlabsCache` (`GetChunkFaceSlabs`;
 cut from the resident array, from the edit-merged snapshot, or decoded on a worker; uniform chunks share one per
 value and depth), while `8 x depth <= ChunkSize` (`ShouldUseCollisionShells`). A cook drops its own chunk's snapshot
-once taken unless another reader took it too (G69, `voxel.Collision.NeighborShells`; tests
+once taken unless another reader took it too (G69; tests
 `Compression.ChunkShell.Extract`, `Streaming.{Plane,Planet}.CollisionNeighborShells`).
 
 **Far compression.** A `Loaded` chunk that is not dirty, sits in a distance band of stride
@@ -272,8 +272,8 @@ A neighbour without voxel data at cook time is read as air. The cook records tho
 (`FChunkCollisionData::MissingNeighborMask`); when one arrives (`OnChunkVoxelDataAvailable`, from
 `OnChunkGenerationComplete`) the chunk re-cooks unless both sides of that boundary are all air (exact) or all solid (a
 buried wall). Arrivals around a chunk fold into one re-cook once no other missing neighbour is still generating, and
-re-cooks queue below every first cook; the old body stays live until the new one replaces it (G32,
-`voxel.Collision.NeighborRecook`; tests `Collision.{NeighborArrival,EditNeighbors}`). `voxel.Collision.AuditNeighbors`
+re-cooks queue below every first cook; the old body stays live until the new one replaces it (G32; tests
+`Collision.{NeighborArrival,EditNeighbors}`). `voxel.Collision.AuditNeighbors`
 lists cooks that read a neighbour as air and are stale.
 
 ## What an edit re-meshes

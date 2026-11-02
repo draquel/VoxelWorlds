@@ -81,14 +81,6 @@ static TAutoConsoleVariable<int32> CVarCollisionLookAheadChunks(
 	     "cooked before entry. 0 disables path coverage."),
 	ECVF_Default);
 
-static TAutoConsoleVariable<int32> CVarCollisionNeighborRecook(
-	TEXT("voxel.Collision.NeighborRecook"),
-	1,
-	TEXT("Re-cook a chunk's collision when a neighbour that had no voxel data at its cook arrives (G32). The mesher reads "
-	     "a missing neighbour as air, so without it the boundary cells facing that neighbour stay wrong: voxel-wide strips "
-	     "along chunk faces where line traces miss the ground. 0 = off (the behaviour before the fix, for A/B checks)."),
-	ECVF_Default);
-
 // ==================== UVoxelCollisionComponent ====================
 
 UVoxelCollisionComponent::UVoxelCollisionComponent(const FObjectInitializer& ObjectInitializer)
@@ -565,7 +557,7 @@ namespace VoxelCollisionNeighbors
 int32 UVoxelCollisionManager::OnChunkVoxelDataAvailable(const FIntVector& ChunkCoord)
 {
 	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("collision neighbour arrival"));
-	if (!bIsInitialized || CVarCollisionNeighborRecook.GetValueOnGameThread() == 0 || !ChunkManager || !Configuration)
+	if (!bIsInitialized || !ChunkManager || !Configuration)
 	{
 		return 0;
 	}
@@ -1052,7 +1044,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	FVoxelMeshingRequest MeshRequest;
 	TSharedPtr<const TArray<FVoxelData>> SharedVoxels;
 	TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>> NeighborSnapshots;
-	// The neighbours' boundary shells when voxel.Collision.NeighborShells is on (G69); NeighborSnapshots is then empty.
+	// The neighbours' boundary shells when the cook's depth takes them (G69); NeighborSnapshots is then empty.
 	TMap<FIntVector, TSharedPtr<const FVoxelFaceSlabs>> NeighborShells;
 	uint32 MissingNeighborMask = 0;
 	// Far-compressed chunks' snapshots may still be decoding on workers (G65): the cook's worker waits for them.

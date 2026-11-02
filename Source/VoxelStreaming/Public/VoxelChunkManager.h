@@ -561,7 +561,7 @@ public:
 	 * ahead of their readers (world modes review G65). A chunk queued for a mesh or a collision cook is about to be read
 	 * with its neighbours (its seam jobs, the water pull at its mesh's completion, the cook): each reads the snapshot,
 	 * decoded by then, instead of expanding the chunk on the game thread. Chunks that are resident, empty or edited are
-	 * left alone. No-op with voxel.FarCompression.SnapshotReads 0.
+	 * left alone.
 	 *
 	 * @param ChunkCoord Centre of the neighbourhood
 	 */
@@ -1297,8 +1297,8 @@ public:
 	 *        UVoxelCollisionManager::GetNeighborBit): the mesher reads them as air, so the cook is re-run when they arrive (G32)
 	 * @param OutSnapshotsReady If set, receives the worker tasks still decoding snapshots or shells, for the cook's worker
 	 *        to wait for (G65); else the game thread waits for them here
-	 * @param OutNeighborFaceSlabs If set and voxel.Collision.NeighborShells is on, receives the neighbours' boundary shells
-	 *        instead of their snapshots (G69: a cook reads only VoxelNeighborSlices::GetNeighborDepth planes of each);
+	 * @param OutNeighborFaceSlabs If set and the depth takes shells (ShouldUseCollisionShells), receives the neighbours'
+	 *        boundary shells instead of their snapshots (G69: a cook reads only VoxelNeighborSlices::GetNeighborDepth planes of each);
 	 *        OutNeighborSnapshots is then left empty
 	 * @return True if request was prepared successfully
 	 */
@@ -1316,7 +1316,6 @@ public:
 	 * Start the inputs of a queued collision cook decoding on workers (G65, G69): with shells (ShouldUseCollisionShells),
 	 * the 26 neighbours' boundary shells (the far-compressed ones without edits; the chunk's own snapshot is decoded when the
 	 * cook starts, so a long queue holds no whole snapshots); without, the 27 snapshots as PrefetchVoxelSnapshotsAround.
-	 * No-op with voxel.FarCompression.SnapshotReads 0.
 	 *
 	 * @param ChunkCoord The chunk to be cooked
 	 * @param LODLevel   The cook's LOD level (sets the shells' depth)
@@ -1325,16 +1324,7 @@ public:
 	void PrefetchCollisionInputs(const FIntVector& ChunkCoord, int32 LODLevel);
 
 	/**
-	 * Whether collision cooks read their neighbours' boundary shells (voxel.Collision.NeighborShells, G69).
-	 *
-	 * @return True if they do
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|Streaming")
-	bool UsesCollisionNeighborShells() const;
-
-	/**
-	 * Whether a cook at this neighbour depth takes shells (G69): voxel.Collision.NeighborShells is on and a shell of that
-	 * depth is at most three quarters of a chunk (8 * Depth <= ChunkSize: one plane at 64^3 is 9%, the stride + 1 planes of
+	 * Whether a cook at this neighbour depth takes shells (G69): a shell of that depth is at most three quarters of a chunk (8 * Depth <= ChunkSize: one plane at 64^3 is 9%, the stride + 1 planes of
 	 * collision LOD 2 47%); a deeper shell would hold about as much as the chunk, so the cook reads whole snapshots.
 	 *
 	 * @param Depth Planes per face (VoxelNeighborSlices::GetNeighborDepth)
@@ -1642,7 +1632,7 @@ public:
 
 	/**
 	 * Snapshots of resident chunks that shared the chunk's own array this session instead of copying it (world modes review
-	 * G71; voxel.Snapshot.ShareResident), and those copied (without edits).
+	 * G71), and those copied (without edits).
 	 *
 	 * @param OutCopied Receives the copies made from resident chunks without edits
 	 * @return The shared ones
@@ -1654,8 +1644,7 @@ public:
 	}
 
 	/**
-	 * Chunks collapsed to uniform as they were generated this session (world modes review G67;
-	 * voxel.FarCompression.UniformAtGeneration).
+	 * Chunks collapsed to uniform as they were generated this session (world modes review G67).
 	 *
 	 * @return The count
 	 */
@@ -2112,10 +2101,9 @@ protected:
 		Copied = 0,             // copied from a resident chunk's array
 		CopiedWithEdits = 1,    // copied, the chunk's edits applied
 		DecodedCompressed = 2,  // decoded on a worker from a far-compressed chunk (G65)
-		DecodedUniform = 3,     // expanded on a worker from a uniform chunk (G65; voxel.Snapshot.ShareUniform 0)
-		SharedUniform = 4,      // a uniform chunk's, the shared array for its value (G69)
-		SharedResident = 5,     // a resident chunk's own array, shared copy-on-write (G71; voxel.Snapshot.ShareResident)
-		Num = 6
+		SharedUniform = 3,      // a uniform chunk's, the shared array for its value (G69)
+		SharedResident = 4,     // a resident chunk's own array, shared copy-on-write (G71)
+		Num = 5
 	};
 
 	/** The snapshot cache's session counters (G69; voxel.Snapshot.Stats). */
@@ -2622,8 +2610,6 @@ private:
 		/** FChunkDescriptor::AsyncCompactTicket of the dispatch; a mismatch means the array changed. */
 		uint32 Ticket = 0;
 		FVoxelChunkCompactForm Form;
-		/** The copy the worker encoded, handed back for reuse by a later dispatch. */
-		TArray<FVoxelData> Scratch;
 	};
 	using FFarCompressResultQueue = TQueue<FFarCompressResult, EQueueMode::Mpsc>;
 
@@ -2635,19 +2621,6 @@ private:
 
 	/** Encodes dispatched and not yet drained (capped by voxel.FarCompression.MaxInFlight). */
 	int32 FarCompressJobsInFlight = 0;
-
-	/** Bytes of the copies those encodes hold (counted in the voxel data memory stats). */
-	int64 FarCompressBytesInFlight = 0;
-
-	/**
-	 * Scratch arrays for the next dispatches' copies, reused so a copy is a memcpy into pages that are
-	 * already committed. Together with the in-flight copies there are never more than MaxInFlight;
-	 * freed once the sweep has dispatched nothing for IdleFrames.
-	 */
-	TArray<TArray<FVoxelData>> FarCompressScratchPool;
-
-	/** Last frame the sweep dispatched an encode or still had one in flight (drives the pool release). */
-	int64 FarCompressLastBusyFrame = 0;
 
 	/** Ticket source for FChunkDescriptor::AsyncCompactTicket (0 is never issued). */
 	uint32 NextFarCompressTicket = 0;

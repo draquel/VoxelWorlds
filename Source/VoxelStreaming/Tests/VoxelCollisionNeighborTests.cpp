@@ -5,7 +5,6 @@
 #include "Async/TaskGraphInterfaces.h"
 #include "CollisionQueryParams.h"
 #include "Engine/World.h"
-#include "HAL/IConsoleManager.h"
 #include "VoxelChunkManager.h"
 #include "VoxelCollisionManager.h"
 #include "VoxelWorldConfiguration.h"
@@ -22,9 +21,8 @@
 // - Collision.NeighborArrival: a streamed plane with collision on every loaded chunk. The window's edge chunks are cooked
 //   while their outward neighbours are not loaded; the viewer then moves two chunks along +X +Y, so those neighbours
 //   load. Down-traces along each such face (inside the chunk's last voxel cell, at every voxel along the face) are
-//   compared with the same traces after re-cooking those chunks from scratch. With voxel.Collision.NeighborRecook 0 (the
-//   code before the fix) they differ: the scenario reproduces G32. With 1 (the fix) they are identical, and the re-cooks
-//   came from neighbour arrivals.
+//   compared with the same traces after re-cooking those chunks from scratch: identical, the re-cooks having come from
+//   neighbour arrivals (before the fix they differed).
 // ---------------------------------------------------------------------------
 
 namespace VoxelCollisionNeighborTest
@@ -107,21 +105,9 @@ namespace VoxelCollisionNeighborTest
 		bool bSettled = false;
 	};
 
-	FPassResult RunPass(FAutomationTestBase& Test, bool bRecook)
+	FPassResult RunPass(FAutomationTestBase& Test)
 	{
 		FPassResult R;
-		// Set at console priority: a value typed in the editor's console outranks a code set, which would be ignored.
-		IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Collision.NeighborRecook"));
-		const int32 Previous = CVar ? CVar->GetInt() : 1;
-		if (CVar)
-		{
-			CVar->Set(bRecook ? 1 : 0, ECVF_SetByConsole);
-		}
-		if (!CVar || CVar->GetInt() != (bRecook ? 1 : 0))
-		{
-			Test.AddError(FString::Printf(TEXT("voxel.Collision.NeighborRecook could not be set to %d"), bRecook ? 1 : 0));
-		}
-
 		VoxelTesting::FTestChunkWorld W;
 		W.Create(TEXT("CollisionNeighborArrival"));
 		W.ConfigureSmallPlane();
@@ -133,7 +119,6 @@ namespace VoxelCollisionNeighborTest
 		{
 			Test.AddError(TEXT("The chunk manager has a collision manager"));
 			W.Stop();
-			if (CVar) { CVar->Set(Previous, ECVF_SetByConsole); }
 			return R;
 		}
 		// Cook every loaded chunk, the window's edge included (the default radius is half the view distance).
@@ -224,10 +209,6 @@ namespace VoxelCollisionNeighborTest
 		}
 
 		W.Stop();
-		if (CVar)
-		{
-			CVar->Set(Previous, ECVF_SetByConsole);
-		}
 		return R;
 	}
 }
@@ -239,22 +220,14 @@ bool FVoxelCollisionNeighborArrivalTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelCollisionNeighborTest;
 
-	const FPassResult Off = RunPass(*this, /*bRecook=*/false);
-	AddInfo(FString::Printf(TEXT("NeighborRecook 0 (before the fix): %d faces cooked before their neighbour loaded, %d probes, %d differ from a fresh cook (%d missed), %d hits buried in rock; %lld neighbour re-cooks (arrivals needing none: %lld air, %lld solid on both sides); audit: %d of %d cooked chunks stale"),
-		Off.Faces, Off.Probes, Off.Mismatches, Off.StaleMisses, Off.BuriedHits, Off.NeighborRecooks, Off.ArrivalsSkipped, Off.ArrivalsSkippedSolid, Off.AuditStale, Off.AuditCooked));
-	TestTrue(TEXT("NeighborRecook 0: streaming and collision settle"), Off.bSettled);
-	TestTrue(TEXT("NeighborRecook 0: faces cooked before their neighbour loaded (non-vacuous)"), Off.Faces > 0 && Off.Probes > 0);
-	TestTrue(TEXT("NeighborRecook 0: the stale faces differ from a fresh cook (the scenario reproduces G32)"), Off.Mismatches > 0);
-	TestTrue(TEXT("NeighborRecook 0: the audit finds the stale cooks"), Off.AuditStale > 0);
-
-	const FPassResult On = RunPass(*this, /*bRecook=*/true);
-	AddInfo(FString::Printf(TEXT("NeighborRecook 1 (the fix): %d faces cooked before their neighbour loaded, %d probes, %d differ from a fresh cook (%d missed), %d hits buried in rock; %lld neighbour re-cooks (arrivals needing none: %lld air, %lld solid on both sides); audit: %d of %d cooked chunks stale"),
+	const FPassResult On = RunPass(*this);
+	AddInfo(FString::Printf(TEXT("%d faces cooked before their neighbour loaded, %d probes, %d differ from a fresh cook (%d missed), %d hits buried in rock; %lld neighbour re-cooks (arrivals needing none: %lld air, %lld solid on both sides); audit: %d of %d cooked chunks stale"),
 		On.Faces, On.Probes, On.Mismatches, On.StaleMisses, On.BuriedHits, On.NeighborRecooks, On.ArrivalsSkipped, On.ArrivalsSkippedSolid, On.AuditStale, On.AuditCooked));
-	TestTrue(TEXT("NeighborRecook 1: streaming and collision settle"), On.bSettled);
-	TestTrue(TEXT("NeighborRecook 1: faces cooked before their neighbour loaded (non-vacuous)"), On.Faces > 0 && On.Probes > 0);
-	TestEqual(TEXT("NeighborRecook 1: every face equals a fresh cook once its neighbour loaded"), On.Mismatches, 0);
-	TestTrue(TEXT("NeighborRecook 1: the re-cooks came from neighbour arrivals"), On.NeighborRecooks > 0);
-	TestEqual(TEXT("NeighborRecook 1: no cook reads as air a neighbour that has data"), On.AuditStale, 0);
+	TestTrue(TEXT("Streaming and collision settle"), On.bSettled);
+	TestTrue(TEXT("Faces cooked before their neighbour loaded (non-vacuous)"), On.Faces > 0 && On.Probes > 0);
+	TestEqual(TEXT("Every face equals a fresh cook once its neighbour loaded"), On.Mismatches, 0);
+	TestTrue(TEXT("The re-cooks came from neighbour arrivals"), On.NeighborRecooks > 0);
+	TestEqual(TEXT("No cook reads as air a neighbour that has data"), On.AuditStale, 0);
 	return true;
 }
 
