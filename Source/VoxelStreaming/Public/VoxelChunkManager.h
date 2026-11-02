@@ -15,17 +15,12 @@
 #include "VoxelTerrainConditioning.h"
 #include "IVoxelMesher.h"
 #include "VoxelMeshingTypes.h"
-#include "VoxelStreamingBenchmark.h"
-#include "VoxelSeamRegistry.h"
 #include "VoxelSeamTransitionHolds.h"
 #include "VoxelLODEvalSchedule.h"
 #include "VoxelWorldComponentOwners.h"
 #include "VoxelWaterTiles.h"
 #include "VoxelStreamingViewerPolicy.h"
 #include "VoxelConditioningZoneSet.h"
-#include "VoxelSeaSurface.h"
-#include "VoxelSurfaceQuery.h"
-#include "VoxelTreeInjector.h"
 #include <atomic>
 #include "VoxelChunkManager.generated.h"
 
@@ -40,6 +35,13 @@ class UVoxelCollisionManager;
 class UVoxelScatterManager;
 class UVoxelWaterPropagation;
 class FVoxelSeamRegistry;
+class FVoxelStreamingBenchmark;
+struct FVoxelBenchConfig;
+struct FVoxelSeaSurface;
+struct FVoxelSurfaceSample;
+enum class EVoxelSurfaceLayer : uint8;
+struct FVoxelTreeInstance;
+struct FVoxelTreeVoxel;
 class FVoxelFarField;
 class UBoxComponent;
 class UProceduralMeshComponent;
@@ -382,6 +384,9 @@ class VOXELSTREAMING_API UVoxelChunkManager : public UActorComponent
 
 public:
 	UVoxelChunkManager();
+	/** Out of line, as the destructor: the owners below are forward-declared, and UHT's generated vtable-helper
+	 * constructor would destroy them incomplete. */
+	UVoxelChunkManager(FVTableHelper& Helper);
 	/** Out-of-line (defaulted in .cpp) so the TUniquePtr<FVoxelSeamRegistry> deleter sees the complete type. */
 	virtual ~UVoxelChunkManager() override;
 

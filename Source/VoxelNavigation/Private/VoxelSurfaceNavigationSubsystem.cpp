@@ -8,6 +8,7 @@
 #include "EngineUtils.h"
 #include "HAL/IConsoleManager.h"
 #include "VoxelChunkManager.h"
+#include "VoxelSeaSurface.h"
 #include "VoxelCoordinates.h"
 #include "VoxelEditManager.h"
 #include "VoxelSurfaceQuery.h"

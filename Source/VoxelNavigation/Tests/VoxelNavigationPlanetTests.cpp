@@ -6,6 +6,7 @@
 #include "VoxelSurfacePathfinder.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelChunkManager.h"
+#include "VoxelSurfaceQuery.h"
 #include "VoxelEditManager.h"
 #include "Testing/VoxelTestChunkWorld.h"
 

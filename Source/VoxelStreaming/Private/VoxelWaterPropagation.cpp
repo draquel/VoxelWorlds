@@ -2,6 +2,7 @@
 
 #include "VoxelWaterPropagation.h"
 #include "VoxelChunkManager.h"
+#include "VoxelSeaSurface.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
 #include "VoxelData.h"
