@@ -5,16 +5,19 @@
 #include "Materials/MaterialFunction.h"
 #include "Materials/MaterialExpressionCustom.h"
 #include "Materials/MaterialExpressionCollectionParameter.h"
+#include "Materials/MaterialExpressionConstant.h"
 #include "Materials/MaterialParameterCollection.h"
 
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITORONLY_DATA
 
 /**
  * Visual polish VP2-O2 (VISUAL_POLISH_PLAN.md): the texture variation's wiring in the assets (Scripts/setup_texture_variation.py).
- * MPC_VoxelMaterial holds TileVariation (1) and MacroVariation (0.3); each triplanar function's Custom node includes
- * VoxelTextureVariation.ush and has the inputs the variation reads; and every collection parameter node in the two
- * functions carries the id of the collection scalar it names. A node whose id does not resolve reads another scalar
- * without any error, so the voxel.Material.* switch it stands for would silently do nothing.
+ * MPC_VoxelMaterial holds MacroVariation (0.3) alone (VoxelWorlds 8 retired GradientSampling, TileVariation and
+ * ConstantRoughness: the graphs take them as constants); each triplanar function's Custom node includes
+ * VoxelTextureVariation.ush and has the inputs the variation reads, GradientSampling and TileVariation a constant 1; and
+ * every collection parameter node in the two functions carries the id of the collection scalar it names. A node whose id
+ * does not resolve reads another scalar without any error (VoxelWorlds 8's first graph edit drew brighter, flatter sand
+ * that way), so voxel.Material.MacroVariation would silently do nothing.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelTextureVariationAssetTest,
 	"VoxelWorlds.Rendering.TextureVariation.Assets",
@@ -28,14 +31,9 @@ bool FVoxelTextureVariationAssetTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	const FCollectionScalarParameter* Tile = Collection->ScalarParameters.FindByPredicate(
-		[](const FCollectionScalarParameter& P) { return P.ParameterName == TEXT("TileVariation"); });
 	const FCollectionScalarParameter* Macro = Collection->ScalarParameters.FindByPredicate(
 		[](const FCollectionScalarParameter& P) { return P.ParameterName == TEXT("MacroVariation"); });
-	if (TestNotNull(TEXT("TileVariation in the collection"), Tile))
-	{
-		TestEqual(TEXT("TileVariation defaults to 1"), Tile->DefaultValue, 1.0f);
-	}
+	TestEqual(TEXT("The collection holds one scalar"), Collection->ScalarParameters.Num(), 1);
 	if (TestNotNull(TEXT("MacroVariation in the collection"), Macro))
 	{
 		TestEqual(TEXT("MacroVariation defaults to 0.3"), Macro->DefaultValue, 0.3f, 1e-6f);
@@ -45,13 +43,16 @@ bool FVoxelTextureVariationAssetTest::RunTest(const FString& Parameters)
 	{
 		const TCHAR* Path;
 		TArray<FName> VariationInputs;
+		int32 CollectionInputs;
 	};
+	// GradientSampling and TileVariation are constants in both; MacroVariation, in the albedo's, the collection's.
 	const FFunctionCase Cases[] = {
 		{ TEXT("/VoxelWorlds/Materials/Functions/MF_TriplanarSampleAlbedoRoughness.MF_TriplanarSampleAlbedoRoughness"),
-			{ TEXT("GradientSampling"), TEXT("TileVariation"), TEXT("MacroVariation") } },
+			{ TEXT("GradientSampling"), TEXT("TileVariation"), TEXT("MacroVariation") }, 1 },
 		{ TEXT("/VoxelWorlds/Materials/Functions/MF_TriplanarSampleNormal.MF_TriplanarSampleNormal"),
-			{ TEXT("GradientSampling"), TEXT("TileVariation") } },
+			{ TEXT("GradientSampling"), TEXT("TileVariation") }, 0 },
 	};
+	const FName ConstantInputs[] = { TEXT("GradientSampling"), TEXT("TileVariation") };
 	for (const FFunctionCase& Case : Cases)
 	{
 		const UMaterialFunction* Function = LoadObject<UMaterialFunction>(nullptr, Case.Path);
@@ -97,8 +98,17 @@ bool FVoxelTextureVariationAssetTest::RunTest(const FString& Parameters)
 					Found->Input.Expression);
 			}
 		}
-		TestEqual(*FString::Printf(TEXT("%s: one collection parameter node per switch"), *Function->GetName()),
-			CollectionNodes, Case.VariationInputs.Num());
+		for (const FName& Input : ConstantInputs)
+		{
+			const FCustomInput* Found = Custom->Inputs.FindByPredicate([&Input](const FCustomInput& I) { return I.InputName == Input; });
+			const UMaterialExpressionConstant* Constant = Found ? Cast<UMaterialExpressionConstant>(Found->Input.Expression) : nullptr;
+			if (TestNotNull(*FString::Printf(TEXT("%s: %s is a constant"), *Function->GetName(), *Input.ToString()), Constant))
+			{
+				TestEqual(*FString::Printf(TEXT("%s: %s is 1"), *Function->GetName(), *Input.ToString()), Constant->R, 1.0f);
+			}
+		}
+		TestEqual(*FString::Printf(TEXT("%s: one collection parameter node per collection input"), *Function->GetName()),
+			CollectionNodes, Case.CollectionInputs);
 	}
 	return true;
 }
