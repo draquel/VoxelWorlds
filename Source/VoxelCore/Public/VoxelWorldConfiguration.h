@@ -202,6 +202,34 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Planet", meta = (ClampMin = "0"))
 	float VoxelCutoverAltitude = 0.0f;
 
+	// ==================== Far field (every world mode with voxel.World.FarField) ====================
+	// The world's own far-field budgets (code review CR4, the plan's §10.4): each has a console variable of the same meaning
+	// that overrides it once something sets the variable.
+
+	/** Screen-space error budget in pixels: a far-field patch splits while its geometric error projects to more (voxel.World.FarFieldError) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Far Field", meta = (ClampMin = "0.25"))
+	float FarFieldScreenError = 2.0f;
+
+	/** The same budget on a heightmap world (a plane has no horizon); <= 0 = FarFieldScreenError (voxel.World.FarFieldHeightmapError) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Far Field")
+	float FarFieldHeightmapScreenError = 4.0f;
+
+	/** Quads along a far-field patch's edge, a power of two from 4 to 64 (voxel.World.FarFieldQuads) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Far Field", meta = (ClampMin = "4", ClampMax = "64"))
+	int32 FarFieldPatchQuads = 16;
+
+	/** Heightmap worlds: chunks along a root tile's edge, a power of two from 4 to 4096; 0 = from the far distance (voxel.World.FarFieldRootChunks) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Far Field", meta = (ClampMin = "0", ClampMax = "4096"))
+	int32 FarFieldRootChunks = 0;
+
+	/** Heightmap worlds: how far from the camera the far field draws (uu; a bounded world also stops at its bounds) (voxel.World.FarFieldDistance) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Far Field", meta = (ClampMin = "0"))
+	float FarFieldDistance = 2000000.0f;
+
+	/** Far-field patch builds in flight on the thread pool at once (voxel.World.FarFieldMaxBuilds) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Far Field", meta = (ClampMin = "1"))
+	int32 FarFieldMaxBuilds = 6;
+
 	// ==================== Water Settings ====================
 
 	/**
@@ -457,6 +485,14 @@ public:
 	/** LOD level to use for collision (higher = simpler) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering", meta = (ClampMin = "0", ClampMax = "4", EditCondition = "bGenerateCollision"))
 	int32 CollisionLODLevel = 0;
+
+	/** Chunks along a render region's edge: each region is drawn relative to its own origin, for float precision far from the world's (voxel.Render.RegionChunks; 0 = one region) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering", meta = (ClampMin = "0"))
+	int32 RenderRegionChunks = 16;
+
+	/** Chunks along a scatter region's edge (its HISMs per region); -1 = 4 in every world mode, 0 = the render regions' (voxel.Scatter.RegionChunks) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering", meta = (ClampMin = "-1"))
+	int32 ScatterRegionChunks = -1;
 
 	/**
 	 * Runtime Virtual Textures the terrain writes into.

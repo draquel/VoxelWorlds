@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelSurfaceNavigationSubsystem.h"
+#include "VoxelWorldsSettings.h"
 #include "VoxelNavigation.h"
 
 #include "DrawDebugHelpers.h"
@@ -206,11 +207,11 @@ bool UVoxelSurfaceNavigationSubsystem::IsReady() const
 
 void UVoxelSurfaceNavigationSubsystem::ApplyCVars()
 {
-	Params.CellSize = FMath::Max(CVarNavCellSize.GetValueOnGameThread(), 25.f);
-	Params.MaxNodes = FMath::Max(CVarNavMaxNodes.GetValueOnGameThread(), 16);
-	Params.MaxStepRise = FMath::Max(CVarNavMaxStepRise.GetValueOnGameThread(), 0.f);
-	Params.MaxWadeDepth = FMath::Max(CVarNavMaxWadeDepth.GetValueOnGameThread(), 0.f);
-	Params.MaxSearchRadius = FMath::Max(CVarNavMaxRadius.GetValueOnGameThread(), 0.f);
+	Params.CellSize = FMath::Max(VoxelSettings::Resolve(CVarNavCellSize, UVoxelWorldsSettings::Get().NavCellSize), 25.f);
+	Params.MaxNodes = FMath::Max(VoxelSettings::Resolve(CVarNavMaxNodes, UVoxelWorldsSettings::Get().NavMaxNodes), 16);
+	Params.MaxStepRise = FMath::Max(VoxelSettings::Resolve(CVarNavMaxStepRise, UVoxelWorldsSettings::Get().NavMaxStepRise), 0.f);
+	Params.MaxWadeDepth = FMath::Max(VoxelSettings::Resolve(CVarNavMaxWadeDepth, UVoxelWorldsSettings::Get().NavMaxWadeDepth), 0.f);
+	Params.MaxSearchRadius = FMath::Max(VoxelSettings::Resolve(CVarNavMaxRadius, UVoxelWorldsSettings::Get().NavMaxRadius), 0.f);
 	Params.GridOrigin = FVector2D::ZeroVector;
 	Params.bBlockSteps = false;
 	if (const UVoxelChunkManager* ChunkMgr = ChunkManager.Get())

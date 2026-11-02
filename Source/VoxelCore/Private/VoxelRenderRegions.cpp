@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelRenderRegions.h"
+#include "VoxelWorldsSettings.h"
 #include "VoxelWorldConfiguration.h"
 #include "HAL/IConsoleManager.h"
 
@@ -28,7 +29,7 @@ FVoxelRenderRegions FVoxelRenderRegions::FromConfig(const UVoxelWorldConfigurati
 	Regions.WorldOrigin = Config.WorldOrigin;
 	Regions.ChunkWorldSize = Config.GetChunkWorldSize();
 	// Every world mode (WM-MP5): a plane far from its origin loses float precision as a big planet does.
-	Regions.RegionChunks = FMath::Max(0, CVarVoxelRenderRegionChunks.GetValueOnAnyThread());
+	Regions.RegionChunks = FMath::Max(0, VoxelSettings::ResolveAnyThread(CVarVoxelRenderRegionChunks, Config.RenderRegionChunks));
 	return Regions;
 }
 

@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelEditManager.h"
+#include "VoxelWorldsSettings.h"
 #include "IVoxelEditValidator.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelCoordinates.h"
@@ -831,7 +832,7 @@ FString UVoxelEditManager::GetDebugStats() const
 	Stats += FString::Printf(TEXT("Undo Stack: %d\n"), UndoStack.Num());
 	Stats += FString::Printf(TEXT("Redo Stack: %d\n"), RedoStack.Num());
 	Stats += FString::Printf(TEXT("Undo History Memory: %.2f MB (budget %.1f MB, voxel.Edit.UndoHistoryMB)\n"),
-		GetHistoryMemoryUsage() / (1024.0 * 1024.0), CVarVoxelEditUndoHistoryMB.GetValueOnAnyThread());
+		GetHistoryMemoryUsage() / (1024.0 * 1024.0), VoxelSettings::ResolveAnyThread(CVarVoxelEditUndoHistoryMB, UVoxelWorldsSettings::Get().EditUndoHistoryMB));
 	Stats += FString::Printf(TEXT("Operation In Progress: %s\n"),
 		CurrentOperation.IsValid() ? TEXT("Yes") : TEXT("No"));
 	Stats += FString::Printf(TEXT("Memory Usage: %.2f KB\n"), GetMemoryUsage() / 1024.0f);
@@ -1111,7 +1112,7 @@ void UVoxelEditManager::TrimUndoStack()
 	}
 
 	// The memory budget (G68): oldest first, the newest operation kept whatever its size.
-	const double BudgetMB = CVarVoxelEditUndoHistoryMB.GetValueOnAnyThread();
+	const double BudgetMB = VoxelSettings::ResolveAnyThread(CVarVoxelEditUndoHistoryMB, UVoxelWorldsSettings::Get().EditUndoHistoryMB);
 	if (BudgetMB <= 0.0)
 	{
 		return;

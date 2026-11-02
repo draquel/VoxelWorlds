@@ -2,6 +2,7 @@
 
 #include "VoxelChunkManager.h"
 #include "VoxelStreamingBenchmark.h"
+#include "VoxelWorldsSettings.h"
 #include "VoxelChunkManagerPrivate.h"
 #include "VoxelStreaming.h"
 #include "VoxelSeamRegistry.h"
@@ -3210,7 +3211,7 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 	Settings.VoxelSize = Configuration->VoxelSize;
 	// Quads along a patch's edge (16: an edge patch's error stays a fraction of the sink on the review planets, and the
 	// procedural mesh components hold about 200 bytes a vertex, CPU and GPU copies).
-	Settings.PatchQuads = static_cast<int32>(FMath::RoundUpToPowerOfTwo(static_cast<uint32>(FMath::Clamp(CVarFarFieldQuads.GetValueOnGameThread(), 4, 64))));
+	Settings.PatchQuads = static_cast<int32>(FMath::RoundUpToPowerOfTwo(static_cast<uint32>(FMath::Clamp(VoxelSettings::Resolve(CVarFarFieldQuads, Configuration->FarFieldPatchQuads), 4, 64))));
 	// A voxel under the analytic surface: the voxel surface (which DC and MC follow within a few uu) hides it wherever a
 	// chunk is drawn over it.
 	Settings.Sink = Configuration->VoxelSize;
@@ -3243,9 +3244,9 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 		// A heightmap world (world modes review WM-MP1, D36): root tiles of RootChunks chunks on the chunk grid, split down
 		// to one chunk column at the voxel window's edge, out to FarDistance from the camera (and an island's bounds).
 		Settings.bHeightmap = true;
-		Settings.FarDistance = FMath::Max(0.0f, CVarFarFieldDistance.GetValueOnGameThread());
+		Settings.FarDistance = FMath::Max(0.0f, VoxelSettings::Resolve(CVarFarFieldDistance, Configuration->FarFieldDistance));
 		Settings.Bounds = WorldMode->GetWorldBounds();
-		const int32 RootChunksCVar = CVarFarFieldRootChunks.GetValueOnGameThread();
+		const int32 RootChunksCVar = VoxelSettings::Resolve(CVarFarFieldRootChunks, Configuration->FarFieldRootChunks);
 		if (RootChunksCVar > 0)
 		{
 			Settings.RootChunks = static_cast<int32>(FMath::RoundUpToPowerOfTwo(static_cast<uint32>(FMath::Clamp(RootChunksCVar, 4, 4096))));
@@ -3271,7 +3272,7 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 
 	FarField = MakeUnique<FVoxelFarField>();
 	FarField->Initialize(Settings, Surface);
-	FarField->SetMaxBuildsInFlight(CVarFarFieldMaxBuilds.GetValueOnGameThread());
+	FarField->SetMaxBuildsInFlight(VoxelSettings::Resolve(CVarFarFieldMaxBuilds, Configuration->FarFieldMaxBuilds));
 	// The cut-over is in force only with a far field (D38, every mode since G78): told now, not at the next Update.
 	if (LODStrategy)
 	{
@@ -3506,10 +3507,11 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	}
 	const double FieldOfViewRadians = FMath::DegreesToRadians(FMath::Clamp(FieldOfView > 0.0f ? static_cast<double>(FieldOfView) : 90.0, 5.0, 170.0));
 	View.PixelsPerRadian = ViewportWidth / (2.0 * FMath::Tan(FieldOfViewRadians * 0.5));
-	View.MaxScreenError = FMath::Max(0.25f, CVarFarFieldError.GetValueOnGameThread());
-	if (Settings.bHeightmap && CVarFarFieldHeightmapError.GetValueOnGameThread() > 0.0f)
+	View.MaxScreenError = FMath::Max(0.25f, VoxelSettings::Resolve(CVarFarFieldError, Configuration->FarFieldScreenError));
+	const float HeightmapError = VoxelSettings::Resolve(CVarFarFieldHeightmapError, Configuration->FarFieldHeightmapScreenError);
+	if (Settings.bHeightmap && HeightmapError > 0.0f)
 	{
-		View.MaxScreenError = FMath::Max(0.25f, CVarFarFieldHeightmapError.GetValueOnGameThread());
+		View.MaxScreenError = FMath::Max(0.25f, HeightmapError);
 	}
 	// The viewer's ground point, as the LOD strategy measures the window's horizons on it (GetPlanetGroundRadius: the
 	// analytic terrain along the viewer's direction, no zones). One sample when the viewer moves. A heightmap world
@@ -3538,12 +3540,12 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	View.Time = FPlatformTime::Seconds();
 	// A new chunk fades in over the patch under it (the appearance fade, R24 P3): hide the patch once it has.
 	static IConsoleVariable* FadeDuration = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.MeshFade.Duration"));
-	View.HideDelay = (FadeDuration ? FMath::Max(0.0f, FadeDuration->GetFloat()) : 0.35f) + 0.1;
+	View.HideDelay = FMath::Max(0.0f, VoxelSettings::IsOverridden(FadeDuration) ? FadeDuration->GetFloat() : UVoxelWorldsSettings::Get().MeshFadeDuration) + 0.1;
 	View.ChunkStateVersion = ChunkStateVersion;
 	View.bAvoidStandIns = CVarFarFieldAvoidStandIns.GetValueOnGameThread() != 0;
 	View.bBuildAllRoots = CVarFarFieldBuildAllRoots.GetValueOnGameThread() != 0;
 
-	FarField->SetMaxBuildsInFlight(CVarFarFieldMaxBuilds.GetValueOnGameThread());
+	FarField->SetMaxBuildsInFlight(VoxelSettings::Resolve(CVarFarFieldMaxBuilds, Configuration->FarFieldMaxBuilds));
 	FVoxelFarFieldChanges Changes;
 	FarField->Update(View, [this](const FIntVector& Coord) { return IsChunkDrawnForFarField(Coord); }, Changes);
 

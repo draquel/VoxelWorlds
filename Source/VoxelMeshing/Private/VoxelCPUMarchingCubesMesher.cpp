@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelCPUMarchingCubesMesher.h"
+#include "VoxelWorldsSettings.h"
 #include "VoxelCrossingGradient.h"
 #include "VoxelMeshingVoxelSampler.h"
 #include "VoxelDigitalLine.h"
@@ -728,7 +729,7 @@ void FVoxelCPUMarchingCubesMesher::MorphVertexToCoarse(
 	// morphed band vertices stay coincident with the unmorphed interior mesh at the junction.
 	const float MorphWidth = (Request.MorphWidthOverride > 0.0f)
 		? Request.MorphWidthOverride
-		: FMath::Max(0.01f, CVarMCBoundaryMorphWidth.GetValueOnAnyThread());
+		: FMath::Max(0.01f, VoxelSettings::ResolveAnyThread(CVarMCBoundaryMorphWidth, UVoxelWorldsSettings::Get().MCBoundaryMorphWidth));
 
 	const float Vx = Vertex.X / VoxelSize;
 	const float Vy = Vertex.Y / VoxelSize;

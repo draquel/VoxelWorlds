@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelCollisionManager.h"
+#include "VoxelWorldsSettings.h"
 #include "VoxelBoundedDrain.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelChunkManager.h"
@@ -311,16 +312,16 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 	// configured CollisionRadius.
 	const float ConfiguredBase = CVarCollisionBaseRadius.GetValueOnGameThread();
 	const float Base = ConfiguredBase > 0.0f ? ConfiguredBase : CollisionRadius;
-	const float EffectiveRadius = Base + FocusSpeed * CVarCollisionLeadSeconds.GetValueOnGameThread();
+	const float EffectiveRadius = Base + FocusSpeed * VoxelSettings::Resolve(CVarCollisionLeadSeconds, UVoxelWorldsSettings::Get().CollisionLeadSeconds);
 	CurrentEffectiveRadius = FMath::Max(EffectiveRadius, CollisionRadius);
 
 	// 2. Re-run collision decisions when the focus moved enough: a small deadband, and an immediate
 	// re-decision on a stop->start transition, so the first steps after standing still don't outrun it.
-	const float MoveThreshold = FMath::Max(CVarCollisionMoveUpdateThreshold.GetValueOnGameThread(), 1.0f);
+	const float MoveThreshold = FMath::Max(VoxelSettings::Resolve(CVarCollisionMoveUpdateThreshold, UVoxelWorldsSettings::Get().CollisionMoveUpdateThreshold), 1.0f);
 	const bool bStartedMoving = bWasStationary && FocusSpeed > StationarySpeedThreshold;
 	const float DistanceMoved = FVector::Dist(FocusPosition, LastViewerPosition);
 	SecondsSinceDecisions += DeltaTime;
-	const float ResweepSeconds = CVarCollisionResweepSeconds.GetValueOnGameThread();
+	const float ResweepSeconds = VoxelSettings::Resolve(CVarCollisionResweepSeconds, UVoxelWorldsSettings::Get().CollisionResweepSeconds);
 	const bool bPeriodicResweep = ResweepSeconds > 0.0f && SecondsSinceDecisions >= ResweepSeconds;
 	if (DistanceMoved > MoveThreshold || LastViewerPosition.X == FLT_MAX || bPendingInitialUpdate || bStartedMoving || bPeriodicResweep)
 	{
@@ -381,7 +382,7 @@ void UVoxelCollisionManager::ForcePathCoverage(const FVector& FocusPosition, con
 	{
 		return;
 	}
-	const int32 LookAhead = FMath::Clamp(CVarCollisionLookAheadChunks.GetValueOnGameThread(), 0, 8);
+	const int32 LookAhead = FMath::Clamp(VoxelSettings::Resolve(CVarCollisionLookAheadChunks, UVoxelWorldsSettings::Get().CollisionLookAheadChunks), 0, 8);
 
 	// Boost path priorities far above the distance-based ones (which max at ~CurrentEffectiveRadius),
 	// so imminent-footfall chunks cook first. RequestCollision re-prioritizes an already-queued chunk.
@@ -1211,7 +1212,7 @@ void UVoxelCollisionManager::ProcessCompletedCollisionCooks()
 {
 	// Tier 1: cvar-tunable applies-per-frame (was a hardcoded 2 — a throughput bottleneck during
 	// sustained traversal). Clamped so a bad value can't stall the game thread.
-	const int32 MaxApplies = FMath::Clamp(CVarCollisionMaxApplies.GetValueOnGameThread(), 1, 16);
+	const int32 MaxApplies = FMath::Clamp(VoxelSettings::Resolve(CVarCollisionMaxApplies, UVoxelWorldsSettings::Get().CollisionMaxAppliesPerFrame), 1, 16);
 
 	// Bounded drain: the budget is checked before each dequeue, so a cook beyond it stays queued for
 	// the next tick. The old `while (Dequeue(Result) && Applied < Max)` popped one extra result per

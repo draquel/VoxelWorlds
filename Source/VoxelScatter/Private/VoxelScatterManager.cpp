@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelScatterManager.h"
+#include "VoxelWorldsSettings.h"
 #include "VoxelScatterExtraction.h"
 #include "VoxelSurfaceQuery.h"
 #include "VoxelScatterRenderer.h"
@@ -372,7 +373,7 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 	// Its HISMs per region (world modes review G42): every change to a HISM costs all its instances (UVoxelScatterRenderer's
 	// batched writes), so scatter is kept in regions a quarter of the render regions' edge; precision only gains.
 	FVoxelRenderRegions ScatterRegions = FVoxelRenderRegions::FromConfig(*Config);
-	const int32 ScatterRegionSetting = CVarVoxelScatterRegionChunks.GetValueOnGameThread();
+	const int32 ScatterRegionSetting = VoxelSettings::Resolve(CVarVoxelScatterRegionChunks, Config->ScatterRegionChunks);
 	if (ScatterRegionSetting > 0)
 	{
 		ScatterRegions.RegionChunks = ScatterRegionSetting;
