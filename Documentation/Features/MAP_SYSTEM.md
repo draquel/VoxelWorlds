@@ -224,8 +224,8 @@ What they ask of the map:
 - **The minimap** (`UVCMinimapWidget`) fills its texture from the tile images only when it must: with no texture, after
   `RefillShiftTexels` (2) texels of movement, when an image of a tile it read changed (a signature over the tiles it
   visited), or after `MaxRefillSeconds` (2 s); in between it shifts the image by the movement. A plane is filled texel by
-  texel. Before world modes review G64 it filled every refresh, ten times a second, 2-3 ms each. `vc.Minimap.SkipUnchanged`
-  and `vc.Minimap.TexelFill` switch the two parts, `vc.Minimap.Stats` reports the fills.
+  texel. Before world modes review G64 it filled every refresh, ten times a second, 2-3 ms each. `vc.Minimap.Stats`
+  reports the fills.
 - **The world map** (`UVCWorldMapWidget`) asks for tile images in view (`RequestTileImage`, detail when zoomed in). When
   the images do not show (the globe drawn from its albedo) or the view holds more than `TileRedrawThrottleTiles` (256)
   tiles, in any mode, a tile's arrival redraws the map at most every 2 s (G51: a redraw per arrival held the open map at

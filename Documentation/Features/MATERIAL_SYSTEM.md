@@ -513,8 +513,8 @@ does not override it: the atlas is rendering data, which a dedicated server need
 
 The reserved slots, and materials an atlas adds past the registry's list, keep the default. Gameplay decides what the
 number means: in VoxelCharacterPlugin a cubic world's block breaks after `Hardness / MiningSpeed` while the primary action
-is held (`UVCBlockInteractionComponent::GetBreakSeconds`; bare hands 1, the stone pickaxe 1.5, the iron pickaxe 2;
-`vc.Dig.BreakTimes`), decided on the server; smooth worlds dig at once (D32).
+is held (`UVCBlockInteractionComponent::GetBreakSeconds`; bare hands 1, the stone pickaxe 1.5, the iron pickaxe 2),
+decided on the server; smooth worlds dig at once (D32).
 
 ---
 
