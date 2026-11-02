@@ -339,7 +339,7 @@ float ClassicFBM3D(const FVector& Position, const FVoxelNoiseParams& Params)
 {
 	float Total = 0.0f;
 	float Frequency = Params.Frequency;
-	float Amplitude = Params.Amplitude;
+	float Amplitude = 1.0f;
 	float MaxValue = 0.0f; // Used for normalizing result
 
 	for (int32 i = 0; i < Params.Octaves; ++i)

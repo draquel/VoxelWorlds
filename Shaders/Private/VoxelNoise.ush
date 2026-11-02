@@ -173,14 +173,15 @@ float NoiseSample(uint3 Cell, float3 Frac, float3 Offset, int NoiseType, int See
 /**
  * FVoxelNoise::FBM3D(Origin, Offset, Params): fBm at a field's origin (its splits at NoiseOrigins[OriginBase +
  * octave], uploaded by the CPU) + OffsetUU, the sample's offset from the origin in uu, scaled by each octave's frequency.
- * The octave loop is the classic FBM3D's: frequencies multiplied in float, amplitudes, normalisation.
+ * The octave loop is the classic FBM3D's: frequencies multiplied in float, amplitudes from 1, normalisation (no
+ * amplitude parameter: it divided out, G88).
  */
-float NoiseFBM3D(int OriginBase, float3 OffsetUU, int NoiseType, int Seed, int Octaves, float Frequency, float Amplitude,
-    float Lacunarity, float Persistence)
+float NoiseFBM3D(int OriginBase, float3 OffsetUU, int NoiseType, int Seed, int Octaves, float Frequency, float Lacunarity,
+    float Persistence)
 {
     float Total = 0.0f;
     float CurrentFrequency = Frequency;
-    float CurrentAmplitude = Amplitude;
+    float CurrentAmplitude = 1.0f;
     float MaxValue = 0.0f;
     const int Count = clamp(Octaves, 1, 16);
     for (int i = 0; i < Count; ++i)
@@ -193,5 +194,6 @@ float NoiseFBM3D(int OriginBase, float3 OffsetUU, int NoiseType, int Seed, int O
         CurrentAmplitude *= Persistence;
         CurrentFrequency *= Lacunarity;
     }
-    return Total / MaxValue;
+    // The weights sum to 0 only with a negative Persistence: 0 then, as the CPU (G88)
+    return MaxValue > 0.0f ? Total / MaxValue : 0.0f;
 }

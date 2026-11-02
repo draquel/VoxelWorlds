@@ -288,7 +288,7 @@ float FVoxelNoise::FBM3D(const FVector& Position, const FVoxelNoiseParams& Param
 	float Frequencies[MaxOctaves];
 	const int32 Count = OctaveFrequencies(Params, Frequencies);
 	float Total = 0.0f;
-	float Amplitude = Params.Amplitude;
+	float Amplitude = 1.0f;
 	float MaxValue = 0.0f;
 	for (int32 i = 0; i < Count; ++i)
 	{
@@ -297,7 +297,8 @@ float FVoxelNoise::FBM3D(const FVector& Position, const FVoxelNoiseParams& Param
 		MaxValue += Amplitude;
 		Amplitude *= Params.Persistence;
 	}
-	return Total / MaxValue;
+	// The first octave weighs 1, so the weights sum to 0 only with a negative Persistence; 0 then, not 0 / 0 (G88).
+	return MaxValue > 0.0f ? Total / MaxValue : 0.0f;
 }
 
 float FVoxelNoise::FBM3D(const FVector& Origin, const FVector3f& Offset, const FVoxelNoiseParams& Params)
@@ -307,7 +308,7 @@ float FVoxelNoise::FBM3D(const FVector& Origin, const FVector3f& Offset, const F
 	const int32 Count = SplitOctaves(Origin, Params, Splits);
 	OctaveFrequencies(Params, Frequencies);
 	float Total = 0.0f;
-	float Amplitude = Params.Amplitude;
+	float Amplitude = 1.0f;
 	float MaxValue = 0.0f;
 	for (int32 i = 0; i < Count; ++i)
 	{
@@ -315,7 +316,7 @@ float FVoxelNoise::FBM3D(const FVector& Origin, const FVector3f& Offset, const F
 		MaxValue += Amplitude;
 		Amplitude *= Params.Persistence;
 	}
-	return Total / MaxValue;
+	return MaxValue > 0.0f ? Total / MaxValue : 0.0f;
 }
 
 int32 FVoxelNoise::SplitOctaves(const FVector& Origin, const FVoxelNoiseParams& Params, FVoxelNoiseSplit* OutSplits)
@@ -336,7 +337,6 @@ FVoxelNoiseParams FVoxelNoise::MakeFieldParams(int32 Seed, float Frequency)
 	Params.Octaves = 2;
 	Params.Persistence = 0.5f;
 	Params.Lacunarity = 2.0f;
-	Params.Amplitude = 1.0f;
 	Params.Seed = Seed;
 	Params.Frequency = Frequency;
 	return Params;
@@ -406,7 +406,7 @@ double FVoxelNoise::ReferenceFBM3D(const FVector& Position, const FVoxelNoisePar
 	float Frequencies[MaxOctaves];
 	const int32 Count = OctaveFrequencies(Params, Frequencies);
 	double Total = 0.0;
-	double Amplitude = Params.Amplitude;
+	double Amplitude = 1.0;
 	double MaxValue = 0.0;
 	for (int32 i = 0; i < Count; ++i)
 	{
@@ -414,5 +414,5 @@ double FVoxelNoise::ReferenceFBM3D(const FVector& Position, const FVoxelNoisePar
 		MaxValue += Amplitude;
 		Amplitude *= Params.Persistence;
 	}
-	return Total / MaxValue;
+	return MaxValue > 0.0 ? Total / MaxValue : 0.0;
 }

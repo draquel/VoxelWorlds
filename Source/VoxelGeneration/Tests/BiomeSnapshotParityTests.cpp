@@ -89,7 +89,6 @@ bool FBiomeSnapshotParityTest::RunTest(const FString& Parameters)
 		P.Octaves = 2;
 		P.Persistence = 0.5f;
 		P.Lacunarity = 2.0f;
-		P.Amplitude = 1.0f;
 	};
 	InitClimate(TempNP);   TempNP.Seed = WorldSeed + Config->TemperatureSeedOffset;    TempNP.Frequency = Config->TemperatureNoiseFrequency;
 	InitClimate(MoistNP);  MoistNP.Seed = WorldSeed + Config->MoistureSeedOffset;      MoistNP.Frequency = Config->MoistureNoiseFrequency;

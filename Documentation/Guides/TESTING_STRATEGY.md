@@ -99,8 +99,9 @@ GPU against the CPU:
    a single `Success`.
 3. It extracts the **parity lines** (the parity tests' `[N voxels]: density~` lines, one per case and LOD: density,
    material, biome and metadata agreement and the GPU's CRC) and compares all **111** with the record,
-   `Documentation/CodeReview/VW8/gpu_parity_lines_2026-11-02.txt` (`parity_lines.py`; CR2's 114 less the three
-   `BlendDither off` cases, gone with `voxel.Biome.BlendDither` in VoxelWorlds 8). A changed line is a finding to
+   `Documentation/CodeReview/VW8/gpu_parity_lines_2026-11-02_generation.txt` (`parity_lines.py`; CR2's 114 less the
+   three `BlendDither off` cases, gone with `voxel.Biome.BlendDither` in VoxelWorlds 8, and 24 lines moved by the shader
+   cleanup of G97 and G88, `Features/GPU_PIPELINE.md`). A changed line is a finding to
    explain, not a tolerance to widen: a change that should not touch generation leaves every line identical.
 4. It copies the editor's log to `Saved/QA/editor/`.
 

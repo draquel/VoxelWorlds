@@ -101,6 +101,16 @@ Generation on the GPU must equal the CPU's within float rounding. The `VoxelWorl
 `Generation.GPUNoiseGeneratorAsync` compare whole chunks and log a CRC per case. They need a real RHI: under
 `-nullrhi` they skip themselves, so run them in the editor (the project `CLAUDE.md`, "Running correctness tests").
 
+The shader carries the current rules only. VoxelWorlds 8 kept two dead legs behind parameters pinned to 1, the classic
+Simplex kernel (before G43) and the old blend pick (before G39), because removing them changes DXC's code generation;
+G97 removed them (2026-11-02), and G88 the noise's amplitude parameter (`NoiseFBM3D`'s octave weights start at 1). The
+GPU's output moved by rounding in 24 of the 111 parity lines, the record since then
+(`Documentation/CodeReview/VW8/gpu_parity_lines_2026-11-02_generation.txt`): G97 alone moved all 24 (the InfinitePlane
+case, the caves under the sea and six planet cases, each at three LODs), and G88 the InfinitePlane case's three again.
+Every test still passes and no line has a voxel whose density differs from the CPU's by more than 2 steps; the moved
+lines' density disagreements went from 2-50 voxels of 32,768 to 3-48, their material disagreements from 0-7 to 0-9.
+The CPU did not change (the headless suite's mesh digests and the explored maps are byte-identical to before).
+
 ## Performance
 
 A 32^3 chunk dispatches 8x8x8 groups of 64 threads (one thread per voxel); a 64^3 chunk 16x16x16. The shaders keep

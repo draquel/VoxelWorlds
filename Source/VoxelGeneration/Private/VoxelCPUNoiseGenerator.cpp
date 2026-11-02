@@ -178,14 +178,12 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 	TempNoiseParams.Octaves = 2;  // Fewer octaves for smoother biome transitions
 	TempNoiseParams.Persistence = 0.5f;
 	TempNoiseParams.Lacunarity = 2.0f;
-	TempNoiseParams.Amplitude = 1.0f;
 
 	FVoxelNoiseParams MoistureNoiseParams;
 	MoistureNoiseParams.NoiseType = EVoxelNoiseType::Simplex;
 	MoistureNoiseParams.Octaves = 2;
 	MoistureNoiseParams.Persistence = 0.5f;
 	MoistureNoiseParams.Lacunarity = 2.0f;
-	MoistureNoiseParams.Amplitude = 1.0f;
 
 	// Use configuration values if available, otherwise use defaults.
 	// (Continentalness noise params are built inside FInfinitePlaneWorldMode::ComputeEffectiveTerrainParams

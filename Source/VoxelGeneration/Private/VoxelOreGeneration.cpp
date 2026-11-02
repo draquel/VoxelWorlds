@@ -31,7 +31,6 @@ float FVoxelCPUNoiseGenerator::SampleOreVeinNoise(const FVector& WorldPos, const
 	OreNoiseParams.Octaves = 2;  // Simple noise for ores
 	OreNoiseParams.Persistence = 0.5f;
 	OreNoiseParams.Lacunarity = 2.0f;
-	OreNoiseParams.Amplitude = 1.0f;
 
 	FVector SamplePos = WorldPos;
 

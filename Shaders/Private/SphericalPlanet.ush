@@ -124,7 +124,7 @@ float PlanetOreVeinNoise(uint OreIdx, float3 D, int WorldSeed)
     const int Base = OreNoiseOrigin + (int)OreIdx * 3;
     const float4 Streak = NoiseOrigins[Base * 2]; // [direction, 1 - 1 / StreakStretch] (factor 0 for a blob)
     const float3 Offset = D - Streak.xyz * (dot(D, Streak.xyz) * Streak.w);
-    const float NoiseValue = NoiseFBM3D(Base + 1, Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, WorldSeed + SeedOffset, 2, o1.x, 1.0f, 2.0f, 0.5f);
+    const float NoiseValue = NoiseFBM3D(Base + 1, Offset, VOXELGEN_NOISE_TYPE_SIMPLEX, WorldSeed + SeedOffset, 2, o1.x, 2.0f, 0.5f);
     return (NoiseValue + 1.0f) * 0.5f;
 }
 
@@ -189,11 +189,11 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     if (ContinentalnessEnabled != 0)
     {
         Continentalness = GpuContinentalnessCurves(
-            NoiseFBM3D(ContinentNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, ContinentalnessSeed, 2, ContinentalnessFrequency, 1.0f, 2.0f, 0.5f),
+            NoiseFBM3D(ContinentNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, ContinentalnessSeed, 2, ContinentalnessFrequency, 2.0f, 0.5f),
             EffectiveBaseHeight, EffectiveHeightScale);
     }
     const float TerrainNoise = NoiseFBM3D(TerrainNoiseOrigin, SurfaceOffset,
-        NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseAmplitude, NoiseLacunarity, NoisePersistence);
+        NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseLacunarity, NoisePersistence);
     float TerrainAltitude = EffectiveBaseHeight + TerrainNoise * EffectiveHeightScale * 0.5f;
 
     // Terrain conditioning (SP-B10): the planet zones blend the altitude along this direction before the SDF, as on the CPU.
@@ -216,8 +216,8 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     if (BiomeCount > 0)
     {
         // Temperature and moisture on the datum sphere, like the terrain (SP-B1)
-        const float Temperature = NoiseFBM3D(TemperatureNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 1.0f, 2.0f, 0.5f);
-        const float Moisture = NoiseFBM3D(MoistureNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 1.0f, 2.0f, 0.5f);
+        const float Temperature = NoiseFBM3D(TemperatureNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 2.0f, 0.5f);
+        const float Moisture = NoiseFBM3D(MoistureNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 2.0f, 0.5f);
         const BiomeBlendResult Blend = SampleGpuBiomeBlend(Temperature, Moisture, Continentalness);
         const GpuBiome Dominant = LoadGpuBiome(Blend.Indices[0]);
         OutBiomeID = Dominant.BiomeID;

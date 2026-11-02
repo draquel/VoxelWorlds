@@ -24,6 +24,9 @@
 // - WorldModes.Plane.NoiseCreases: the generated terrain height across the line X = Y, where every octave's simplex
 //   boundary lies, steps no more and its slope changes no more than at a control of points off the line (with the classic
 //   kernel, before MP4, the height stepped there: G43's creases, about a quarter voxel).
+// - Noise.FBMNormalised (G88): the fBm is normalised with a first octave weight of 1 (the amplitude that divided out went):
+//   one octave's value at Persistence 0 for any octave count, the Simplex fBm within [-1, 1], and 0, not NaN, where the
+//   weights sum to 0 (Persistence -1, two octaves), in both float forms and the double reference.
 // ---------------------------------------------------------------------------
 
 namespace VoxelHeightmapNoiseTestUtils
@@ -38,7 +41,6 @@ namespace VoxelHeightmapNoiseTestUtils
 		Params.Octaves = 4;
 		Params.Lacunarity = 2.0f;
 		Params.Persistence = 0.5f;
-		Params.Amplitude = 1.0f;
 		return Params;
 	}
 }
@@ -219,6 +221,55 @@ bool FVoxelPlaneNoiseCreasesTest::RunTest(const FString& Parameters)
 		OnLine.MaxStep <= 2.0 * Control.MaxStep + 1.0e-3);
 	TestTrue(*FString::Printf(TEXT("The slope is as continuous across X = Y as off it (%.4f against %.4f)"), OnLine.MaxSlopeJump, Control.MaxSlopeJump),
 		OnLine.MaxSlopeJump <= 2.0 * Control.MaxSlopeJump + 1.0e-2);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNoiseFBMNormalisedTest,
+	"VoxelWorlds.Noise.FBMNormalised",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelNoiseFBMNormalisedTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelHeightmapNoiseTestUtils;
+	FRandomStream Random(0x6088);
+	const EVoxelNoiseType Types[] = { EVoxelNoiseType::Simplex, EVoxelNoiseType::Perlin, EVoxelNoiseType::Cellular, EVoxelNoiseType::Voronoi };
+
+	// 1. At Persistence 0 only the first octave weighs, so the fBm is that octave's value whatever the octave count.
+	int32 FirstOctaveDiffer = 0;
+	for (const EVoxelNoiseType Type : Types)
+	{
+		FVoxelNoiseParams One = MakeTerrainParams(Type);
+		One.Octaves = 1;
+		FVoxelNoiseParams Many = One;
+		Many.Octaves = 6;
+		Many.Persistence = 0.0f;
+		for (int32 i = 0; i < 200; ++i)
+		{
+			const FVector P(Random.FRandRange(-1.0e6, 1.0e6), Random.FRandRange(-1.0e6, 1.0e6), Random.FRandRange(-1.0e4, 1.0e4));
+			FirstOctaveDiffer += FVoxelNoise::FBM3D(P, One) != FVoxelNoise::FBM3D(P, Many);
+		}
+	}
+	TestEqual(TEXT("Persistence 0 gives the first octave alone (800 points, four types)"), FirstOctaveDiffer, 0);
+
+	// 2. The Simplex fBm is a weighted mean of values in [-1, 1].
+	const FVoxelNoiseParams Terrain = MakeTerrainParams();
+	float MaxAbs = 0.0f;
+	for (int32 i = 0; i < 2000; ++i)
+	{
+		const FVector P(Random.FRandRange(-1.0e6, 1.0e6), Random.FRandRange(-1.0e6, 1.0e6), 0.0);
+		MaxAbs = FMath::Max(MaxAbs, FMath::Abs(FVoxelNoise::FBM3D(P, Terrain)));
+	}
+	TestTrue(*FString::Printf(TEXT("The Simplex fBm stays within [-1, 1] (max |value| %.4f)"), MaxAbs), MaxAbs <= 1.0f);
+
+	// 3. Weights summing to 0 (1 - 1) give 0 in every form, not 0 / 0.
+	FVoxelNoiseParams Zero = Terrain;
+	Zero.Octaves = 2;
+	Zero.Persistence = -1.0f;
+	const FVector P(12345.0, -6789.0, 250.0);
+	const float A = FVoxelNoise::FBM3D(P, Zero);
+	const float B = FVoxelNoise::FBM3D(P, FVector3f(10.0f, 20.0f, 0.0f), Zero);
+	const double C = FVoxelNoise::ReferenceFBM3D(P, Zero);
+	TestTrue(*FString::Printf(TEXT("A zero weight sum gives 0 (%f, %f, %f)"), A, B, C), A == 0.0f && B == 0.0f && C == 0.0);
 	return true;
 }
 

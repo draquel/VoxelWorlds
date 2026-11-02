@@ -187,7 +187,6 @@ FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParamsAt
 		ContinentalnessNoiseParams.Octaves = 2;
 		ContinentalnessNoiseParams.Persistence = 0.5f;
 		ContinentalnessNoiseParams.Lacunarity = 2.0f;
-		ContinentalnessNoiseParams.Amplitude = 1.0f;
 		ContinentalnessNoiseParams.Seed = BaseNoiseParams.Seed + BiomeSnapshot->ContinentalnessSeedOffset;
 		ContinentalnessNoiseParams.Frequency = BiomeSnapshot->ContinentalnessNoiseFrequency;
 

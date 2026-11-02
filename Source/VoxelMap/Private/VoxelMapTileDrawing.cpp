@@ -74,7 +74,6 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord, uint32 Generatio
 	FallbackTempNoiseParams.Octaves = 2;
 	FallbackTempNoiseParams.Persistence = 0.5f;
 	FallbackTempNoiseParams.Lacunarity = 2.0f;
-	FallbackTempNoiseParams.Amplitude = 1.0f;
 	FallbackTempNoiseParams.Seed = NoiseParams.Seed + 1234;
 	FallbackTempNoiseParams.Frequency = 0.00005f;
 

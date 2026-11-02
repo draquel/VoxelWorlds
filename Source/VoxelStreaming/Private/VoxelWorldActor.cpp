@@ -282,7 +282,6 @@ UVoxelWorldConfiguration* AVoxelWorldActor::CreateDefaultConfiguration()
 	Config->NoiseParams.Octaves = 4;
 	Config->NoiseParams.Lacunarity = 2.0f;
 	Config->NoiseParams.Persistence = 0.5f;
-	Config->NoiseParams.Amplitude = 1.0f;
 
 	// LOD bands matched to ViewDistance (default 10000)
 	// ChunkSize=32, VoxelSize=100 -> 3200 units per chunk

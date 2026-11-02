@@ -40,7 +40,6 @@ namespace
 		P.NoiseType = EVoxelNoiseType::Simplex;
 		P.Seed = kSeed;
 		P.Frequency = 0.000025f;
-		P.Amplitude = 1.0f;
 		P.Octaves = 6;
 		P.Lacunarity = 2.0f;
 		P.Persistence = 0.5f;
@@ -81,7 +80,6 @@ namespace
 			C.Octaves = 2;
 			C.Persistence = 0.5f;
 			C.Lacunarity = 2.0f;
-			C.Amplitude = 1.0f;
 			C.Seed = NoiseParams.Seed + Config->ContinentalnessSeedOffset;
 			C.Frequency = Config->ContinentalnessNoiseFrequency;
 
