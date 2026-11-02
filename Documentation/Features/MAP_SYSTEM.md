@@ -304,6 +304,6 @@ globe zoomed out drawn from the albedo).
 ## See Also
 
 - [BIOME_SYSTEM.md](BIOME_SYSTEM.md) — Biome definitions and blend logic used by tile coloring
-- [MATERIAL_REGISTRY.md](MATERIAL_REGISTRY.md) — Material ID to color mapping
-- [CHUNK_STREAMING.md](CHUNK_STREAMING.md) — UVoxelChunkManager and OnChunkGenerated delegate
-- [NOISE_GENERATION.md](NOISE_GENERATION.md) — FVoxelCPUNoiseGenerator and FBM3D noise sampling
+- [MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) — Material ID to color mapping
+- [LOD_SYSTEM.md](LOD_SYSTEM.md) — UVoxelChunkManager and OnChunkGenerated delegate
+- [NOISE_LIBRARY.md](NOISE_LIBRARY.md) — FVoxelCPUNoiseGenerator and FBM3D noise sampling

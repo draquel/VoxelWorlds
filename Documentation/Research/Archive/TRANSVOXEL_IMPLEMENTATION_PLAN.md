@@ -1,5 +1,7 @@
 # Transvoxel Seam Stitching — Implementation Plan
 
+> **Archived 2026-11-02** (code review CR5, D-CR6): a Transvoxel plan that was not pursued; LOD boundaries are closed by seam ownership instead. Current: `Features/STREAMING_AND_SEAMS.md`. Kept as history.
+
 **Project**: VoxelWorlds Plugin (UE 5.8)
 **Target File**: `VoxelCPUMarchingCubesMesher.cpp` (CPU path; GPU path later)
 **Status**: ⏸️ NOT PURSUED. Transvoxel was previously implemented but disabled (`bUseTransvoxel=false`)

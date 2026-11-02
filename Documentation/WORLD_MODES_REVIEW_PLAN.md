@@ -1,5 +1,7 @@
 # World modes review plan (cubic, island, spherical)
 
+> **Frozen 2026-11-02** (code review CR5, D-CR6). This plan is history: the cubic, island and planet reviews, spherical Phases 1-6 and mode parity from 2026-10-12 to 10-29, findings G1-G86 and decisions D1-D41, each section true on its own date. The systems as they are now are described by the Features docs: `WORLD_MODES.md` (modes, frames, the sea, mode parity), `LOD_SYSTEM.md` (the window, slabs, the far field, the cut-over, far compression), `STREAMING_AND_SEAMS.md` (streaming, seam ownership, snapshots, collision cooking, residency), `SCATTER_SYSTEM.md`, `WATER_SYSTEM.md`, `EDIT_LAYER.md`, `DUAL_CONTOURING.md`, `MARCHING_CUBES_MESHING.md`, `MAP_SYSTEM.md`, `MATERIAL_SYSTEM.md`, `NOISE_LIBRARY.md`, `BIOME_SYSTEM.md`; open findings and the next free G- and D-numbers are in `Documentation/FINDINGS.md` at the project root. Its bench reports stay in `Research/Bench/`.
+
 VoxelWorlds has been built and tuned almost entirely on one configuration: an InfinitePlane world with smooth
 meshing (Dual Contouring in the demo). This plan sets up a review of the two other configurations that are
 meant to be supported, and records what spherical mode still needs:
@@ -379,7 +381,7 @@ from a fresh world and the user's demo save is never loaded or written. The demo
 
 **Bench method.** One cold PIE per run: Play, `vox.DeleteSave` (so the next Play is fresh again), clock pinned at noon,
 `voxel.Bench.Run <tag> <v> 40000 start=0:0 dir=1:0 warmup=120`, Stop. Every warmup drained before the traverse. The
-JSON reports are copied to [Research/Bench/ReviewA/](Research/Bench/ReviewA/). The session's helper scripts (status
+JSON reports are copied to [Research/Bench/ReviewA/](Research/Bench/ReviewA). The session's helper scripts (status
 probe, face aim and measure harness, cold-bench driver) are in the project's `Saved/ClaudeScripts/rc/`; screenshots named
 below are in `Saved/Screenshots/Claudius/`.
 
@@ -624,7 +626,7 @@ cubic surface query (block top) and block-accurate editing for the consumers tha
 **Method.** As in §12.2: a single editor in the foreground, background throttle off, PIE in the level viewport, one
 cold fresh world per run, `voxel.Bench.Run <tag> <v> 40000 start=0:0 dir=1:0 warmup=120`. Cubic is `Review_Cubic`,
 whose asset still has `bEnableLOD` on: before this change it ran the LOD system (§12.2 "LOD on (as shipped)"), and now
-it must behave like `Review_Cubic_NoLOD`. The JSON reports are in [Research/Bench/D7/](Research/Bench/D7/).
+it must behave like `Review_Cubic_NoLOD`. The JSON reports are in [Research/Bench/D7/](Research/Bench/D7).
 
 **PIE** (§12.2 rows for comparison, in italics):
 
@@ -728,7 +730,7 @@ headless memory columns below still match or beat §12.7.
 throttle off, PIE in the level viewport, a cold fresh world per run, `voxel.Bench.Run <tag> <v> 40000 start=0:0 dir=1:0
 warmup=120`. The sync rows are the same build with `voxel.FarCompression.Async 0`. "Sweep" is the new `FarCompressMs`
 section, and "unattributed" is what remains of `TotalMs` after every timed section. JSON reports are in
-[Research/Bench/G6/](Research/Bench/G6/).
+[Research/Bench/G6/](Research/Bench/G6).
 
 **PIE** (§12.7 rows for comparison, in italics; their sweep was untimed and measured about 14 ms of unattributed P95
 at v3000, §12.4):
@@ -862,7 +864,7 @@ warmup=120 <route>`, Stop. Every warmup drained. Routes, all with `follow=300`:
 
 `follow=` holds the pawn 300 uu above the seabed under water, so the pawn drowned in the first chord run (G4). For every
 run reported here the player Blueprint's `DrowningDamagePerSecond` was set to 0 in memory, and restored afterwards. The
-JSON reports are in [Research/Bench/ReviewB/](Research/Bench/ReviewB/), the session scripts are
+JSON reports are in [Research/Bench/ReviewB/](Research/Bench/ReviewB), the session scripts are
 `Saved/ClaudeScripts/rc/rb_*`, and screenshots are `Saved/Screenshots/Claudius/rb*` and `Saved/Screenshots/VoxelMap/rbI2_*`.
 
 **Probe tests** (I1) are new automation tests that record what the code does and pass:
@@ -1239,7 +1241,7 @@ come from one binary; the legacy path logged the flag's state each time the pipe
 world per run, `DrowningDamagePerSecond` 0 in memory, the §13.3 chord: `voxel.Bench.Run <tag> 3000 500000 warmup=120
 start=-250000:0 dir=1:0 follow=300`, legacy and fixed runs interleaved. Unlike §13.3, this editor was not the foreground
 window and the main checkout's editor stayed open beside it, so frame and manager times compare only within these tables.
-JSON reports are in [Research/Bench/KI12/](Research/Bench/KI12/).
+JSON reports are in [Research/Bench/KI12/](Research/Bench/KI12).
 
 **PIE, island M chord v3000:**
 
@@ -1351,7 +1353,7 @@ old window (removed in the next commit), so both windows come from one binary. T
 editor open (not in the foreground), background throttle off, cold fresh world per run, drowning off in memory, legacy and
 fixed interleaved. Routes: the §13.3 chord (`follow=300`); a straight flight at z 7,200 (layer 1, `start=-250000:0:7200
 dir=1:0`, 150,000 uu at v3000); and S at its spawn (`warmup=300`, zero distance, as in §13.4). JSON reports are in
-[Research/Bench/VerticalWindow/](Research/Bench/VerticalWindow/).
+[Research/Bench/VerticalWindow/](Research/Bench/VerticalWindow).
 
 | Run | Window | Loaded chunks per layer, mean over the traverse | Loaded mean / peak | LOD re-meshes | Audit | Frame P95 / manager P95 ms | LOD cache rebuild P50 / P95 ms | JSON |
 |-----|--------|-------------------------------------------------|--------------------|---------------|-------|----------------------------|--------------------------------|------|
@@ -1679,7 +1681,7 @@ runs the Exponential curve (100% density, material, biome and metadata at LOD 0/
 |  | Done, merged 2026-10-15 | VoxelWorlds#88 | §11's non-spherical items fixed (WORLD_MODES.md island sections and POI claim, CAVE_SYSTEM, SCATTER_SYSTEM, README, TRAVERSAL_LIMITS); `Research/PERFORMANCE_TARGETS.md` has a current baseline from the control; `Features/WORLD_MODES.md`'s island sections carry §13's numbers and the known gaps |
 |  | Done, merged 2026-10-15 | VoxelWorlds#87, UE5_PluginDev#102 | Phase 0's exit check: `PlanetTest` (a 2.5 km planet from the demo config) generates on the CPU with the SP-B3 warning, the config raises no warnings, and the terrain stays inside its shell; the pawn spawns on the north pole (z 250,090). Test `Configuration.PlanetSettings` (the default spherical settings get the depth warning; water on a planet is flagged; `ShouldUseGPUGeneration` is false for planets). Doc corrections per §11 |
 
-JSON reports: [Research/Bench/M1/](Research/Bench/M1/) (`m1h1_*` the WM-H1 A/B, `m1h8_*` the WM-H8 runs).
+JSON reports: [Research/Bench/M1/](Research/Bench/M1) (`m1h1_*` the WM-H1 A/B, `m1h8_*` the WM-H8 runs).
 
 **Left for later milestones**, as planned: KI4's four island param builders (WM-A1), the edge, recovery and boundary
 (M3), slab culling and 3D LOD distance for islands (M4), cubic's legacy path (M5). M1 changed one shared behaviour on
@@ -1834,7 +1836,7 @@ crossing `start=150000:0 dir=1:0` (150,000 uu, ending 50,000 uu past R + F). The
 through the same override, as in §12-§13; the island is `Review_Island_M`. The legacy shim reproduces the old window,
 slab gate and distances exactly in the strategy; the chunk manager's range checks follow the strategy's horizon in both
 arms, so legacy island runs report audit 0 where review B saw KI11. JSON reports in
-[Research/Bench/M4/](Research/Bench/M4/).
+[Research/Bench/M4/](Research/Bench/M4).
 
 **Island M against the control** (this build; review B's numbers are in §13.3):
 
@@ -2055,7 +2057,7 @@ the path itself). §12's route: `voxel.Bench.Run <tag> <v> 40000 start=0:0 dir=1
 run, interleaved per speed: control, cubic, cubic on the legacy path; v3000 twice. PIE in the worktree editor's level
 viewport (1280×722), background throttle off, `vox.DeleteSave`, clock pinned at noon, after two throwaway PIEs (G14). The
 control is `DemoSmoothWorldConfig` and cubic is `Review_Cubic`, both through `voxel.ConfigOverride`, as in §12. JSON reports
-in [Research/Bench/M5/](Research/Bench/M5/).
+in [Research/Bench/M5/](Research/Bench/M5).
 
 **PIE** ("Mesh" is the meshing section's P95, "Seam" the seam scheduler's, "Slices" the legacy neighbour-slice extraction's;
 "Chunk / seam jobs" over the whole run; thrash = re-meshes of chunks that already had a mesh, by reason LOD / neighbour /
@@ -2271,7 +2273,7 @@ clock pinned at noon, `warmup=120`, a throwaway PIE first (G14). Three batches o
   every PIE start and is the primary below. The two agree within run-to-run noise; the second batch's settled runs are
   discarded.
 
-JSON reports in [Research/Bench/M6/](Research/Bench/M6/) (`m6_*` first batch, `m6f_*` second, `m6g_*` third, `*s_*_settled`
+JSON reports in [Research/Bench/M6/](Research/Bench/M6) (`m6_*` first batch, `m6f_*` second, `m6g_*` third, `*s_*_settled`
 the settled runs).
 
 **Island M against the control, final build** (far ocean = its share of the manager's tick):
@@ -2571,7 +2573,7 @@ throttling off, `vox.DeleteSave`, the clock pinned at noon, the player controlle
 `voxel.Temp.PlanetLegacyWindow` cvar, which restored the planet's old viewer-relative window and horizon (removed before
 the PR). The control generates on the GPU and the planet on the CPU (SP-B3). So two more pairs ran after the batch in the
 same editor session, on a CPU-generation copy of the control (`bUseGPUGeneration` off, not committed): the straight
-route, and the 80° circle's radius at z 7,200. JSON reports in [Research/Bench/SP1/](Research/Bench/SP1/) (`p1b_*` the batch,
+route, and the 80° circle's radius at z 7,200. JSON reports in [Research/Bench/SP1/](Research/Bench/SP1) (`p1b_*` the batch,
 `p1bs_*` settled, `p1c_*` and `p1d_*` the CPU control).
 
 | Route | Run | Frame P50 / P95 / P99 ms | Manager P95 ms | Catch-up s | Gen queue mean / peak | Loaded mean / peak | Peak voxel MB | Systems MB | LOD re-meshes | Generated / s, queue full | Audit | JSON |
@@ -2871,7 +2873,7 @@ editor session, a throwaway PIE first (G14), `vox.DeleteSave`, the clock at noon
 `warmup=120`. In the same batch, the planet on the CPU (`voxel.GPUGeneration.Enable 0`) on the equator, and after it the
 GPU control on a circle of the 80° circle's radius at z 7,200, and repeats of the two v1500 circle runs. PIE ran in the
 worktree editor's level viewport at 1842×920 (§15.2: 3440×1408), so frame times compare within this batch only. JSON
-reports in [Research/Bench/SP2/](Research/Bench/SP2/) (`p2b_*` the batch, `p2bs_*` settled, `p2c_*` the control's
+reports in [Research/Bench/SP2/](Research/Bench/SP2) (`p2b_*` the batch, `p2bs_*` settled, `p2c_*` the control's
 circle, `p2r_*` the repeats).
 
 | Route | Run | Frame P50 / P95 / P99 ms | Manager P95 ms | Catch-up s | Gen queue mean / peak | Loaded mean / peak | Peak voxel MB | Systems MB | LOD re-meshes | Generated / s, queue full | Audit | JSON |

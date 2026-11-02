@@ -1,5 +1,7 @@
 # LOD Seam Investigation — Stage 1 Findings (2026-06-10)
 
+> **Archived 2026-11-02** (code review CR5, D-CR6): the June investigation of LOD seams, superseded by seam ownership. Current: `Features/STREAMING_AND_SEAMS.md`. Kept as history.
+
 > ## ⚠️ CURRENT UNDERSTANDING (2026-06-13, latest) — read this first
 >
 > There are **two distinct things** that were conflated, plus a real open bug:

@@ -1,5 +1,7 @@
 # Spherical planet requirements
 
+> **Frozen 2026-11-02** (code review CR5, D-CR6). This document is history: the planet's requirements and the phases that met them (Phases 0-6, 2026-10-12 to 10-19; the results in `WORLD_MODES_REVIEW_PLAN.md` §15-§20). Planets as they are now: `Features/WORLD_MODES.md` ("Mode 3" and "Mode parity"); open findings and the next free G- and D-numbers are in `Documentation/FINDINGS.md` at the project root.
+
 Spherical mode (`EWorldMode::SphericalPlanet`) has been reserved since the GPU generation epic. This document
 collects what the docs already say about it and what the code actually does, then lists what is needed to bring
 it to the level of InfinitePlane and IslandBowl. It is a requirements list, not an implementation plan. The

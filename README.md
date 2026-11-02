@@ -13,7 +13,7 @@ water, ore, scatter).
   mesher in world modes review WM-C4, the GPU Marching Cubes and Dual Contouring meshers in code review CR1).
 - **Seam ownership** — every mode meshes chunk interiors only and gives each chunk boundary to one seam
   job that reads both sides' voxels, so a chunk never waits for, or re-meshes on, a neighbour
-  (`Documentation/Research/SEAM_OWNERSHIP_ARCHITECTURE.md`; cubic since world modes review M5).
+  (`Documentation/Research/Archive/SEAM_OWNERSHIP_ARCHITECTURE.md`; cubic since world modes review M5).
 - **Watertight LOD seams** — MC seams handled by **geomorph** (bending the fine surface toward the
   coarse contour at the boundary); DC LOD seams and 4-chunk corner seams sealed.
 - **Pluggable LOD** — swappable strategies via `IVoxelLODStrategy` (distance-band default) with
@@ -44,9 +44,9 @@ Start with **[Documentation/ARCHITECTURE.md](Documentation/ARCHITECTURE.md)**, t
   [Testing Strategy](Documentation/Guides/TESTING_STRATEGY.md),
   [Master Material Setup](Documentation/Guides/MASTER_MATERIAL_SETUP.md)
 - **Research/** — investigations, implementation plans, and performance studies
-  ([roadmap](Documentation/Research/IMPLEMENTATION_PHASES.md),
+  ([roadmap](Documentation/Research/Archive/IMPLEMENTATION_PHASES.md),
   [streaming perf](Documentation/Research/STREAMING_PERFORMANCE.md),
-  [LOD seam investigation](Documentation/Research/LOD_SEAM_INVESTIGATION.md))
+  [LOD seam investigation](Documentation/Research/Archive/LOD_SEAM_INVESTIGATION.md))
 
 ## Project Structure
 
@@ -71,7 +71,7 @@ VoxelWorlds/
 Core engine is implemented and in active development. Meshing (cubic CPU, MC/DC CPU+GPU), LOD with
 watertight seams, streaming, generation (biomes/caves/water/ore/scatter), editing, materials, and the
 map subsystem are functional. See
-[Documentation/Research/IMPLEMENTATION_PHASES.md](Documentation/Research/IMPLEMENTATION_PHASES.md)
+[Documentation/Research/IMPLEMENTATION_PHASES.md](Documentation/Research/Archive/IMPLEMENTATION_PHASES.md)
 for the phase-by-phase roadmap.
 
 ## Testing

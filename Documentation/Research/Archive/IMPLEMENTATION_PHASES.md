@@ -1,5 +1,7 @@
 # Implementation Phases
 
+> **Archived 2026-11-02** (code review CR5, D-CR6): the February build plan, Phases 1-8, every phase complete. Current: `ARCHITECTURE.md` and the Features docs. Kept as history.
+
 Development roadmap for the VoxelWorlds plugin.
 
 ## Phase 1: Foundation (Weeks 1-2) ✓ COMPLETE

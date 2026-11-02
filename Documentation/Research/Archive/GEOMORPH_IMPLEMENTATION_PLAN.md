@@ -1,5 +1,7 @@
 # LOD Seam Geomorph (Transvoxel Secondary Positions) — Implementation Plan
 
+> **Archived 2026-11-02** (code review CR5, D-CR6): the Marching Cubes geomorph, implemented in June. Current: `Features/MARCHING_CUBES_MESHING.md`. Kept as history.
+
 **Project**: VoxelWorlds Plugin (UE 5.8)
 **Target**: `VoxelCPUMarchingCubesMesher` (CPU, increment 1) + `MarchingCubesMeshGeneration.usf` `MainCS` (GPU, increment 2)
 **Status**: ✅ IMPLEMENTED (CPU + GPU). This plan is retained as the design record; the geomorph

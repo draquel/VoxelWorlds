@@ -899,7 +899,7 @@ inputs: a `.a` on that output fails the material's compile and every mesh using 
 | MI_VoxelDefault | Content/VoxelWorlds/Materials/ | Default material instance |
 | MF_* | Content/VoxelWorlds/Materials/Functions/ | Reusable material functions |
 
-See [MASTER_MATERIAL_SETUP.md](MASTER_MATERIAL_SETUP.md) for detailed setup instructions.
+See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed setup instructions.
 
 ---
 
@@ -951,7 +951,7 @@ The master material (M_VoxelMaster) must:
 
 When the opaque MID overrides blend mode back to `BLEND_Opaque`, UE ignores the OpacityMask pin entirely — no performance cost for opaque chunks.
 
-See [MASTER_MATERIAL_SETUP.md](MASTER_MATERIAL_SETUP.md) for detailed setup instructions.
+See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed setup instructions.
 
 ---
 

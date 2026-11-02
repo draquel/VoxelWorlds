@@ -25,10 +25,10 @@ The Marching Cubes meshing system generates organic, curved terrain surfaces usi
 - **LOD Support**: Strided sampling for level-of-detail rendering
 - **LOD-seam handling**: Shipped via **geomorph** (bending the fine surface toward the coarse
   contour at the boundary) — see
-  [Research/GEOMORPH_IMPLEMENTATION_PLAN.md](../Research/GEOMORPH_IMPLEMENTATION_PLAN.md).
+  [Research/GEOMORPH_IMPLEMENTATION_PLAN.md](../Research/Archive/GEOMORPH_IMPLEMENTATION_PLAN.md).
   The Transvoxel transition-cell approach described later in this doc was implemented but is
   **disabled** (`bUseTransvoxel=false`); see
-  [Research/TRANSVOXEL_IMPLEMENTATION_PLAN.md](../Research/TRANSVOXEL_IMPLEMENTATION_PLAN.md).
+  [Research/TRANSVOXEL_IMPLEMENTATION_PLAN.md](../Research/Archive/TRANSVOXEL_IMPLEMENTATION_PLAN.md).
 
 ### When to Use Marching Cubes Meshing
 

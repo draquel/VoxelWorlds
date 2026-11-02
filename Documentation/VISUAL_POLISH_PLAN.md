@@ -1,5 +1,7 @@
 # Visual polish plan (VP1-VP5)
 
+> **Frozen 2026-11-02** (code review CR5, D-CR6). This plan is history: VP1-VP5 and their milestones, 2026-10-24 to 10-29. The results live in `Features/RENDERING_SYSTEM.md` (shadow culling, the far field's stand-ins, render regions), `Features/MATERIAL_SYSTEM.md` (gradient sampling, roughness, texture variation, the saved texture arrays and their slices), the meshing docs (VP5's LOD crossings) and WorldClockPlugin's instructions (the planet sky light and atmosphere shadows); its open items (F2.9, F3.2-F3.4, D-VP1..3) and the next free numbers are in `Documentation/FINDINGS.md` at the project root.
+
 Three reports from a run around `PlanetTest` (2026-10-24), to fix before making media of the project:
 
 1. "The sky flickers and moves strangely as the camera moves. Unsure if it is the skybox or the clouds."

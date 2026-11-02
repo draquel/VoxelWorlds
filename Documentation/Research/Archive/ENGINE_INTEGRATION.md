@@ -1,5 +1,7 @@
 # Engine Integration Strategy — Leveraging UE 5.8 Systems
 
+> **Archived 2026-11-02** (code review CR5, D-CR6): the June engine-integration decisions (no Nanite, RVT, runtime PCG, World Partition for actors only), each acted on. Current: `ARCHITECTURE.md` ("Design Decisions"). Kept as history.
+
 **Status**: Planning / active investigation
 **Scope**: Which built-in UE 5.8 systems VoxelWorlds should adopt, which it should keep hand-built, and why.
 **Audience**: Anyone deciding how much of the engine's terrain/rendering toolchain to lean on instead of maintaining bespoke equivalents.
@@ -143,7 +145,7 @@ places static meshes on the runtime voxel terrain via the custom node.
 **Architecture (agreed 2026-06-27):** the full design — biome-keyed decoration, an **edit-aware hybrid
 sampler** (voxel-merged data near / generator far, which also fixes Phase 3's Z-hugging), a priority stack
 (POI > construction > ambient), and a standalone **Claims/World-Annotation system** feeding PCG (by tag),
-Map and Compass — is in [PCG_DECORATION_ARCHITECTURE.md](PCG_DECORATION_ARCHITECTURE.md). PCG output is
+Map and Compass — is in [PCG_DECORATION_ARCHITECTURE.md](../PCG_DECORATION_ARCHITECTURE.md). PCG output is
 strictly visual; biome selection stays voxel-authoritative; integration with game-level POI/construction
 systems is boundary-safe (tagged PCG-readable data, no code dependency).
 
@@ -260,5 +262,5 @@ Mesh Terrain specifics (UE 5.8, Experimental):
 
 ## References
 
-- Internal: [PCG_DECORATION_ARCHITECTURE.md](PCG_DECORATION_ARCHITECTURE.md) (PCG decoration design), [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md), [LOD_SYSTEM.md](../Features/LOD_SYSTEM.md), [MATERIAL_SYSTEM.md](../Features/MATERIAL_SYSTEM.md), [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md), [SCATTER_SYSTEM.md](../Features/SCATTER_SYSTEM.md), [BIOME_SYSTEM.md](../Features/BIOME_SYSTEM.md), [EDIT_LAYER.md](../Features/EDIT_LAYER.md), [STREAMING_PERFORMANCE.md](STREAMING_PERFORMANCE.md)
+- Internal: [PCG_DECORATION_ARCHITECTURE.md](../PCG_DECORATION_ARCHITECTURE.md) (PCG decoration design), [RENDERING_SYSTEM.md](../../Features/RENDERING_SYSTEM.md), [LOD_SYSTEM.md](../../Features/LOD_SYSTEM.md), [MATERIAL_SYSTEM.md](../../Features/MATERIAL_SYSTEM.md), [MASTER_MATERIAL_SETUP.md](../../Guides/MASTER_MATERIAL_SETUP.md), [SCATTER_SYSTEM.md](../../Features/SCATTER_SYSTEM.md), [BIOME_SYSTEM.md](../../Features/BIOME_SYSTEM.md), [EDIT_LAYER.md](../../Features/EDIT_LAYER.md), [STREAMING_PERFORMANCE.md](../STREAMING_PERFORMANCE.md)
 - Epic: Nanite Virtualized Geometry, Runtime Virtual Textures, Mesh Terrain (UE 5.8 docs)
