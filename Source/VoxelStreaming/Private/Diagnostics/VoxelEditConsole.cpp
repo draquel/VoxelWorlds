@@ -175,7 +175,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelEditSystemLayersCmd(
 // World modes review G56 / G57: the meshing work since the last reset (UVoxelChunkManager::GetMeshWorkStats): chunk mesh jobs
 // and seam jobs with their worker time, streaming's as well as edits', and what edits asked of the meshing pipeline. To
 // measure an edit, hold the viewer still (vox.Freeze 1), reset, edit (voxel.Edit.System), wait for the pipeline to settle and
-// log; voxel.Edit.NeighbourRemesh 1 is the rule before for an A/B.
+// log.
 static TMap<TWeakObjectPtr<UVoxelChunkManager>, TPair<UVoxelChunkManager::FMeshWorkStats, double>> GVoxelMeshWorkBaselines;
 
 static FAutoConsoleCommandWithWorldAndArgs GVoxelEditMeshWorkCmd(
@@ -207,13 +207,11 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelEditMeshWorkCmd(
 			const TPair<UVoxelChunkManager::FMeshWorkStats, double>* Base = GVoxelMeshWorkBaselines.Find(CM);
 			const UVoxelChunkManager::FMeshWorkStats B = Base ? Base->Key : UVoxelChunkManager::FMeshWorkStats();
 			const double Since = Base ? FPlatformTime::Seconds() - Base->Value : 0.0;
-			const IConsoleVariable* Rule = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Edit.NeighbourRemesh"));
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Edit.MeshWork [%s]: %s %.1f s: chunk meshes %lld (worker %.1f ms), seam jobs %lld (worker %.1f ms); edits: %lld broadcasts, %lld edited chunks re-meshed, %lld on their way to a mesh (%lld re-meshed after it landed), %lld face-neighbour re-meshes (voxel.Edit.NeighbourRemesh %d); now: %d to generate, %d to mesh, %d seam jobs in flight"),
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Edit.MeshWork [%s]: %s %.1f s: chunk meshes %lld (worker %.1f ms), seam jobs %lld (worker %.1f ms); edits: %lld broadcasts, %lld edited chunks re-meshed, %lld on their way to a mesh (%lld re-meshed after it landed); now: %d to generate, %d to mesh, %d seam jobs in flight"),
 				*TargetWorld->GetName(), Base ? TEXT("since reset") : TEXT("since Initialize (no reset),"), Since,
 				Now.ChunkMeshJobs - B.ChunkMeshJobs, Now.ChunkMeshWorkerMs - B.ChunkMeshWorkerMs, Now.SeamJobs - B.SeamJobs,
 				Now.SeamWorkerMs - B.SeamWorkerMs, Now.EditBroadcasts - B.EditBroadcasts, Now.EditedRemeshes - B.EditedRemeshes,
-				Now.EditedOnTheWay - B.EditedOnTheWay, Now.RemeshesAfterMeshing - B.RemeshesAfterMeshing,
-				Now.NeighbourRemeshes - B.NeighbourRemeshes, Rule ? Rule->GetInt() : -1, CM->GetPendingGenerationCount(),
+				Now.EditedOnTheWay - B.EditedOnTheWay, Now.RemeshesAfterMeshing - B.RemeshesAfterMeshing, CM->GetPendingGenerationCount(),
 				CM->GetPendingMeshingCount(), CM->GetSeamJobsInFlightCount());
 		}
 	}));

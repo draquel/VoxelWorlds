@@ -21,9 +21,9 @@
 // life and nothing but this path can extract it after its arrival: a viewer walks 16,000 uu in steps of 800 through a
 // window of 6,000 with a scatter horizon of 2,500 (trees; grass and rocks at ScatterRadius 1,500). At the end every
 // chunk within the horizon of the viewer has been handed off (none waits there) and no chunk holds spawn points past
-// the horizon's release distance; with voxel.Scatter.FirstExtractionAtHorizon 0 no chunk that arrived during the
-// walk was ever extracted (the ones from the first load unloaded behind the viewer): the symptom on VoxelDemo, where the
-// LOD0 refine at 8,200 uu was the next mesh and every type landed there.
+// the horizon's release distance (before G79 no chunk that arrived during the walk was ever extracted, the ones from the
+// first load unloading behind the viewer: the symptom on VoxelDemo, where the LOD0 refine at 8,200 uu was the next mesh
+// and every type landed there).
 // ---------------------------------------------------------------------------
 
 namespace VoxelScatterHorizonStreamingTestUtils
@@ -67,9 +67,8 @@ namespace VoxelScatterHorizonStreamingTestUtils
 		int32 TreeChunks = 0;           // chunks holding tree spawn points at the end
 	};
 
-	FWalkResult Walk(FAutomationTestBase& Test, int32 Rule)
+	FWalkResult Walk(FAutomationTestBase& Test)
 	{
-		const FScopedCVar RuleVar(TEXT("voxel.Scatter.FirstExtractionAtHorizon"), Rule ? TEXT("1") : TEXT("0"));
 		const FScopedCVar FarFieldVar(TEXT("voxel.World.FarField"), TEXT("0"));
 		FWalkResult R;
 
@@ -99,7 +98,7 @@ namespace VoxelScatterHorizonStreamingTestUtils
 			Copy.Density = 0.2f;
 			Scatter->AddScatterDefinition(Copy);
 		}
-		Test.AddInfo(FString::Printf(TEXT("rule %d: scatter horizon %.0f"), Rule, Scatter->GetScatterHorizon()));
+		Test.AddInfo(FString::Printf(TEXT("scatter horizon %.0f"), Scatter->GetScatterHorizon()));
 
 		auto At = [&W](double X) { return FVector(X, 0.0, W.Manager->GetGeneratedSurfacePoint(FVector(X, 0.0, 0.0)).Z + 300.0); };
 		W.SetViewer(At(0.0));
@@ -154,8 +153,8 @@ namespace VoxelScatterHorizonStreamingTestUtils
 			R.AwaitingWithinHorizon += DistanceOf(Coord) <= TreeRange ? 1 : 0;
 		}
 		R.DeferredHandOffs = Scatter->GetTotalDeferredFirstExtractions();
-		Test.AddInfo(FString::Printf(TEXT("rule %d: %s; loaded %d (%d within the horizon), cached %d (%d with spawn points beyond the release distance), %d with trees, awaiting %d (%d within the horizon), deferred hand-offs %lld"),
-			Rule, R.bSettled ? TEXT("settled") : TEXT("NOT settled"), R.Loaded, R.LoadedWithinHorizon, R.CachedChunks, R.SpawnedBeyondRelease, R.TreeChunks,
+		Test.AddInfo(FString::Printf(TEXT("%s; loaded %d (%d within the horizon), cached %d (%d with spawn points beyond the release distance), %d with trees, awaiting %d (%d within the horizon), deferred hand-offs %lld"),
+			R.bSettled ? TEXT("settled") : TEXT("NOT settled"), R.Loaded, R.LoadedWithinHorizon, R.CachedChunks, R.SpawnedBeyondRelease, R.TreeChunks,
 			R.Awaiting, R.AwaitingWithinHorizon, R.DeferredHandOffs));
 		W.Stop();
 		return R;
@@ -170,19 +169,14 @@ bool FVoxelPlaneScatterFirstExtractionAtHorizonTest::RunTest(const FString& Para
 {
 	using namespace VoxelScatterHorizonStreamingTestUtils;
 
-	const FWalkResult With = Walk(*this, 1);
-	TestTrue(TEXT("With the rule: the walk settled"), With.bSettled);
+	const FWalkResult With = Walk(*this);
+	TestTrue(TEXT("The walk settled"), With.bSettled);
 	TestTrue(TEXT("Scenario: chunks are loaded within the horizon at the end"), With.LoadedWithinHorizon > 0);
-	TestTrue(TEXT("With the rule: the distance pass handed chunks off"), With.DeferredHandOffs > 0);
-	TestEqual(TEXT("With the rule: no chunk within the horizon awaits its first extraction"), With.AwaitingWithinHorizon, 0);
-	TestTrue(TEXT("With the rule: chunks that arrived during the walk hold scatter"), With.CachedChunks > 0);
-	TestTrue(TEXT("With the rule: chunks hold trees"), With.TreeChunks > 0);
-	TestEqual(TEXT("With the rule: no chunk holds spawn points beyond the horizon's release distance"), With.SpawnedBeyondRelease, 0);
-
-	const FWalkResult Before = Walk(*this, 0);
-	TestTrue(TEXT("Rule before: the walk settled"), Before.bSettled);
-	TestEqual(TEXT("Rule before: no chunk that arrived during the walk was ever extracted"), Before.CachedChunks, 0);
-	TestEqual(TEXT("Rule before: no deferred hand-off"), Before.DeferredHandOffs, static_cast<int64>(0));
+	TestTrue(TEXT("The distance pass handed chunks off"), With.DeferredHandOffs > 0);
+	TestEqual(TEXT("No chunk within the horizon awaits its first extraction"), With.AwaitingWithinHorizon, 0);
+	TestTrue(TEXT("Chunks that arrived during the walk hold scatter"), With.CachedChunks > 0);
+	TestTrue(TEXT("Chunks hold trees"), With.TreeChunks > 0);
+	TestEqual(TEXT("No chunk holds spawn points beyond the horizon's release distance"), With.SpawnedBeyondRelease, 0);
 	return true;
 }
 

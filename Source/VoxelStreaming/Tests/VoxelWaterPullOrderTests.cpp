@@ -2,8 +2,6 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
-#include "HAL/IConsoleManager.h"
-#include "Testing/VoxelTestScopedCVar.h"
 #include "Testing/VoxelTestChunkWorld.h"
 #include "VoxelChunkManager.h"
 #include "VoxelCoordinates.h"
@@ -23,8 +21,8 @@
 // - Streaming.Water.PullOrder.Plane / .Planet: a sea two chunk layers deeper than the seabed's top, streamed from a viewer
 //   down at the seabed, so the chunks under the sea mesh from the bottom up, each pulling before the one above it has
 //   water. Afterwards the flags must be closed under the flood: no dry air below the sea in a loaded chunk next to a
-//   flagged voxel, in its own chunk or across a face. With each neighbour pulling again when a chunk's water rises
-//   (voxel.Water.PullAgain 1) there is none; with one pull each (0, the rule before) there are many.
+//   flagged voxel, in its own chunk or across a face. With each neighbour pulling again when a chunk's water rises there
+//   is none (with one pull each, before G70, there were many).
 // ---------------------------------------------------------------------------
 
 namespace VoxelWaterPullOrderTestUtils
@@ -134,37 +132,33 @@ namespace VoxelWaterPullOrderTestUtils
 		return Out;
 	}
 
-	/** Stream the world with each setting of voxel.Water.PullAgain and measure; the fix must leave nothing missed. */
+	/** Stream the world and measure: the flood must miss nothing. */
 	void RunPullOrder(FAutomationTestBase& Test, const TCHAR* Name, TFunctionRef<void(VoxelTesting::FTestChunkWorld&)> Configure,
 		TFunctionRef<FVector(VoxelTesting::FTestChunkWorld&)> Viewer)
 	{
-		FPullResult Results[2];
-		for (int32 Mode = 0; Mode < 2; ++Mode)
+		FPullResult Result;
 		{
-			VoxelTesting::FScopedCVar Scoped(TEXT("voxel.Water.PullAgain"), Mode);
 			VoxelTesting::FTestChunkWorld W;
-			W.Create(Mode == 0 ? TEXT("WaterPullOrderBefore") : TEXT("WaterPullOrderAfter"));
+			W.Create(TEXT("WaterPullOrder"));
 			Configure(W);
 			W.StartManager();
 			W.SetViewer(Viewer(W));
-			Test.TestTrue(*FString::Printf(TEXT("%s (pull again %d): the pipeline settled"), Name, Mode), W.Settle());
+			Test.TestTrue(*FString::Printf(TEXT("%s: the pipeline settled"), Name), W.Settle());
 			// The second pulls run about a millisecond a tick: let the queue drain.
 			for (int32 Tick = 0; Tick < 600 && W.Manager->GetWaterRepullStats().Pending > 0; ++Tick)
 			{
 				W.Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
 			}
-			Results[Mode] = Measure(W);
+			Result = Measure(W);
 			W.Stop();
-			const FPullResult& R = Results[Mode];
-			Test.AddInfo(FString::Printf(TEXT("%s, pull again %d: %d chunks, %lld flagged voxels, %lld dry voxels the flood reaches (in %d chunks); second pulls %lld queued, %lld run, %lld flooded (%lld voxels), %lld skipped, %d pending"),
-				Name, Mode, R.Chunks, R.Flagged, R.Missed, R.ChunksMissed, R.Repulls.Queued, R.Repulls.Run, R.Repulls.Flooded,
+			const FPullResult& R = Result;
+			Test.AddInfo(FString::Printf(TEXT("%s: %d chunks, %lld flagged voxels, %lld dry voxels the flood reaches (in %d chunks); second pulls %lld queued, %lld run, %lld flooded (%lld voxels), %lld skipped, %d pending"),
+				Name, R.Chunks, R.Flagged, R.Missed, R.ChunksMissed, R.Repulls.Queued, R.Repulls.Run, R.Repulls.Flooded,
 				R.Repulls.FloodedVoxels, R.Repulls.Skipped, R.Repulls.Pending));
 		}
-		Test.TestTrue(*FString::Printf(TEXT("%s: the sea floods (non-vacuous)"), Name), Results[1].Flagged > 10000);
-		Test.TestEqual(*FString::Printf(TEXT("%s: pulling again, no dry voxel the flood reaches"), Name), Results[1].Missed, static_cast<int64>(0));
-		Test.TestEqual(*FString::Printf(TEXT("%s: the queue drained"), Name), Results[1].Repulls.Pending, 0);
-		Test.TestTrue(*FString::Printf(TEXT("%s: one pull each (the rule before) leaves the flood short (%lld voxels)"), Name, Results[0].Missed),
-			Results[0].Missed > 100);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the sea floods (non-vacuous)"), Name), Result.Flagged > 10000);
+		Test.TestEqual(*FString::Printf(TEXT("%s: no dry voxel the flood reaches"), Name), Result.Missed, static_cast<int64>(0));
+		Test.TestEqual(*FString::Printf(TEXT("%s: the queue drained"), Name), Result.Repulls.Pending, 0);
 	}
 }
 

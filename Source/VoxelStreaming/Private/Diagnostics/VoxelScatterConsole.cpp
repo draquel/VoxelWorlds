@@ -129,11 +129,10 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterEditAuditCmd(
 				Kinds.Add(FString::Printf(TEXT("%s%s"), bReadsEdited ? TEXT("readsEdited") : TEXT(""), bOwn ? (bReadsEdited ? TEXT("+own") : TEXT("own")) : (bReadsEdited ? TEXT("") : TEXT("neither"))));
 			}
 			const UVoxelChunkManager::FEditScatterStats& E = CM->GetEditScatterStats();
-			const IConsoleVariable* Rule = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Scatter.EditReaders"));
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.EditAudit [%s]: compared %d cached chunk(s) in %.2f s: stale %d (%d changed points; reading an edited chunk %d, edited themselves %d, neither %d); skipped %d pending, %d with a cleared volume, %d without voxels; edits (EditReaders %d): %lld system broadcasts, readers re-extracted %lld, folded %lld, without data %lld, legacy face neighbours %lld; scatter regenerations %lld, extractions launched %lld"),
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Scatter.EditAudit [%s]: compared %d cached chunk(s) in %.2f s: stale %d (%d changed points; reading an edited chunk %d, edited themselves %d, neither %d); skipped %d pending, %d with a cleared volume, %d without voxels; edits: %lld system broadcasts, readers re-extracted %lld, folded %lld, without data %lld; scatter regenerations %lld, extractions launched %lld"),
 				*TargetWorld->GetName(), Stats.Compared, Seconds, Stats.Stale, ChangedPoints, ReadsEdited, OwnEdits, Other, Stats.SkippedPending,
-				Stats.SkippedCleared, Stats.SkippedNoVoxels, Rule ? Rule->GetInt() : -1, E.Broadcasts, E.ReadersReextracted, E.ReadersFolded,
-				E.ReadersWithoutData, E.LegacyFaceNeighbours, ScatterMgr->GetTotalRegenerations(), ScatterMgr->GetTotalExtractionsLaunched());
+				Stats.SkippedCleared, Stats.SkippedNoVoxels, E.Broadcasts, E.ReadersReextracted, E.ReadersFolded,
+				E.ReadersWithoutData, ScatterMgr->GetTotalRegenerations(), ScatterMgr->GetTotalExtractionsLaunched());
 			const double ChunkWorldSize = Config->GetChunkWorldSize();
 			for (int32 i = 0; i < FMath::Min(MaxLines, Stale.Num()); ++i)
 			{

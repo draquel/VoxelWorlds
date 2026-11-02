@@ -619,8 +619,8 @@ chunk need it (world modes review G33):
   collects them, and `UVoxelChunkManager::ProcessEditScatterReaders` re-extracts each once per tick from its voxels
   (`RegenerateChunkScatter`, then the same hand-off as a mesh completion), with no re-mesh: their own voxels did not
   change. A reader edited in the same tick is skipped (its own re-mesh re-extracts it, after the edits), and so is one
-  without voxel data (its extraction reads the edit when it loads). `voxel.Scatter.EditReaders 0` restores the rule
-  before G33 (the edited chunk's six face neighbours), for A/B.
+  without voxel data (its extraction reads the edit when it loads). Before G33 the edited chunk's six face neighbours
+  re-extracted, which missed a planet's edge and corner readers.
 
 Player edits are unchanged: they only clear scatter in a radius (above) and never re-extract.
 
@@ -709,9 +709,8 @@ edit-merged voxels, the far-compressed snapshot path included). Its first extrac
 types in range there, and the distance pass streams the rest in at their own distances; types with `SpawnDistance` 0
 stream at `ScatterRadius` like the others (and are released past it like the others, where before they stayed once
 spawned). A hand-off that finds a type in range takes the chunk out of the set, so a chunk whose next mesh comes first
-is handled as before. `voxel.Scatter.FirstExtractionAtHorizon` (1; 0 = the behaviour before), `voxel.Scatter.Stats`
-reports the chunks awaiting, the deferred hand-offs and the horizon. Tests: `Scatter.FirstExtraction.Horizon`,
-`.RuleBefore`, `Streaming.Plane.ScatterFirstExtractionAtHorizon`.
+is handled as before. `voxel.Scatter.Stats` reports the chunks awaiting, the deferred hand-offs and the horizon. Tests:
+`Scatter.FirstExtraction.Horizon`, `Streaming.Plane.ScatterFirstExtractionAtHorizon`.
 
 With the horizon in place the distances a definition needs are only the ones `ValidateScatterDistances` already
 checks: `LODStartDistance < CullDistance` (a fade band) and `CullDistance` below the effective spawn distance (a

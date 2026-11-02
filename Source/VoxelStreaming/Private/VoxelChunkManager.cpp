@@ -410,28 +410,6 @@ static TAutoConsoleVariable<int32> CVarAppearHold(
 	     "(capped by voxel.MeshFade.SeamHoldMs). 1 = on (default), 0 = the interior fades in at once and its seams follow."),
 	ECVF_Default);
 
-// World modes review G33: a system or editor edit re-extracts the scatter of the chunks whose extraction reads the voxels it
-// changed (UVoxelScatterManager::GetEditReaders: the chunk below on a heightmap, the seven chunks at -X / -Y / -Z on a
-// planet, those the edit's bounds reach), once each per tick. The rule before regenerated the edited chunk's six face
-// neighbours, which missed a planet's edge and corner readers and re-extracted the rest for nothing.
-static TAutoConsoleVariable<int32> CVarScatterEditReaders(
-	TEXT("voxel.Scatter.EditReaders"),
-	1,
-	TEXT("System / editor edits re-extract the scatter of the chunks whose extraction reads the edited voxels (world modes review "
-	     "G33). 1 = on (default), 0 = the rule before: the edited chunk's six face neighbours, for A/B."),
-	ECVF_Default);
-
-// World modes review G56: an edit re-meshes the chunks it changed, and their seams restale (MarkChunkDirty). The rule before
-// also re-meshed each edited chunk's six face neighbours ("so they re-extract boundary data"), work for nothing since seam
-// ownership: a chunk mesh reads only its own voxels, and a seam job only its participants', which the edited chunk's seams
-// include. voxel.Scatter.EditReaders 0 keeps the re-mesh: that rule's face neighbours re-extract their scatter through it.
-static TAutoConsoleVariable<int32> CVarEditNeighbourRemesh(
-	TEXT("voxel.Edit.NeighbourRemesh"),
-	0,
-	TEXT("Re-mesh an edited chunk's six face neighbours too (world modes review G56). 0 = off (default): an edit re-meshes the ")
-	TEXT("chunks it changed and restales their seams; 1 = the rule before, for A/B."),
-	ECVF_Default);
-
 // ==================== Far-chunk voxel-data compression ====================
 // Settled far chunks keep a resident ~1MB voxel array purely to serve rare events (neighbor-plane
 // reads, LOD upgrades, edits, queries). A budgeted sweep compacts idle far chunks; any access
@@ -473,15 +451,6 @@ static TAutoConsoleVariable<int32> CVarFarCompressionMaxInFlight(
 	8,
 	TEXT("Async encodes in flight at most. Each reads its chunk's own array, shared copy-on-write (a write to the chunk "
 	     "meanwhile clones it), so this also caps the clones' memory (1MB each for a 64^3 chunk)."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarWaterPullAgain(
-	TEXT("voxel.Water.PullAgain"),
-	1,
-	TEXT("The water pull across chunk faces (world modes review G70): 1 = when a chunk's water rises after a neighbour pulled "
-	     "(its own pull floods voxels on the face they share, or its generated water arrives), that neighbour pulls again, "
-	     "so the flood reaches the same voxels whatever order the chunks finish meshing in; 0 = each chunk pulls once when "
-	     "its mesh lands, as before (a flood that reached it only through a neighbour that flooded later never came)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarSnapshotMaxAgeTicks(
@@ -1404,18 +1373,16 @@ void UVoxelChunkManager::HandleChunkEdited(const FIntVector& ChunkCoord, EEditSo
 			// Drive that from the claim covering the region once VoxelScatter consumes claims.
 			ScatterManager->RegenerateChunkScatter(ChunkCoord);
 			++EditScatterStats.Broadcasts;
-			if (CVarScatterEditReaders.GetValueOnGameThread() != 0)
-			{
-				// The chunks whose extraction reads the voxels the edit changed here (G33): the chunk below on a
-				// heightmap, the -X / -Y / -Z chunks on a planet, as far as the edit's bounds reach. Re-extracted once
-				// each in the next tick (ProcessEditScatterReaders), so an edit across many chunks folds them.
-				FIntVector EditMin, EditMax;
-				const bool bBounds = EditManager->GetBroadcastEditBounds(EditMin, EditMax);
-				TArray<FIntVector> Readers;
-				ScatterManager->GetEditReaders(ChunkCoord, bBounds ? &EditMin : nullptr, Readers);
-				EditScatterReaderChunks.Append(Readers);
-				EditScatterEditedChunks.Add(ChunkCoord);
-			}
+			// The chunks whose extraction reads the voxels the edit changed here (G33): the chunk below on a heightmap, the
+			// -X / -Y / -Z chunks on a planet, as far as the edit's bounds reach (the edited chunk's six face neighbours
+			// missed a planet's edge and corner readers and re-extracted the rest for nothing). Re-extracted once each in the
+			// next tick (ProcessEditScatterReaders), so an edit across many chunks folds them.
+			FIntVector EditMin, EditMax;
+			const bool bBounds = EditManager->GetBroadcastEditBounds(EditMin, EditMax);
+			TArray<FIntVector> Readers;
+			ScatterManager->GetEditReaders(ChunkCoord, bBounds ? &EditMin : nullptr, Readers);
+			EditScatterReaderChunks.Append(Readers);
+			EditScatterEditedChunks.Add(ChunkCoord);
 		}
 		// A zero-radius player edit has no sphere to clear. Undo broadcasts System (the restored voxels regenerate),
 		// and redo the operation's own source, centre and radius (G60).
@@ -1429,38 +1396,20 @@ void UVoxelChunkManager::HandleChunkEdited(const FIntVector& ChunkCoord, EEditSo
 
 	// The face neighbours re-cook their collision: a cook reads its 26 neighbours' voxels (G32). Their meshes read none of
 	// the edited chunk's voxels (a chunk mesh is a function of its own; the boundary is in the edited chunk's seams,
-	// restaled above), so they re-mesh only under the rule before (voxel.Edit.NeighbourRemesh 1, G56), or for a system edit
-	// under voxel.Scatter.EditReaders 0, whose face neighbours re-extract their scatter through that re-mesh.
+	// restaled above), so they do not re-mesh (G56: re-meshing them was work for nothing since seam ownership). Their
+	// scatter: a player edit's ClearScatterInRadius reaches every chunk within the edit radius; a system or editor edit
+	// re-extracts the chunks whose extraction reads the edited voxels (G33, above).
 	static const FIntVector NeighborOffsets[6] = {
 		FIntVector(-1, 0, 0), FIntVector(1, 0, 0),
 		FIntVector(0, -1, 0), FIntVector(0, 1, 0),
 		FIntVector(0, 0, -1), FIntVector(0, 0, 1)
 	};
-	const bool bNeighbourRemesh = CVarEditNeighbourRemesh.GetValueOnGameThread() != 0
-		|| (Source != EEditSource::Player && CVarScatterEditReaders.GetValueOnGameThread() == 0);
-
 	for (const FIntVector& Offset : NeighborOffsets)
 	{
 		const FIntVector NeighborCoord = ChunkCoord + Offset;
-		if (ChunkStates.Contains(NeighborCoord))
+		if (CollisionManager && ChunkStates.Contains(NeighborCoord))
 		{
-			if (bNeighbourRemesh)
-			{
-				MeshWorkStats.NeighbourRemeshes += GetChunkState(NeighborCoord) == EChunkState::Loaded ? 1 : 0;
-				MarkChunkDirty(NeighborCoord);
-			}
-			if (CollisionManager)
-			{
-				CollisionManager->MarkChunkDirty(NeighborCoord);
-			}
-			// Player edits: scatter for neighbours is handled by ClearScatterInRadius, which affects every chunk
-			// within the edit radius. System / Editor edits: the chunks whose extraction reads the edited voxels
-			// re-extract (G33, above); voxel.Scatter.EditReaders 0 restores the rule before, these six.
-			if (ScatterManager && Source != EEditSource::Player && CVarScatterEditReaders.GetValueOnGameThread() == 0)
-			{
-				ScatterManager->RegenerateChunkScatter(NeighborCoord);
-				++EditScatterStats.LegacyFaceNeighbours;
-			}
+			CollisionManager->MarkChunkDirty(NeighborCoord);
 		}
 	}
 
@@ -7010,7 +6959,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 
 void UVoxelChunkManager::QueueWaterRepulls(const FIntVector& ChunkCoord, uint8 FaceMask)
 {
-	if (FaceMask == 0 || !Configuration || !Configuration->bEnableWaterLevel || CVarWaterPullAgain.GetValueOnGameThread() == 0)
+	if (FaceMask == 0 || !Configuration || !Configuration->bEnableWaterLevel)
 	{
 		return;
 	}
