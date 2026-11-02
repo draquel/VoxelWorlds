@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelScatterRenderer.h"
+#include "VoxelWorldsSettings.h"
 #include "VoxelScatter.h"
 #include "VoxelScatterManager.h"
 #include "VoxelBillboardMeshGenerator.h"
@@ -561,7 +562,7 @@ int32 UVoxelScatterRenderer::GetTotalInstanceCount() const
 
 bool UVoxelScatterRenderer::IsBatchingHISMWrites()
 {
-	return CVarVoxelScatterHISMBatchSeconds.GetValueOnGameThread() > 0.0f;
+	return VoxelSettings::Resolve(CVarVoxelScatterHISMBatchSeconds, UVoxelWorldsSettings::Get().ScatterHISMBatchSeconds) > 0.0f;
 }
 
 bool UVoxelScatterRenderer::GetEffectiveInstanceTransform(const FVoxelScatterHISMKey& Key, const UHierarchicalInstancedStaticMeshComponent* HISM,
@@ -648,7 +649,7 @@ void UVoxelScatterRenderer::ApplyPendingHISMWrites(bool bAll)
 	}
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_ApplyHISMWrites);
 	const double Now = FPlatformTime::Seconds();
-	const double Interval = FMath::Max(0.0f, CVarVoxelScatterHISMBatchSeconds.GetValueOnGameThread());
+	const double Interval = FMath::Max(0.0f, VoxelSettings::Resolve(CVarVoxelScatterHISMBatchSeconds, UVoxelWorldsSettings::Get().ScatterHISMBatchSeconds));
 	const double MaxHold = FMath::Max(Interval, static_cast<double>(CVarVoxelScatterHISMMaxHoldSeconds.GetValueOnGameThread()));
 	for (auto It = PendingHISMWrites.CreateIterator(); It; ++It)
 	{
@@ -674,7 +675,7 @@ void UVoxelScatterRenderer::ApplyPendingHISMWrites(bool bAll)
 			}
 		}
 		// A HISM whose pool outweighs its live instances is rewritten with the live ones, which lands its writes too
-		const int32 MinPooled = CVarVoxelScatterHISMCompactMinPooled.GetValueOnGameThread();
+		const int32 MinPooled = VoxelSettings::Resolve(CVarVoxelScatterHISMCompactMinPooled, UVoxelWorldsSettings::Get().ScatterHISMCompactMinPooled);
 		if (FHISMInstancePool* Pool = InstancePools.Find(It.Key()); Pool && MinPooled > 0)
 		{
 			const int32 Pooled = Pool->FreeIndices.Num();

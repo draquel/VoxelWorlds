@@ -27,6 +27,7 @@ public class VoxelCore : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
+				"DeveloperSettings", // UVoxelWorldsSettings
 			}
 		);
 

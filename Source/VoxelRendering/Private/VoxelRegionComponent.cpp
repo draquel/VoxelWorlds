@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelRegionComponent.h"
+#include "VoxelWorldsSettings.h"
 #include "VoxelSceneProxy.h"
 #include "VoxelRendering.h"
 #include "VoxelMaterialAtlas.h"
@@ -861,7 +862,7 @@ void UVoxelRegionComponent::SetFadeViewerPosition(const FVector& ViewerPosition)
 /** voxel.MeshFade.AppearMinDistance, never negative (voxel.MeshFade is the off switch). */
 static double GetVoxelAppearMinDistance()
 {
-	return FMath::Max(0.0, static_cast<double>(CVarVoxelMeshFadeAppearMinDistance.GetValueOnGameThread()));
+	return FMath::Max(0.0, static_cast<double>(VoxelSettings::Resolve(CVarVoxelMeshFadeAppearMinDistance, UVoxelWorldsSettings::Get().MeshFadeAppearMinDistance)));
 }
 
 double UVoxelRegionComponent::GetFadeViewerDistance(const FIntVector& ChunkCoord) const
@@ -986,7 +987,7 @@ float UVoxelRegionComponent::GetSeamFadeRemainingSeconds(const FIntVector& Owner
 		return 0.0f;
 	}
 	const double Now = World->GetRealTimeSeconds();
-	const float Duration = CVarVoxelMeshFadeDuration.GetValueOnGameThread();
+	const float Duration = VoxelSettings::Resolve(CVarVoxelMeshFadeDuration, UVoxelWorldsSettings::Get().MeshFadeDuration);
 	float Remaining = 0.0f;
 	for (uint8 Slot = 0; Slot <= 6; ++Slot)
 	{
@@ -1001,7 +1002,7 @@ FString UVoxelRegionComponent::GetFadeDebugString(int32 MaxEntries, const FVecto
 
 	const UWorld* World = GetWorld();
 	const double Now = World ? World->GetRealTimeSeconds() : 0.0;
-	const float Duration = CVarVoxelMeshFadeDuration.GetValueOnGameThread();
+	const float Duration = VoxelSettings::Resolve(CVarVoxelMeshFadeDuration, UVoxelWorldsSettings::Get().MeshFadeDuration);
 	FString Out = FString::Printf(TEXT("%s: can crossfade %d (fade material %s), tick registered %d enabled %d, active fades %d, scheduled %d, chunk holds %d, seam holds %d, pending releases %d, interior fades started %lld (appearances %lld)"),
 		*GetName(), CanSwapFade() ? 1 : 0, FadeMaterial ? *FadeMaterial->GetName() : TEXT("none"),
 		PrimaryComponentTick.IsTickFunctionRegistered() ? 1 : 0, IsComponentTickEnabled() ? 1 : 0,
@@ -1170,7 +1171,7 @@ bool UVoxelRegionComponent::StartFade(const FIntVector4& Key)
 	{
 		const int32 Kind = bSeam ? 1 : 0;
 		++FadeStartCounts[Kind];
-		if (FadeScheduler.GetRemainingSeconds(Key, World->GetRealTimeSeconds(), CVarVoxelMeshFadeDuration.GetValueOnGameThread()) > 0.0f)
+		if (FadeScheduler.GetRemainingSeconds(Key, World->GetRealTimeSeconds(), VoxelSettings::Resolve(CVarVoxelMeshFadeDuration, UVoxelWorldsSettings::Get().MeshFadeDuration)) > 0.0f)
 		{
 			++FadeMidRestartCounts[Kind];
 		}
@@ -1383,7 +1384,7 @@ void UVoxelRegionComponent::AdvanceFades()
 	}
 	else
 	{
-		const float Duration = FMath::Max(0.02f, CVarVoxelMeshFadeDuration.GetValueOnGameThread());
+		const float Duration = FMath::Max(0.02f, VoxelSettings::Resolve(CVarVoxelMeshFadeDuration, UVoxelWorldsSettings::Get().MeshFadeDuration));
 		FVoxelFadeScheduler::FAdvanceResult Result;
 		FadeScheduler.Advance(World->GetRealTimeSeconds(), Duration, VoxelFadeHoldFailsafeSeconds, Result);
 
