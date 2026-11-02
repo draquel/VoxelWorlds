@@ -222,7 +222,7 @@ private:
 		float SnapMB;
 		// Of which the neighbours' boundary shells for collision cooks (MB; G69)
 		float ShellMB;
-		// Of BatchesDrawn, the voxel batches drawn into shadow maps (visual polish VP3: voxel.Render.ShadowCullFrustum)
+		// Of BatchesDrawn, the voxel batches drawn into shadow maps (visual polish VP3: culled by the shadow's caster volume)
 		int32 ShadowBatchesDrawn;
 		// Far-field stand-ins over the voxel window since the last sample (visual polish VP4)
 		int32 FarFieldStandIns;

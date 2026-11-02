@@ -308,8 +308,8 @@ This custom HLSL node samples both albedo and roughness arrays:
 - `AlbedoArray` (Texture2DArray) - Material atlas parameter
 - `RoughnessArray` (Texture2DArray) - Material atlas parameter
 - `MaterialLUT` (Texture2D) - The atlas's material LUT (its slice row gives the material's slice in each array)
-- `GradientSampling` (float) - `MPC_VoxelMaterial` collection parameter (Footprint Sampling below)
-- `TileVariation`, `MacroVariation` (float) - `MPC_VoxelMaterial` collection parameters (Texture Variation below; the node
+- `GradientSampling`, `TileVariation` (float) - a constant 1 (Footprint Sampling and Texture Variation below)
+- `MacroVariation` (float) - `MPC_VoxelMaterial` collection parameter (Texture Variation below; the node
   includes `/Plugin/VoxelWorlds/Private/VoxelTextureVariation.ush`)
 
 **Output:** `float4` (RGB = Albedo, A = Roughness)
@@ -335,7 +335,7 @@ float2 UV_X = WorldPos.zy * Scale;  // YZ plane
 float2 UV_Y = WorldPos.xz * Scale;  // XZ plane (top/bottom)
 float2 UV_Z = WorldPos.xy * Scale;  // XY plane
 
-// UV derivatives from the continuous translated position, scaled by GradientSampling (MPC_VoxelMaterial)
+// UV derivatives from the continuous translated position, scaled by GradientSampling (1)
 float3 DPdx = 0;
 float3 DPdy = 0;
 #if PIXELSHADER
@@ -371,8 +371,7 @@ Normal maps require special blending to avoid "plaid" artifacts. This uses UDN (
 - `Sharpness` (float) - Blend sharpness
 - `NormalArray` (Texture2DArray) - Material atlas parameter
 - `MaterialLUT` (Texture2D) - The atlas's material LUT
-- `GradientSampling` (float) - `MPC_VoxelMaterial` collection parameter
-- `TileVariation` (float) - `MPC_VoxelMaterial` collection parameter (Texture Variation below)
+- `GradientSampling`, `TileVariation` (float) - a constant 1 (Texture Variation below)
 
 **Output:** `float3` (World-space normal)
 
@@ -442,9 +441,8 @@ At one 512 px tile per metre a pixel of ground 10 m away covers about 5 texels a
 reading mip 0 picks one texel out of each pixel's footprint, a different one with every sub-pixel camera move and TSR
 jitter: aliasing TSR cannot resolve, a noisy-looking terrain. Each projection samples with `SampleGrad` and the UV derivatives of the translated world position, with the
 array's own sampler (`AlbedoArraySampler` etc., anisotropic: the arrays are `TEXTUREGROUP_World` with `TF_Default`).
-The switch is the scalar `GradientSampling` of `MPC_VoxelMaterial` (`/VoxelWorlds/Materials/`), read inside both
-functions; `voxel.Material.GradientSampling` (1 by default, 0 = mip 0, the rule before) sets it in every game and PIE world
-(a console variable sink, and each `UVoxelRegionComponent` applies it when its scene proxy is created). On `PlanetTest`
+Both functions take `GradientSampling` as a constant 1 (0 gave mip 0, the rule before: `MPC_VoxelMaterial`'s scalar and
+its console variable were retired in VoxelWorlds 8). On `PlanetTest`
 at four fixed views, a quarter-pixel camera turn changes the ground's pixels by 43.8-45.0 luma (of 255) at mip 0 and
 0.6-1.6 with gradients; the ground's high-frequency energy under TSR falls from 55-59 to 3.5-7.3; GPU time per frame
 is not higher (P50 5.11-5.22 ms against 4.94-5.07, three bench runs each).
@@ -456,18 +454,18 @@ the master and in `MI_VoxelDefault`: roughness 0, a mirror. No terrain material 
 roughness array hold a placeholder: the first valid texture, the coal ore's packed ORD map), so the multiplier could not
 fix it either. The terrain reflected the sky at grazing angles: a pale sheen and hard-edged patches on far, flat ground,
 and before VP2-O1 sparkle. Both masters now output `lerp(sampled x RoughnessMultiplier, TerrainRoughness,
-ConstantRoughness)`: `TerrainRoughness` is a scalar parameter (0.9 by default), `ConstantRoughness` is
-`MPC_VoxelMaterial`'s, set by `voxel.Material.ConstantRoughness` (1 by default; 0 = as before). On `PlanetTest` the
+ConstantRoughness)`: `TerrainRoughness` is a scalar parameter (0.9 by default), `ConstantRoughness` a constant 1 (0 was
+the rule before; `MPC_VoxelMaterial`'s scalar was retired in VoxelWorlds 8). On `PlanetTest` the
 roughness buffer reads 0 → 0.9 on the ground, and the far ground at a grazing view loses its sky sheen (blue channel
-112 → 86, saturation 41.6 → 66.0). When real roughness maps exist, `ConstantRoughness` 0 and a `RoughnessMultiplier` of 1
-use them.
+112 → 86, saturation 41.6 → 66.0). When real roughness maps exist, a `ConstantRoughness` of 0 and a
+`RoughnessMultiplier` of 1 use them.
 
 ### Texture Variation (visual polish VP2-O2)
 
 With mips in use (VP2-O1) the one-metre tiles repeat visibly: rows of the same marks close up, a plaid grid on flat
 ground at mid distance (F2.8). Both triplanar functions include `Shaders/Private/VoxelTextureVariation.ush`:
 
-- **Tile variation** (`TileVariation`, `voxel.Material.TileVariation`, 1 by default): the ground becomes a mosaic of
+- **Tile variation** (`TileVariation`, a constant 1): the ground becomes a mosaic of
   patches under a tile across, each reading the texture at its own offset (Inigo Quilez, "Texture repetition",
   technique 3). A smooth value noise about a tile across, times eight, picks one of eight offsets; each patch's tail
   blends into the next patch's offset, which the next patch starts with, so there is no seam. Offsets keep the
@@ -713,7 +711,7 @@ See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed 
 - `M_VoxelMaster` - Unified master material
 - `M_VoxelMaster_Fade` - The crossfade twin (Masked)
 - `MI_VoxelDefault` - Default material instance
-- `MPC_VoxelMaterial` - The `voxel.Material.*` switches
+- `MPC_VoxelMaterial` - `MacroVariation`, set by `voxel.Material.MacroVariation`
 - `Functions/MF_GetMaterialID` - MaterialID extraction
 - `Functions/MF_TriplanarSampleAlbedoRoughness` - Smooth terrain sampling
 - `Functions/MF_TriplanarSampleNormal` - Smooth terrain normals

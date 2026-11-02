@@ -64,35 +64,6 @@ static constexpr double VoxelFadeHoldFailsafeSeconds = 3.0;
 static const FName VoxelFadeAlphaParamName(TEXT("FadeAlpha"));
 static const FName VoxelFadeInvertParamName(TEXT("FadeInvert"));
 
-static TAutoConsoleVariable<int32> CVarVoxelMaterialGradientSampling(
-	TEXT("voxel.Material.GradientSampling"),
-	1,
-	TEXT("How the smooth terrain material samples its texture arrays (visual polish VP2-O1; MPC_VoxelMaterial's\n")
-	TEXT("GradientSampling, read by MF_TriplanarSampleAlbedoRoughness and MF_TriplanarSampleNormal):\n")
-	TEXT("  1 = at the pixel's footprint: mip and anisotropy from the UV derivatives (default)\n")
-	TEXT("  0 = mip 0 at every distance, as before (the texture aliases into noise beyond a few metres)"),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarVoxelMaterialConstantRoughness(
-	TEXT("voxel.Material.ConstantRoughness"),
-	1,
-	TEXT("The terrain's roughness (visual polish VP2-O6; MPC_VoxelMaterial's ConstantRoughness, read by M_VoxelMaster and\n")
-	TEXT("M_VoxelMaster_Fade):\n")
-	TEXT("  1 = the material's TerrainRoughness scalar (0.9 by default): matte ground (default)\n")
-	TEXT("  0 = the sampled roughness times RoughnessMultiplier, as before (0 in MI_VoxelDefault: a mirror that reflects the\n")
-	TEXT("      sky at grazing angles; no terrain material has a roughness map, the slots hold a placeholder)"),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarVoxelMaterialTileVariation(
-	TEXT("voxel.Material.TileVariation"),
-	1,
-	TEXT("Breaks up the tiling of the smooth terrain's textures (visual polish VP2-O2; MPC_VoxelMaterial's TileVariation, read\n")
-	TEXT("by MF_TriplanarSampleAlbedoRoughness and MF_TriplanarSampleNormal through VoxelTextureVariation.ush):\n")
-	TEXT("  1 = the ground is a mosaic of patches under a tile, each reading the texture at its own offset, and triplanar\n")
-	TEXT("      projections under 2% are skipped (default)\n")
-	TEXT("  0 = every tile the same, as before"),
-	ECVF_Default);
-
 static TAutoConsoleVariable<float> CVarVoxelMaterialMacroVariation(
 	TEXT("voxel.Material.MacroVariation"),
 	0.3f,
@@ -103,30 +74,29 @@ static TAutoConsoleVariable<float> CVarVoxelMaterialMacroVariation(
 
 namespace
 {
-	/** The collection the voxel master materials read their switches from (VP2-O1, VP2-O2, VP2-O6) */
+	/**
+	 * The collection the voxel master materials read MacroVariation from, set from its console variable (VP2-O2). The
+	 * graphs take GradientSampling, TileVariation and ConstantRoughness as constants (VoxelWorlds 8 retired their scalars).
+	 */
 	const TCHAR* VoxelMaterialCollectionPath = TEXT("/VoxelWorlds/Materials/MPC_VoxelMaterial.MPC_VoxelMaterial");
 
-	/** Each switch: the collection's scalar and the console variable that sets it, an on/off switch (0 or 1) or a value. */
+	/** Each switch: the collection's scalar and the console variable that sets it. */
 	struct FVoxelMaterialSwitch
 	{
 		FName ParamName;
-		TAutoConsoleVariable<int32>* OnOffCVar = nullptr;
 		TAutoConsoleVariable<float>* ValueCVar = nullptr;
 
 		float GetWanted() const
 		{
-			return OnOffCVar ? (OnOffCVar->GetValueOnGameThread() != 0 ? 1.0f : 0.0f) : ValueCVar->GetValueOnGameThread();
+			return ValueCVar->GetValueOnGameThread();
 		}
 	};
 
-	/** Push the voxel.Material.* switches into the world's MPC_VoxelMaterial instance where they differ. */
+	/** Push voxel.Material.MacroVariation into the world's MPC_VoxelMaterial instance where it differs. */
 	void ApplyVoxelMaterialSwitches(UWorld* World)
 	{
 		static const FVoxelMaterialSwitch Switches[] = {
-			{ FName(TEXT("GradientSampling")), &CVarVoxelMaterialGradientSampling, nullptr },
-			{ FName(TEXT("ConstantRoughness")), &CVarVoxelMaterialConstantRoughness, nullptr },
-			{ FName(TEXT("TileVariation")), &CVarVoxelMaterialTileVariation, nullptr },
-			{ FName(TEXT("MacroVariation")), nullptr, &CVarVoxelMaterialMacroVariation },
+			{ FName(TEXT("MacroVariation")), &CVarVoxelMaterialMacroVariation },
 		};
 		static TWeakObjectPtr<UMaterialParameterCollection> Collection;
 		static bool bLoadAttempted = false;
@@ -216,7 +186,7 @@ FPrimitiveSceneProxy* UVoxelRegionComponent::CreateSceneProxy()
 	// Resolve the crossfade fade material (covers materials assigned without SetMaterial)
 	RefreshDerivedFadeMaterial();
 
-	// A new world's MPC instance starts at the collection's defaults: give it the material switches (VP2-O1, O6). Render
+	// A new world's MPC instance starts at the collection's defaults: give it voxel.Material.MacroVariation (VP2-O2). Render
 	// state can be created off the game thread, and the MPC instance belongs to it.
 	AsyncTask(ENamedThreads::GameThread, [WeakWorld = TWeakObjectPtr<UWorld>(GetWorld())]()
 	{

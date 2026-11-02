@@ -130,7 +130,7 @@ float2 UV_Y = WorldPosition.xz * Scale;
 float2 UV_Z = WorldPosition.xy * Scale;
 
 // UV derivatives from the continuous translated position (the WorldPosition input is tiled for large-world
-// precision and jumps at its period), scaled by GradientSampling: 0 = mip 0 (MATERIAL_SYSTEM.md "Footprint Sampling")
+// precision and jumps at its period), scaled by GradientSampling (1; 0 would be mip 0: MATERIAL_SYSTEM.md "Footprint Sampling")
 float3 DPdx = 0;
 float3 DPdy = 0;
 #if PIXELSHADER
@@ -163,9 +163,8 @@ return float4(Albedo, Roughness);
      - `Sharpness` (Scalar)
      - `AlbedoArray` (Texture2DArray)
      - `RoughnessArray` (Texture2DArray)
-     - `GradientSampling` (Scalar): a Collection Parameter node, `MPC_VoxelMaterial` / `GradientSampling`, inside the function
-     - `TileVariation`, `MacroVariation` (Scalar): Collection Parameter nodes on `MPC_VoxelMaterial`, likewise (texture
-       variation, VP2-O2)
+     - `GradientSampling`, `TileVariation` (Scalar): Constant 1 nodes inside the function (texture variation, VP2-O2)
+     - `MacroVariation` (Scalar): a Collection Parameter node, `MPC_VoxelMaterial` / `MacroVariation`, inside the function
    - Include File Paths: `/Plugin/VoxelWorlds/Private/VoxelTextureVariation.ush`
    - Output Type: CMOT Float 4
    - `Scripts/setup_texture_variation.py` (parent repo) writes the code, inputs and include into both functions; run
@@ -266,8 +265,7 @@ return BlendedNormal;
      - `Scale` (Scalar)
      - `Sharpness` (Scalar)
      - `NormalArray` (Texture2DArray)
-     - `GradientSampling` (Scalar): a Collection Parameter node, `MPC_VoxelMaterial` / `GradientSampling`, inside the function
-     - `TileVariation` (Scalar): a Collection Parameter node, `MPC_VoxelMaterial` / `TileVariation` (VP2-O2)
+     - `GradientSampling`, `TileVariation` (Scalar): Constant 1 nodes inside the function (VP2-O2)
    - Include File Paths: `/Plugin/VoxelWorlds/Private/VoxelTextureVariation.ush`
    - Output Type: CMOT Float 3
 

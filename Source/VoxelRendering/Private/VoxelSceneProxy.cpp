@@ -16,17 +16,6 @@
 
 #include <atomic>
 
-// ==================== Console Variables ====================
-
-static TAutoConsoleVariable<int32> CVarVoxelShadowCullFrustum(
-	TEXT("voxel.Render.ShadowCullFrustum"),
-	1,
-	TEXT("How the voxel scene proxy culls chunks and seams in a shadow depth pass (visual polish VP3-O1):\n")
-	TEXT("  1 = against the shadow's caster volume (GetDynamicMeshElementsShadowCullFrustum): terrain out of view still casts\n")
-	TEXT("  0 = against the camera's frustum, as before: a hill out of view casts no shadow until it is turned into view"),
-	ECVF_RenderThreadSafe
-);
-
 namespace
 {
 	/**
@@ -43,11 +32,11 @@ namespace
 		/** A shadow gather culled by its caster volume: batches that cast no shadow (RVT clones, water) are left out. */
 		bool bShadowCasters = false;
 
-		FVoxelViewCull(const FSceneView& View, bool bUseShadowVolume)
+		explicit FVoxelViewCull(const FSceneView& View)
 			: Frustum(&View.ViewFrustum)
 		{
 			const FConvexVolume* ShadowFrustum = View.GetDynamicMeshElementsShadowCullFrustum();
-			if (bUseShadowVolume && ShadowFrustum)
+			if (ShadowFrustum)
 			{
 				Frustum = ShadowFrustum;
 				Translation = View.GetPreShadowTranslation();
@@ -467,7 +456,6 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 	const bool bAnyFades = ChunkFadeStates.Num() > 0;
 
 	// A shadow gather passes one view carrying the shadow's caster volume (FVoxelViewCull)
-	const bool bUseShadowVolume = CVarVoxelShadowCullFrustum.GetValueOnAnyThread() != 0;
 	const bool bShadowGather = Views.Num() > 0 && Views[0]->GetDynamicMeshElementsShadowCullFrustum() != nullptr;
 	if (!bShadowGather)
 	{
@@ -487,7 +475,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			continue;
 		}
 
-		const FVoxelViewCull Cull(*Views[ViewIndex], bUseShadowVolume);
+		const FVoxelViewCull Cull(*Views[ViewIndex]);
 
 		// Iterate over all chunks
 		for (const auto& Pair : ChunkRenderData)
@@ -764,7 +752,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 				continue;
 			}
 
-			const FVoxelViewCull Cull(*Views[ViewIndex], bUseShadowVolume);
+			const FVoxelViewCull Cull(*Views[ViewIndex]);
 			const bool bWithRVT = !Cull.bShadowCasters;
 
 			for (const auto& Pair : SeamRenderData)
@@ -883,7 +871,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 					continue;
 				}
 
-				const FVoxelViewCull Cull(*Views[ViewIndex], bUseShadowVolume);
+				const FVoxelViewCull Cull(*Views[ViewIndex]);
 				if (Cull.bShadowCasters)
 				{
 					continue; // water casts no shadow

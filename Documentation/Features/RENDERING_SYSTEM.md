@@ -76,7 +76,7 @@ AVoxelWorldActor
 - `UPrimitiveComponent` that bridges game thread and render thread
 - Creates `FVoxelSceneProxy` for actual rendering
 - Drives the crossfades (`FVoxelFadeScheduler`, the fade material instances)
-- Pushes the `voxel.Material.*` switches into `MPC_VoxelMaterial` ([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md))
+- Pushes `voxel.Material.MacroVariation` into `MPC_VoxelMaterial` ([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md))
 - Exposes statistics and chunk queries (`GetChunkDrawInfo`)
 
 **FVoxelSceneProxy** (`VoxelRendering/Private/VoxelSceneProxy.cpp`)
@@ -128,7 +128,7 @@ against the shadow's caster volume (`FSceneView::GetDynamicMeshElementsShadowCul
 camera's; culling with it left every chunk out of view out of the shadow map, so hills behind or beside the camera
 cast no shadow until turned into view. With the caster volume a hill out of view casts again, and shadow-pass voxel
 batches fell from about 1,070 to 335 a frame at no GPU cost (VP3-O1). A shadow pass also skips the RVT clones and
-water, which cast no shadow. `voxel.Render.ShadowCullFrustum` (1; 0 = the camera's frustum);
+water, which cast no shadow.
 `FVoxelBatchCounters::FCounts::ShadowDrawn` and the bench's `ShadowBatchN` column count the batches drawn into shadow
 maps.
 
@@ -299,7 +299,6 @@ ChunkManager::OnChunkMeshingComplete()
 
 - **Missing chunks**: check the chunk's render region exists and holds it (`GetChunkDrawInfo`), and whether the proxy
   was recreated (`ConsumeLostRenderData`)
-- **Shadows missing out of view**: `voxel.Render.ShadowCullFrustum` should be 1
 - **A swap that does not show**: judge an edit from above, not at the crosshair, where the held tool covers the cell
   (G74)
 - Use RenderDoc to check the vertex factory's bindings and buffers
