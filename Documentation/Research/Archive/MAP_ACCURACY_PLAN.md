@@ -1,5 +1,7 @@
 # Map Accuracy Plan — Making VoxelMap Tiles Match the Generated Terrain
 
+> **Archived 2026-11-02** (code review CR5, D-CR6): the map accuracy plan, complete (phases 1-3). Current: `Features/MAP_SYSTEM.md`. Kept as history.
+
 **Status:** COMPLETE — Phase 1 (VoxelWorlds#56), Phase 2 (#57), Phase 3 (#58)
 **Problem:** The 2D map (UVoxelMapSubsystem tiles) does not match the generated world.
 Water placement is wildly wrong; land materials are close but diverge at biome

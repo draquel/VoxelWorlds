@@ -1066,4 +1066,4 @@ In `HandOffChunkVoxels()`, VoxelInjection scatter definitions are filtered based
 - [BIOME_SYSTEM.md](BIOME_SYSTEM.md) - Biome-scatter integration
 - [CAVE_SYSTEM.md](CAVE_SYSTEM.md) - Cave generation (density subtraction, cave types)
 - [EDIT_LAYER.md](EDIT_LAYER.md) - Edit system integration
-- [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) - Phase 7 details
+- [IMPLEMENTATION_PHASES.md](../Research/Archive/IMPLEMENTATION_PHASES.md) - Phase 7 details

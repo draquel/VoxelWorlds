@@ -1,5 +1,7 @@
 # Seam Ownership Architecture — making chunk boundaries structurally watertight
 
+> **Archived 2026-11-02** (code review CR5, D-CR6): the seam ownership design (July), built and shipped; some cvars it names are gone. Current: `Features/STREAMING_AND_SEAMS.md` and the meshers' seam sections. Kept as history.
+
 Status: **DRAFT for review** (2026-07-18). Companion work landed on `feature/lod-transition-polish`:
 near-field correction latency tuning (shipped), swap crossfade (§5, **implemented** on this branch).
 The DC boundary-weld series (#43/#44) is held in draft — its findings are inputs to this document.

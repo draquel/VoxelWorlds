@@ -619,7 +619,7 @@ edge".
 ## References
 
 - [Rendering System](RENDERING_SYSTEM.md) — GPU and PMC renderer details
-- [Architecture Overview](ARCHITECTURE.md) — System-wide architecture
+- [Architecture Overview](../ARCHITECTURE.md) — System-wide architecture
 - [GPU Pipeline](GPU_PIPELINE.md) — Compute shader generation pipeline
 
 ---

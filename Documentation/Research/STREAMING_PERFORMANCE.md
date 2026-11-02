@@ -3,7 +3,7 @@
 How streaming performance is measured and tuned in VoxelWorlds, the command-line
 knobs available, and the levers explored so far (what shipped, what's a tradeoff,
 what's a dead end). Companion to [PERFORMANCE_TARGETS.md](PERFORMANCE_TARGETS.md)
-(budgets) and [LOD_SYSTEM.md](LOD_SYSTEM.md) (the distance-band LOD strategy).
+(budgets) and [LOD_SYSTEM.md](../Features/LOD_SYSTEM.md) (the distance-band LOD strategy).
 
 The streaming concerns this targets, in order of impact found: the mesh queue
 growing under motion, re-mesh **thrash** (chunks re-meshed repeatedly), and
@@ -181,7 +181,7 @@ LOD-seam watertightness needs deep neighbour data `stride` voxels deep; the prev
 default went to `2*stride` purely to give central-difference *normals* at boundaries.
 `stride+1` is the geometry-watertight minimum, so it is now the default: cheaper mesh
 jobs (and ~half the GPU-DC deep upload), with one-sided (softer) boundary normals.
-`-VoxelDeepFull` restores the old behaviour. See [LOD_SEAM_INVESTIGATION.md](LOD_SEAM_INVESTIGATION.md).
+`-VoxelDeepFull` restores the old behaviour. See [LOD_SEAM_INVESTIGATION.md](Archive/LOD_SEAM_INVESTIGATION.md).
 
 ### LOD band scale — a tradeoff, not a fix
 
@@ -307,6 +307,6 @@ low-priority front of the queue until reached.
 ## References
 
 - [PERFORMANCE_TARGETS.md](PERFORMANCE_TARGETS.md) — frame/memory/streaming budgets
-- [LOD_SYSTEM.md](LOD_SYSTEM.md) — distance-band LOD strategy, hysteresis, 2:1 balance
-- [LOD_SEAM_INVESTIGATION.md](LOD_SEAM_INVESTIGATION.md) — deep neighbour data / watertightness
-- [DUAL_CONTOURING.md](DUAL_CONTOURING.md) — the DC mesher the per-job-cost work tunes
+- [LOD_SYSTEM.md](../Features/LOD_SYSTEM.md) — distance-band LOD strategy, hysteresis, 2:1 balance
+- [LOD_SEAM_INVESTIGATION.md](Archive/LOD_SEAM_INVESTIGATION.md) — deep neighbour data / watertightness
+- [DUAL_CONTOURING.md](../Features/DUAL_CONTOURING.md) — the DC mesher the per-job-cost work tunes

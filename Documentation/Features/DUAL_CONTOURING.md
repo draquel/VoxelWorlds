@@ -457,7 +457,7 @@ Intermediate buffers are allocated per-dispatch and released after readback.
 - [Dual Contouring of Hermite Data](https://www.cs.rice.edu/~jwarren/papers/dualcontour.pdf) — Ju, Losasso, Schaefer, Warren (2002)
 - [Manifold Dual Contouring](https://people.engr.tamu.edu/schaefer/research/dualsimp_tvcg.pdf) — Schaefer, Ju, Warren (2007)
 - [Marching Cubes Meshing (companion doc)](MARCHING_CUBES_MESHING.md) — MC algorithm, Transvoxel, LOD material selection
-- [Architecture Overview](ARCHITECTURE.md) — System architecture and module organization
+- [Architecture Overview](../ARCHITECTURE.md) — System architecture and module organization
 
 ---
 

@@ -1,5 +1,7 @@
 # Scatter Review — Implementation Plan
 
+> **Archived 2026-11-02** (code review CR5, D-CR6): the July scatter review (the flash, the underwater classification), done. Current: `Features/SCATTER_SYSTEM.md`. Kept as history.
+
 **Status:** In progress (started 2026-07-12)
 **Module:** VoxelScatter (+ VoxelCore types)
 **Scope:** Three items from the scatter review — (1) underwater placement, (2) the "refresh flash", (3) performance.

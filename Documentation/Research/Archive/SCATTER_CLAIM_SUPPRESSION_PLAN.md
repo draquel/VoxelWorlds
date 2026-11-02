@@ -1,5 +1,7 @@
 # HISM Scatter — Claim-Driven Suppression (Design Plan)
 
+> **Archived 2026-11-02** (code review CR5, D-CR6): scatter suppression under world claims; phase 1 built, phase 2 shipped as the claims bridge. Current: `Features/SCATTER_SYSTEM.md` and WorldClaims' `CLAIMS_ARCHITECTURE.md`. Kept as history.
+
 **Status:** Phase 1 (scatter exclusion API) BUILT on `feature/scatter-edit-aware` — reviewed leans
 locked in: world-subsystem facade (`UVoxelScatterExclusionSubsystem`), oriented-box containment from
 the start, reserved-but-unused `EdgeFalloff` field. Phase 2 (VoxelWorldPOI claim bridge) not started.

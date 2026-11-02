@@ -1,5 +1,7 @@
 # Voxel QA follow-ups plan (R22-R24)
 
+> **Archived 2026-11-02** (code review CR5, D-CR6): R22-R24 (the map's edit overlay, orphaned seams and dropped mesh results, the seam crossfade), all merged 2026-10-12. Current: `Features/MAP_SYSTEM.md` (overlays), `Features/STREAMING_AND_SEAMS.md` (residency, the crossfade), `Features/RENDERING_SYSTEM.md`. Kept as history.
+
 The first VoxelDemo QA pass (2026-10-11) left three voxel engine items out of the refinement milestones:
 R22 (the map ignores voxel edits), R23 (a distant chunk stayed visible) and R24 (seam pop-in). This plan traces
 each to its cause, proposes a design, and records the decisions taken. The parent plan is

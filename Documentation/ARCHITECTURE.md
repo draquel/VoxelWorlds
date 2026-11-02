@@ -294,7 +294,7 @@ Two rationales drive the non-default phases. Modules that register global shader
 
 ### 1. Pluggable LOD System
 
-See: [LOD_SYSTEM.md](LOD_SYSTEM.md) for complete details.
+See: [LOD_SYSTEM.md](Features/LOD_SYSTEM.md) for complete details.
 
 **Interface**: `IVoxelLODStrategy`
 ```cpp
@@ -319,7 +319,7 @@ class IVoxelLODStrategy {
 
 ### 2. Rendering System
 
-See: [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) for complete details.
+See: [RENDERING_SYSTEM.md](Features/RENDERING_SYSTEM.md) for complete details.
 
 **Interface**: `IVoxelMeshRenderer`
 ```cpp
@@ -338,7 +338,7 @@ deleted in code review CR1, D-CR7.)
 
 ### 3. GPU Compute Pipeline
 
-See: [GPU_PIPELINE.md](GPU_PIPELINE.md) for complete details.
+See: [GPU_PIPELINE.md](Features/GPU_PIPELINE.md) for complete details.
 
 **Phase 1: Voxel Generation**
 ```
@@ -362,7 +362,7 @@ FVoxelMeshRenderer: the mesh uploaded into per-mesh FLocalVertexFactory buffers
 
 ### 4. World Modes
 
-See: [WORLD_MODES.md](WORLD_MODES.md) for complete details.
+See: [WORLD_MODES.md](Features/WORLD_MODES.md) for complete details.
 
 **Infinite Plane**
 - Standard heightmap-style terrain
@@ -384,14 +384,14 @@ See: [WORLD_MODES.md](WORLD_MODES.md) for complete details.
 
 ### 5. Material System
 
-See: [MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) for complete details.
+See: [MATERIAL_SYSTEM.md](Features/MATERIAL_SYSTEM.md) for complete details.
 
 **Cubic Mode**: Tile atlas with per-face UVs
 **Smooth Mode** (MarchingCubes + DualContouring): Triplanar projection with material blending
 
 ### 6. Water System
 
-See: [WATER_SYSTEM.md](WATER_SYSTEM.md) for complete details.
+See: [WATER_SYSTEM.md](Features/WATER_SYSTEM.md) for complete details.
 
 **Per-voxel water flags** stored in `FVoxelData::Metadata` bit 4, set during generation via column-scan and propagated across chunk boundaries. When terrain edits expose air adjacent to water, `UVoxelWaterPropagation` performs bounded BFS flood fill, writing the flags through the edit layer (G58); the tiles read a chunk with edits edit-merged, and a flood crosses into a chunk that loads after it through face scans when the chunk's water settles (G59).
 
@@ -401,7 +401,7 @@ See: [WATER_SYSTEM.md](WATER_SYSTEM.md) for complete details.
 
 ### 7. Biome System
 
-See: [BIOME_SYSTEM.md](BIOME_SYSTEM.md) for complete details.
+See: [BIOME_SYSTEM.md](Features/BIOME_SYSTEM.md) for complete details.
 
 Selection based on:
 - Temperature (noise-driven)
@@ -652,7 +652,7 @@ The streaming system has been optimized to eliminate per-frame overhead:
 
 ## Next Steps
 
-See [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) for development roadmap.
+See [IMPLEMENTATION_PHASES.md](Research/Archive/IMPLEMENTATION_PHASES.md) for development roadmap.
 
 **Phase 1 (Current)**: Foundation
 - Core data structures
@@ -678,16 +678,16 @@ See [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) for development roadmap
 
 ## References
 
-- [LOD System Details](LOD_SYSTEM.md)
-- [Marching Cubes Meshing & Transvoxel](MARCHING_CUBES_MESHING.md)
-- [Dual Contouring Meshing](DUAL_CONTOURING.md)
-- [Rendering System Details](RENDERING_SYSTEM.md)
-- [Water System](WATER_SYSTEM.md)
-- [GPU Pipeline Details](GPU_PIPELINE.md)
-- [Data Structures Reference](DATA_STRUCTURES.md)
-- [World Modes Guide](WORLD_MODES.md)
-- [Implementation Phases](IMPLEMENTATION_PHASES.md)
-- [Coding Standards](CODING_STANDARDS.md)
+- [LOD System Details](Features/LOD_SYSTEM.md)
+- [Marching Cubes Meshing & Transvoxel](Features/MARCHING_CUBES_MESHING.md)
+- [Dual Contouring Meshing](Features/DUAL_CONTOURING.md)
+- [Rendering System Details](Features/RENDERING_SYSTEM.md)
+- [Water System](Features/WATER_SYSTEM.md)
+- [GPU Pipeline Details](Features/GPU_PIPELINE.md)
+- [Data Structures Reference](Features/DATA_STRUCTURES.md)
+- [World Modes Guide](Features/WORLD_MODES.md)
+- [Implementation Phases](Research/Archive/IMPLEMENTATION_PHASES.md)
+- [Coding Standards](Guides/CODING_STANDARDS.md)
 
 ---
 

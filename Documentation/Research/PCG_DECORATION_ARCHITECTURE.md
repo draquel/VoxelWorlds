@@ -1,9 +1,11 @@
 # PCG Decoration Architecture — Biome-Keyed, Edit-Aware Runtime Scatter
 
-**Status**: Design (agreed with project owner 2026-06-27)
+**Status** (2026-11-02): phases 3-6 built (phase 6 as the World Claims bridge, steps 6a-6e in WorldClaims'
+`CLAIMS_ARCHITECTURE.md`); phases 7 (edit and claim reactivity) and 8 (coexistence with the bespoke scatter) open.
+The design was agreed with the project owner on 2026-06-27.
 **Scope**: How PCG ("Generate at Runtime") integrates with the voxel world to decorate terrain with
 foliage/props — edit-aware, biome-keyed, POI/construction-aware, and multiplayer-safe.
-**Parent**: [ENGINE_INTEGRATION.md](ENGINE_INTEGRATION.md) §2 (PCG with Runtime Generation).
+**Parent**: [ENGINE_INTEGRATION.md](Archive/ENGINE_INTEGRATION.md) §2 (PCG with Runtime Generation).
 **Related**: [BIOME_SYSTEM.md](../Features/BIOME_SYSTEM.md), [SCATTER_SYSTEM.md](../Features/SCATTER_SYSTEM.md),
 [EDIT_LAYER.md](../Features/EDIT_LAYER.md), [MAP_SYSTEM.md](../Features/MAP_SYSTEM.md).
 
@@ -183,7 +185,7 @@ emerges from this model — not a global switch. Revised order:
 | **3 — done** | Basic round-trip: sampler → static-mesh spawner → output; meshes on runtime terrain in PIE | Committed |
 | **4 (revised) — Edit-aware hybrid sampler — DONE** | Near band reads edit-merged voxel data (`UVoxelChunkManager::QueryEditMergedSurface` + `FVoxelSurfaceQuery::ExtractSurfaceFromColumn`); far band falls back to the generator; Bounding Shape pin now required | The load-bearing spine; **fixed the Z-hugging** — PIE cubes now follow the terraced voxel surface, confirming the near band reads voxel data. Committed `ca90fd7`/`fead0f5` |
 | **5 — Per-biome routing — DONE (data-driven dispatcher)** | `UVoxelPCGBiomeDecorationMapping` asset (BiomeID → decoration graph; "biomes as configuration", standalone — not on `FBiomeDefinition`, to keep VoxelCore PCG-free) + `UPCGVoxelBiomeDispatcher` node that partitions points by BiomeID and **dynamically schedules each biome's mapped subgraph** (`Context->ScheduleGraph` + `FPCGInputForwardingElement`, the `FPCGSubgraphElement` pattern) and merges. Setup how-to: [PCG_BIOME_DECORATION_SETUP.md](../Guides/PCG_BIOME_DECORATION_SETUP.md). | Smoke-tested in PIE: 441 points → dispatcher merged **3 biome subgraph results**. Committed `02fa52f`/`c0c27ef` |
-| **6 — Claims-driven exclusion — DESIGNED** | The game-level **World Claims** system (registry + claim component/volume) produces tagged footprints; PCG reads them by tag for exclusion (Suppress) / route (OwnGraph) / falloff (Blend). Also covers terrain conditioning (gen-time density-level hook for deterministic POIs; runtime Edit-Layer System edit for player placements) and seed-based POI placement. Full design: `Plugins/WorldClaims/Documentation/CLAIMS_ARCHITECTURE.md`. | Designed 2026-06-28; new `WorldClaims` plugin (game-level, boundary-safe via tags); build pending |
+| **6 — Claims-driven exclusion — DONE (WorldClaims 6a-6e)** | The game-level **World Claims** system (registry + claim component/volume) produces tagged footprints; PCG reads them by tag for exclusion (Suppress) / route (OwnGraph) / falloff (Blend). Also covers terrain conditioning (gen-time density-level hook for deterministic POIs; runtime Edit-Layer System edit for player placements) and seed-based POI placement. Full design: `Plugins/WorldClaims/Documentation/CLAIMS_ARCHITECTURE.md`. | Designed 2026-06-28; new `WorldClaims` plugin (game-level, boundary-safe via tags); build pending |
 | **7 — Edit/claim reactivity** | Hook `EDIT_LAYER` dirty + claim changes → throttled PCG cell regen | Debounced |
 | **8 — Coexistence / parity** | Decide which categories PCG owns vs bespoke; retire superseded HISM-foliage where parity is proven | Replaces the old global toggle |
 

@@ -1175,7 +1175,7 @@ MeshRequest.NeighborLODLevels[face] = NeighborState->LODLevel;
 11. **(Future)** Phase 3: LOD hysteresis if thrashing observed at large view distances
 12. **(Future)** Octree LOD for orbital-scale spherical planet viewing
 
-See [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) for detailed roadmap.
+See [IMPLEMENTATION_PHASES.md](../Research/Archive/IMPLEMENTATION_PHASES.md) for detailed roadmap.
 
 ---
 
