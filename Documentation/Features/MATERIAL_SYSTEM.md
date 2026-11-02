@@ -498,7 +498,7 @@ in `FVoxelMaterialRegistry`, which an atlas extends (below).
 ## Hardness (decision D31)
 
 `FVoxelMaterialDefinition::Hardness` is how hard a block of the material is to break: the seconds it takes bare-handed.
-It is a property of the material, set by the registry's defaults (`FVoxelMaterialRegistry::EnsureInitialized`), read with
+It is a property of the material, set by the registry's defaults (`BuildDefaultMaterials`, `VoxelMaterialRegistry.cpp`), read with
 `FVoxelMaterialRegistry::GetHardness` (`DefaultHardness`, 1 s, for an ID the registry does not know). The material atlas
 does not override it: the atlas is rendering data, which a dedicated server need not load, and the server decides a break.
 
@@ -671,9 +671,24 @@ For non-occluding materials, `ShouldRenderFace()` returns true if **either** the
 
 Non-occluding faces are emitted as individual 1x1 quads in a **pre-pass** before greedy meshing. This prevents them from being merged into larger quads (which would lose per-voxel visual variation).
 
-### Material Registry Dynamic Growth
+### The Registry's Table and the Atlas (G100)
 
-`SetAtlasPositions()` grows the `Materials` array if the atlas defines MaterialIDs beyond the hardcoded set (IDs 0-21). This allows users to define arbitrary materials in the atlas without modifying C++ code.
+`FVoxelMaterialRegistry` answers every query from one immutable table. Until an atlas is bound it is the defaults (IDs
+0-21, `BuildDefaultMaterials`), built once by the first query on any thread (a function-local static, which C++ builds
+on one thread while the others wait). `SetAtlasPositions` publishes an atlas's table: a new table from the defaults,
+grown with placeholders (`Material<ID>`, the default hardness) up to the atlas's highest MaterialID, so an atlas can
+define materials without a change to C++, and each configured material's atlas position, scales, name and masked and
+non-occluding flags from its config. Each atlas sets the whole table; it does not build on the last atlas's.
+
+The table is published with one atomic pointer: the meshers' workers (the cubic mesher's `IsNonOccluding`, per face) and
+the map's read it with no lock and see the old table or the new one, whole. No published table is changed or freed, so
+the pointer `GetMaterial` returns and the array `GetAllMaterials` returns stay valid; the registry keeps one table per
+distinct content, and an atlas whose table it already holds (`UVoxelRegionComponent::SetMaterialAtlas` calls
+`SetAtlasPositions` for every region component the renderer creates, during streaming) republishes that table and logs
+nothing. Before G100 the defaults were built lazily with no lock, and every `SetAtlasPositions` grew and rewrote, in
+place, the array those workers were reading. Tests `VoxelWorlds.MaterialRegistry.AtlasTable` and
+`VoxelWorlds.MaterialRegistry.WorkerReads` (eight workers read the table while the game thread publishes two atlases
+800 times: every read is one atlas's table whole).
 
 ### Texture Requirements
 
@@ -700,6 +715,7 @@ See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed 
 **C++ Code:**
 - `VoxelCore/Public/VoxelMaterialAtlas.h` - Data asset header
 - `VoxelCore/Private/VoxelMaterialAtlas.cpp` - BuildTextureArrays(), BuildMaterialLUT()
+- `VoxelCore/Private/VoxelMaterialRegistry.cpp` - The registry's defaults and the published table (`SetAtlasPositions`)
 - `VoxelRendering/Private/VoxelRegionComponent.cpp` - UpdateMaterialAtlasParameters(), the `voxel.Material.*` switches
 - `VoxelRendering/Private/VoxelMeshRenderer.cpp` - Automatic mode sync
 
