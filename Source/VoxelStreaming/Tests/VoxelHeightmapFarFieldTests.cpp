@@ -1142,11 +1142,11 @@ bool FFarFieldPlaneChunkManagerTest::RunTest(const FString& Parameters)
 /**
  * WM-MP1 (VP4's test on a plane): no coarse stand-in over the voxel window while the viewer walks. With the window loaded
  * around a viewer 170 uu over the ground, settled past the release delay (ancestors hidden under their children are
- * released), the viewer walks 7,500 uu east at 1,500 uu/s, the window following, one update a frame at 30 fps: with
- * View.bAvoidStandIns no update draws a stand-in over the window and no covered edge patch waits for a build; every place
- * out to three view distances stays drawn by a chunk or a patch; the window shrunk to 0.85 of the view distance leaves no
- * gap in the very next update; and a teleport 40,000 uu north (nothing loaded there) has no gap in its first update (a
- * root tile stands in, as a face root does on a planet). The rule before is run too and its stand-ins reported.
+ * released), the viewer walks 7,500 uu east at 1,500 uu/s, the window following, one update a frame at 30 fps: no update
+ * draws a stand-in over the window and no covered edge patch waits for a build; every place out to three view distances
+ * stays drawn by a chunk or a patch; the window shrunk to 0.85 of the view distance leaves no gap in the very next update;
+ * and a teleport 40,000 uu north (nothing loaded there) has no gap in its first update (a root tile stands in, as a face
+ * root does on a planet).
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlaneNoStandInTest,
 	"VoxelWorlds.FarField.Plane.NoStandInOverWindow",
@@ -1157,16 +1157,14 @@ bool FFarFieldPlaneNoStandInTest::RunTest(const FString& Parameters)
 	using namespace VoxelHeightmapFarFieldTestUtils;
 
 	const FVector2D Site = GetSites()[1];
-	for (const bool bAvoidStandIns : { false, true })
 	{
-		const TCHAR* Rule = bAvoidStandIns ? TEXT("avoiding stand-ins") : TEXT("the rule before");
+		const TCHAR* Rule = TEXT("walking");
 		FRig Rig(MakePlaneConfig(), 64, 150000.0, /*bSea=*/false);
-		auto MakeView = [&Rig, bAvoidStandIns](const FVector& Viewer, double Time)
+		auto MakeView = [&Rig](const FVector& Viewer, double Time)
 		{
 			FVoxelFarFieldView View = Rig.MakeView(Viewer);
 			View.Time = Time;
 			View.HideDelay = 0.45;
-			View.bAvoidStandIns = bAvoidStandIns;
 			return View;
 		};
 		auto Viewer = [&Rig](const FVector2D& XY) { return Rig.SurfacePoint(XY) + FVector(0.0, 0.0, 170.0); };
@@ -1235,20 +1233,17 @@ bool FFarFieldPlaneNoStandInTest::RunTest(const FString& Parameters)
 			ReleasedBefore, WalkGaps));
 		TestTrue(*FString::Printf(TEXT("%s: hidden patches were released while settling"), Rule), ReleasedBefore > 0);
 		TestEqual(*FString::Printf(TEXT("%s: no gap while walking"), Rule), WalkGaps, 0);
-		if (bAvoidStandIns)
-		{
-			TestEqual(*FString::Printf(TEXT("%s: no stand-in over the window while walking"), Rule), FramesWithStandIns, 0);
-			TestEqual(*FString::Printf(TEXT("%s: no covered edge patch waits for a build"), Rule), UnreadyCovered, 0);
+		TestEqual(*FString::Printf(TEXT("%s: no stand-in over the window while walking"), Rule), FramesWithStandIns, 0);
+		TestEqual(*FString::Printf(TEXT("%s: no covered edge patch waits for a build"), Rule), UnreadyCovered, 0);
 
-			// The window's edge unloads: the edge patches there were built meanwhile and draw in the very next update.
-			TestTrue(*FString::Printf(TEXT("%s: settles after the walk"), Rule), Rig.Converge(View, Loaded) > 0);
-			auto Shrunk = [&Rig, &View](const FIntVector& Coord) { return Rig.InWindow(View, Coord, 0.85 * ViewDistance); };
-			Rig.FarField.Update(View, Shrunk, Changes);
-			const int32 EdgeGaps = CountGaps(View, Shrunk);
-			AddInfo(FString::Printf(TEXT("%s: the window shrunk to 0.85 of the view distance: %d gaps in the next update, %d stand-ins"),
-				Rule, EdgeGaps, Rig.FarField.GetStandInCount()));
-			TestEqual(*FString::Printf(TEXT("%s: the edge's patches draw at once when its chunks unload"), Rule), EdgeGaps, 0);
-		}
+		// The window's edge unloads: the edge patches there were built meanwhile and draw in the very next update.
+		TestTrue(*FString::Printf(TEXT("%s: settles after the walk"), Rule), Rig.Converge(View, Loaded) > 0);
+		auto Shrunk = [&Rig, &View](const FIntVector& Coord) { return Rig.InWindow(View, Coord, 0.85 * ViewDistance); };
+		Rig.FarField.Update(View, Shrunk, Changes);
+		const int32 EdgeGaps = CountGaps(View, Shrunk);
+		AddInfo(FString::Printf(TEXT("%s: the window shrunk to 0.85 of the view distance: %d gaps in the next update, %d stand-ins"),
+			Rule, EdgeGaps, Rig.FarField.GetStandInCount()));
+		TestEqual(*FString::Printf(TEXT("%s: the edge's patches draw at once when its chunks unload"), Rule), EdgeGaps, 0);
 
 		// A teleport 40,000 uu north, settled past the release delay first: nothing is loaded there, and the root tile
 		// there is built (roots within the far distance are kept), so the first update after the cut has no gap.
@@ -1273,10 +1268,10 @@ bool FFarFieldPlaneNoStandInTest::RunTest(const FString& Parameters)
  * (the chunk manager's tick in TG_PrePhysics reading the camera manager's camera, the camera managers, the far field's
  * camera tick in TG_PostUpdateWork). The window settles around the camera 1,200 over the ground; the camera then jumps
  * 600,000 uu east, where only the root tile of the old camera's selection lies (within the far distance, built up front).
- * With voxel.World.FarFieldCameraUpdate that very frame runs one far-field update for the new camera; under the rule before
- * none. A plane has no horizon, so the built root draws under the camera in the frame of the cut under either rule (the
- * planet's gap, a face culled under the horizon, cannot occur here) and the refinement under the new camera takes its
- * updates either way. Moving under a chunk a frame runs no second update.
+ * That very frame runs one far-field update for the new camera (F4.3; before it, none). A plane has no horizon, so the
+ * built root draws under the camera in the frame of the cut (the planet's gap, a face culled under the horizon, cannot
+ * occur here) and the refinement under the new camera takes its updates. Moving under a chunk a frame runs no second
+ * update.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlaneCameraAfterCutTest,
 	"VoxelWorlds.FarField.Plane.CameraAfterCut",
@@ -1294,10 +1289,8 @@ bool FFarFieldPlaneCameraAfterCutTest::RunTest(const FString& Parameters)
 	// wavelength splits to the band's first level within about 200,000 uu of the camera at 4 px).
 	const FVector2D FarXY = SiteXY + FVector2D(600000.0, 0.0);
 	const FScopedCVar FarFieldVar(TEXT("voxel.World.FarField"), TEXT("1"));
-	for (const bool bCameraUpdate : { false, true })
 	{
-		const TCHAR* Rule = bCameraUpdate ? TEXT("updating for the frame's camera") : TEXT("the rule before");
-		const FScopedCVar CameraUpdate(TEXT("voxel.World.FarFieldCameraUpdate"), bCameraUpdate ? TEXT("1") : TEXT("0"));
+		const TCHAR* Rule = TEXT("updating for the frame's camera");
 
 		FTestChunkWorld W;
 		W.Create(TEXT("FarFieldPlaneCameraAfterCutWorld"));
@@ -1389,13 +1382,11 @@ bool FFarFieldPlaneCameraAfterCutTest::RunTest(const FString& Parameters)
 			AddInfo(FString::Printf(TEXT("%s: before the cut the destination's patch is at level %d (band %d); the frame of the cut draws level %d there with %lld update(s) for the frame's camera; the next frame level %d"),
 				Rule, FarLevelBefore, EdgeLevel, CutLevel, CutUpdates, NextLevel));
 			// A plane has no horizon: the root tile under the destination is built and drawn before the cut, so the frame of the
-			// cut draws something there under either rule (the planet's gap, a face culled under the horizon, cannot occur) and
-			// the refinement under the new camera takes its updates either way; what tells the rules apart in the frame of the
-			// cut is the update for the frame's camera.
+			// cut draws something there (the planet's gap, a face culled under the horizon, cannot occur); what F4.3 adds in
+			// the frame of the cut is the update for the frame's camera.
 			TestTrue(*FString::Printf(TEXT("%s: the frame of the cut draws a patch under the camera (a built root at least)"), Rule), CutLevel >= 0);
 			TestTrue(*FString::Printf(TEXT("%s: the frame after the cut draws a patch under the camera"), Rule), NextLevel >= 0);
-			TestEqual(*FString::Printf(TEXT("%s: %s for the frame's camera"), Rule, bCameraUpdate ? TEXT("one update") : TEXT("no update")),
-				CutUpdates, int64(bCameraUpdate ? 1 : 0));
+			TestEqual(*FString::Printf(TEXT("%s: one update for the frame's camera"), Rule), CutUpdates, int64(1));
 		}
 
 		if (PC)

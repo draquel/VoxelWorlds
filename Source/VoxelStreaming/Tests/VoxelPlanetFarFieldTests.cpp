@@ -510,11 +510,10 @@ bool FFarFieldPlanetHoleTest::RunTest(const FString& Parameters)
 /**
  * Visual polish VP4: no coarse stand-in over the voxel window while the viewer walks. With the window loaded around a
  * viewer at 45 degrees on the small planet, settled past the release delay (ancestors hidden under their children are
- * released), the viewer walks 7,500 uu east at 1,500 uu/s, the window following, one update a frame at 30 fps: with
- * View.bAvoidStandIns no update draws a stand-in over the window (under the rule before, covered edge patches the viewer
- * leaves past the prebuild radius, and a patch coming back over the horizon, need a build, and their nearest built
- * ancestor, up to a face's root, stands in for a frame); every direction out to three view distances stays drawn by a
- * chunk or a patch; and
+ * released), the viewer walks 7,500 uu east at 1,500 uu/s, the window following, one update a frame at 30 fps: no update
+ * draws a stand-in over the window (before VP4, covered edge patches the viewer left past the prebuild radius, and a patch
+ * coming back over the horizon, needed a build, and their nearest built ancestor, up to a face's root, stood in for a
+ * frame); every direction out to three view distances stays drawn by a chunk or a patch; and
  * the window shrunk to 0.85 of the view distance (its edge chunks unloading) leaves no gap in the very next update (the
  * edge patches near the edge were built meanwhile).
  */
@@ -528,16 +527,14 @@ bool FFarFieldPlanetNoStandInTest::RunTest(const FString& Parameters)
 
 	const FPlanetCase Case = GetPlanetCases()[0];
 	const FSite Site = GetSites()[1];
-	for (const bool bAvoidStandIns : { false, true })
 	{
-		const TCHAR* Rule = bAvoidStandIns ? TEXT("avoiding stand-ins") : TEXT("the rule before");
+		const TCHAR* Rule = TEXT("walking");
 		FRig Rig(Case, 16, /*bSea=*/false);
-		auto MakeView = [&Rig, bAvoidStandIns](const FVector& Viewer, double Time)
+		auto MakeView = [&Rig](const FVector& Viewer, double Time)
 		{
 			FVoxelFarFieldView View = Rig.MakeView(Viewer);
 			View.Time = Time;
 			View.HideDelay = 0.45;
-			View.bAvoidStandIns = bAvoidStandIns;
 			return View;
 		};
 		auto Viewer = [&Rig](const FVector& Up) { return Rig.SurfacePoint(Up) + Up * 170.0; };
@@ -606,27 +603,17 @@ bool FFarFieldPlanetNoStandInTest::RunTest(const FString& Parameters)
 			ReleasedBefore, WalkGaps));
 		TestTrue(*FString::Printf(TEXT("%s: hidden patches were released while settling"), Rule), ReleasedBefore > 0);
 		TestEqual(*FString::Printf(TEXT("%s: no gap while walking"), Rule), WalkGaps, 0);
-		if (bAvoidStandIns)
-		{
-			TestEqual(*FString::Printf(TEXT("%s: no stand-in over the window while walking"), Rule), FramesWithStandIns, 0);
-			TestEqual(*FString::Printf(TEXT("%s: no covered edge patch waits for a build"), Rule), UnreadyCovered, 0);
+		TestEqual(*FString::Printf(TEXT("%s: no stand-in over the window while walking"), Rule), FramesWithStandIns, 0);
+		TestEqual(*FString::Printf(TEXT("%s: no covered edge patch waits for a build"), Rule), UnreadyCovered, 0);
 
-			// The window's edge unloads: the edge patches there were built meanwhile and draw in the very next update.
-			TestTrue(*FString::Printf(TEXT("%s: settles after the walk"), Rule), Rig.Converge(View, Loaded) > 0);
-			auto Shrunk = [&Rig, &View](const FIntVector& Coord) { return Rig.InWindow(View, Coord, 0.85 * ViewDistance); };
-			Rig.FarField.Update(View, Shrunk, Changes);
-			const int32 EdgeGaps = Rig.CountGaps(View, Shrunk);
-			AddInfo(FString::Printf(TEXT("%s: the window shrunk to 0.85 of the view distance: %d gaps in the next update, %d stand-ins"),
-				Rule, EdgeGaps, Rig.FarField.GetStandInCount()));
-			TestEqual(*FString::Printf(TEXT("%s: the edge's patches draw at once when its chunks unload"), Rule), EdgeGaps, 0);
-
-		}
-		else
-		{
-			// Documents the flicker this replaces (VP4): if this fails the rule before no longer shows it, and the test needs
-			// a new walk.
-			TestTrue(*FString::Printf(TEXT("%s: stand-ins over the window while walking"), Rule), FramesWithStandIns > 0);
-		}
+		// The window's edge unloads: the edge patches there were built meanwhile and draw in the very next update.
+		TestTrue(*FString::Printf(TEXT("%s: settles after the walk"), Rule), Rig.Converge(View, Loaded) > 0);
+		auto Shrunk = [&Rig, &View](const FIntVector& Coord) { return Rig.InWindow(View, Coord, 0.85 * ViewDistance); };
+		Rig.FarField.Update(View, Shrunk, Changes);
+		const int32 EdgeGaps = Rig.CountGaps(View, Shrunk);
+		AddInfo(FString::Printf(TEXT("%s: the window shrunk to 0.85 of the view distance: %d gaps in the next update, %d stand-ins"),
+			Rule, EdgeGaps, Rig.FarField.GetStandInCount()));
+		TestEqual(*FString::Printf(TEXT("%s: the edge's patches draw at once when its chunks unload"), Rule), EdgeGaps, 0);
 
 		// A teleport 40 degrees toward the pole, settled past the release delay first: the destination was under the
 		// horizon (culled, released) on a face whose root is built, and nothing is loaded there yet. The first update
@@ -650,11 +637,10 @@ bool FFarFieldPlanetNoStandInTest::RunTest(const FString& Parameters)
 /**
  * Visual polish F4.2: a teleport onto a cube face the camera never saw. The window loaded around a viewer at 45 degrees on
  * the small planet (between the +X and +Z faces), settled past the release delay; then a teleport 90 degrees east, onto
- * the middle of a face that lay under the horizon all along, where nothing of the window is loaded. With
- * View.bBuildAllRoots every root is built while settling (culled ones drawing nothing: the site draws the same patches as
- * under the rule before) and the destination face's root stands in from the first update after the teleport: no gap out
- * to three view distances, then or in the updates after it while the face refines. Under the rule before that root was
- * never built: nothing of the far field was drawn there in the first update.
+ * the middle of a face that lay under the horizon all along, where nothing of the window is loaded. Every root is built
+ * while settling (culled ones drawing nothing) and the destination face's root stands in from the first update after the
+ * teleport: no gap out to three view distances, then or in the updates after it while the face refines. Before F4.2 that
+ * root was never built: nothing of the far field was drawn there in the first update.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlanetUnseenFaceTest,
 	"VoxelWorlds.FarField.Planet.TeleportOntoUnseenFace",
@@ -671,17 +657,14 @@ bool FFarFieldPlanetUnseenFaceTest::RunTest(const FString& Parameters)
 	const FVector Far = East.GetSafeNormal();
 	const int32 FarFace = FVoxelCubeSphere::DirectionToSurface(Far).Face;
 	const uint64 FarRoot = FVoxelFarFieldPatchKey(FarFace, 0, 0, 0).Pack();
-	TSet<uint64> DrawnAtSiteBefore;
-	for (const bool bBuildAllRoots : { false, true })
 	{
-		const TCHAR* Rule = bBuildAllRoots ? TEXT("building every root") : TEXT("the rule before");
+		const TCHAR* Rule = TEXT("building every root");
 		FRig Rig(Case, 16, /*bSea=*/false);
-		auto MakeView = [&Rig, bBuildAllRoots](const FVector& Viewer, double Time)
+		auto MakeView = [&Rig](const FVector& Viewer, double Time)
 		{
 			FVoxelFarFieldView View = Rig.MakeView(Viewer);
 			View.Time = Time;
 			View.HideDelay = 0.45;
-			View.bBuildAllRoots = bBuildAllRoots;
 			return View;
 		};
 		auto Viewer = [&Rig](const FVector& Up) { return Rig.SurfacePoint(Up) + Up * 170.0; };
@@ -719,19 +702,7 @@ bool FFarFieldPlanetUnseenFaceTest::RunTest(const FString& Parameters)
 		TestTrue(*FString::Printf(TEXT("%s: the destination's face lay under the horizon from the site"), Rule), Destination && Destination->bCulled);
 		AddInfo(FString::Printf(TEXT("%s: settled at 45 degrees: %d of 6 roots built (the largest %.1f KB), %d patches drawn; the destination's face %d"),
 			Rule, RootsBuilt, RootBytes / 1024.0, DrawnAtSite.Num(), FarFace));
-		if (bBuildAllRoots)
-		{
-			TestEqual(*FString::Printf(TEXT("%s: every root is built"), Rule), RootsBuilt, 6);
-			TestTrue(*FString::Printf(TEXT("%s: the site draws what it drew under the rule before"), Rule),
-				DrawnAtSite.Num() == DrawnAtSiteBefore.Num() && DrawnAtSite.Includes(DrawnAtSiteBefore));
-		}
-		else
-		{
-			// Documents the gap this closes (F4.2): if this fails the destination's root is built under the rule before,
-			// and the test needs a face the site does not see.
-			TestTrue(*FString::Printf(TEXT("%s: the destination's root was never built"), Rule), Destination && !Destination->bBuilt);
-			DrawnAtSiteBefore = DrawnAtSite;
-		}
+		TestEqual(*FString::Printf(TEXT("%s: every root is built"), Rule), RootsBuilt, 6);
 
 		// The teleport: nothing of the window loaded there; the first update after it, and a second of updates after that.
 		auto Nothing = [](const FIntVector&) { return false; };
@@ -757,15 +728,8 @@ bool FFarFieldPlanetUnseenFaceTest::RunTest(const FString& Parameters)
 			}
 		}
 		AddInfo(FString::Printf(TEXT("%s: the 29 updates after the first: %d with gaps (%d gaps in all)"), Rule, LaterUpdatesWithGaps, LaterGaps));
-		if (bBuildAllRoots)
-		{
-			TestEqual(*FString::Printf(TEXT("%s: no gap in the first update after the teleport"), Rule), FirstGaps, 0);
-			TestEqual(*FString::Printf(TEXT("%s: no gap in the updates after it"), Rule), LaterGaps, 0);
-		}
-		else
-		{
-			TestTrue(*FString::Printf(TEXT("%s: the first update after the teleport has gaps"), Rule), FirstGaps > 0);
-		}
+		TestEqual(*FString::Printf(TEXT("%s: no gap in the first update after the teleport"), Rule), FirstGaps, 0);
+		TestEqual(*FString::Printf(TEXT("%s: no gap in the updates after it"), Rule), LaterGaps, 0);
 	}
 	return true;
 }
@@ -1054,9 +1018,9 @@ bool FFarFieldPlanetChunkManagerTest::RunTest(const FString& Parameters)
  * UWorld::Tick's order: the chunk manager's tick (TG_PrePhysics, reading the camera manager's camera), the camera managers,
  * then the far field's camera tick (TG_PostUpdateWork). The window settles around the camera 1,200 over the datum at 45
  * degrees between +X and +Z; the camera then jumps 135 degrees, over the middle of the -X face, which lay under the
- * horizon all along. With voxel.World.FarFieldCameraUpdate that very frame draws the far field there: every direction out
- * to 9,000 uu around the camera falls on a drawn patch whose component shows it. Under the rule before that frame drew
- * the selection for the old camera, nothing there, and the next frame drew it. Moving under a chunk a frame runs no
+ * horizon all along. That very frame draws the far field there (F4.3): every direction out to 9,000 uu around the camera
+ * falls on a drawn patch whose component shows it. Before F4.3 that frame drew the selection for the old camera, nothing
+ * there, and the next frame drew it. Moving under a chunk a frame runs no
  * second update; the camera tick is registered in TG_PostUpdateWork after the primary tick.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlanetCameraAfterCutTest,
@@ -1072,10 +1036,8 @@ bool FFarFieldPlanetCameraAfterCutTest::RunTest(const FString& Parameters)
 	constexpr float FrameSeconds = 1.0f / 60.0f;
 	const FVector SiteUp = FVector(1, 0, 1).GetSafeNormal();
 	const FVector FarUp = FVector(-1, 0, 0);
-	for (const bool bCameraUpdate : { false, true })
 	{
-		const TCHAR* Rule = bCameraUpdate ? TEXT("updating for the frame's camera") : TEXT("the rule before");
-		const FScopedCVar CameraUpdate(TEXT("voxel.World.FarFieldCameraUpdate"), bCameraUpdate ? TEXT("1") : TEXT("0"));
+		const TCHAR* Rule = TEXT("updating for the frame's camera");
 
 		UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("FarFieldCameraAfterCutWorld"));
 		FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
@@ -1217,17 +1179,8 @@ bool FFarFieldPlanetCameraAfterCutTest::RunTest(const FString& Parameters)
 			AddInfo(FString::Printf(TEXT("%s: the frame of the cut: %d of %d directions without the far field (under the camera %s), %lld update(s) for the frame's camera; the next frame: %d"),
 				Rule, FirstGaps, Samples, Drawn ? *Drawn->Key.ToString() : TEXT("nothing"), CutUpdates, SecondGaps));
 			TestEqual(*FString::Printf(TEXT("%s: the frame after the cut draws the far field there"), Rule), SecondGaps, 0);
-			if (bCameraUpdate)
-			{
-				TestEqual(*FString::Printf(TEXT("%s: the frame of the cut draws the far field there"), Rule), FirstGaps, 0);
-				TestEqual(*FString::Printf(TEXT("%s: one update for the frame's camera"), Rule), CutUpdates, int64(1));
-			}
-			else
-			{
-				// Documents the frame this closes (F4.3): if this fails the rule before no longer lags the camera here.
-				TestEqual(*FString::Printf(TEXT("%s: the frame of the cut draws the old camera's selection, nothing there"), Rule), FirstGaps, Samples);
-				TestEqual(*FString::Printf(TEXT("%s: no update for the frame's camera"), Rule), CutUpdates, int64(0));
-			}
+			TestEqual(*FString::Printf(TEXT("%s: the frame of the cut draws the far field there"), Rule), FirstGaps, 0);
+			TestEqual(*FString::Printf(TEXT("%s: one update for the frame's camera"), Rule), CutUpdates, int64(1));
 		}
 
 		Manager->Shutdown();

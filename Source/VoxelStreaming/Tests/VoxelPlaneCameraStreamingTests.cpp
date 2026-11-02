@@ -190,9 +190,9 @@ bool FVoxelPlaneDescentPrefetchTest::RunTest(const FString& Parameters)
  * player controller whose view target is a camera actor, frames stepped in UWorld::Tick's order: the chunk manager's tick
  * (TG_PrePhysics, reading the camera manager's camera), the camera managers, then the camera tick (TG_PostUpdateWork). The
  * window settles around the camera 300 over the ground; the camera then jumps ten chunks east, past the view distance.
- * With voxel.Stream.CameraCutUpdate the chunk under the new camera is requested in that very frame and the first
- * generations are launched; under the rule before that frame streamed for the old camera, the chunk under the new one
- * stayed unloaded, and the next frame requested it. Moving under a chunk a frame runs no second update.
+ * The chunk under the new camera is requested in that very frame and the first generations are launched (before WM-MP4
+ * that frame streamed for the old camera, the chunk under the new one stayed unloaded, and the next frame requested it).
+ * Moving under a chunk a frame runs no second update.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlaneCameraAfterCutTest,
 	"VoxelWorlds.Streaming.Plane.CameraAfterCut",
@@ -204,10 +204,8 @@ bool FVoxelPlaneCameraAfterCutTest::RunTest(const FString& Parameters)
 	using namespace VoxelTesting;
 
 	constexpr float FrameSeconds = 1.0f / 60.0f;
-	for (const bool bCutUpdate : { false, true })
 	{
-		const TCHAR* Rule = bCutUpdate ? TEXT("streaming for the frame's camera") : TEXT("the rule before");
-		const FScopedCVar CutUpdate(TEXT("voxel.Stream.CameraCutUpdate"), bCutUpdate ? TEXT("1") : TEXT("0"));
+		const TCHAR* Rule = TEXT("streaming for the frame's camera");
 		const FScopedCVar NoLead(TEXT("voxel.Stream.DescentLead"), TEXT("0"));
 
 		FTestChunkWorld W;
@@ -292,21 +290,12 @@ bool FVoxelPlaneCameraAfterCutTest::RunTest(const FString& Parameters)
 				Rule, InTheFrame == EChunkState::Unloaded ? TEXT("unloaded") : TEXT("requested"), PendingInTheFrame,
 				bViewerMovedInTheFrame ? TEXT("at the new camera") : TEXT("still at the old one"), CutUpdates, NextFrame == EChunkState::Unloaded ? TEXT("unloaded") : TEXT("requested")));
 			TestTrue(*FString::Printf(TEXT("%s: the frame after the cut has requested the chunk under the camera"), Rule), NextFrame != EChunkState::Unloaded);
-			if (bCutUpdate)
-			{
-				TestTrue(*FString::Printf(TEXT("%s: the frame of the cut requests the chunk under the camera"), Rule), InTheFrame != EChunkState::Unloaded);
-				TestTrue(*FString::Printf(TEXT("%s: ... and has generations under way"), Rule), PendingInTheFrame > 0);
-				TestTrue(*FString::Printf(TEXT("%s: ... the streaming viewer at the new camera"), Rule), bViewerMovedInTheFrame);
-				TestEqual(*FString::Printf(TEXT("%s: one update for the frame's camera"), Rule), CutUpdates, int64(1));
-			}
-			else
-			{
-				// Documents the frame this closes (WM-MP4): if this fails the rule before no longer lags the camera here.
-				TestTrue(*FString::Printf(TEXT("%s: the frame of the cut streams for the old camera, nothing under the new one"), Rule), InTheFrame == EChunkState::Unloaded);
-				TestEqual(*FString::Printf(TEXT("%s: no update for the frame's camera"), Rule), CutUpdates, int64(0));
-			}
+			TestTrue(*FString::Printf(TEXT("%s: the frame of the cut requests the chunk under the camera"), Rule), InTheFrame != EChunkState::Unloaded);
+			TestTrue(*FString::Printf(TEXT("%s: ... and has generations under way"), Rule), PendingInTheFrame > 0);
+			TestTrue(*FString::Printf(TEXT("%s: ... the streaming viewer at the new camera"), Rule), bViewerMovedInTheFrame);
+			TestEqual(*FString::Printf(TEXT("%s: one update for the frame's camera"), Rule), CutUpdates, int64(1));
 
-			// Settled at the destination the window is whole either way.
+			// Settled at the destination the window is whole.
 			IdleFrames = 0;
 			while (IdleFrames < 30 && FPlatformTime::Seconds() < Deadline)
 			{

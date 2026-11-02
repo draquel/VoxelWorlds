@@ -2,7 +2,6 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
-#include "HAL/IConsoleManager.h"
 #include "Testing/VoxelTestChunkWorld.h"
 #include "VoxelChunkManager.h"
 #include "VoxelWorldConfiguration.h"
@@ -18,9 +17,8 @@
 //
 // - Streaming.Bench.PreBenchMeshes: a small plane with three LOD bands streams around a viewer and settles; the counters
 //   are reset as a bench start resets them, the viewer moves 3,000 uu and the world settles again. Every chunk that
-//   re-meshed for its LOD was meshed before the reset. With voxel.Bench.CountPreBenchMeshes 1 the bench's re-mesh count
-//   (and its LOD share) equals the re-meshes the renderer received after the reset; with 0 (the rule before) it counts
-//   none of them.
+//   re-meshed for its LOD was meshed before the reset. The bench's re-mesh count (and its LOD share) equals the re-meshes
+//   the renderer received after the reset (before G14 it counted none of them).
 // ---------------------------------------------------------------------------
 
 namespace VoxelBenchRemeshCountTest
@@ -34,12 +32,8 @@ namespace VoxelBenchRemeshCountTest
 		int32 Loaded = 0;
 	};
 
-	FRunResult Run(int32 CountPreBenchMeshes)
+	FRunResult Run()
 	{
-		IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Bench.CountPreBenchMeshes"));
-		const int32 Previous = CVar ? CVar->GetInt() : 1;
-		if (CVar) { CVar->Set(CountPreBenchMeshes, ECVF_SetByCode); }
-
 		FRunResult Result;
 		VoxelTesting::FTestChunkWorld W;
 		W.Create(TEXT("VoxelBenchPreBenchMeshes"));
@@ -71,8 +65,6 @@ namespace VoxelBenchRemeshCountTest
 		Result.CountedLOD = W.Manager->GetBenchRemeshByReason(EVoxelRemeshReason::LODTransition);
 		Result.Loaded = W.Renderer.ChunkMeshes.Num();
 		W.Stop();
-
-		if (CVar) { CVar->Set(Previous, ECVF_SetByCode); }
 		return Result;
 	}
 }
@@ -84,19 +76,15 @@ bool FVoxelBenchPreBenchMeshesTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelBenchRemeshCountTest;
 
-	const FRunResult After = Run(1);
-	const FRunResult Before = Run(0);
+	const FRunResult After = Run();
 
-	AddInfo(FString::Printf(TEXT("CountPreBenchMeshes 1: re-meshes received %lld, counted %lld (LOD %lld), %d chunk meshes"),
+	AddInfo(FString::Printf(TEXT("Re-meshes received %lld, counted %lld (LOD %lld), %d chunk meshes"),
 		After.Truth, After.Counted, After.CountedLOD, After.Loaded));
-	AddInfo(FString::Printf(TEXT("CountPreBenchMeshes 0 (before): re-meshes received %lld, counted %lld (LOD %lld), %d chunk meshes"),
-		Before.Truth, Before.Counted, Before.CountedLOD, Before.Loaded));
 
-	TestTrue(TEXT("Both runs settled at both viewers"), After.bSettled && Before.bSettled);
-	TestTrue(TEXT("The move re-meshed chunks meshed before the reset"), After.Truth > 0 && Before.Truth > 0);
-	TestEqual(TEXT("1: the bench counts every re-mesh the renderer received"), After.Counted, After.Truth);
-	TestEqual(TEXT("1: they are all LOD transitions"), After.CountedLOD, After.Truth);
-	TestEqual(TEXT("0 (the rule before): none of them counted"), Before.Counted, (int64)0);
+	TestTrue(TEXT("The run settled at both viewers"), After.bSettled);
+	TestTrue(TEXT("The move re-meshed chunks meshed before the reset"), After.Truth > 0);
+	TestEqual(TEXT("The bench counts every re-mesh the renderer received"), After.Counted, After.Truth);
+	TestEqual(TEXT("They are all LOD transitions"), After.CountedLOD, After.Truth);
 	return true;
 }
 

@@ -327,16 +327,15 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   second's weight of the two; both materials are flat per triangle (a grid vertex is duplicated where neighbouring quads
   hold different pairs) and only the weight interpolates. The terrain material picks one of the two per pixel against a
   temporal screen dither (`FarFieldMaterialPick`, [MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Far-Field Material Blend"),
-  which TSR resolves into a gradient across the quad. `voxel.World.FarFieldMaterialBlend 0` gives each quad one
-  material, the most common of its corners' picks (`QueryPlanetSurfaceConditionsAt`), so a border is a staircase of
-  quads, as before G45; it is read when patches build (`voxel.World.FarField 0` then `1` rebuilds them).
+  which TSR resolves into a gradient across the quad (G45; before, each quad drew one material, the most common of its
+  corners' picks, so a border was a staircase of quads).
 - **Selection.** A patch splits while its geometric error (the drawn triangles against the surface at the quad centres,
   curvature and the sea's sag included) projects to more than `voxel.World.FarFieldError` pixels (2) from the camera,
   and stays whole under 0.7 of it; a patch wholly under the camera's horizon (the lowest terrain's sphere, plus the
   angle its top stays in view) is neither drawn nor split. A patch keeps drawing until its subtree covers its area, so
   the planet never shows a hole while it refines; builds run on the thread pool (`voxel.World.FarFieldMaxBuilds`, 6 in
   flight), nearest first. A patch whose subtree waits for a build stands in for it, hiding everything under it, so a
-  wait where nothing would show must not reach one (visual polish VP4, `voxel.World.FarFieldAvoidStandIns`, 1): a band
+  wait where nothing would show must not reach one (visual polish VP4): a band
   patch the voxel chunks cover covers its area without a mesh, a patch culled in its last visit (coming up over the
   horizon) waits for its build drawing nothing, and a chunk re-meshing counts as drawn. Before, the nearest built
   ancestor stood in, often a face's root (the others released), and its coarse surface flashed over the voxel terrain
@@ -345,7 +344,7 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   The chunk manager updates the far field in its tick (`TG_PrePhysics`) with the player camera manager's camera, the
   frame before's (the camera managers update after `TG_PostPhysics`); after a cut, a camera more than a chunk from that
   one, it updates it again in `TG_PostUpdateWork` for this frame's (`FVoxelFarFieldCameraTickFunction`,
-  `UpdateFarFieldForCamera`; F4.3, `voxel.World.FarFieldCameraUpdate`), so the frame of a teleport draws the far field
+  `UpdateFarFieldForCamera`; F4.3), so the frame of a teleport draws the far field
   where the camera arrived rather than the old position's selection (test `FarField.{Planet,Plane}.CameraAfterCut`).
 - **The hole.** Within the window's reach of the viewer's ground point (the unload distance plus a chunk's half
   diagonal, along the ground as the window measures its horizons) patches split down to the edge level, one to two
@@ -360,9 +359,8 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   builds again when needed (its subtree draws meanwhile), except the roots and edge patches near the window's edge,
   which are built while covered so they show the moment their chunks unload (a covered one the viewer leaves there
   builds while it draws nothing, VP4). Every root is built from the first updates, also a face under the horizon, so
-  after a teleport onto a face the camera never saw its root stands in at once (F4.2,
-  `voxel.World.FarFieldBuildAllRoots`, 1; before, a root was built once some of its face came into view and the first
-  update there drew no far field; test `FarField.Planet.TeleportOntoUnseenFace`).
+  after a teleport onto a face the camera never saw its root stands in at once (F4.2; before, a root was built once some
+  of its face came into view and the first update there drew no far field; test `FarField.Planet.TeleportOntoUnseenFace`).
 - **The sea**, at scale: where the sea sphere would sag past its budget (`ShouldDrawSea`: from about R 3.3 x 10^5) each
   patch draws a sea section over the cells near or under the sea, 8 x 8 cells a patch, over the voxel window too (a
   planet has no voxel water tiles), with an underside near the window shown from under the sea. The small planet keeps
@@ -426,9 +424,8 @@ window, and `vox.Planet` reports "cut-over off: no far field" (tests `LOD.Planet
   120,000 uu on the review planets) the window is suspended; it resumes below `CutoverResumeFraction` (0.85) of it, so a flyer hovering at the cut-over does
   not churn. `voxel.Stream.VoxelCutover` overrides it (-1: the configuration's; 0: never, the window keeping its ground
   disk at any altitude as WM-BP8 made it). A suspended window resumes only with the camera under the cut-over as well
-  (`FLODQueryContext::ViewerLead` gives the strategy the camera's altitude; G49, `voxel.World.CutoverResumeGuard`, 0 =
-  the streaming viewer alone decides, the rule before): the descent prefetch below can bring a resume forward to the
-  cut-over but no higher (tests `LOD.Planet.CutoverResumeGuard`, `Streaming.Planet.CutoverDescentStop`).
+  (`FLODQueryContext::ViewerLead` gives the strategy the camera's altitude; G49: before, the streaming viewer alone
+  decided): the descent prefetch below can bring a resume forward to the cut-over but no higher (tests `LOD.Planet.CutoverResumeGuard`, `Streaming.Planet.CutoverDescentStop`).
 - **Suspended**, `GetVisibleChunks` returns nothing, `GetChunksToUnload` every loaded chunk and the balanced LOD cache is
   empty; the chunk manager evicts its generation queue, stale-culls whatever finishes generating, and neither pins nor
   keeps edited chunks (their edits stay in the edit layers and load with the window when it resumes). The window
@@ -545,7 +542,7 @@ Each tick `UVoxelChunkManager`:
 3. Makes streaming decisions when the viewer enters another chunk (`CachedViewerChunk`) or an update is forced
    (`bForceStreamingUpdate`): `GetChunksToLoad` into the generation queue, `GetChunksToUnload` through the chunk
    manager's vetoes into `SelectUnloadCandidates`. After a camera cut (more than a chunk) it runs a second streaming
-   pass in the same frame for the new camera (`voxel.Stream.CameraCutUpdate`, every world mode since MP1).
+   pass in the same frame for the new camera (`UpdateStreamingForCamera`, every world mode since MP1).
 4. Re-meshes chunks whose balanced LOD changed (with a crossfade, `RENDERING_SYSTEM.md`) and updates the far field.
 
 ---

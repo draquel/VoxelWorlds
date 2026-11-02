@@ -12,20 +12,6 @@
 #include "Async/Async.h"
 #include "HAL/IConsoleManager.h"
 
-static TAutoConsoleVariable<int32> CVarFarFieldMaterialBlend(
-	TEXT("voxel.World.FarFieldMaterialBlend"),
-	1,
-	TEXT("Planet far field materials (world modes review G45): 1 = each quad carries its corners' two leading materials and a ")
-	TEXT("weight per corner, from each vertex's material mix, and the terrain material dithers between them (a gradient across ")
-	TEXT("the quad); 0 = one material a quad, the most common of its corners' picks, as before (borders a staircase of quads). ")
-	TEXT("Read when patches build; voxel.World.FarField 0 then 1 rebuilds them."),
-	ECVF_Default);
-
-bool FVoxelFarFieldSurface::IsMaterialBlendEnabled()
-{
-	return CVarFarFieldMaterialBlend.GetValueOnAnyThread() != 0;
-}
-
 namespace VoxelFarFieldPrivate
 {
 	/** The angle between two unit directions, precise for small angles (atan2 of the cross and dot products). */
@@ -825,15 +811,11 @@ void FVoxelFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, const FV
 	TArray<FVector3f> Normals;
 	TArray<uint8> Materials;
 	TArray<uint8> Biomes;
-	TArray<FVoxelSurfaceMaterialMix> Mixes; // G45: each vertex's material mix, when the quads blend
-	const bool bBlendMaterials = FVoxelFarFieldSurface::IsMaterialBlendEnabled();
+	TArray<FVoxelSurfaceMaterialMix> Mixes; // G45: each vertex's material mix, which the quads blend
 	Normals.SetNumUninitialized(Row * Row);
 	Materials.SetNumUninitialized(Row * Row);
 	Biomes.SetNumUninitialized(Row * Row);
-	if (bBlendMaterials)
-	{
-		Mixes.SetNum(Row * Row);
-	}
+	Mixes.SetNum(Row * Row);
 	Out.MinAltitude = TNumericLimits<float>::Max();
 	Out.MaxAltitude = TNumericLimits<float>::Lowest();
 	for (int32 J = 0; J <= Q; ++J)
@@ -849,18 +831,10 @@ void FVoxelFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, const FV
 				Normal = Samples[Index].Direction;
 			}
 			Normals[I + J * Row] = FVector3f(Normal);
-			if (bBlendMaterials)
-			{
-				FVoxelSurfaceMaterialMix& Mix = Mixes[I + J * Row];
-				Mix = Surface.SampleMaterialMix(Samples[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index]);
-				Materials[I + J * Row] = Mix.Materials[0];
-				Biomes[I + J * Row] = Mix.BiomeID;
-			}
-			else
-			{
-				Surface.SampleConditions(Samples[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index],
-					Materials[I + J * Row], Biomes[I + J * Row]);
-			}
+			FVoxelSurfaceMaterialMix& Mix = Mixes[I + J * Row];
+			Mix = Surface.SampleMaterialMix(Samples[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index]);
+			Materials[I + J * Row] = Mix.Materials[0];
+			Biomes[I + J * Row] = Mix.BiomeID;
 			Out.MinAltitude = FMath::Min(Out.MinAltitude, static_cast<float>(Altitudes[Index]));
 			Out.MaxAltitude = FMath::Max(Out.MaxAltitude, static_cast<float>(Altitudes[Index]));
 		}
@@ -1069,17 +1043,6 @@ void FVoxelFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, const FV
 		for (int32 I = 0; I < Q; ++I)
 		{
 			const int32 Corners[4] = { I + J * Row, (I + 1) + J * Row, I + (J + 1) * Row, (I + 1) + (J + 1) * Row };
-			if (!bBlendMaterials)
-			{
-				uint16 Keys[4];
-				for (int32 c = 0; c < 4; ++c)
-				{
-					Keys[c] = static_cast<uint16>(Materials[Corners[c]]) | (static_cast<uint16>(Biomes[Corners[c]]) << 8);
-				}
-				const uint16 Majority = Keys[MajorityOfFour(Keys)];
-				QuadKeys[I + J * Q] = PackKey(static_cast<uint8>(Majority & 0xFF), static_cast<uint8>(Majority & 0xFF), static_cast<uint8>(Majority >> 8));
-				continue;
-			}
 			// The corners' shares per material; the largest two.
 			uint8 Candidates[8];
 			float Totals[8];
@@ -1137,7 +1100,7 @@ void FVoxelFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, const FV
 	{
 		const uint8 Primary = KeyMaterial(QuadKey);
 		const uint8 Secondary = KeySecondary(QuadKey);
-		if (!bBlendMaterials || Primary == Secondary)
+		if (Primary == Secondary)
 		{
 			return 0.0f;
 		}
@@ -1554,15 +1517,11 @@ bool FVoxelFarField::IsLazy(FPatchState& Patch, const FPatchState& Parent)
 	{
 		return false;
 	}
-	if (View.bAvoidStandIns)
-	{
-		// Covered is enough wherever the patch lies (VP4); near the window's edge its build is requested meanwhile (Visit),
-		// and nothing stands in for it in the meantime. Past the prebuild radius only once its chunks have been drawn
-		// HideDelay: a chunk that has just appeared fades in over where the patch's mesh would be.
-		return UpdateCovered(Patch)
-			&& (GetGroundDistanceMax(Patch) < View.PrebuildRadius || View.Time - Patch.CoveredSince >= View.HideDelay);
-	}
-	return GetGroundDistanceMax(Patch) < View.PrebuildRadius && UpdateCovered(Patch);
+	// Covered is enough wherever the patch lies (VP4); near the window's edge its build is requested meanwhile (Visit),
+	// and nothing stands in for it in the meantime. Past the prebuild radius only once its chunks have been drawn
+	// HideDelay: a chunk that has just appeared fades in over where the patch's mesh would be.
+	return UpdateCovered(Patch)
+		&& (GetGroundDistanceMax(Patch) < View.PrebuildRadius || View.Time - Patch.CoveredSince >= View.HideDelay);
 }
 
 bool FVoxelFarField::IsKeptBuilt(const FPatchState& Patch) const
@@ -1681,7 +1640,7 @@ bool FVoxelFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutChanges)
 	{
 		PruneChildren(*Patch, OutChanges);
 		// A root is built while culled too (F4.2), so after a teleport onto a face the camera never saw it stands in at once.
-		if (View.bBuildAllRoots && Patch->Key.Level == 0)
+		if (Patch->Key.Level == 0)
 		{
 			RequestBuild(*Patch);
 		}
@@ -1690,14 +1649,14 @@ bool FVoxelFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutChanges)
 	// Coming up over the horizon as the camera moves (VP4): nothing was drawn for it, so it waits for its build drawing
 	// nothing (a stand-in would replace everything drawn under that ancestor, the horizon and the voxel window included).
 	// After a cut (a teleport) it may lie in full view: the ancestor stands in as before, or there would be a hole.
-	const bool bWaitsUndrawn = View.bAvoidStandIns && bCulledBefore && !bCameraCut;
+	const bool bWaitsUndrawn = bCulledBefore && !bCameraCut;
 	// An edge patch standing in without a mesh (its parent found it lazy this update: never built, or released while
 	// covered) covers its area by drawing nothing; anything else unbuilt is built first.
 	if (Patch->bLazy)
 	{
 		++CoveredEdgeVisits;
 		// Near the window's edge it is wanted built for when its chunks unload (VP4): built meanwhile, still drawing nothing.
-		if (View.bAvoidStandIns && IsKeptBuilt(*Patch))
+		if (IsKeptBuilt(*Patch))
 		{
 			RequestBuild(*Patch);
 		}

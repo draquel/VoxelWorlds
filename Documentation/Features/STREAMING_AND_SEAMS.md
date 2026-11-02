@@ -68,7 +68,7 @@ Each queue is a priority-sorted array with a set beside it for duplicate checks 
 
 A second tick function (`FVoxelFarFieldCameraTickFunction`, `TG_PostUpdateWork`) runs `TickAfterCameraUpdate`: after
 a camera cut of more than a chunk it updates the far field and runs the streaming decisions again for the camera this
-frame renders with (`voxel.World.FarFieldCameraUpdate`, `voxel.Stream.CameraCutUpdate`; F4.3, MP1). Each step is
+frame renders with (F4.3, MP1). Each step is
 timed into `FVoxelTimingStats`, which the streaming bench reports.
 
 ### Generation

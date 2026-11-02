@@ -627,9 +627,8 @@ return MaterialID;
 
 Each pixel takes one of the two materials against interleaved gradient noise moved every frame, which TSR averages into a
 gradient across the quad: no texture sample is added. Before, a far-field quad drew one material, the most common of
-its corners' picks, so every material border was a staircase of quads (a few km a step at a planet's horizon);
-`voxel.World.FarFieldMaterialBlend 0` restores that (tests `FarField.Planet.MaterialMix`, `.MaterialBlend`,
-`FarField.Plane.MaterialMix`). Every voxel chunk vertex has alpha 255 (weight 0) and keeps
+its corners' picks, so every material border was a staircase of quads (a few km a step at a planet's horizon) (tests
+`FarField.Planet.MaterialMix`, `.MaterialBlend`, `FarField.Plane.MaterialMix`). Every voxel chunk vertex has alpha 255 (weight 0) and keeps
 `MaterialID`. Vertex colour reaches the shader as UNORM (`VET_Color`, no sRGB decode), so R carries an ID exactly; IDs stay
 out of interpolation because both are flat per triangle. The node is added by `Scripts/setup_farfield_material_blend.py`
 (parent repository; idempotent, run headless). The VertexColor node's default output is RGB only, so R and A go in as their own

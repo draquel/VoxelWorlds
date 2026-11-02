@@ -2,8 +2,6 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
-#include "HAL/IConsoleManager.h"
-#include "Testing/VoxelTestScopedCVar.h"
 #include "VoxelFarField.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelBiomeConfiguration.h"
@@ -17,7 +15,7 @@
 // ---------------------------------------------------------------------------
 // G45 (WORLD_MODES_REVIEW_PLAN.md §14.1, §20.27): the planet far field's material borders. Each quad used to carry one material,
 // the most common of its corners' picks, so a border between materials was a staircase of quads (a few km a step at the
-// horizon, every biome border from orbit). Now (voxel.World.FarFieldMaterialBlend 1) a vertex samples the surface's
+// horizon, every biome border from orbit). Now a vertex samples the surface's
 // material mix (FVoxelFarFieldSurface::SampleMaterialMix: a blend zone's two leading materials and the second's share,
 // what the voxels' dithered picks cover there) and a quad carries its corners' two leading materials, the weight
 // interpolating across it; the terrain material dithers between them (M_VoxelMaster's FarFieldMaterialPick).
@@ -27,8 +25,7 @@
 //   is the mix's weight, and the two materials hold nearly all the picks.
 // - MaterialBlend: the patch mesh keeps both materials flat per triangle (UV1.x and colour R the same at its three
 //   vertices), a vertex whose quad's pair holds its mix carries the mix's weight, and blend quads exist (grid points where
-//   two quads draw a material differently, three materials meeting, are counted); with the cvar at 0 the old encoding
-//   (colour R the material, alpha 1) and one material a quad.
+//   two quads draw a material differently, three materials meeting, are counted).
 // ---------------------------------------------------------------------------
 
 namespace VoxelFarFieldMaterialTestUtils
@@ -199,12 +196,9 @@ bool FFarFieldPlanetMaterialBlendTest::RunTest(const FString& Parameters)
 		return true;
 	}
 
-	int32 SeamsByMode[2] = { 0, 0 };
-	for (int32 Blend = 0; Blend < 2; ++Blend)
 	{
-		VoxelTesting::FScopedCVar Scoped(TEXT("voxel.World.FarFieldMaterialBlend"), Blend);
 		int32 Triangles = 0, MixedPrimary = 0, MixedSecondary = 0, BlendTriangles = 0, Weighted = 0, Vertices = 0;
-		int32 OldEncoding = 0, Checked = 0, WrongWeight = 0, Shared = 0, Seams = 0;
+		int32 Checked = 0, WrongWeight = 0, Shared = 0, Seams = 0;
 		for (const FVector& Site : Sites)
 		{
 			const FVoxelSurfaceCoord Coord = FVoxelCubeSphere::DirectionToSurface(Site);
@@ -227,7 +221,7 @@ bool FFarFieldPlanetMaterialBlendTest::RunTest(const FString& Parameters)
 					MixedSecondary += (Terrain.Colors[A].R != Terrain.Colors[B].R || Terrain.Colors[A].R != Terrain.Colors[C].R) ? 1 : 0;
 					BlendTriangles += (Terrain.Colors[A].A != Terrain.Colors[B].A || Terrain.Colors[A].A != Terrain.Colors[C].A) ? 1 : 0;
 				}
-				// Per vertex: the old encoding; with the blend, a vertex whose quad's pair holds its own mix carries the mix's weight
+				// Per vertex: a vertex whose quad's pair holds its own mix carries the mix's weight
 				// (what the voxels take there). Per grid point: where two quads draw a material's share differently by over a
 				// quarter (three materials meeting: a quad keeps two).
 				TMap<FVector3f, TArray<int32>> AtPoint;
@@ -236,10 +230,9 @@ bool FFarFieldPlanetMaterialBlendTest::RunTest(const FString& Parameters)
 					++Vertices;
 					const FColor& Color = Terrain.Colors[V];
 					Weighted += Color.A < 255 ? 1 : 0;
-					OldEncoding += (Color.A == 255 && static_cast<float>(Color.R) == Terrain.UV1[V].X) ? 1 : 0;
 					AtPoint.FindOrAdd(Terrain.Positions[V]).Add(V);
 					const uint8 P = static_cast<uint8>(Terrain.UV1[V].X), S = Color.R;
-					if (Blend && P != S)
+					if (P != S)
 					{
 						const FVector Direction = (Mesh.Origin + FVector(Terrain.Positions[V]) - Rig.Settings.Center).GetSafeNormal();
 						const FVoxelSurfaceMaterialMix M = Rig.Mix(Direction);
@@ -284,27 +277,16 @@ bool FFarFieldPlanetMaterialBlendTest::RunTest(const FString& Parameters)
 				}
 			}
 		}
-		AddInfo(FString::Printf(TEXT("%s: %d triangles (%d with the material or %d the second material mixed, %d blending), %d surface vertices (%d weighted, %d in the old encoding), ")
+		// Every material border was a hard edge between quads; with the blend only where three materials meet (logged).
+		AddInfo(FString::Printf(TEXT("%d triangles (%d with the material or %d the second material mixed, %d blending), %d surface vertices (%d weighted), ")
 			TEXT("%d vertices whose pair holds their mix (%d with another weight), %d grid points shared by quads (%d where a material's share differs by over 0.25)"),
-			Blend ? TEXT("Blend") : TEXT("No blend"), Triangles, MixedPrimary, MixedSecondary, BlendTriangles, Vertices, Weighted, OldEncoding, Checked, WrongWeight, Shared, Seams));
-		SeamsByMode[Blend] = Seams;
-		TestEqual(*FString::Printf(TEXT("%s: one material per triangle"), Blend ? TEXT("Blend") : TEXT("No blend")), MixedPrimary, 0);
-		TestEqual(*FString::Printf(TEXT("%s: one second material per triangle"), Blend ? TEXT("Blend") : TEXT("No blend")), MixedSecondary, 0);
-		if (Blend)
-		{
-			TestTrue(TEXT("Blend: quads blend across the zones (non-vacuous)"), BlendTriangles > 0 && Weighted > 0);
-			TestTrue(TEXT("Blend: vertices whose pair holds their mix (non-vacuous)"), Checked > 0);
-			TestEqual(TEXT("Blend: such a vertex carries its mix's weight"), WrongWeight, 0);
-		}
-		else
-		{
-			TestEqual(TEXT("No blend: every vertex in the old encoding (colour R the material, alpha 1)"), OldEncoding, Vertices);
-			TestEqual(TEXT("No blend: no triangle blends"), BlendTriangles, 0);
-		}
+			Triangles, MixedPrimary, MixedSecondary, BlendTriangles, Vertices, Weighted, Checked, WrongWeight, Shared, Seams));
+		TestEqual(TEXT("One material per triangle"), MixedPrimary, 0);
+		TestEqual(TEXT("One second material per triangle"), MixedSecondary, 0);
+		TestTrue(TEXT("Quads blend across the zones (non-vacuous)"), BlendTriangles > 0 && Weighted > 0);
+		TestTrue(TEXT("Vertices whose pair holds their mix (non-vacuous)"), Checked > 0);
+		TestEqual(TEXT("Such a vertex carries its mix's weight"), WrongWeight, 0);
 	}
-	// Every material border was a hard edge between quads; with the blend only where three materials meet.
-	TestTrue(*FString::Printf(TEXT("Hard edges between quads: under a quarter of before (%d against %d)"), SeamsByMode[1], SeamsByMode[0]),
-		SeamsByMode[0] > 0 && SeamsByMode[1] * 4 < SeamsByMode[0]);
 	return true;
 }
 

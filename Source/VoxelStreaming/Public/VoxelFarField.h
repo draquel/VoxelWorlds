@@ -550,9 +550,6 @@ struct VOXELSTREAMING_API FVoxelFarFieldSurface
 	 */
 	FVoxelSurfaceMaterialMix SampleMaterialMix(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness) const;
 
-	/** Whether far-field quads blend their corners' two leading materials (voxel.World.FarFieldMaterialBlend, G45). */
-	static bool IsMaterialBlendEnabled();
-
 private:
 	// The two kinds' halves of the triple above.
 	float SampleHeight(double WorldX, double WorldY, const TArray<FVoxelConditioningZone>& Zones) const;
@@ -600,12 +597,11 @@ struct VOXELSTREAMING_API FVoxelFarFieldSection
  * Vertex attributes match the voxel terrain's (FChunkMeshData from the CPU meshers): UV1 = (material id, 0 = top face),
  * colour G the biome id. Each quad has one material and biome, the same at its four corners, and a grid vertex is
  * duplicated where quads of different materials meet, since the terrain material reads the id from the interpolated UV1.
- * G45 (voxel.World.FarFieldMaterialBlend): a quad also carries a second material, colour R, the same at its corners, and
+ * G45: a quad also carries a second material, colour R, the same at its corners, and
  * each corner the second's weight there as 1 - colour A; the terrain material takes the second where a temporal dither
  * falls under the interpolated weight (M_VoxelMaster's FarFieldMaterialPick node), so a border or a blend zone draws as a
  * gradient across the quad. The quad's materials are the two largest shares of its corners' mixes
- * (FVoxelFarFieldSurface::SampleMaterialMix); voxel chunks carry alpha 1 and keep their one material. Without the blend
- * each quad takes the most common material and biome of its corners, colour R that material and alpha 1. The sea's
+ * (FVoxelFarFieldSurface::SampleMaterialMix); voxel chunks carry alpha 1 and keep their one material. The sea's
  * attributes match the sea sphere's (FVoxelPlanetOcean).
  */
 struct VOXELSTREAMING_API FVoxelFarFieldPatchMesh
@@ -711,29 +707,6 @@ struct VOXELSTREAMING_API FVoxelFarFieldView
 	 * edge patches near the window's edge stay. Negative: never
 	 */
 	double ReleaseDelay = 10.0;
-
-	/**
-	 * No stand-in where nothing would show (visual polish VP4). A patch that is not ready to draw is stood in for by its
-	 * nearest built ancestor, which draws its whole area instead of everything under it; past the voxel window's band the
-	 * ancestors are released after ReleaseDelay, so that is often a cube face's root, whose coarse surface replaced the
-	 * horizon and rose through the voxel terrain for the frame or more the build took. With this:
-	 * - an edge patch whose chunks are all drawn covers its area with nothing to draw, built or not (past PrebuildRadius
-	 *   once they have been drawn HideDelay; one that must stay built for when its chunks unload builds meanwhile);
-	 * - a patch culled (wholly under the horizon) in its last visit, so drawing nothing, waits for its build drawing nothing
-	 *   while the camera moves (not after a cut: the camera more than a chunk from the last update's, where it may lie in
-	 *   full view).
-	 * False = before: both stood in for, as a covered edge patch the viewer moved past PrebuildRadius did
-	 */
-	bool bAvoidStandIns = true;
-
-	/**
-	 * Build every cube face's root, also one wholly under the horizon (visual polish F4.2). A root is the stand-in of last
-	 * resort, kept built once built (IsKeptBuilt), but a culled patch requests no build, so a face the camera had never
-	 * looked at had no root: after a teleport onto it the first update drew nothing there (the sky through the planet;
-	 * the voxel window is not loaded there yet either) until builds landed. Six patches in all, built in the first
-	 * updates, nearest first. False = before: a root was built once some of its face came into view
-	 */
-	bool bBuildAllRoots = true;
 };
 
 /** What an update changed, for the owner to apply to its components. */
@@ -1078,8 +1051,13 @@ private:
 
 	/**
 	 * Whether an edge patch without a mesh (unbuilt or released) can stand in for its area drawing nothing: every chunk under
-	 * it drawn and no sea; inside the prebuild radius, or past it once the chunks have been drawn HideDelay (with
-	 * View.bAvoidStandIns, VP4).
+	 * it drawn and no sea; inside the prebuild radius, or past it once the chunks have been drawn HideDelay (visual polish
+	 * VP4: no stand-in where nothing would show). A patch not ready to draw is otherwise stood in for by its nearest built
+	 * ancestor, which draws its whole area instead of everything under it, often a cube face's root, whose coarse surface
+	 * replaced the horizon and rose through the voxel terrain for the frame or more the build took. For the same reason a
+	 * patch culled in its last visit waits for its build drawing nothing while the camera moves (Visit; not after a cut,
+	 * where it may lie in full view), and every cube face's root is built, also one wholly under the horizon (F4.2), so a
+	 * teleport onto a face the camera never saw has a root to stand in from the first update.
 	 */
 	bool IsLazy(FPatchState& Patch, const FPatchState& Parent);
 

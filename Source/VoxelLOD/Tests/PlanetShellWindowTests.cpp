@@ -1208,9 +1208,9 @@ bool FPlanetCutoverTest::RunTest(const FString& Parameters)
  *   under the cut-over, and stays suspended while the camera is over it; with the camera at the viewer it is the rule
  *   without one at every altitude.
  * - A strategy on the small planet and the 1,000 km one at the four sites, the cut-over at the view distance (C): suspended
- *   at 1.5 C; the camera at 1.4 C led to a viewer at 0.7 C keeps it suspended with no candidate (the resume held), and
- *   with voxel.World.CutoverResumeGuard 0 the same context resumes it (the rule before); the camera just under C with the
- *   viewer at 0.5 C resumes it under the guard; the viewer under the resume altitude with no lead resumes it under either rule.
+ *   at 1.5 C; the camera at 1.4 C led to a viewer at 0.7 C keeps it suspended with no candidate (the resume held; before
+ *   G49 the same context resumed it); the camera just under C with the viewer at 0.5 C resumes it; the viewer under the
+ *   resume altitude with no lead resumes it.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetCutoverResumeGuardTest,
 	"VoxelWorlds.LOD.Planet.CutoverResumeGuard",
@@ -1239,14 +1239,6 @@ bool FPlanetCutoverResumeGuardTest::RunTest(const FString& Parameters)
 	}
 	TestEqual(TEXT("Rule: with the camera at the viewer it is the rule without a camera (0 to 100,000, both states)"), Differ, 0);
 
-	IConsoleVariable* GuardVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.World.CutoverResumeGuard"));
-	TestNotNull(TEXT("voxel.World.CutoverResumeGuard exists"), GuardVar);
-	if (!GuardVar)
-	{
-		return false;
-	}
-	const int32 SavedGuard = GuardVar->GetInt();
-
 	constexpr float ViewDistance = 40000.0f;
 	for (const FPlanetCase& Case : GetPlanetCases())
 	{
@@ -1269,36 +1261,29 @@ bool FPlanetCutoverResumeGuardTest::RunTest(const FString& Parameters)
 				OutCandidates = Candidates(Strategy, Context).Num();
 				return Strategy.IsWindowSuspended();
 			};
-			int32 High = 0, Held = 0, Before = 0, AtCutover = 0, NoLead = 0, Dummy = 0;
+			int32 High = 0, Held = 0, AtCutover = 0, NoLead = 0, Dummy = 0;
 
-			GuardVar->Set(1, ECVF_SetByConsole);
 			const bool bHigh = Visit(1.5 * Cutover, 0.0, High);
 			const bool bHeld = Visit(1.4 * Cutover, 0.7 * Cutover, Held);
 			const bool bHeldFlag = Strategy.IsCutoverResumeHeld();
 			const double CameraSeen = Strategy.GetViewerSurfaceAltitude() + 0.7 * Cutover;
 
-			GuardVar->Set(0, ECVF_SetByConsole);
-			const bool bBefore = Visit(1.4 * Cutover, 0.7 * Cutover, Before);
-
-			GuardVar->Set(1, ECVF_SetByConsole);
 			Visit(1.5 * Cutover, 0.0, Dummy);
 			const bool bAtCutover = Visit(Cutover - 1.0, 0.5 * Cutover, AtCutover);
 			Visit(1.5 * Cutover, 0.0, Dummy);
 			const bool bNoLead = Visit(0.8 * Cutover, 0.0, NoLead);
 
-			AddInfo(FString::Printf(TEXT("%s, %s: 1.5 C suspended %d (%d candidates); camera 1.4 C, viewer 0.7 C: guard 1 suspended %d (held %d, %d candidates, camera seen %.0f over the ground), guard 0 suspended %d (%d candidates); camera 1 under C, viewer 0.5 C: suspended %d (%d); 0.8 C with no lead: suspended %d (%d)"),
-				Case.Name, Site.Name, bHigh ? 1 : 0, High, bHeld ? 1 : 0, bHeldFlag ? 1 : 0, Held, CameraSeen, bBefore ? 1 : 0, Before,
+			AddInfo(FString::Printf(TEXT("%s, %s: 1.5 C suspended %d (%d candidates); camera 1.4 C, viewer 0.7 C: suspended %d (held %d, %d candidates, camera seen %.0f over the ground); camera 1 under C, viewer 0.5 C: suspended %d (%d); 0.8 C with no lead: suspended %d (%d)"),
+				Case.Name, Site.Name, bHigh ? 1 : 0, High, bHeld ? 1 : 0, bHeldFlag ? 1 : 0, Held, CameraSeen,
 				bAtCutover ? 1 : 0, AtCutover, bNoLead ? 1 : 0, NoLead));
 			TestTrue(*FString::Printf(TEXT("%s, %s: suspended at 1.5 cut-overs"), Case.Name, Site.Name), bHigh && High == 0);
 			TestTrue(*FString::Printf(TEXT("%s, %s: the camera over the cut-over keeps it suspended (the resume held)"), Case.Name, Site.Name), bHeld && bHeldFlag && Held == 0);
 			TestTrue(*FString::Printf(TEXT("%s, %s: the strategy reads the camera from the lead"), Case.Name, Site.Name), FMath::IsNearlyEqual(CameraSeen, 1.4 * Cutover, 1.0));
-			TestTrue(*FString::Printf(TEXT("%s, %s: with the guard off the lead resumes it (the rule before)"), Case.Name, Site.Name), !bBefore && Before > 0);
 			TestTrue(*FString::Printf(TEXT("%s, %s: the camera just under the cut-over resumes it"), Case.Name, Site.Name), !bAtCutover && AtCutover > 0);
 			TestTrue(*FString::Printf(TEXT("%s, %s: under the resume altitude with no lead it resumes"), Case.Name, Site.Name), !bNoLead && NoLead > 0);
 		}
 		Config->RemoveFromRoot();
 	}
-	GuardVar->Set(SavedGuard, ECVF_SetByConsole);
 	return true;
 }
 
