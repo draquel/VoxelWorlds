@@ -269,7 +269,7 @@ public:
 	 * from the real voxels instead of the air the mesher read in their place (G32: stale collision strips along chunk
 	 * faces). The re-cook is requested once none of that neighbour's other missing neighbours is still being generated
 	 * (ProcessNeighborRecooks), and below every first cook in the queue; the old body stays live until it is replaced.
-	 * Off with voxel.Collision.NeighborRecook 0. Called by the chunk manager.
+	 * Called by the chunk manager.
 	 *
 	 * @param ChunkCoord The chunk whose voxel data arrived
 	 * @return The number of cooked neighbours that read this chunk as air

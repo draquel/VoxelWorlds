@@ -520,13 +520,13 @@ A chunk's voxels are 1 MB at 64^3. Two rules keep the window's memory down witho
   task from a copy of the compact form (`FVoxelCompactSource`), started when a chunk in its neighbourhood is queued for a
   mesh or a collision cook; mesh jobs, seam jobs and cooks wait for it on their own workers, and the chunk stays
   compressed. Before, every reader expanded the chunk on the game thread as the viewer came near, about 0.3 ms each and
-  half of them repeats (G65; `voxel.FarCompression.SnapshotReads`, tests `Compression.Codec.CompactSource`,
+  half of them repeats (G65; tests `Compression.Codec.CompactSource`,
   `Streaming.{Planet,Plane}.FarReadsOffGameThread`).
 - **Uniform at generation.** A chunk whose every voxel is the same (all air, all rock, open sea) is collapsed to that
   value where it is generated (the CPU worker, the tree injector, a GPU readback as it lands;
   `FChunkDescriptor::CollapseToUniform`), not when the sweep reaches it; its snapshot is a shared array per value and a
   point read returns the value without expanding it. After a teleport this roughly halved the window's peak voxel data
-  on the big planets (G67; `voxel.FarCompression.UniformAtGeneration`, tests `Compression.CollapseToUniform`,
+  on the big planets (G67; tests `Compression.CollapseToUniform`,
   `Streaming.{Planet,Plane}.UniformAtGeneration`).
 
 The snapshot cache those readers share (shells for collision cooks, copy-on-write resident arrays) is described in

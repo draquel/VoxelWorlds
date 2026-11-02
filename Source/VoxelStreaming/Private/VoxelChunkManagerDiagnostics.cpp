@@ -360,13 +360,6 @@ UVoxelChunkManager::FVoxelMemoryStats UVoxelChunkManager::GetVoxelMemoryStats() 
 		Stats.SnapshotBytes += Pair.Value.IsValid() ? static_cast<int64>(Pair.Value->GetAllocatedSize()) : 0;
 	}
 
-	// Copies held by async far-compression encodes, in flight or pooled for the next dispatch.
-	Stats.VoxelDataBytes += FarCompressBytesInFlight;
-	for (const TArray<FVoxelData>& Scratch : FarCompressScratchPool)
-	{
-		Stats.VoxelDataBytes += static_cast<int64>(Scratch.GetAllocatedSize());
-	}
-
 	// Edit manager
 	if (EditManager)
 	{

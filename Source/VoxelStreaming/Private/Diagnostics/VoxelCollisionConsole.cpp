@@ -32,11 +32,9 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelCollisionAuditNeighborsCmd(
 			{
 				List += FString::Printf(TEXT(" (%d,%d,%d)"), StaleChunks[Index].X, StaleChunks[Index].Y, StaleChunks[Index].Z);
 			}
-			UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.Collision.AuditNeighbors: %d cooked, %d cooked with a neighbour missing, %d stale (the neighbour has data now, no re-cook pending), %d re-cooks pending, %lld neighbour re-cooks so far, arrivals needing none: %lld air and %lld solid on both sides (voxel.Collision.NeighborRecook %d)%s%s"),
+			UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.Collision.AuditNeighbors: %d cooked, %d cooked with a neighbour missing, %d stale (the neighbour has data now, no re-cook pending), %d re-cooks pending, %lld neighbour re-cooks so far, arrivals needing none: %lld air and %lld solid on both sides%s%s"),
 				Cooked, WithMissing, Stale, Awaiting, Collision->GetTotalNeighborRecooks(), Collision->GetTotalNeighborArrivalsSkipped(),
 				Collision->GetTotalNeighborArrivalsSkippedSolid(),
-				IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Collision.NeighborRecook"))
-					? IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Collision.NeighborRecook"))->GetInt() : -1,
 				List.IsEmpty() ? TEXT("") : TEXT("; stale:"), *List);
 		}
 	}));
