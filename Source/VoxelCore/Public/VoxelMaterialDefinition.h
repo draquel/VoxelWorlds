@@ -70,6 +70,14 @@ struct VOXELCORE_API FVoxelMaterialDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Material", meta = (ClampMin = "0.0", Units = "s"))
 	float Hardness = 1.0f;
 
+	/**
+	 * The material the smooth terrain's shader draws on this one's steep ground (visual polish VP2-O3: its atlas config's
+	 * FVoxelMaterialTextureConfig::SlopeMaterialID, by UVoxelMaterialAtlas::GetSlopeMaterialID's rule), or -1 for none.
+	 * Set in a world's table from its atlas (FVoxelMaterialTable::FromAtlas); scatter counts a steep point as it (G106).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Material|Atlas", meta = (ClampMin = "-1", ClampMax = "254"))
+	int32 SlopeMaterialID = -1;
+
 	FVoxelMaterialDefinition() = default;
 
 	FVoxelMaterialDefinition(uint8 InID, const FString& InName, const FColor& InColor)

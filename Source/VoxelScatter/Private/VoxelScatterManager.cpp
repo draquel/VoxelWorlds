@@ -487,6 +487,7 @@ void UVoxelScatterManager::Shutdown()
 	Configuration = nullptr;
 	CachedWorld = nullptr;
 	WorldMode.Reset(); // extractions still on workers hold their own reference (G104)
+	MaterialTable.Reset();
 	bIsInitialized = false;
 
 	UE_LOG(LogVoxelScatter, Log, TEXT("VoxelScatterManager shutdown. Stats: Chunks=%lld, SurfacePoints=%lld, SpawnPoints=%lld"),
@@ -2266,6 +2267,71 @@ void UVoxelScatterManager::ExtractSurfacePointsByColumn(
 
 	// Stride to match SurfacePointSpacing (e.g., 100cm spacing with 100cm voxels = stride 1)
 	const int32 Stride = FMath::Max(1, FMath::RoundToInt(SurfacePointSpacing / VoxelSize));
+
+	// The material the shader draws at an open point (its slope rock, G106) goes by the mesh's slope, which follows the
+	// surface; the density gradient below is a central difference of saturated voxel densities, several degrees off and
+	// often far steeper on gentle ground (on VoxelDemo a quarter of the points read 30 degrees or more). So the slope
+	// for the drawn material comes from the height field of the columns' topmost crossings (interpolated as below):
+	// every column's, computed here when the world's table has slope materials.
+	const bool bDrawnMaterial = Context.Materials.IsValid() && Context.Materials->HasSlopeMaterials();
+	TArray<float> TopCrossing; // per column (X + Y * ChunkSize): the topmost crossing's local Z in voxels, or -1
+	if (bDrawnMaterial)
+	{
+		TopCrossing.Init(-1.0f, ChunkSize * ChunkSize);
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			for (int32 X = 0; X < ChunkSize; ++X)
+			{
+				for (int32 Z = ChunkSize - 2; Z >= 0; --Z)
+				{
+					const FVoxelData& Solid = VoxelData[X + Y * ChunkSize + Z * ChunkSize * ChunkSize];
+					const FVoxelData& Above = VoxelData[X + Y * ChunkSize + (Z + 1) * ChunkSize * ChunkSize];
+					if (Above.IsSolid())
+					{
+						break; // the column's top voxel is solid or the ground continues: no open crossing in this chunk
+					}
+					if (!Solid.IsSolid())
+					{
+						continue;
+					}
+					const float Range = static_cast<float>(Above.Density) - static_cast<float>(Solid.Density);
+					const float Fraction = FMath::Abs(Range) > SMALL_NUMBER
+						? FMath::Clamp((static_cast<float>(VOXEL_SURFACE_THRESHOLD) - Solid.Density) / Range, 0.0f, 1.0f) : 0.5f;
+					TopCrossing[X + Y * ChunkSize] = Z + Fraction;
+					break;
+				}
+			}
+		}
+	}
+	// The cosine of the surface's slope at a column's top crossing from its neighbours' (central where both are there,
+	// one-sided at the chunk's faces), or the gradient normal's where neither neighbour on an axis has a crossing within
+	// four voxels (a cliff, an overhang, a column of air)
+	auto DrawnCosToUp = [&TopCrossing, ChunkSize](int32 X, int32 Y, float Height, const FVector& GradientNormal)
+	{
+		auto Neighbour = [&](int32 NX, int32 NY, float& OutHeight)
+		{
+			if (NX < 0 || NY < 0 || NX >= ChunkSize || NY >= ChunkSize)
+			{
+				return false;
+			}
+			OutHeight = TopCrossing[NX + NY * ChunkSize];
+			return OutHeight >= 0.0f && FMath::Abs(OutHeight - Height) <= 4.0f;
+		};
+		auto Slope = [&](int32 DX, int32 DY, float& OutSlope)
+		{
+			float Low = 0.0f, High = 0.0f;
+			const bool bLow = Neighbour(X - DX, Y - DY, Low);
+			const bool bHigh = Neighbour(X + DX, Y + DY, High);
+			OutSlope = bLow && bHigh ? 0.5f * (High - Low) : bHigh ? High - Height : bLow ? Height - Low : 0.0f;
+			return bLow || bHigh;
+		};
+		float SX = 0.0f, SY = 0.0f;
+		if (!Slope(1, 0, SX) || !Slope(0, 1, SY))
+		{
+			return static_cast<float>(GradientNormal.Z);
+		}
+		return 1.0f / FMath::Sqrt(1.0f + SX * SX + SY * SY);
+	};
 	const int32 ColumnsPerAxis = (ChunkSize + Stride - 1) / Stride;
 	OutSurfaceData.SurfacePoints.Reserve(ColumnsPerAxis * ColumnsPerAxis);
 
@@ -2438,6 +2504,12 @@ void UVoxelScatterManager::ExtractSurfacePointsByColumn(
 				Point.FaceType = FaceType;
 				Point.AmbientOcclusion = Voxel.GetAO() & 0x03;
 				Point.ComputeSlopeAngle();
+				if (bDrawnMaterial)
+				{
+					// The material the shader draws here: a material's slope rock on steep ground (G106)
+					Point.MaterialID = Context.Materials->GetDrawnMaterial(Point.MaterialID, !bFoundColumnTop && Z + 1 < ChunkSize
+						? DrawnCosToUp(X, Y, Z + Fraction, Normal) : static_cast<float>(Normal.Z));
+				}
 
 				// Underground if: the cave/air flag says so; OR this is not the topmost surface in the
 				// column (a lower transition is always covered by solid above); OR the whole chunk is
@@ -2533,11 +2605,12 @@ void UVoxelScatterManager::ExtractChunkSurfacePoints(
 	const FScatterExtractionContext& Context,
 	FChunkSurfaceData& OutSurfaceData)
 {
+	const bool bPlanetLines = !bCubic && Context.WorldMode && Context.WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet;
 	if (bCubic)
 	{
 		ExtractSurfacePointsByBlockTop(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, ClearedVolumes, Context, OutSurfaceData);
 	}
-	else if (Context.WorldMode && Context.WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet)
+	else if (bPlanetLines)
 	{
 		// A planet scans along local up (spherical SP-G1).
 		ExtractSurfacePointsByRay(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, ClearedVolumes, Context,
@@ -2547,6 +2620,18 @@ void UVoxelScatterManager::ExtractChunkSurfacePoints(
 	{
 		ExtractSurfacePointsByColumn(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, ClearedVolumes,
 			Context, OutSurfaceData);
+	}
+
+	// The smooth terrain's shader draws a material's slope rock on its steep ground (VP2-O3): a point there counts as the
+	// rock, so ground cover kept off Stone does not stand on it (G106). The column scan decides it as it extracts (from its
+	// height field); a planet's lines by their cell-gradient normal, here. The cubic atlas path draws no slope rock.
+	if (!bCubic && bPlanetLines && Context.Materials.IsValid() && Context.Materials->HasSlopeMaterials())
+	{
+		for (FVoxelSurfacePoint& Point : OutSurfaceData.SurfacePoints)
+		{
+			Point.MaterialID = Context.Materials->GetDrawnMaterial(Point.MaterialID,
+				static_cast<float>(FVector::DotProduct(Point.Normal, Point.LocalUp)));
+		}
 	}
 }
 
@@ -3090,6 +3175,7 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 	FScatterExtractionContext Context;
 	Context.WorldMode = WorldMode.Get();
 	Context.WorldModeOwner = WorldMode;
+	Context.Materials = MaterialTable;
 	if (Configuration)
 	{
 		Context.NoiseParams = Configuration->GetNoiseParams();

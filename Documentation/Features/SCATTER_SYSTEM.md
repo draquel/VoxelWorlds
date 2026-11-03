@@ -225,7 +225,15 @@ CR2), picks the extractor:
 | Planet | `ExtractSurfacePointsByRay` | Crossings down the planet's radial rays (below) |
 
 Material, biome, AO and the underground and water flags come from the voxels at the crossing; the first crossing down a
-column is open surface, the rest underground ([UNDERGROUND_CLASSIFICATION.md](UNDERGROUND_CLASSIFICATION.md)). Points
+column is open surface, the rest underground ([UNDERGROUND_CLASSIFICATION.md](UNDERGROUND_CLASSIFICATION.md)). On the
+smooth terrain the material is the one the shader draws there: where a material's slope rock (visual polish VP2-O3) has
+at least half its weight, the point counts as the slope material, read from the world's material table
+(`SetMaterialTable`, the chunk manager's; `FVoxelMaterialTable::GetDrawnMaterial`), so ground cover kept off Stone does
+not grow on the rock (G106; [MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Slope Rock and Scatter"). The column scan judges
+that slope from the height field of the columns' topmost crossings (central differences, one-sided at the chunk's faces,
+the gradient normal where no neighbour has a crossing within four voxels), not from the point's normal, a central
+difference of saturated densities that is too noisy for a border at 30 degrees; a planet's lines use their cell gradient.
+CPU and GPU generation feed the same extraction: it reads the chunk's voxels on the CPU either way. Points
 inside a cleared volume (a player edit) or an exclusion volume are skipped. The extraction is deterministic:
 `voxel.Scatter.Digest` logs the cached spawn points' counts and a CRC per type, to compare builds.
 
@@ -745,7 +753,10 @@ Game Thread:               Drain Result -> Cache -> HISM Update
   rendered through `UpdateChunkInstances`), never appended to the chunk's earlier spawn points (G30)
 - **Edit during async**: Cleared volumes updated on game thread; stale result discarded
 - **GetPendingGenerationCount()**: Returns queued + in-flight count for "world stable" check
-- **Shutdown safety**: `TWeakObjectPtr<UVoxelScatterManager>` in lambda prevents use-after-free
+- **Shutdown safety**: `TWeakObjectPtr<UVoxelScatterManager>` in lambda prevents use-after-free; the extraction
+  context shares the world mode with the chunk manager (`WorldModeOwner`; the manager's `SetWorldMode` takes a shared
+  pointer), so an extraction still on a worker at a PIE stop reads a live mode after the chunk manager's Shutdown reset
+  its own (G104: a crash in `ExtractSurfacePointsByRay`; test `VoxelWorlds.Scatter.Extraction.WorldModeOutlivesShutdown`)
 - **Supplemental passes**: `CompletedScatterTypes` records which types a chunk has, so a later pass (the distance
   stream, the horizon hand-off) adds only the types it lacks
 

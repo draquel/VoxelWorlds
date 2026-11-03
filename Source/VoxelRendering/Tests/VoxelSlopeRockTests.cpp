@@ -10,6 +10,9 @@
 #include "Materials/MaterialExpressionSubtract.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Materials/MaterialExpressionWorldPosition.h"
+#include "VoxelMaterialRegistry.h"
+#include "ShaderCore.h"
+#include "Misc/FileHelper.h"
 
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITORONLY_DATA
 
@@ -24,6 +27,8 @@
 // - Rendering.SlopeRock.LocalUpParameter: the region component's material instance carries LocalUpCenter: 0 on a
 //   heightmap world, the planet's centre and 1 once SetRadialFaceUp turns the radial up on, before or after the instance
 //   is made.
+// - Rendering.SlopeRock.Thresholds: the shader's VOXEL_SLOPE_ROCK_START and _END are FVoxelMaterialTable's SlopeRockStart
+//   and SlopeRockEnd, which scatter places by (G106): a change to one without the other fails here.
 // ---------------------------------------------------------------------------
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelSlopeRockAssetTest,
@@ -127,6 +132,39 @@ bool FVoxelSlopeRockLocalUpParameterTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Later: the centre and radial"), Read(After), FLinearColor(5.0f, 6.0f, 7.0f, 1.0f));
 	After->SetRadialFaceUp(false, FVector::ZeroVector);
 	TestEqual(TEXT("Later: back to world +Z"), Read(After), FLinearColor(0, 0, 0, 0));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelSlopeRockThresholdsTest,
+	"VoxelWorlds.Rendering.SlopeRock.Thresholds",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelSlopeRockThresholdsTest::RunTest(const FString& Parameters)
+{
+	const FString Path = GetShaderSourceFilePath(TEXT("/Plugin/VoxelWorlds/Private/VoxelSlopeRock.ush"));
+	FString Source;
+	if (!TestTrue(*FString::Printf(TEXT("VoxelSlopeRock.ush reads (%s)"), *Path), FFileHelper::LoadFileToString(Source, *Path)))
+	{
+		return false;
+	}
+	auto Define = [&Source](const TCHAR* Name, float& OutValue)
+	{
+		const FString Key = FString::Printf(TEXT("#define %s "), Name);
+		const int32 At = Source.Find(Key, ESearchCase::CaseSensitive);
+		if (At == INDEX_NONE)
+		{
+			return false;
+		}
+		int32 End = Source.Find(TEXT("\n"), ESearchCase::CaseSensitive, ESearchDir::FromStart, At);
+		End = End == INDEX_NONE ? Source.Len() : End;
+		OutValue = FCString::Atof(*Source.Mid(At + Key.Len(), End - At - Key.Len()).TrimStartAndEnd());
+		return true;
+	};
+	float Start = -1.0f, End = -1.0f;
+	TestTrue(TEXT("The include defines VOXEL_SLOPE_ROCK_START"), Define(TEXT("VOXEL_SLOPE_ROCK_START"), Start));
+	TestTrue(TEXT("and VOXEL_SLOPE_ROCK_END"), Define(TEXT("VOXEL_SLOPE_ROCK_END"), End));
+	TestEqual(TEXT("The shader's start is scatter's"), Start, FVoxelMaterialTable::SlopeRockStart);
+	TestEqual(TEXT("The shader's end is scatter's"), End, FVoxelMaterialTable::SlopeRockEnd);
 	return true;
 }
 
