@@ -1,6 +1,6 @@
 ﻿# Rendering System Architecture
 
-> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-03 (code review CR5; F3.3 ray tracing geometry). Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelRendering
 **Dependencies**: VoxelCore
@@ -172,7 +172,60 @@ terrain shadow past 2,000 uu comes from the far cascades, which shows them worki
 
 ### What Lumen Sees
 
-The terrain has no mesh distance fields and no ray tracing geometry, so Lumen (hardware ray tracing on this project) sees it on screen only: an overhang that leaves the screen stops darkening what it covers (visual polish F3.3, open). D-VP4's spike (2026-11-03) measured both representations a custom proxy can give: ray tracing geometry per chunk and seam mesh fixes it at about +0.2 ms of GPU frame and 50-60 MB of BLAS on the demo, distance fields per chunk work only under software Lumen at +1.6-2.4 ms; terrain hits return black until the terrain has a Lumen surface cache. The numbers and the plan: [LUMEN_OFFSCREEN_TERRAIN_SPIKE.md](../Research/LUMEN_OFFSCREEN_TERRAIN_SPIKE.md).
+Lumen (hardware ray tracing on this project: `r.Lumen.HardwareRayTracing` 1) traces the ray tracing scene, so the
+terrain is in it: every current chunk mesh and seam bucket of `FVoxelSceneProxy` has an `FRayTracingGeometry` over the
+vertex and index buffers the proxy uploaded (visual polish F3.3, 2026-11-03; D-VP4's spike chose the path,
+[LUMEN_OFFSCREEN_TERRAIN_SPIKE.md](../Research/LUMEN_OFFSCREEN_TERRAIN_SPIKE.md)). An overhang that leaves the screen
+keeps darkening the ground under it, and a sealed cave stays dark.
+
+- **Built once on the GPU.** An upload builds its mesh's acceleration structure (fast build, no updates); nothing runs
+  on the workers and no voxel is read. The geometry belongs to the mesh: an LOD swap, an edit's re-mesh and a seam
+  rebuild upload new buffers and build anew, an unload or a cleared bucket releases it, and a recreated proxy gets its
+  meshes, and with them its geometry, back through `RecoverLostRenderData` (G15, F3.4).
+- **The current mesh only.** A crossfade's outgoing mesh, a held swap's visible Previous and a seam bucket fading out
+  have none: rays see the mesh the fade ends on.
+- **Gathered every frame** (`GetDynamicRayTracingInstances`), one instance per mesh whose build has completed, with the
+  terrain material; a mesh still building joins the next frame. Each mesh keeps its mesh batch and the instances view it
+  and the proxy's transform, so the gather allocates nothing. Only meshes whose box is within the view's Lumen max
+  trace distance (the post process setting, 20,000 uu by default) times `voxel.Render.RayTracing.TraceDistanceScale`
+  (1) are gathered: about 290 of the window's 1,100 meshes. The engine's per-instance work each frame is the gather's
+  cost: all 1,100 cost the game thread +0.9 ms (chord) and +1.5-3.0 ms (great circle). A ray from a pixel near the camera
+  ends before the meshes left out; a pixel farther than the trace distance traces as before (screen traces). The
+  engine's cached path (`CacheInstances`) would remove the per-frame work, but it takes instance transforms from
+  GPUScene, which this proxy does not use (its batches carry the primitive uniform buffer): a first version on that path
+  cached its instances and none reached the ray tracing scene.
+- **Cost** (2026-11-03, the streaming bench, `voxel.Render.RayTracing` 0 and 1 interleaved, three runs each, noon with
+  the clock stopped, a 2,874 x 1,358 PIE viewport): GPU frame P50 +0.14 ms on `VoxelDemo`'s chord (6.45 → 6.59) and
+  +0.10 ms on `PlanetTest`'s great circle (5.82 → 5.92), game thread P50 +0.29 and +0.42 ms; 62 MB of BLAS at the
+  chord's peak (55-57 MB at rest, about 1,100 meshes) and 68 MB on the great circle (46 MB at rest), the bench's
+  `RTGeomN` and `BLASMB` columns (`peakRayTracingMB` in its JSON). Built on the GPU: about 19,000 builds a run, nothing
+  on the workers.
+- **Off** with `voxel.Render.RayTracing 0` (a change recreates the region proxies, whose chunks re-mesh), or where the
+  project or the RHI does not allow ray tracing. `voxel.Render.RayTracingStats` gives the geometries alive, their BLAS
+  megabytes and the instances the last frame gathered; test `Rendering.RayTracing.ChunkGeometry` (the in-editor gate).
+
+What it does not give yet:
+
+- **Bounce light from the terrain.** A ray that hits the terrain finds no Lumen surface cache (the terrain has no mesh
+  cards) and returns black: occlusion is right, the bounce off the terrain is lost, so the ground under an overhang
+  reads a little darker off screen than on screen (0.90 of it on `VoxelDemo`) and on a planet's shaded ground can go
+  black. Lumen captures cards only from static mesh draw commands, so the fix starts with the proxy drawing through the
+  static path (GPUScene, cached mesh draw commands per chunk, a real position SRV for hit lighting), which would also
+  let the scene cache the ray tracing instances; G116 in the project's findings.
+- **Water.** Water tiles have no ray tracing geometry: the sea is translucent (or Single Layer Water) and is not an
+  occluder Lumen needs.
+- **The far field.** Its procedural mesh components have the engine's own ray tracing path
+  (r.RayTracing.Geometry.ProceduralMeshes is 1), but the ray tracing scene's view from orbit shows none of them (G117).
+
+| `VoxelDemo`, overhang and sealed cave (D-VP4's repro) | Under the overhang, on screen → off screen | Off / on | Sealed cave |
+|---|---|---|---|
+| `voxel.Render.RayTracing 0` (Lumen in screen space only) | 0.240 → 0.258 | 1.08 (brightens: F3.3) | 0.247 |
+| `voxel.Render.RayTracing 1` | 0.177 → 0.159 | 0.90 | 0.111 |
+| `PlanetTest` (30N 20E), 0 | 0.443 → 0.398 | 0.90 | 0.090 |
+| `PlanetTest`, 1 | 0.433 → 0.378 | 0.87 | 0.029 |
+
+Mean luminance of the inner 60 % of the compared regions, noon with the clock stopped, exposure and anti-aliasing off;
+the spike's numbers for its prototype were 0.176 → 0.159 (0.91) on the demo and a planet cave of 0.039.
 
 ---
 

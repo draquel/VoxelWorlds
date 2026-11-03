@@ -110,7 +110,8 @@ machine's state moves every timing together (G82, G85).
 The CSV adds per-sample memory columns (`VoxelMB`, `EditMB`, `RendCPUMB`, `RendGPUMB`, `CollMB`,
 `ScatMB`, `ProcessMB`, `ResidentN`, `UniformN`, `CompressedN`, `EmptyN`), refreshed every 0.25 s, and
 per-tick far-compression columns (`FarCompMs`, `FarCompDispN` encodes started, `FarCompApplyN` async
-results installed).
+results installed). `RTGeomN` and `BLASMB` (every sample) are the terrain's ray tracing geometries alive and their
+acceleration structures (`FVoxelRayTracingCounters`, F3.3); the JSON's `memory` has `peakRayTracingMB` and `endRayTracingMB`.
 
 ### Methodology notes (important)
 
