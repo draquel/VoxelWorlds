@@ -50,7 +50,7 @@ Each queue is a priority-sorted array with a set beside it for duplicate checks 
 `TickComponent` runs, in order:
 
 1. `RecoverLostRenderData`: a recreated scene proxy drops the geometry it held; every `Loaded` chunk it lost is
-   re-meshed and the seam buckets are re-sent from the slots the manager keeps (G15).
+   re-meshed and the seam buckets are re-sent from the slots the manager keeps (G15); paused, see below (F3.4).
 2. The query context (`BuildStreamingContext`): the camera, the streaming viewer ahead of a descending camera
    (`ApplyDescentPrefetch`), the viewer's speed for the speed-adaptive load budget (`voxel.Stream.SpeedAdaptive`).
 3. The LOD strategy's update, the cut-over (a suspended window lets every chunk go), then the streaming decisions
@@ -65,6 +65,15 @@ Each queue is a priority-sorted array with a set beside it for duplicate checks 
 9. `TickSeamScheduler` (after everything above, so this tick's residency and rendered-LOD changes are in the registry).
 10. `ProcessFarCompressionSweep`, then the collision manager's and the scatter manager's updates
     (`ProcessEditScatterReaders` first), then one `FlushPendingOperations` on the renderer.
+
+While streaming is paused (`SetStreamingEnabled(false)`: `voxel.Stream.Enabled 0`, `vox.Freeze 1 streaming`) the tick
+runs `TickPausedRenderRecovery` instead: nothing is discovered, generated, unloaded or changes LOD, and a plain pause
+submits nothing. A scene proxy recreated meanwhile (a material or render-state change, a Lumen toggle) still gets its
+geometry back (visual polish F3.4): `RecoverLostRenderData` re-meshes the chunks it lost and re-sends the seam buckets,
+the recovered chunks alone of the meshing queue launch, the meshes that land are submitted (with them the meshes that
+were on workers when the pause began, which would otherwise fill the pending queue whose cap stops the launches), the
+water tiles are sent again and the renderer's batch is flushed (it draws its updates only then). Before, the paused tick returned at once and the chunks stayed lost until the resume. Test
+`Streaming.Cubic.RendererProxyRecreatedWhilePaused` (the viewer moved far away while paused loads and unloads nothing).
 
 A second tick function (`FVoxelFarFieldCameraTickFunction`, `TG_PostUpdateWork`) runs `TickAfterCameraUpdate`: after
 a camera cut of more than a chunk it updates the far field and runs the streaming decisions again for the camera this

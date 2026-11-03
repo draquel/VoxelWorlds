@@ -322,6 +322,97 @@ bool FVoxelCubicStreamingProxyRecreatedTest::RunTest(const FString& Parameters)
 }
 
 // ---------------------------------------------------------------------------
+// Visual polish F3.4: a scene proxy recreated while streaming is paused (vox.Freeze 1 streaming, then a Lumen toggle) drew
+// only the seam strips until streaming resumed, as the paused chunk manager never ran RecoverLostRenderData. Paused, a
+// plain run of ticks submits nothing; after the renderer loses its geometry the paused ticks send every chunk mesh and
+// seam bucket again, while the viewer, moved far away meanwhile, loads and unloads nothing; after the resume the world
+// streams to the new viewer.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCubicStreamingProxyRecreatedWhilePausedTest,
+	"VoxelWorlds.Streaming.Cubic.RendererProxyRecreatedWhilePaused",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelCubicStreamingProxyRecreatedWhilePausedTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelCubicStreamingTestUtils;
+
+	FCubicStreamingWorld Test;
+	Test.Start(TEXT("VoxelCubicProxyRecreatedPausedTestWorld"));
+	const int32 N = Test.Config->ChunkSize;
+	TestTrue(TEXT("The pipeline settled"), Test.Settle());
+
+	TMap<FUnitFace, int32> Before;
+	CollectRendered(Test.Renderer, Test.Config->VoxelSize, N, Before);
+	TArray<FIntVector> ChunksBefore, BucketOwners;
+	Test.Renderer.ChunkMeshes.GetKeys(ChunksBefore);
+	Test.Renderer.SeamBuckets.GetKeys(BucketOwners);
+	TestTrue(TEXT("The world has chunk meshes and seam buckets"), ChunksBefore.Num() >= 27 && BucketOwners.Num() > 0);
+
+	// Pause and move the viewer beyond the unload distance: paused, nothing streams to it.
+	Test.Manager->SetStreamingEnabled(false);
+	const double Far = Test.Config->ViewDistance * 4.0;
+	const float FarSurfaceZ = Test.Manager->GetGeneratedSurfacePoint(FVector(Far, 0.0, 0.0)).Z;
+	Test.SetViewer(FVector(Far, 0.0, FarSurfaceZ + 200.0));
+	const int32 SubmitsAtPause = Test.Renderer.ChunkSubmits;
+	const int32 SeamSubmitsAtPause = Test.Renderer.SeamSubmits;
+	const int32 FlushesAtPause = Test.Renderer.Flushes;
+	for (int32 i = 0; i < 60; ++i)
+	{
+		Test.Tick();
+	}
+	TestEqual(TEXT("Paused with nothing lost: no chunk is submitted"), Test.Renderer.ChunkSubmits, SubmitsAtPause);
+	TestEqual(TEXT("Paused with nothing lost: no seam bucket is submitted"), Test.Renderer.SeamSubmits, SeamSubmitsAtPause);
+	TestEqual(TEXT("Paused with nothing lost: the renderer is not flushed"), Test.Renderer.Flushes, FlushesAtPause);
+
+	// The engine recreates the scene proxy while paused.
+	Test.Renderer.SimulateProxyRecreated();
+	TestTrue(TEXT("The pipeline settled while paused"), Test.Settle());
+
+	TMap<FUnitFace, int32> After;
+	CollectRendered(Test.Renderer, Test.Config->VoxelSize, N, After);
+	int32 Missing = 0, Extra = 0;
+	for (const TPair<FUnitFace, int32>& F : Before)
+	{
+		Missing += (After.FindRef(F.Key) == F.Value) ? 0 : 1;
+	}
+	for (const TPair<FUnitFace, int32>& F : After)
+	{
+		Extra += Before.Contains(F.Key) ? 0 : 1;
+	}
+	TArray<FIntVector> ChunksAfter;
+	Test.Renderer.ChunkMeshes.GetKeys(ChunksAfter);
+	int32 SameChunks = 0;
+	for (const FIntVector& Chunk : ChunksAfter)
+	{
+		SameChunks += ChunksBefore.Contains(Chunk) ? 1 : 0;
+	}
+	AddInfo(FString::Printf(TEXT("Paused: %d chunk meshes and %d seam buckets lost; %d chunk submits and %d buckets after recovery, %d / %d unit faces"),
+		ChunksBefore.Num(), BucketOwners.Num(), Test.Renderer.ChunkSubmits - SubmitsAtPause, Test.Renderer.SeamBuckets.Num(), After.Num(), Before.Num()));
+	TestEqual(TEXT("Paused: every chunk mesh was sent again"), ChunksAfter.Num(), ChunksBefore.Num());
+	TestEqual(TEXT("Paused: the same chunks (nothing loaded or unloaded for the moved viewer)"), SameChunks, ChunksBefore.Num());
+	TestEqual(TEXT("Paused: each lost chunk was re-meshed once"), Test.Renderer.ChunkSubmits - SubmitsAtPause, ChunksBefore.Num());
+	TestEqual(TEXT("Paused: every seam bucket was sent again"), Test.Renderer.SeamBuckets.Num(), BucketOwners.Num());
+	TestEqual(TEXT("Paused: no face missing after recovery"), Missing, 0);
+	TestEqual(TEXT("Paused: no extra face after recovery"), Extra, 0);
+	TestTrue(TEXT("Paused: the renderer's batch is flushed, so the meshes draw (the real renderer batches them)"), Test.Renderer.Flushes > FlushesAtPause);
+	TestTrue(TEXT("Paused: still paused"), !Test.Manager->IsStreamingEnabled());
+
+	// Resumed, the world streams to the moved viewer.
+	Test.Manager->SetStreamingEnabled(true);
+	TestTrue(TEXT("The pipeline settled after the resume"), Test.Settle());
+	int32 Kept = 0;
+	for (const TPair<FIntVector, FChunkMeshData>& Pair : Test.Renderer.ChunkMeshes)
+	{
+		Kept += ChunksBefore.Contains(Pair.Key) ? 1 : 0;
+	}
+	AddInfo(FString::Printf(TEXT("Resumed: %d chunk meshes, %d of them from before the pause"), Test.Renderer.ChunkMeshes.Num(), Kept));
+	TestTrue(TEXT("Resumed: the world streamed to the moved viewer"), Test.Renderer.ChunkMeshes.Num() >= 27 && Kept < ChunksBefore.Num());
+
+	Test.Stop();
+	return true;
+}
+
+// ---------------------------------------------------------------------------
 // G101: two worlds with different atlases at once each mesh with their own atlas's materials. World A's atlas keeps
 // Leaves non-occluding and adds a non-occluding ID 22; world B's makes Leaves occluding. Each chunk manager's mesher holds
 // its atlas's table, a 2x2x2 leaf block meshes with its inner faces in A (48 unit faces) and without them in B (24), and

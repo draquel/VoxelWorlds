@@ -88,7 +88,8 @@ AVoxelWorldActor
   (also in the first second of play, when the scatter system compiles its runtime billboard material), and a new
   proxy starts empty. `CreateSceneProxy` flags it, `IVoxelMeshRenderer::ConsumeLostRenderData` reports it once, and the
   chunk manager re-meshes the chunks that had a mesh and re-sends every seam bucket and water tile
-  (`UVoxelChunkManager::RecoverLostRenderData`; G15, test `Streaming.Cubic.RendererProxyRecreated`)
+  (`UVoxelChunkManager::RecoverLostRenderData`; G15, test `Streaming.Cubic.RendererProxyRecreated`), also while
+  streaming is paused (`TickPausedRenderRecovery`; F3.4, test `Streaming.Cubic.RendererProxyRecreatedWhilePaused`)
 
 **FVoxelLocalVertex** (`VoxelRendering/Public/VoxelLocalVertexFactory.h`)
 - 40-byte vertex format compatible with `FLocalVertexFactory`
