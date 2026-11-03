@@ -228,11 +228,12 @@ Material, biome, AO and the underground and water flags come from the voxels at 
 column is open surface, the rest underground ([UNDERGROUND_CLASSIFICATION.md](UNDERGROUND_CLASSIFICATION.md)). On the
 smooth terrain the material is the one the shader draws there: where a material's slope rock (visual polish VP2-O3) has
 at least half its weight, the point counts as the slope material, read from the world's material table
-(`SetMaterialTable`, the chunk manager's; `FVoxelMaterialTable::GetDrawnMaterial`), so grass-only ground cover does not
-grow on the rock (G106; [MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Slope Rock and Scatter"). The column scan's normal is
-the density's central difference, one-sided at the chunk's faces and divided by its span there (before G106 an edge
-column read a 40-degree flank as 18). CPU and GPU generation feed the same extraction: it reads the chunk's voxels on the
-CPU either way. Points
+(`SetMaterialTable`, the chunk manager's; `FVoxelMaterialTable::GetDrawnMaterial`), so ground cover kept off Stone does
+not grow on the rock (G106; [MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Slope Rock and Scatter"). The column scan judges
+that slope from the height field of the columns' topmost crossings (central differences, one-sided at the chunk's faces,
+the gradient normal where no neighbour has a crossing within four voxels), not from the point's normal, a central
+difference of saturated densities that is too noisy for a border at 30 degrees; a planet's lines use their cell gradient.
+CPU and GPU generation feed the same extraction: it reads the chunk's voxels on the CPU either way. Points
 inside a cleared volume (a player edit) or an exclusion volume are skipped. The extraction is deterministic:
 `voxel.Scatter.Digest` logs the cached spawn points' counts and a CRC per type, to compare builds.
 

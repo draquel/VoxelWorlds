@@ -768,13 +768,21 @@ whole), `.SlopeMaterials` and `VoxelWorlds.Configuration.TreeTemplateMaterials` 
 
 Scatter places by the material the shader draws, not the voxel's: on the smooth terrain a surface point where a
 material's slope rock has at least half its weight counts as the slope material (`FVoxelMaterialTable::GetDrawnMaterial`:
-the slope 1 - N.Up past the middle of `SlopeRockStart` and `SlopeRockEnd`, 0.135, about 30 degrees), so ground cover
-limited to grass no longer stands on the rock, and a definition that allows Stone grows there. The thresholds are the
-include's `VOXEL_SLOPE_ROCK_START` and `_END`, which test `VoxelWorlds.Rendering.SlopeRock.Thresholds` keeps equal to
-the C++ constants. Two approximations: the shader's noise (up to 0.04 either way, patches a few tiles across) is left
-out, and scatter's normal is its density-gradient estimate (a few degrees off the mesh's vertex normal), so the border
-the scatter keeps is within a few degrees of the drawn one. The cubic atlas path draws no slope rock and is unchanged.
-See [SCATTER_SYSTEM.md](SCATTER_SYSTEM.md) "1. Surface Extraction".
+the slope 1 - N.Up past the middle of `SlopeRockStart` and `SlopeRockEnd`, 0.135, about 30 degrees). The thresholds are
+the include's `VOXEL_SLOPE_ROCK_START` and `_END`, which test `VoxelWorlds.Rendering.SlopeRock.Thresholds` keeps equal to
+the C++ constants. The slope is the mesh's as nearly as the extractor can know it: on a heightmap world the height field
+of the columns' topmost crossings (the density gradient at a voxel, which the slope filters read, is a central difference
+of saturated densities and reads a quarter of VoxelDemo's open points as 30 degrees or more), on a planet the lines' cell
+gradient. The shader's noise (up to 0.04 either way, in patches a few tiles across) is left out, so the scatter's border
+is the drawn one without its jitter. The cubic atlas path draws no slope rock and is unchanged.
+
+A definition with no `AllowedMaterials` grows on every material, rock included, so the smooth worlds' ground cover
+(`DemoSmoothScatterConfig`: the grasses, plants and flowers) allows the base terrain materials but Stone
+(`Scripts/setup_ground_cover_materials.py`); trees, the bush and the baby spruce still grow anywhere. Result
+(2026-11-03): on VoxelDemo's 38-40 degree flanks the drawn rock is bare of grass and flowers and the grass-drawn ground
+beside it keeps them (`Scripts/qa` digests: 13 of 188 chunks near the spawn change, their spawn points 12,854 to 5,725,
+the spawn area being steep; Review_Planet 7 of 195, natural stone only). See [SCATTER_SYSTEM.md](SCATTER_SYSTEM.md)
+"1. Surface Extraction".
 
 ### Texture Requirements
 
