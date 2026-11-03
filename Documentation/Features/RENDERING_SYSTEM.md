@@ -218,7 +218,7 @@ What it does not give yet:
   not the vertex factory's position view, which the proxy leaves null). Sunlit terrain seen in a ray turns from black to
   lit, but terrain in shadow still reads its own indirect light from the missing surface cache: off screen under the
   overhang 0.160 → 0.171 on `VoxelDemo` and 0.376 → 0.383 on `PlanetTest`, the sealed caves unchanged (0.111, 0.029),
-  for HITCOST (2026-11-03, G116's work; captures on the parent's `media/g116-surface-cache-plan` branch).
+  for +1.3 ms of GPU frame P50 on the chord (4.91 → 6.20) and +0.85 ms on the great circle (4.83 → 5.68) (the streaming bench, three interleaved runs each) (2026-11-03, G116's work; captures on the parent's `media/g116-surface-cache-plan` branch).
 - **Water.** Water tiles have no ray tracing geometry: the sea is translucent (or Single Layer Water) and is not an
   occluder Lumen needs.
 - **The far field.** Its procedural mesh components have the engine's own ray tracing path

@@ -95,7 +95,7 @@ anti-aliasing off; mean luminance of the inner 60 % of the compared regions), on
 
 In Lumen's scene view the overhang's sunlit side turns from black to lit under hit lighting, and terrain in shadow stays
 black: a hit evaluates the material and the direct light, and reads its indirect light from the surface cache, which the
-terrain does not have. Cost: HITCOST. Hit lighting is therefore no interim for G116; the cards are.
+terrain does not have. Cost: +1.29 ms of GPU frame P50 on `VoxelDemo`'s chord (4.91 → 6.20 ms, P95 6.46 → 7.73) and +0.85 ms on `PlanetTest`'s great circle (4.83 → 5.68, P95 6.93 → 7.67), game thread P50 +0.40 and +0.16 ms (the streaming bench, modes 0 and 1 interleaved, three runs each, noon with the clock stopped, the 2,874 x 1,358 PIE viewport). Hit lighting is therefore no interim for G116; the cards are.
 
 ## 6. Risks
 
