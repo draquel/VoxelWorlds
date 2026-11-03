@@ -126,7 +126,7 @@ namespace VoxelScatterTopFaceTestUtils
 
 	/**
 	 * The context the scatter manager builds: the world mode (null = no analytic height) and the bottom-layer edits above,
-	 * keyed in this chunk's frame (the layer over the top at Z = ChunkSize) as GatherAboveLayerEdits keys them.
+	 * keyed in this chunk's frame (the layer over the top at Z = ChunkSize) as GatherFaceLayerEdits keys them.
 	 */
 	FScatterExtractionContext MakeContext(const IVoxelWorldMode* Mode, const FChunkEditLayer* AboveLayer = nullptr)
 	{
