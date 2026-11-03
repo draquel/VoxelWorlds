@@ -220,7 +220,7 @@ CR2), picks the extractor:
 
 | World | Extractor | Points |
 |-------|-----------|--------|
-| Heightmap, smooth | `ExtractSurfacePointsByColumn` | Every surface crossing down each (X, Y) column at the point spacing's stride, Z interpolated as the mesher does, normal from the density gradient |
+| Heightmap, smooth | `ExtractSurfacePointsByColumn` | Every surface crossing down each (X, Y) column at the point spacing's stride, Z interpolated as the mesher does, normal from the density gradient (a central difference over two voxels, past the chunk's faces too) |
 | Heightmap, cubic | `ExtractSurfacePointsByBlockTop` | One point at the centre of each exposed top block face (below) |
 | Planet | `ExtractSurfacePointsByRay` | Crossings down the planet's radial rays (below) |
 
@@ -240,11 +240,12 @@ inside a cleared volume (a player edit) or an exclusion volume are skipped. The 
 #### The voxels past the chunk
 
 An extractor reads a few voxels its chunk's data cannot show: on a heightmap world the voxel over each column's top
-layer (the chunk above's bottom layer), on a planet the voxels past the chunk's +X, +Y and +Z faces. All three
+layer (the chunk above's bottom layer) and, on a smooth one, the voxels the density gradient reads past the chunk's faces
+and under its bottom layer (G109); on a planet the voxels past the chunk's +X, +Y and +Z faces. All three
 extractors take them from one source, `FScatterExtractionContext::GetVoxelOutsideChunk` (code review CR2): the voxel as
 generation makes it there (`FVoxelSurfaceQuery::GenerateVoxelAt`: the generated surface with the conditioning zones,
 the cave carve from the world's `CaveConfiguration`), with the neighbour's edits there applied (`OutsideEdits`, from
-`GatherAboveLayerEdits` on a heightmap world, `GatherPlanetTouchingEdits` on a planet, through the chunk manager's edit
+`GatherFaceLayerEdits` on a heightmap world, the six face neighbours' layers facing the chunk, `GatherPlanetTouchingEdits` on a planet, through the chunk manager's edit
 layers, `SetEditLayerSource`). Tests can supply the neighbours' real voxels instead (`OutsideVoxelSource`).
 
 What that rule fixed:
@@ -257,6 +258,20 @@ What that rule fixed:
   air, which copied the surface onto the chunk's top face up to 1.5 voxels under the ground; before G28 it still was
   deeper than that, so a buried chunk's top face carried underground points inside the rock, where underground-only
   scatter spawned. Tests: `Scatter.TopFace.*`.
+- **The density gradient at a heightmap chunk's faces** (G109). A point's normal is the density's central difference
+  over two voxels on each axis. At a face column, or in the top or bottom layer, one of the two is the neighbour's: the
+  voxel generation makes there, judged against the generated height of its own column, with the neighbour's edits.
+  Before, the index was clamped into the chunk, so the difference was one-sided over one voxel read as two and the slope
+  along that axis about halved (a 40-degree flank read 18 at an edge column; the definitions' slope limits and the
+  instances' alignment read it). Doubling the one-sided difference instead is right on average but not per point: the
+  densities saturate a voxel from the surface, and a one-voxel difference of them read a 40-degree plane anywhere from 1
+  to 59 degrees. A context without a heightmap world mode (a test) still doubles it. Its cost is one generated voxel per
+  point at a face (the side columns' heights sampled once per chunk), on the extraction worker. A voxel tree the
+  neighbour's generation injected is not in the generated voxel (as over the top layer). Test
+  `Scatter.Extraction.GradientAtChunkFaces`: 40-degree planes along X, Y and the diagonal read the interior's slope at the
+  face columns and in the top and bottom layers (41.41 and 41.39 degrees against the interior's 41.40 along an axis; the
+  saturated densities read a plane a little steep everywhere). Digests against main: VoxelDemo 22 of 188 chunks moved,
+  spawn points 5,725 to 5,871; Review_Planet identical (195 of 195: a planet's lines do not use the column scan).
 - **A planet chunk's faces** (G29, G72). The voxels past a planet chunk's faces are the planet generator's with the
   neighbours' edits, carved by the caves (`CalculateCaveDensity` along local up, for the biome generation gives that
   direction when the cave configuration has biome overrides). Before G72 a cave within a voxel past a chunk's max face
@@ -616,8 +631,11 @@ chunk need it (world modes review G33):
   instances stay until the re-extraction replaces them per type) and marks the chunk dirty; its re-mesh hands its
   edit-merged voxels to scatter.
 - **The chunks whose extraction reads its edited voxels**, from past their own faces (`FScatterExtractionContext`):
-  - on a heightmap world, the chunk below: the voxel over its top layer is the edited chunk's bottom layer
-    (`OutsideEdits`, keyed in the reader's frame at Z = ChunkSize, G26);
+  - on a smooth heightmap world, the face neighbours whose facing layer the edit reached: the chunk below reads the
+    edited chunk's bottom layer as the voxel over its top layer (G26), and each face neighbour its facing layer in its
+    density gradient (G109; `OutsideEdits`, keyed in the reader's frame one voxel outside it). An edit that reached local
+    0 on an axis is read by the neighbour at -1 on it, one that reached ChunkSize - 1 by the one at +1;
+  - on a cubic heightmap world, the chunk below alone (its block tops read the voxel over the top layer);
   - on a planet, the seven chunks at -X, -Y and -Z: a planet chunk's last cell on each axis reads the voxels past its +X,
     +Y and +Z faces (`OutsideEdits`, G29, G31). A face neighbour reads the layer facing it, an edge neighbour the column
     along the shared edge, the corner neighbour the corner voxel.
@@ -628,7 +646,8 @@ chunk need it (world modes review G33):
   (`RegenerateChunkScatter`, then the same hand-off as a mesh completion), with no re-mesh: their own voxels did not
   change. A reader edited in the same tick is skipped (its own re-mesh re-extracts it, after the edits), and so is one
   without voxel data (its extraction reads the edit when it loads). Before G33 the edited chunk's six face neighbours
-  re-extracted, which missed a planet's edge and corner readers.
+  re-extracted, which missed a planet's edge and corner readers; `EVoxelScatterOutsideReads` (`GetOutsideReads`) says
+  which rule a world reads by.
 
 Player edits are unchanged: they only clear scatter in a radius (above) and never re-extract.
 

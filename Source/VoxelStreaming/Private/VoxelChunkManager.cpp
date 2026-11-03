@@ -578,8 +578,13 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	if (!bIsInitialized || !bStreamingEnabled)
+	if (!bIsInitialized)
 	{
+		return;
+	}
+	if (!bStreamingEnabled)
+	{
+		TickPausedRenderRecovery();
 		return;
 	}
 
@@ -1371,14 +1376,14 @@ void UVoxelChunkManager::HandleChunkEdited(const FIntVector& ChunkCoord, EEditSo
 			// Drive that from the claim covering the region once VoxelScatter consumes claims.
 			ScatterManager->RegenerateChunkScatter(ChunkCoord);
 			++EditScatterStats.Broadcasts;
-			// The chunks whose extraction reads the voxels the edit changed here (G33): the chunk below on a heightmap, the
-			// -X / -Y / -Z chunks on a planet, as far as the edit's bounds reach (the edited chunk's six face neighbours
-			// missed a planet's edge and corner readers and re-extracted the rest for nothing). Re-extracted once each in the
-			// next tick (ProcessEditScatterReaders), so an edit across many chunks folds them.
+			// The chunks whose extraction reads the voxels the edit changed here (G33), as far as the edit's bounds reach: on a
+			// smooth heightmap the face neighbours whose facing layer it touched (G109), on a cubic one the chunk below, on a
+			// planet the -X / -Y / -Z chunks (the six face neighbours missed a planet's edge and corner readers). Re-extracted
+			// once each in the next tick (ProcessEditScatterReaders), so an edit across many chunks folds them.
 			FIntVector EditMin, EditMax;
 			const bool bBounds = EditManager->GetBroadcastEditBounds(EditMin, EditMax);
 			TArray<FIntVector> Readers;
-			ScatterManager->GetEditReaders(ChunkCoord, bBounds ? &EditMin : nullptr, Readers);
+			ScatterManager->GetEditReaders(ChunkCoord, bBounds ? &EditMin : nullptr, bBounds ? &EditMax : nullptr, Readers);
 			EditScatterReaderChunks.Append(Readers);
 			EditScatterEditedChunks.Add(ChunkCoord);
 		}
@@ -1660,6 +1665,9 @@ void UVoxelChunkManager::Shutdown()
 void UVoxelChunkManager::SetStreamingEnabled(bool bEnabled)
 {
 	bStreamingEnabled = bEnabled;
+	// A recovery begun while paused finishes in the streaming tick (its chunks are queued, in flight or pending).
+	PausedRecoveryChunks.Reset();
+	bPausedRecoveryActive = false;
 
 	if (bEnabled)
 	{
@@ -7330,8 +7338,13 @@ void UVoxelChunkManager::RecoverLostRenderData()
 		{
 			MarkChunkDirty(Coord);
 			++Remeshed;
+			if (!bStreamingEnabled)
+			{
+				PausedRecoveryChunks.Add(Coord);
+			}
 		}
 	}
+	bPausedRecoveryActive |= !bStreamingEnabled;
 
 	// The merged seam buckets are rebuilt from the slots kept here; no seam job has to run again.
 	TArray<FIntVector> SeamOwners;
@@ -7343,8 +7356,70 @@ void UVoxelChunkManager::RecoverLostRenderData()
 
 	WaterTiles.MarkAllDirty();
 
-	UE_LOG(LogVoxelStreaming, Log, TEXT("Renderer lost its geometry (scene proxy recreated): re-meshing %d chunk(s), re-sending %d seam bucket(s) and %d water tile(s)"),
-		Remeshed, SeamOwners.Num(), WaterTiles.Num());
+	UE_LOG(LogVoxelStreaming, Log, TEXT("Renderer lost its geometry (scene proxy recreated): re-meshing %d chunk(s), re-sending %d seam bucket(s) and %d water tile(s)%s"),
+		Remeshed, SeamOwners.Num(), WaterTiles.Num(), bStreamingEnabled ? TEXT("") : TEXT(" (streaming paused: the chunks alone re-mesh)"));
+}
+
+void UVoxelChunkManager::TickPausedRenderRecovery()
+{
+	RecoverLostRenderData();
+	if (!bPausedRecoveryActive || !MeshRenderer)
+	{
+		return;
+	}
+
+	// Launch the recovered chunks' meshes alone: the rest of the meshing queue waits for the resume, as it did before.
+	if (PausedRecoveryChunks.Num() > 0)
+	{
+		TArray<FChunkLODRequest> Held;
+		for (int32 i = MeshingQueue.Num() - 1; i >= 0; --i)
+		{
+			if (!PausedRecoveryChunks.Contains(MeshingQueue[i].ChunkCoord))
+			{
+				Held.Add(MeshingQueue[i]);
+				MeshingQueueSet.Remove(MeshingQueue[i].ChunkCoord);
+				MeshingQueue.RemoveAt(i, EAllowShrinking::No);
+			}
+		}
+		FVoxelTimingStats Timing;
+		ProcessMeshingQueue(Configuration ? Configuration->StreamingTimeSliceMS * 0.4f : 0.8f, Timing);
+		for (const FChunkLODRequest& Request : Held)
+		{
+			AddToMeshingQueue(Request);
+		}
+	}
+
+	// Submit what lands. The meshes that were on workers when the pause began land too: holding them would fill the
+	// pending queue, whose cap stops the launches above.
+	ProcessCompletedAsyncMeshes();
+	SubmitRendererSecondsThisTick = 0.0;
+	SubmitScatterSecondsThisTick = 0.0;
+	SubmitWaterSecondsThisTick = 0.0;
+	const int32 MaxRenderSubmitsPerFrame = ResolveMaxLoadPerFrame();
+	for (int32 Submitted = 0; PendingMeshQueue.Num() > 0 && Submitted < MaxRenderSubmitsPerFrame; ++Submitted)
+	{
+		const FIntVector ChunkCoord = PendingMeshQueue.Last().ChunkCoord;
+		OnChunkMeshingComplete(ChunkCoord);
+		PausedRecoveryChunks.Remove(ChunkCoord);
+	}
+	// A recovered chunk that left the pipeline another way (a failed mesh retries as PendingMeshing) is no longer waited on
+	// once it is neither queued nor meshing.
+	for (auto It = PausedRecoveryChunks.CreateIterator(); It; ++It)
+	{
+		const EChunkState State = GetChunkState(*It);
+		if (State != EChunkState::PendingMeshing && State != EChunkState::Meshing)
+		{
+			It.RemoveCurrent();
+		}
+	}
+
+	if (UsesWaterTiles())
+	{
+		ProcessDirtyWaterTiles(8);
+	}
+
+	// The renderer batches its updates and draws them at the flush, as at the end of the streaming tick.
+	MeshRenderer->FlushPendingOperations();
 }
 
 void UVoxelChunkManager::ProcessDirtyWaterTiles(int32 MaxTilesPerFrame)

@@ -19,9 +19,11 @@
 // ---------------------------------------------------------------------------
 // G33 (WORLD_MODES_REVIEW_PLAN.md section 14.1, section 19.11): a system or editor edit (a POI's terraform) re-extracted
 // the scatter of the edited chunk and its six face neighbours. The chunks whose extraction reads an edited chunk's voxels
-// are the chunk below on a heightmap (the voxel over its top layer, G26) and, on a planet, the seven chunks at -X / -Y /
-// -Z (the voxels past their +X / +Y / +Z faces, G29, G31): a planet's three edge and one corner readers kept a stale view
-// until they reloaded, and the other face neighbours (five on a heightmap, three on a planet) re-extracted for nothing.
+// are, on a planet, the seven chunks at -X / -Y / -Z (the voxels past their +X / +Y / +Z faces, G29, G31): a planet's
+// three edge and one corner readers kept a stale view until they reloaded, and its other three face neighbours
+// re-extracted for nothing. On a heightmap a cubic world's block tops read the voxel over the top layer (the chunk below
+// reads the bottom layer, G26); a smooth world's column scan reads the layer past every face (its density gradient,
+// G109), so the face neighbours whose facing layer the edit touched read it.
 //
 // - Scatter.EditReaders.Rule: UVoxelScatterManager::GetEditReaderOffsets by the layers an edit reached, and what
 //   UVoxelEditManager reports while it broadcasts OnChunkEdited: the voxels each chunk had changed (GetBroadcastEditBounds)
@@ -34,10 +36,12 @@
 //   the edit (OnChunkScatterReady), and every cached chunk against a fresh extraction now (CompareWithFreshExtraction).
 //   Every reader re-extracts and no chunk is stale (before G33 no edge or corner reader re-extracted and the edge reader
 //   kept stale points). Then an edit inside the chunk: re-extractions per edit.
-// - Scatter.EditReaders.Plane: a streamed plane; a system edit digs a chunk's bottom layer where the ground lies within
-//   G26's band over the chunk below's top. The chunk below is a face neighbour; the re-extractions per edit are the edited
-//   chunk and the chunk below (before G33, the edited chunk and its six face neighbours). Then an edit inside the chunk, and one that digs the whole chunk: its re-extraction finds no surface,
-//   and the instances RegenerateChunkScatter kept for the replacement must not stay (they stood on the dug terrain).
+// - Scatter.EditReaders.Plane: a streamed smooth plane; a system edit digs a chunk's bottom layer where the ground lies
+//   within G26's band over the chunk below's top. It reaches every face but the top, so the readers are the chunk below and
+//   the four side neighbours (G109; before G33 the six face neighbours re-extracted, between G33 and G109 the chunk below
+//   alone); every reader with points re-extracts and no cached chunk is stale after it. Then an edit inside the chunk, and
+//   one that digs the whole chunk: its re-extraction finds no surface, and the instances RegenerateChunkScatter kept for the
+//   replacement must not stay (they stood on the dug terrain).
 // ---------------------------------------------------------------------------
 
 namespace VoxelScatterEditReadersTest
@@ -183,10 +187,10 @@ namespace VoxelScatterEditReadersTest
 
 	/**
 	 * One streamed pass: settle and audit; Find picks the chunk to edit (false: none qualifies) and Edit edits it
-	 * (returning the voxels changed) with BoundsMin the lowest local coordinate it reaches; settle and audit again; then an
-	 * edit inside the chunk.
+	 * (returning the voxels changed) with BoundsMin and BoundsMax the lowest and highest local coordinates it reaches;
+	 * settle and audit again; then an edit inside the chunk.
 	 */
-	FPassResult RunPass(FAutomationTestBase& Test, VoxelTesting::FTestChunkWorld& W, const FIntVector& BoundsMin,
+	FPassResult RunPass(FAutomationTestBase& Test, VoxelTesting::FTestChunkWorld& W, const FIntVector& BoundsMin, const FIntVector& BoundsMax,
 		TFunctionRef<bool(VoxelTesting::FTestChunkWorld&, FIntVector&)> Find,
 		TFunctionRef<int32(VoxelTesting::FTestChunkWorld&, const FIntVector&)> Edit)
 	{
@@ -206,7 +210,7 @@ namespace VoxelScatterEditReadersTest
 		}
 
 		TArray<FIntVector> Readers;
-		Scatter->GetEditReaders(R.Edited, &BoundsMin, Readers);
+		Scatter->GetEditReaders(R.Edited, &BoundsMin, &BoundsMax, Readers);
 		R.Readers = Readers.Num();
 		auto IsEdgeOrCorner = [&R](const FIntVector& Reader)
 		{
@@ -289,24 +293,42 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterEditReadersRuleTest, "VoxelWorlds.
 bool FVoxelScatterEditReadersRuleTest::RunTest(const FString& Parameters)
 {
 	// --- The reader rule by the layers an edit reached ---
-	auto Offsets = [](bool bPlanet, const FIntVector* Min)
+	constexpr int32 CS = 16;
+	auto Offsets = [](EVoxelScatterOutsideReads Reads, const FIntVector* Min, const FIntVector* Max)
 	{
 		TArray<FIntVector> Out;
-		UVoxelScatterManager::GetEditReaderOffsets(bPlanet, Min, Out);
+		UVoxelScatterManager::GetEditReaderOffsets(Reads, CS, Min, Max, Out);
 		Out.Sort([](const FIntVector& A, const FIntVector& B) { return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z); });
 		return Out;
 	};
+	using enum EVoxelScatterOutsideReads;
 	const FIntVector Mid(5, 5, 5), BottomZ(5, 5, 0), FaceX(0, 5, 5), EdgeXY(0, 0, 5), Corner(0, 0, 0);
-	TestEqual(TEXT("Heightmap: an edit inside the chunk is read by no other chunk"), Offsets(false, &Mid).Num(), 0);
-	TestEqual(TEXT("Heightmap: an edit on the bottom layer is read by the chunk below"), Offsets(false, &BottomZ), TArray<FIntVector>{ FIntVector(0, 0, -1) });
-	TestEqual(TEXT("Heightmap: an edit on the -X layer only is read by no other chunk"), Offsets(false, &FaceX).Num(), 0);
-	TestEqual(TEXT("Heightmap: unknown bounds give the chunk below"), Offsets(false, nullptr), TArray<FIntVector>{ FIntVector(0, 0, -1) });
-	TestEqual(TEXT("Planet: an edit inside the chunk is read by no other chunk"), Offsets(true, &Mid).Num(), 0);
-	TestEqual(TEXT("Planet: an edit on the -X layer is read by the -X neighbour"), Offsets(true, &FaceX), TArray<FIntVector>{ FIntVector(-1, 0, 0) });
-	TestEqual(TEXT("Planet: an edit on the -X -Y edge is read by the -X, -Y and -X -Y neighbours"), Offsets(true, &EdgeXY),
+	const FIntVector TopZ(5, 5, CS - 1), FaceMaxX(CS - 1, 5, 5), MaxCorner(CS - 1, CS - 1, CS - 1);
+	TestEqual(TEXT("Cubic heightmap: an edit inside the chunk is read by no other chunk"), Offsets(TopLayer, &Mid, &Mid).Num(), 0);
+	TestEqual(TEXT("Cubic heightmap: an edit on the bottom layer is read by the chunk below"), Offsets(TopLayer, &BottomZ, &BottomZ),
+		TArray<FIntVector>{ FIntVector(0, 0, -1) });
+	TestEqual(TEXT("Cubic heightmap: an edit on the -X layer only is read by no other chunk"), Offsets(TopLayer, &FaceX, &FaceX).Num(), 0);
+	TestEqual(TEXT("Cubic heightmap: unknown bounds give the chunk below"), Offsets(TopLayer, nullptr, nullptr), TArray<FIntVector>{ FIntVector(0, 0, -1) });
+	TestEqual(TEXT("Smooth heightmap: an edit inside the chunk is read by no other chunk"), Offsets(FaceLayers, &Mid, &Mid).Num(), 0);
+	TestEqual(TEXT("Smooth heightmap: an edit on the bottom layer is read by the chunk below"), Offsets(FaceLayers, &BottomZ, &BottomZ),
+		TArray<FIntVector>{ FIntVector(0, 0, -1) });
+	TestEqual(TEXT("Smooth heightmap: an edit on the top layer is read by the chunk above (G109)"), Offsets(FaceLayers, &TopZ, &TopZ),
+		TArray<FIntVector>{ FIntVector(0, 0, 1) });
+	TestEqual(TEXT("Smooth heightmap: an edit on the -X layer is read by the -X neighbour (G109)"), Offsets(FaceLayers, &FaceX, &FaceX),
+		TArray<FIntVector>{ FIntVector(-1, 0, 0) });
+	TestEqual(TEXT("Smooth heightmap: an edit on the +X layer is read by the +X neighbour (G109)"), Offsets(FaceLayers, &FaceMaxX, &FaceMaxX),
+		TArray<FIntVector>{ FIntVector(1, 0, 0) });
+	TestEqual(TEXT("Smooth heightmap: an edit on the -X -Y edge is read by the -X and -Y neighbours, no edge neighbour"), Offsets(FaceLayers, &EdgeXY, &EdgeXY),
+		TArray<FIntVector>{ FIntVector(-1, 0, 0), FIntVector(0, -1, 0) });
+	TestEqual(TEXT("Smooth heightmap: an edit across the whole chunk is read by its six face neighbours"), Offsets(FaceLayers, &Corner, &MaxCorner).Num(), 6);
+	TestEqual(TEXT("Smooth heightmap: unknown bounds give the six"), Offsets(FaceLayers, nullptr, nullptr).Num(), 6);
+	TestEqual(TEXT("Planet: an edit inside the chunk is read by no other chunk"), Offsets(PlanetShell, &Mid, &Mid).Num(), 0);
+	TestEqual(TEXT("Planet: an edit on the -X layer is read by the -X neighbour"), Offsets(PlanetShell, &FaceX, &FaceX), TArray<FIntVector>{ FIntVector(-1, 0, 0) });
+	TestEqual(TEXT("Planet: an edit on the +X layer is read by no other chunk"), Offsets(PlanetShell, &FaceMaxX, &FaceMaxX).Num(), 0);
+	TestEqual(TEXT("Planet: an edit on the -X -Y edge is read by the -X, -Y and -X -Y neighbours"), Offsets(PlanetShell, &EdgeXY, &EdgeXY),
 		TArray<FIntVector>{ FIntVector(-1, -1, 0), FIntVector(-1, 0, 0), FIntVector(0, -1, 0) });
-	TestEqual(TEXT("Planet: an edit on the min corner is read by the seven neighbours at -X / -Y / -Z"), Offsets(true, &Corner).Num(), 7);
-	TestEqual(TEXT("Planet: unknown bounds give the seven"), Offsets(true, nullptr).Num(), 7);
+	TestEqual(TEXT("Planet: an edit on the min corner is read by the seven neighbours at -X / -Y / -Z"), Offsets(PlanetShell, &Corner, &Corner).Num(), 7);
+	TestEqual(TEXT("Planet: unknown bounds give the seven"), Offsets(PlanetShell, nullptr, nullptr).Num(), 7);
 
 	// --- What the edit manager reports while it broadcasts ---
 	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
@@ -472,7 +494,7 @@ bool FVoxelScatterEditReadersPlanetTest::RunTest(const FString& Parameters)
 		const FVector Up(1, 0, 0);
 		const FVoxelTerrainSurfacePoint Site = W.Manager->GetSurfacePointAt(W.Config->WorldOrigin + Up);
 		W.SetViewer(Site.Position + Up * 300.0);
-		const FPassResult R = RunPass(*this, W, FIntVector(0, 0, 0), Find, Edit);
+		const FPassResult R = RunPass(*this, W, FIntVector(0, 0, 0), FIntVector(W.Config->ChunkSize - 1), Find, Edit);
 		// Undo and redo are edits too (G60): the readers re-extract after them, so every cached chunk equals a fresh extraction.
 		FUndoRedoAudit U;
 		if (R.bFound)
@@ -570,7 +592,7 @@ bool FVoxelScatterEditReadersPlaneTest::RunTest(const FString& Parameters)
 		}
 		const double ChunkWorld = W.Config->GetChunkWorldSize();
 		W.SetViewer(FVector(ChunkWorld * 0.5, ChunkWorld * 0.5, W.Manager->GetGeneratedSurfacePoint(FVector(ChunkWorld * 0.5, ChunkWorld * 0.5, 0.0)).Z + 300.0));
-		const FPassResult R = RunPass(*this, W, FIntVector(0, 0, 0), Find, Edit);
+		const FPassResult R = RunPass(*this, W, FIntVector(0, 0, 0), FIntVector(W.Config->ChunkSize - 1, W.Config->ChunkSize - 1, 0), Find, Edit);
 		// Undo and redo are edits too (G60): the chunk below re-extracts after them, so every cached chunk equals a fresh extraction.
 		FUndoRedoAudit U;
 		if (R.bFound)
@@ -598,9 +620,10 @@ bool FVoxelScatterEditReadersPlaneTest::RunTest(const FString& Parameters)
 			return true;
 		}
 		TestEqual(FString::Printf(TEXT("%s: every cached chunk equals a fresh extraction before the edit"), Name), R.StaleBefore, 0);
-		TestEqual(FString::Printf(TEXT("%s: the chunk below is the one reader of a bottom-layer edit"), Name), R.Readers, 1);
-		TestEqual(FString::Printf(TEXT("%s: the chunk below re-extracts after the edit"), Name), R.ReadersReextracted, 1);
-		TestEqual(FString::Printf(TEXT("%s: its points changed (non-vacuous)"), Name), R.ReadersChanged, 1);
+		TestEqual(FString::Printf(TEXT("%s: a bottom-layer edit across the chunk is read by the chunk below and the four side neighbours (G109)"), Name),
+			R.Readers, 5);
+		TestEqual(FString::Printf(TEXT("%s: every reader with points re-extracts after the edit"), Name), R.ReadersReextracted, R.ReadersWithPoints);
+		TestTrue(FString::Printf(TEXT("%s: readers' points changed (non-vacuous)"), Name), R.ReadersChanged >= 1);
 		TestEqual(FString::Printf(TEXT("%s: no cached chunk is stale after the edit"), Name), R.Stale, 0);
 		AddInfo(FString::Printf(TEXT("%s: both edits undone: %d cached chunks stale (%d undo steps left); redone: %d stale"), Name, U.StaleAfterUndo,
 			U.UndoStepsAfterUndo, U.StaleAfterRedo));
@@ -612,7 +635,7 @@ bool FVoxelScatterEditReadersPlaneTest::RunTest(const FString& Parameters)
 		TestTrue(FString::Printf(TEXT("%s: the dug chunk had instances (non-vacuous)"), Name), InstancesBefore > 0);
 		TestTrue(FString::Printf(TEXT("%s: scatter settles after the dig"), Name), bClearSettled);
 		TestEqual(FString::Printf(TEXT("%s: a re-extraction that finds no surface leaves the chunk no instances"), Name), InstancesAfter, 0);
-		TestEqual(TEXT("The edit regenerates the edited chunk and the chunk below"), R.Regenerations, int64(2));
+		TestEqual(TEXT("The edit regenerates the edited chunk and the readers re-extracted"), R.Regenerations, int64(1) + R.Stats.ReadersReextracted);
 		TestEqual(TEXT("An edit inside the chunk regenerates it alone"), R.MidRegenerations, int64(1));
 	}
 	return true;
