@@ -1,8 +1,11 @@
 # Lumen Off Screen: the Terrain's Distance Fields and Ray Tracing Geometry (D-VP4 spike)
 
+> **Frozen** 2026-11-03: the record of a finished spike; the names it uses are the prototype's, on its branch. The
+> production work it recommends gets its own plan.
+>
 > Spike of 2026-11-03 (D-VP4 = (b) as a spike, (d) meanwhile). Terms: `Documentation/GLOSSARY.md`. The prototype is on
 > VoxelWorlds branch `spike/dvp4-lumen-offscreen` (draft PR VoxelWorlds#248, not to merge); the captures are on the
-> parent repository's media branch `media/dvp4-lumen-offscreen` (`Documentation/Images/dvp4/`).
+> parent repository's media branch `media/dvp4-lumen-offscreen` (Documentation/Images/dvp4).
 
 **The question.** The terrain draws through a custom renderer (`FVoxelSceneProxy` on `FLocalVertexFactory`) with no mesh
 distance fields and no ray tracing geometry, so Lumen sees it only in screen space: an overhang that leaves the screen
@@ -90,7 +93,7 @@ Mean luminance (the inner 60 % of the compared regions), VoxelDemo and PlanetTes
   voxels and clamps its samples there, so between two chunks the composed distance is slightly too large. A field box
   overlapping its neighbours by the band (the voxels' distance extrapolated, or read from the seam's snapshot) closes it.
 
-Captures (`Documentation/Images/dvp4/` on the media branch): `demo_overhang_hw.jpg` (hardware Lumen as today against
+Captures (Documentation/Images/dvp4 on the media branch): `demo_overhang_hw.jpg` (hardware Lumen as today against
 ray tracing geometry, FOV 90 and 20), `demo_overhang_sw.jpg` (software Lumen against distance fields), `demo_cave.jpg`,
 `planet_overhang.jpg`, `demo_rtscene.jpg` (the ray tracing debug view: the terrain is in the scene only with the spike),
 `demo_distancefields.jpg` (the mesh and the global distance field views).
