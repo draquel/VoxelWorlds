@@ -50,10 +50,13 @@ namespace VoxelTesting
 		int32 SeamSubmits = 0;
 		/** Chunk meshes submitted for a chunk that already had one (re-meshes; the streaming bench's thrash, G14). */
 		int64 ChunkResubmits = 0;
+		/** FlushPendingOperations calls: the real renderer batches its updates and draws them only at the flush (F3.4). */
+		int32 Flushes = 0;
 
 		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
 		virtual void Shutdown() override { bInitialized = false; }
 		virtual bool IsInitialized() const override { return bInitialized; }
+		virtual void FlushPendingOperations() override { ++Flushes; }
 		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override
 		{
 			++ChunkSubmits;

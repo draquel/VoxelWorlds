@@ -7363,7 +7363,7 @@ void UVoxelChunkManager::RecoverLostRenderData()
 void UVoxelChunkManager::TickPausedRenderRecovery()
 {
 	RecoverLostRenderData();
-	if (!bPausedRecoveryActive)
+	if (!bPausedRecoveryActive || !MeshRenderer)
 	{
 		return;
 	}
@@ -7417,6 +7417,9 @@ void UVoxelChunkManager::TickPausedRenderRecovery()
 	{
 		ProcessDirtyWaterTiles(8);
 	}
+
+	// The renderer batches its updates and draws them at the flush, as at the end of the streaming tick.
+	MeshRenderer->FlushPendingOperations();
 }
 
 void UVoxelChunkManager::ProcessDirtyWaterTiles(int32 MaxTilesPerFrame)

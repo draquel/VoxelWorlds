@@ -355,12 +355,14 @@ bool FVoxelCubicStreamingProxyRecreatedWhilePausedTest::RunTest(const FString& P
 	Test.SetViewer(FVector(Far, 0.0, FarSurfaceZ + 200.0));
 	const int32 SubmitsAtPause = Test.Renderer.ChunkSubmits;
 	const int32 SeamSubmitsAtPause = Test.Renderer.SeamSubmits;
+	const int32 FlushesAtPause = Test.Renderer.Flushes;
 	for (int32 i = 0; i < 60; ++i)
 	{
 		Test.Tick();
 	}
 	TestEqual(TEXT("Paused with nothing lost: no chunk is submitted"), Test.Renderer.ChunkSubmits, SubmitsAtPause);
 	TestEqual(TEXT("Paused with nothing lost: no seam bucket is submitted"), Test.Renderer.SeamSubmits, SeamSubmitsAtPause);
+	TestEqual(TEXT("Paused with nothing lost: the renderer is not flushed"), Test.Renderer.Flushes, FlushesAtPause);
 
 	// The engine recreates the scene proxy while paused.
 	Test.Renderer.SimulateProxyRecreated();
@@ -392,6 +394,7 @@ bool FVoxelCubicStreamingProxyRecreatedWhilePausedTest::RunTest(const FString& P
 	TestEqual(TEXT("Paused: every seam bucket was sent again"), Test.Renderer.SeamBuckets.Num(), BucketOwners.Num());
 	TestEqual(TEXT("Paused: no face missing after recovery"), Missing, 0);
 	TestEqual(TEXT("Paused: no extra face after recovery"), Extra, 0);
+	TestTrue(TEXT("Paused: the renderer's batch is flushed, so the meshes draw (the real renderer batches them)"), Test.Renderer.Flushes > FlushesAtPause);
 	TestTrue(TEXT("Paused: still paused"), !Test.Manager->IsStreamingEnabled());
 
 	// Resumed, the world streams to the moved viewer.
