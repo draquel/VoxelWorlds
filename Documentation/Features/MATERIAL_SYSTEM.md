@@ -78,6 +78,9 @@ struct VOXELCORE_API FVoxelMaterialTextureConfig
     /** Non-occluding material — render faces between this and any different material.
      *  Same-material adjacency still culls. Creates visual density for leaves, etc. */
     bool bNonOccluding = false;
+
+    /** The material this one turns into on steep smooth terrain (VP2-O3); -1, its own ID or an unconfigured ID: never */
+    int32 SlopeMaterialID = -1;
 };
 ```
 
@@ -262,7 +265,8 @@ every vertex's normal against 0.7, along world +Z on heightmap worlds. On a plan
 `UVoxelRegionComponent::SetRadialFaceUp`, and the normal is measured against the vertex's radial up instead
 (`Rendering.Planet.FaceTypeByLocalUp`). `VoxelMaterialCommon.ush` gets an up-aware `GetVoxelFaceTypeUp` for shaders
 that need one (no shader includes it today). Smooth materials are triplanar on world axes, which works in any
-orientation, and read the face type only in the cubic atlas path, which planets do not use (SD3).
+orientation, and read the face type only in the cubic atlas path, which planets do not use (SD3). The same call
+sets the smooth materials' `LocalUpCenter`, the radial up of the slope rock ("Slope-Aware Rock" below).
 
 The triplanar position is large-world safe (spherical Phase 6, WM-BP7): the triplanar custom nodes
 (`MF_TriplanarSampleAlbedoRoughness`, `MF_TriplanarSampleNormal`) take a float3, and Absolute World Position demoted to
@@ -311,12 +315,16 @@ This custom HLSL node samples both albedo and roughness arrays:
 - `GradientSampling`, `TileVariation` (float) - a constant 1 (Footprint Sampling and Texture Variation below)
 - `MacroVariation` (float) - `MPC_VoxelMaterial` collection parameter (Texture Variation below; the node
   includes `/Plugin/VoxelWorlds/Private/VoxelTextureVariation.ush`)
+- `FromCenter` (float3), `RadialUp` (float) - the absolute world position less the function's `LocalUpCenter` vector
+  parameter, and that parameter's A (Slope-Aware Rock below; the node includes `VoxelSlopeRock.ush` too)
 
 **Output:** `float4` (RGB = Albedo, A = Roughness)
 
-The code below is the node with both variation switches at 0; the full code, with the variation path, is in
-`Scripts/setup_texture_variation.py` (parent repo), which writes it into the asset; `Scripts/setup_texture_array_slices.py`
-(F2.12) then reads each array at the material's slice from the LUT. Run both, in that order.
+The code below is the node with both variation switches at 0 and no slope material; the full code, with the variation
+path and the slope rock's second material, is in `Scripts/setup_slope_rock.py` (parent repo), which writes it into the
+asset. Its history: `Scripts/setup_texture_variation.py` (VP2-O2) wrote the variation, `Scripts/setup_texture_array_slices.py`
+(F2.12) then read each array at the material's slice from the LUT, and `setup_slope_rock.py` (VP2-O3) rewrites the whole
+node with both.
 
 ```hlsl
 int MaterialID = (int)floor(MaterialUV.x + 0.5);
@@ -372,6 +380,7 @@ Normal maps require special blending to avoid "plaid" artifacts. This uses UDN (
 - `NormalArray` (Texture2DArray) - Material atlas parameter
 - `MaterialLUT` (Texture2D) - The atlas's material LUT
 - `GradientSampling`, `TileVariation` (float) - a constant 1 (Texture Variation below)
+- `FromCenter` (float3), `RadialUp` (float) - as in the albedo node (Slope-Aware Rock below)
 
 **Output:** `float3` (World-space normal)
 
@@ -426,7 +435,8 @@ return BlendedNormal;
 The texture arrays hold one slice per distinct texture, not one per MaterialID (F2.12: on `DemoMaterialAtlas` 14-19 of 22
 slices had been copies; test `VoxelWorlds.MaterialAtlas.TextureArrays.SliceTables`), so the triplanar functions cannot sample at the MaterialID. `UVoxelMaterialAtlas::BuildMaterialLUT` writes a fourth row below
 the three face rows: texel (MaterialID, 3) holds the material's slice in the albedo array (R), the normal array (G) and
-the roughness array (B), from the atlas's slice tables; A is 0. Both triplanar functions take the `MaterialLUT` texture
+the roughness array (B), from the atlas's slice tables; A is the material's slope material plus one, 0 for none
+(Slope-Aware Rock below). Both triplanar functions take the `MaterialLUT` texture
 as an input (wired in `M_VoxelMaster` and `M_VoxelMaster_Fade` from the same `MaterialLUT` parameter the cubic path
 reads) and `Load` that texel. The face rows are read by texel too (`MF_CubicAtlasSample`), so the extra row does not
 move them. An atlas whose arrays were built with a slice per MaterialID has empty slice tables, and its LUT gives every
@@ -485,6 +495,51 @@ collection scalars; `VoxelWorlds.Rendering.TextureVariation.Assets` checks the w
 of the ground from above fell from 0.281 to 0.049 (the plaid on far ground gone) at no GPU cost (VP2-O2; history:
 `VISUAL_POLISH_PLAN.md` "VP2-O2 texture variation").
 
+### Slope-Aware Rock (visual polish VP2-O3)
+
+Decision D-VP2 kept the textures and added rock on steep ground in the shader. A material's atlas config names the
+material it turns into where the ground is steep (`FVoxelMaterialTextureConfig::SlopeMaterialID`; -1, its own ID or an ID
+the atlas has no config for: never), and `BuildMaterialLUT` writes it into the slice row's A as the ID plus one
+(`UVoxelMaterialAtlas::GetSlopeMaterialID`; test `VoxelWorlds.MaterialAtlas.SlopeMaterial`). The voxels keep their
+material: digging, hardness, the map and scatter see grass where the shader draws rock. The project's atlases
+(`DemoMaterialAtlas`, `PluginTesting/Config/VoxelMaterialAtlas`) turn Grass and Frozen Dirt to Stone. Dirt stays dirt, so
+a dig's walls look like what was dug; Sand (dunes, beaches), Snow, Sandstone, Stone, the ores, Wood and Leaves never turn.
+
+Both triplanar functions include `Shaders/Private/VoxelSlopeRock.ush` and compute the same weight
+(`VoxelSlopeRockWeight`): the slope 1 - N.Up of the interpolated vertex normal N against local up, through a smoothstep
+from 0.08 to 0.19 (about 23 to 36 degrees), the slope moved by up to 0.04 either way by a value noise about three tiles
+across on the triplanar projections, so the border is irregular and not a contour line. The vertex normal is continuous
+across triangles and quads, so the weight has no per-quad edges; the border between two materials stays where it was.
+Where the weight is between 0 and 1 the node reads both materials' slices (the variation offsets are shared) and blends
+albedo, roughness and the normals' UDN detail by it; at 0 or 1 it reads one material, as before. The tunables are
+`#define`s at the top of the include (editing it recompiles the masters).
+
+Local up is world +Z on a heightmap world and the radial direction from the planet's centre on a planet. Each triplanar
+function holds a `LocalUpCenter` vector parameter (default 0: world +Z): xyz a planet's centre, w 1 for radial. The
+function subtracts it from the absolute world position with LWC math, so the node's `FromCenter` input is demoted to
+float only after the subtraction, and the node normalises it when `RadialUp` is 1. `UVoxelRegionComponent` sets it on
+its material instance with the other per-world parameters (`UpdateMaterialAtlasParameters`, and `SetRadialFaceUp`, which
+the renderer calls for a planet with `WorldOrigin` as the centre), and the crossfade instances copy it with the other
+vector parameters. A material instance parameter rather than a parameter collection: a collection's values are one per
+`UWorld`, which two voxel worlds in one level would share, and the region component already sets the per-world
+parameters on its own instance. The centre is a float: a planet centred 10^8 uu out is 8 uu off, under 10^-5 rad of
+local up at 1 km from the centre. Tests `VoxelWorlds.Rendering.SlopeRock.Assets` (the wiring) and
+`.LocalUpParameter` (the instance's value on a heightmap world and a planet).
+
+`Scripts/setup_slope_rock.py` (parent repository; idempotent, run headless) writes the nodes, the parameter and the
+atlases' slope materials, and resaves `M_VoxelMaster` and `M_VoxelMaster_Fade` with no node changed (their cached
+parameter list then holds `LocalUpCenter`, which a cooked game reads). Smooth terrain only: the cubic path
+(`MF_CubicAtlasSample`) is unchanged. Soft material borders (VP2-O4) wait for the user's look at this.
+
+Result (2026-11-02, before and after at fixed poses): on `VoxelDemo` the steepest hill flanks take rock in patches with
+irregular borders and the gentle ground keeps its grass, at eye level and from 50-150 m up (the main build against the
+change at the same six poses). The thresholds were set by eye: a start of 37 degrees turned almost nothing on these
+worlds, whose hills are gentle. On `PlanetTest` (2.5 km) little turns at the equator, at latitude 70 and at the pole (an
+A/B in one session, the atlases' slope materials off and on: the mean pixel change is 0.3-1.5 of 255, mostly wind in the
+foliage), and the same on `Review_Planet_M` at latitude 70; with world +Z as local up the equator's flat ground would all
+be rock, so the radial up is in use. The explored maps are byte-identical to main's (the map reads the voxels'
+materials), and the meshes and the 111 GPU parity lines are unchanged. Ground scatter still grows on the rock (G106).
+
 ---
 
 ## Material Assignment
@@ -530,6 +585,9 @@ Abridged:
 void UVoxelRegionComponent::UpdateMaterialAtlasParameters()
 {
     DynamicMaterialInstance->SetScalarParameterValue(FName("bSmoothTerrain"), bUseSmoothMeshing ? 1.0f : 0.0f);
+
+    // The slope rock's local up (VP2-O3): a planet's centre and 1, or 0 (world +Z)
+    DynamicMaterialInstance->SetVectorParameterValue(FName("LocalUpCenter"), FLinearColor(FaceUpCenter.X, FaceUpCenter.Y, FaceUpCenter.Z, bRadialFaceUp ? 1.0f : 0.0f));
 
     // The material LUT (face rows and the slice row), built if dirty or missing
     if (MaterialAtlas->IsLUTDirty() || !MaterialAtlas->GetMaterialLUT())
@@ -664,6 +722,8 @@ face rows to encode per-material flags:
 - **Bit 0**: `bIsMasked` (1 = masked blend, 0 = opaque)
 - **Bits 1-7**: Reserved for future flags
 
+The slice row's A is the material's slope material plus one (Slope-Aware Rock above).
+
 
 ### Non-Occluding Face Generation (Cubic Mesher)
 
@@ -722,6 +782,7 @@ See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed 
 **Shaders:**
 - `Shaders/Private/VoxelTriplanarCommon.ush` - Triplanar utility functions
 - `Shaders/Private/VoxelTextureVariation.ush` - Tile and macro variation (VP2-O2)
+- `Shaders/Private/VoxelSlopeRock.ush` - Slope-aware rock (VP2-O3)
 
 **Material Assets (`/VoxelWorlds/Materials/`):**
 - `M_VoxelMaster` - Unified master material

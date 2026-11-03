@@ -1,0 +1,75 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+// VoxelSlopeRock.ush - slope-aware rock on the smooth terrain (visual polish VP2-O3).
+//
+// Included by the Custom nodes of MF_TriplanarSampleAlbedoRoughness and MF_TriplanarSampleNormal. A material whose atlas
+// config names a slope material (FVoxelMaterialTextureConfig::SlopeMaterialID, in the material LUT's slice row, A) is
+// drawn as that material where the ground is steep: the nodes sample both materials' slices and blend them by the weight
+// below. Both nodes compute the same weight from the same inputs, so the albedo and the normals agree.
+//
+// The weight goes by the interpolated vertex normal against local up: world +Z on a heightmap world, the radial
+// direction from the planet's centre on a planet (M_VoxelMaster's LocalUpCenter, set by UVoxelRegionComponent). The
+// vertex normal is continuous across triangles, so the blend has no per-quad edges; a value noise a few tiles across moves
+// the threshold so the border is not a contour line.
+
+#pragma once
+
+#include "/Plugin/VoxelWorlds/Private/VoxelTextureVariation.ush"
+
+/**
+ * The slope (1 - cos of the angle between the normal and local up) where the rock starts: about 23 degrees. The worlds'
+ * hills are gentle, so the rock takes only their steepest flanks (tuned by eye on VoxelDemo, VP2-O3)
+ */
+#ifndef VOXEL_SLOPE_ROCK_START
+#define VOXEL_SLOPE_ROCK_START 0.08
+#endif
+
+/** The slope where the rock is whole: about 36 degrees */
+#ifndef VOXEL_SLOPE_ROCK_END
+#define VOXEL_SLOPE_ROCK_END 0.19
+#endif
+
+/** How far the noise moves the slope either way, in the same units: the border runs between about 16 and 40 degrees */
+#ifndef VOXEL_SLOPE_ROCK_JITTER
+#define VOXEL_SLOPE_ROCK_JITTER 0.04
+#endif
+
+/** The noise's cell, in tiles */
+#ifndef VOXEL_SLOPE_ROCK_NOISE_TILES
+#define VOXEL_SLOPE_ROCK_NOISE_TILES 3.0
+#endif
+
+/** Local up: the direction from the planet's centre (FromCenter = position - centre) when Radial, else world +Z */
+float3 VoxelSlopeRockLocalUp(float3 FromCenter, float Radial)
+{
+	return Radial > 0.5 ? FromCenter * rsqrt(max(dot(FromCenter, FromCenter), 1e-6)) : float3(0, 0, 1);
+}
+
+/**
+ * The slope material's weight at a pixel: 0 below VOXEL_SLOPE_ROCK_START, 1 above VOXEL_SLOPE_ROCK_END, smooth between,
+ * the slope moved by up to VOXEL_SLOPE_ROCK_JITTER by a value noise on the triplanar projections (Weights, the full
+ * triplanar weights, so the noise is continuous where a projection fades out).
+ */
+float VoxelSlopeRockWeight(float3 Normal, float3 LocalUp, float3 Weights, float2 UV_X, float2 UV_Y, float2 UV_Z,
+	float TilesPerPeriod)
+{
+	const float Slope = 1.0 - dot(Normal * rsqrt(max(dot(Normal, Normal), 1e-6)), LocalUp);
+	if (Slope <= VOXEL_SLOPE_ROCK_START - VOXEL_SLOPE_ROCK_JITTER)
+	{
+		return 0.0;
+	}
+	if (Slope >= VOXEL_SLOPE_ROCK_END + VOXEL_SLOPE_ROCK_JITTER)
+	{
+		return 1.0;
+	}
+	float Noise = 0.0;
+	[branch] if (Weights.x > 0.0) { Noise += Weights.x * VoxelVariationNoiseAt(UV_X, TilesPerPeriod, VOXEL_SLOPE_ROCK_NOISE_TILES, 5u); }
+	[branch] if (Weights.y > 0.0) { Noise += Weights.y * VoxelVariationNoiseAt(UV_Y, TilesPerPeriod, VOXEL_SLOPE_ROCK_NOISE_TILES, 5u); }
+	[branch] if (Weights.z > 0.0) { Noise += Weights.z * VoxelVariationNoiseAt(UV_Z, TilesPerPeriod, VOXEL_SLOPE_ROCK_NOISE_TILES, 5u); }
+	return smoothstep(VOXEL_SLOPE_ROCK_START, VOXEL_SLOPE_ROCK_END, Slope + (Noise - 0.5) * (2.0 * VOXEL_SLOPE_ROCK_JITTER));
+}
+
+/** The slope material's ID from a material's slice row texel (A = the ID plus one), or -1 */
+int VoxelSlopeRockMaterial(float4 SliceRow)
+{
+	return (int)floor(SliceRow.a * 255.0 + 0.5) - 1;
+}

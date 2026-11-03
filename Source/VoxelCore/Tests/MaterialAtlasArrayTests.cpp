@@ -34,6 +34,8 @@
 //   marked stale (AreTextureArraysDirty) when TextureArraySize or a source texture changes and EnsureTextureArrays()
 //   rebuilding only then; an array no config has a texture for anymore is dropped; an atlas with no source texture and
 //   no array (packed atlas only) is never stale.
+// - MaterialAtlas.SlopeMaterial (visual polish VP2-O3): a config's SlopeMaterialID reaches the LUT's slice row as A = the
+//   ID plus one, and 0 for none: no slope material, the material's own ID, or an ID the atlas has no config for.
 // ---------------------------------------------------------------------------
 
 namespace MaterialAtlasArrayTestUtils
@@ -214,7 +216,7 @@ namespace MaterialAtlasArrayTestUtils
 		return Texel;
 	}
 
-	/** Whether the LUT's slice row (row 3) holds the atlas's slice tables for every MaterialID. */
+	/** Whether the LUT's slice row (row 3) holds the atlas's slice tables, and in A the slope material plus one, for every MaterialID. */
 	bool SliceRowMatches(UVoxelMaterialAtlas* Atlas, FString& OutMismatch)
 	{
 		for (int32 MaterialID = 0; MaterialID < 256; ++MaterialID)
@@ -223,7 +225,7 @@ namespace MaterialAtlasArrayTestUtils
 			const uint8 ID = static_cast<uint8>(MaterialID);
 			const FColor Expected(UVoxelMaterialAtlas::GetArraySlice(Atlas->AlbedoArraySlices, ID),
 				UVoxelMaterialAtlas::GetArraySlice(Atlas->NormalArraySlices, ID),
-				UVoxelMaterialAtlas::GetArraySlice(Atlas->RoughnessArraySlices, ID), 0);
+				UVoxelMaterialAtlas::GetArraySlice(Atlas->RoughnessArraySlices, ID), static_cast<uint8>(Atlas->GetSlopeMaterialID(ID) + 1));
 			if (Texel != Expected)
 			{
 				OutMismatch = FString::Printf(TEXT("MaterialID %d: %s, expected %s"), MaterialID, *Texel.ToString(), *Expected.ToString());
@@ -439,6 +441,44 @@ bool FMaterialAtlasTextureArraySavedAssetsTest::RunTest(const FString& Parameter
 		Object->ClearFlags(RF_Public | RF_Standalone);
 		Object->MarkAsGarbage();
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMaterialAtlasSlopeMaterialTest, "VoxelWorlds.MaterialAtlas.SlopeMaterial",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMaterialAtlasSlopeMaterialTest::RunTest(const FString& Parameters)
+{
+	using namespace MaterialAtlasArrayTestUtils;
+
+	// MakeAtlas's materials 0-3: 0 turns into 2, 1 into itself, 2 into nothing (the default), 3 into 7 (no config)
+	UVoxelMaterialAtlas* Atlas = MakeAtlas();
+	TestEqual(TEXT("SlopeMaterialID defaults to none"), Atlas->MaterialConfigs[2].SlopeMaterialID, -1);
+	Atlas->MaterialConfigs[0].SlopeMaterialID = 2;
+	Atlas->MaterialConfigs[1].SlopeMaterialID = 1;
+	Atlas->MaterialConfigs[3].SlopeMaterialID = 7;
+
+	TestEqual(TEXT("Material 0 turns into 2"), Atlas->GetSlopeMaterialID(0), 2);
+	TestEqual(TEXT("Material 1 into itself: none"), Atlas->GetSlopeMaterialID(1), -1);
+	TestEqual(TEXT("Material 2: none"), Atlas->GetSlopeMaterialID(2), -1);
+	TestEqual(TEXT("Material 3 into a material with no config: none"), Atlas->GetSlopeMaterialID(3), -1);
+	TestEqual(TEXT("A MaterialID with no config: none"), Atlas->GetSlopeMaterialID(200), -1);
+
+	Atlas->BuildMaterialLUT();
+	if (!TestNotNull(TEXT("LUT built"), Atlas->GetMaterialLUT()))
+	{
+		return false;
+	}
+	TestEqual(TEXT("Slice row A of material 0: 2 + 1"), LUTTexel(Atlas, 0, 3).A, static_cast<uint8>(3));
+	for (int32 MaterialID : { 1, 2, 3, 200, 255 })
+	{
+		TestEqual(*FString::Printf(TEXT("Slice row A of material %d: 0"), MaterialID), LUTTexel(Atlas, MaterialID, 3).A, static_cast<uint8>(0));
+	}
+	TestEqual(TEXT("The slices stay in R, G, B"), LUTTexel(Atlas, 0, 3), FColor(0, 0, 0, 3));
+	FString Mismatch;
+	const bool bRowMatches = SliceRowMatches(Atlas, Mismatch);
+	TestTrue(FString::Printf(TEXT("LUT row 3 %s"), *Mismatch), bRowMatches);
+	TestEqual(TEXT("The face rows' flags are untouched"), LUTTexel(Atlas, 0, 0).A, static_cast<uint8>(0));
 	return true;
 }
 
