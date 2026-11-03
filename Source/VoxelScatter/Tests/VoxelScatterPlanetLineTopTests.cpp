@@ -881,7 +881,7 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 		for (const bool bSource : { true, false })
 		{
 			FPlanetHarness Harness(Config);
-			Harness.Manager->SetWorldMode(&*Mode);
+			Harness.Manager->SetWorldMode(Mode);
 			Harness.Manager->SetConditioningGatherer([&Pad](const FBox&, TArray<FVoxelConditioningZone>& OutZones) { OutZones.Add(Pad); });
 			if (bSource)
 			{

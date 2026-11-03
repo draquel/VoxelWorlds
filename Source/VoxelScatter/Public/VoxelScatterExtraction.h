@@ -21,8 +21,17 @@ struct FVoxelConditioningZone;
  */
 struct FScatterExtractionContext
 {
-	/** World mode for the analytic terrain-height query. Null = coverage check skipped. Non-owning. */
+	/**
+	 * World mode for the analytic terrain-height query. Null = coverage check skipped. Non-owning: a caller that runs
+	 * the extraction synchronously keeps the mode alive; a context handed to a worker also sets WorldModeOwner.
+	 */
 	const IVoxelWorldMode* WorldMode = nullptr;
+	/**
+	 * Keeps WorldMode alive while a worker holds this context: the scatter manager's contexts share the chunk manager's
+	 * mode, so an extraction still running after the chunk manager's Shutdown reset its pointer (a PIE stop) reads a live
+	 * mode (G104). Null for a synchronous caller that owns the mode itself.
+	 */
+	TSharedPtr<const IVoxelWorldMode> WorldModeOwner;
 	/** Noise params for IVoxelWorldMode::GetTerrainHeightAt. */
 	FVoxelNoiseParams NoiseParams;
 	/**

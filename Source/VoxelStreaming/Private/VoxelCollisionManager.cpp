@@ -5,6 +5,7 @@
 #include "VoxelBoundedDrain.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelChunkManager.h"
+#include "VoxelWorkerJobGuard.h"
 #include "VoxelCoordinates.h"
 #include "ChunkRenderData.h"
 #include "IVoxelMesher.h"
@@ -1064,7 +1065,8 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	// The neighbours this cook reads as air; OnChunkVoxelDataAvailable re-cooks the chunk when one of them arrives (G32).
 	Data.MissingNeighborMask = MissingNeighborMask;
 
-	// Capture mesher pointer (stateless, thread-safe — same pattern as LaunchAsyncMeshGeneration)
+	// Capture mesher pointer (stateless, thread-safe — same pattern as LaunchAsyncMeshGeneration). The chunk manager frees
+	// it in Shutdown: the cook counts itself in the chunk manager's worker jobs, which Shutdown waits for first (G104).
 	IVoxelMesher* MesherPtr = ChunkManager->GetMesherPtr();
 	if (!MesherPtr)
 	{
@@ -1082,7 +1084,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	LastPrepMs += static_cast<float>((FPlatformTime::Seconds() - PrepT0) * 1000.0);
 
 	// Launch async task: mesh generation + Chaos trimesh construction on thread pool
-	Async(EAsyncExecution::ThreadPool, [WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), NeighborShells = MoveTemp(NeighborShells), ChunkCoord, LODLevel, ChunkSizeCapture, SnapshotDecodes = MoveTemp(SnapshotDecodes)]() mutable
+	Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(ChunkManager->GetWorkerJobs()), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), NeighborShells = MoveTemp(NeighborShells), ChunkCoord, LODLevel, ChunkSizeCapture, SnapshotDecodes = MoveTemp(SnapshotDecodes)]() mutable
 	{
 		for (UE::Tasks::FTask& Decode : SnapshotDecodes)
 		{

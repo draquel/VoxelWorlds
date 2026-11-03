@@ -35,7 +35,7 @@ namespace
 	 * Resolved voxel-world generator context needed to re-sample the terrain surface.
 	 *
 	 * LIFETIME CONTRACT — this struct BORROWS, it does not own. WorldMode aliases the chunk
-	 * manager's TUniquePtr<IVoxelWorldMode>, which UVoxelChunkManager::EndPlay -> Shutdown()
+	 * manager's TSharedPtr<IVoxelWorldMode>, which UVoxelChunkManager::EndPlay -> Shutdown()
 	 * frees (WorldMode.Reset()); BiomeConfig/ChunkManager are UObjects kept alive by the world.
 	 * Borrowing is safe here ONLY because resolve and every use are confined to one synchronous
 	 * game-thread ExecuteInternal invocation:
