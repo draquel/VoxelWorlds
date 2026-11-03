@@ -132,6 +132,43 @@ water, which cast no shadow.
 `FVoxelBatchCounters::FCounts::ShadowDrawn` and the bench's `ShadowBatchN` column count the batches drawn into shadow
 maps.
 
+### Far Shadow Cascades
+
+The sun's dynamic cascades end at the light's `DynamicShadowDistanceMovableLight` (20,000 uu on the maps) against a
+40,000 uu view, so past 200 m nothing cast a shadow and the shadow's edge moved with the camera (visual polish F3.2).
+Since D-VP3 every map's sun has two far cascades from there to `FarShadowDistance` 40,000
+(`Scripts/setup_far_shadow_cascades.py`; the day/night controller drives the map's light, `ADayNightController::SunLight`,
+and leaves its shadow settings alone). The engine draws into a far cascade only the primitives with `bCastFarShadow`,
+which the region components set, and flags the gather with `EDrawDynamicFlags::FarShadowCascade`.
+
+In a far cascade the proxy draws the coarse terrain only (`FVoxelViewCull::bFarShadowCascade`): chunks and seam buckets
+of LOD `voxel.Render.FarShadowMinLOD` (1) and coarser, each the current mesh once with the opaque material (no
+crossfade halves: a dither mask is noise at a far cascade's texel), culled by the caster volume as every shadow gather
+is. The far cascades' receivers lie past 20,000 uu, in the coarsest band (LOD 2 from 14,000 on the demo bands), so they
+cast with the mesh they draw and do not self-shadow. A LOD 0 chunk (within 7,000 uu) shadows a far receiver only at a
+very low sun; it is left out. Neither scatter's HISMs nor the far field cast into the far cascades (the HISMs keep
+their own `bCastFarShadow`, off; the far field's components cast no shadow at all).
+`FCounts::FarShadowDrawn`, `SkippedTooFine` and `MaxPerCall` and the bench's `FarShadowBatchN`, `MaxCallBatchN`
+columns (the report's `farShadowBatchesDrawnP50`, `farShadowBatchesDrawnP95`, `farShadowBatchesDrawnMax`, `maxBatchesPerCall`) count them; one call draws at most 2,000 batches.
+
+Measured 2026-11-02 (the gate editor at 2,874 x 1,360, the bench's chord on `VoxelDemo` and great circle on
+`PlanetTest` with the clock stopped; the far cascades off is the engine's r.Shadow.MaxNumFarShadowCascades 0):
+
+| Sun | Route | Voxel shadow batches a frame (P50), off → on | Of them in the far cascades | Most in one call |
+|---|---|---|---|---|
+| 17:30 (12° up) | chord | 672 → 2,460 | 1,700 | 550 |
+| 17:30 | great circle | 500 → 1,100 | 550 | 400 |
+| 12:00 | chord | 239 → 594 | 356 | 284 |
+| 12:00 | great circle | 248 → 706 | 435 | 393 |
+
+A low sun stretches every cascade's caster volume toward the light, so the far cascades take most of the window's
+coarse chunks. `voxel.Render.FarShadowMinLOD 2` only trims the low-sun chord's far batches to 1,480. GPU frame P50 moved
+by +0.3 ms at the low sun on the chord (6.48 → 6.77 in the quietest interleaved pair) and +0.1 ms on the great circle;
+the other pairs were inside the shared machine's noise (other sessions' editors were running). The picture changes
+from raised views: a hill's shadow that faded at 200 m now runs on across the far slope; at eye level the ground past
+200 m is a thin band and almost no pixel changes. With the near cascades shortened (r.Shadow.DistanceScale 0.1) every
+terrain shadow past 2,000 uu comes from the far cascades, which shows them working end to end.
+
 ---
 
 ## Crossfades
