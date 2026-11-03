@@ -1325,6 +1325,13 @@ public:
 	 */
 	IVoxelMesher* GetMesherPtr() const { return Mesher.Get(); }
 
+	/**
+	 * The count of worker jobs Shutdown waits for before the meshers and the generator go: a job on a worker holding
+	 * GetMesherPtr counts itself in it from dispatch to its end (FVoxelWorkerJobGuard; the collision cook, G104).
+	 * @return The shared counter
+	 */
+	const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe>& GetWorkerJobs() const { return WorkerJobs; }
+
 	/** True when terrain generation runs on the GPU (bUseGPUGeneration, and not forced to the CPU). */
 	bool IsUsingGPUGeneration() const { return GPUGeneratorPtr != nullptr; }
 
@@ -2210,10 +2217,11 @@ protected:
 	IVoxelMesher* EnsureSeamMesher();
 
 	/**
-	 * Chunk-mesh and seam jobs on workers that hold a raw pointer to Mesher or SeamMesher (each counts itself from dispatch
-	 * to its end): Shutdown waits for them before the meshers go (G76).
+	 * Jobs on workers that hold a raw pointer to Mesher, SeamMesher or NoiseGenerator (chunk meshes, seam jobs, generations
+	 * and tree injections, the collision manager's cooks; each counts itself from dispatch to its end): Shutdown waits
+	 * for them before those go (G76, G104).
 	 */
-	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> MesherWorkerJobs = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
+	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> WorkerJobs = MakeShared<std::atomic<int32>, ESPMode::ThreadSafe>(0);
 
 public:
 	/** Seam registry access for diagnostics (performance HUD, tests). May be null. */

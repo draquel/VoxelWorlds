@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelChunkManager.h"
+#include "VoxelWorkerJobGuard.h"
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelWorldsSettings.h"
 #include "VoxelChunkManagerPrivate.h"
@@ -191,20 +192,6 @@ static TAutoConsoleVariable<float> CVarFarFieldDistance(
 	TEXT("stops at its bounds. 0 = no limit on a bounded world, the tile under the camera alone on a plane. Read when the far\n")
 	TEXT("field is built."),
 	ECVF_Default);
-
-/**
- * Counts a worker job that holds a raw pointer to one of the chunk manager's meshers (a chunk mesh, a seam job) from its
- * dispatch to its end, so Shutdown can wait for them before the meshers go (world modes review G76: a seam job finishing
- * after Shutdown called into a freed mesher). Copies count too: a lambda moved into its task keeps one.
- */
-struct FMesherWorkerGuard
-{
-	TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe> Count;
-	explicit FMesherWorkerGuard(const TSharedRef<std::atomic<int32>, ESPMode::ThreadSafe>& InCount) : Count(InCount) { ++(*Count); }
-	FMesherWorkerGuard(const FMesherWorkerGuard& Other) : Count(Other.Count) { ++(*Count); }
-	FMesherWorkerGuard& operator=(const FMesherWorkerGuard&) = delete;
-	~FMesherWorkerGuard() { --(*Count); }
-};
 
 static TAutoConsoleVariable<int32> CVarFarFieldTrace(
 	TEXT("voxel.World.FarFieldTrace"),
@@ -1567,22 +1554,23 @@ void UVoxelChunkManager::Shutdown()
 		LODStrategy = nullptr;
 	}
 
-	// Chunk meshes and seam jobs on workers hold raw pointers to the meshers (G76): wait for them before the meshers go.
-	// Their results land in queues this Shutdown has emptied, or no-op through the weak manager pointer.
+	// Chunk meshes, seam jobs, generations and collision cooks on workers hold raw pointers to the meshers and the noise
+	// generator (G76, G104): wait for them before those go. Their results land in queues this Shutdown has emptied, or
+	// no-op through the weak manager pointer.
 	{
 		const double WaitStart = FPlatformTime::Seconds();
-		while (MesherWorkerJobs->load() > 0 && FPlatformTime::Seconds() - WaitStart < 10.0)
+		while (WorkerJobs->load() > 0 && FPlatformTime::Seconds() - WaitStart < 10.0)
 		{
 			FPlatformProcess::Sleep(0.001f);
 		}
 		const double Waited = FPlatformTime::Seconds() - WaitStart;
-		if (MesherWorkerJobs->load() > 0)
+		if (WorkerJobs->load() > 0)
 		{
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("Shutdown: %d mesh or seam jobs still on workers after %.1f s; the meshers go regardless."), MesherWorkerJobs->load(), Waited);
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("Shutdown: %d mesh, seam, generation or collision jobs still on workers after %.1f s; the meshers and the generator go regardless."), WorkerJobs->load(), Waited);
 		}
 		else if (Waited > 0.05)
 		{
-			UE_LOG(LogVoxelStreaming, Log, TEXT("Shutdown: waited %.0f ms for the mesh and seam jobs on workers."), Waited * 1000.0);
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Shutdown: waited %.0f ms for the jobs on workers."), Waited * 1000.0);
 		}
 	}
 
@@ -3645,7 +3633,8 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 	// Mark as in-progress (stamped: the serial travels with the result, see FAsyncJobStamp)
 	const uint32 DispatchSerial = StampAsyncDispatch(AsyncGenerationInProgress, Request.ChunkCoord);
 
-	// Capture raw pointer (TUniquePtr, safe because ChunkManager outlives tasks)
+	// The generator is the chunk manager's TUniquePtr: the task counts itself in WorkerJobs, which Shutdown waits for
+	// before the generator goes (G104)
 	IVoxelNoiseGenerator* GeneratorPtr = NoiseGenerator.Get();
 	const FIntVector ChunkCoord = Request.ChunkCoord;
 
@@ -3689,7 +3678,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 	int32 CapturedWorldSeed = 0;
 	FVector CapturedWorldOrigin = FVector::ZeroVector;
 	FVoxelNoiseParams CapturedNoiseParams;
-	IVoxelWorldMode* WorldModePtr = nullptr;
+	TSharedPtr<IVoxelWorldMode> CapturedWorldMode; // shared: lives as long as the task (G104)
 	UVoxelBiomeConfiguration* CapturedBiomeConfig = nullptr;
 	bool CapturedEnableWaterLevel = false;
 	float CapturedWaterLevel = 0.0f;
@@ -3701,7 +3690,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 		CapturedWorldSeed = Configuration->WorldSeed;
 		CapturedWorldOrigin = Configuration->WorldOrigin;
 		CapturedNoiseParams = Configuration->GetNoiseParams();
-		WorldModePtr = WorldMode.Get(); // Raw ptr, same lifetime as NoiseGenerator
+		CapturedWorldMode = WorldMode;
 		CapturedBiomeConfig = Configuration->BiomeConfiguration;
 		CapturedEnableWaterLevel = Configuration->bEnableWaterLevel;
 		CapturedWaterLevel = Configuration->WaterLevel;
@@ -3709,10 +3698,10 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 
-	Async(EAsyncExecution::ThreadPool, [WeakThis, GeneratorPtr, GenRequest = MoveTemp(GenRequest), ChunkCoord, DispatchSerial,
+	Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(WorkerJobs), WeakThis, GeneratorPtr, GenRequest = MoveTemp(GenRequest), ChunkCoord, DispatchSerial,
 		bInjectTrees, CapturedTreeTemplates = MoveTemp(CapturedTreeTemplates),
 		CapturedTreeDensity, CapturedWorldSeed, CapturedWorldOrigin,
-		CapturedNoiseParams, WorldModePtr,
+		CapturedNoiseParams, CapturedWorldMode,
 		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel]() mutable
 	{
 		// Generate voxel data on background thread
@@ -3720,7 +3709,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 		const bool bSuccess = GeneratorPtr->GenerateChunkCPU(GenRequest, VoxelData);
 
 		// Inject voxel trees (runs on same thread pool worker, before enqueue)
-		if (bSuccess && bInjectTrees && WorldModePtr)
+		if (bSuccess && bInjectTrees && CapturedWorldMode)
 		{
 			FVoxelTreeInjector::InjectTrees(
 				ChunkCoord,
@@ -3730,7 +3719,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 				CapturedWorldSeed,
 				CapturedTreeTemplates,
 				CapturedNoiseParams,
-				*WorldModePtr,
+				*CapturedWorldMode,
 				CapturedTreeDensity,
 				CapturedBiomeConfig,
 				CapturedEnableWaterLevel,
@@ -3951,18 +3940,18 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 	const int32 CapturedWorldSeed = Configuration->WorldSeed;
 	const FVector CapturedWorldOrigin = Configuration->WorldOrigin;
 	const FVoxelNoiseParams CapturedNoiseParams = Configuration->GetNoiseParams();
-	IVoxelWorldMode* WorldModePtr = WorldMode.Get(); // Raw ptr, same lifetime as NoiseGenerator
+	const TSharedPtr<IVoxelWorldMode> CapturedWorldMode = WorldMode; // shared: lives as long as the task (G104)
 	UVoxelBiomeConfiguration* CapturedBiomeConfig = Configuration->BiomeConfiguration;
 	const bool CapturedEnableWaterLevel = Configuration->bEnableWaterLevel;
 	const float CapturedWaterLevel = Configuration->WaterLevel;
 
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 
-	Async(EAsyncExecution::ThreadPool, [WeakThis, ChunkCoord, DispatchSerial,
+	Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(WorkerJobs), WeakThis, ChunkCoord, DispatchSerial,
 		GenRequest = MoveTemp(GenRequest), VoxelData = MoveTemp(VoxelData),
 		CapturedTreeTemplates = MoveTemp(CapturedTreeTemplates),
 		CapturedTreeDensity, CapturedWorldSeed, CapturedWorldOrigin,
-		CapturedNoiseParams, WorldModePtr,
+		CapturedNoiseParams, CapturedWorldMode,
 		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel]() mutable
 	{
 		FVoxelTreeInjector::InjectTrees(
@@ -3973,7 +3962,7 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 			CapturedWorldSeed,
 			CapturedTreeTemplates,
 			CapturedNoiseParams,
-			*WorldModePtr,
+			*CapturedWorldMode,
 			CapturedTreeDensity,
 			CapturedBiomeConfig,
 			CapturedEnableWaterLevel,
@@ -4226,7 +4215,7 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 
 	// Dispatch to a thread-pool worker
-	Async(EAsyncExecution::ThreadPool, [MesherGuard = FMesherWorkerGuard(MesherWorkerJobs), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel, DispatchSerial,
+	Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(WorkerJobs), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel, DispatchSerial,
 		DeferredVoxels = MoveTemp(DeferredVoxels), DeferredDecode = MoveTemp(DeferredDecode)]() mutable
 	{
 		// Generate mesh on background thread
@@ -5282,7 +5271,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		const int32 FaceLODLevel = FMath::Min(States[0]->MeshedLODLevel, States[1]->MeshedLODLevel);
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [MesherGuard = FMesherWorkerGuard(MesherWorkerJobs), WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
+		Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(WorkerJobs), WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
 		{
 			WaitForSnapshotDecodes(SnapshotDecodes);
 			FChunkMeshData MeshData;
@@ -5329,7 +5318,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [MesherGuard = FMesherWorkerGuard(MesherWorkerJobs), WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
+		Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(WorkerJobs), WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
 		{
 			WaitForSnapshotDecodes(SnapshotDecodes);
 			FChunkMeshData MeshData;
@@ -5375,7 +5364,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 
 		SeamJobsInFlight.Add(Job.Key);
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
-		Async(EAsyncExecution::ThreadPool, [MesherGuard = FMesherWorkerGuard(MesherWorkerJobs), WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
+		Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(WorkerJobs), WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
 		{
 			WaitForSnapshotDecodes(SnapshotDecodes);
 			FChunkMeshData MeshData;
