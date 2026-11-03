@@ -1786,9 +1786,19 @@ protected:
 	/**
 	 * The renderer lost its geometry (a recreated scene proxy starts empty): re-mesh every chunk whose mesh it
 	 * held, and send every seam bucket and water tile again. Each chunk is meshed once on the seam path, so
-	 * nothing else would ever replace a lost mesh. Called at the start of each tick.
+	 * nothing else would ever replace a lost mesh. Called at the start of each tick, paused or not; while streaming is
+	 * paused the chunks it re-meshes go to PausedRecoveryChunks for TickPausedRenderRecovery.
 	 */
 	void RecoverLostRenderData();
+
+	/**
+	 * The tick while streaming is paused (SetStreamingEnabled(false), `vox.Freeze 1 streaming`): nothing is discovered,
+	 * generated, unloaded or changes LOD, but a scene proxy recreated meanwhile (a material or render-state change, a
+	 * Lumen toggle) gets its geometry back (visual polish F3.4): RecoverLostRenderData re-meshes the chunks it lost, which
+	 * alone of the meshing queue launch here, the meshes that land are submitted (with them the meshes already on workers
+	 * when the pause began) and the water tiles are sent again. Without a recovery since the pause it does nothing.
+	 */
+	void TickPausedRenderRecovery();
 
 	/**
 	 * Called when chunk generation completes.
@@ -1984,6 +1994,12 @@ protected:
 
 	/** Whether streaming is enabled */
 	bool bStreamingEnabled = true;
+
+	/** While streaming is paused: the chunks RecoverLostRenderData re-meshes, until their meshes are submitted (F3.4) */
+	TSet<FIntVector> PausedRecoveryChunks;
+
+	/** While streaming is paused: a recovery ran since the pause, so the paused tick sends meshes and water tiles (F3.4) */
+	bool bPausedRecoveryActive = false;
 
 	// ==================== Chunk State ====================
 
