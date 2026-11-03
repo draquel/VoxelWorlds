@@ -214,8 +214,16 @@ What it does not give yet:
   let the scene cache the ray tracing instances; G116 in the project's findings.
 - **Water.** Water tiles have no ray tracing geometry: the sea is translucent (or Single Layer Water) and is not an
   occluder Lumen needs.
-- **The far field.** Its procedural mesh components have the engine's own ray tracing path
-  (r.RayTracing.Geometry.ProceduralMeshes is 1), but the ray tracing scene's view from orbit shows none of them (G117).
+- **The far field, unless Lumen's far field is on.** Its procedural mesh components build their own ray tracing
+  geometry, a BLAS per section, but the engine culls the near-field layer past `r.RayTracing.Culling.Radius` (30,000
+  uu, culling mode 3, in front of the camera too), and every patch drawn lies past the voxel window: none was ever
+  traced (G117; `r.RayTracing.Culling 0` shows them all). The patches now sit in the engine's far-field layer
+  (`bRayTracingFarField`, `voxel.World.FarFieldRayTracing` 1), which Lumen traces past the near field's reach when
+  `r.LumenScene.FarField` is 1, out to `r.LumenScene.FarField.MaxTraceDistance` (10 km); the project leaves it 0, and
+  then nothing gathers them. Turned on, it changes nothing visible on `VoxelDemo` from 9,000 uu up or on `PlanetTest`
+  at 1.6 R (a hit is black for the same reason as the terrain's, G116), so it stays off. The BLAS is built whatever the
+  mode: 103 MB for `VoxelDemo`'s far field from 9,000 uu up (4,977 sections, 70 % of the scene's ray tracing geometry),
+  52 MB for `PlanetTest`'s at 1.6 R (G121).
 
 | `VoxelDemo`, overhang and sealed cave (D-VP4's repro) | Under the overhang, on screen → off screen | Off / on | Sealed cave |
 |---|---|---|---|
