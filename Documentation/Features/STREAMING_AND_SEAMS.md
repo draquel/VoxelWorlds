@@ -100,7 +100,10 @@ chunk the viewer has left behind the unload distance goes straight to unload (th
 carries the chunk's voxels with its edits merged and nothing of its neighbours; a far-compressed chunk without
 edits meshes from its snapshot, decoded on the worker (G65). The meshers are the CPU ones (`FVoxelCPUDualContourMesher`,
 `FVoxelCPUMarchingCubesMesher`, `FVoxelCPUCubicMesher`) on the thread pool; Shutdown waits for every job holding a
-mesher pointer (`FMesherWorkerGuard`, `MesherWorkerJobs`; G76).
+raw pointer to what it frees, the meshers or the noise generator: chunk meshes, seam jobs, generations and their tree
+injection, the collision manager's cooks (`FVoxelWorkerJobGuard`, `WorkerJobs`, `GetWorkerJobs`; G76, G104). A worker
+that reads the world mode holds it shared (generation's tree injection, scatter's extraction), so the mode outlives
+Shutdown's reset until the last such job ends (G104). The wait gives up after 10 s and logs it.
 
 A finished mesh waits in `PendingMeshQueue` for the time-budgeted submit. `OnChunkMeshingComplete`:
 

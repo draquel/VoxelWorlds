@@ -501,7 +501,8 @@ Decision D-VP2 kept the textures and added rock on steep ground in the shader. A
 material it turns into where the ground is steep (`FVoxelMaterialTextureConfig::SlopeMaterialID`; -1, its own ID or an ID
 the atlas has no config for: never), and `BuildMaterialLUT` writes it into the slice row's A as the ID plus one
 (`UVoxelMaterialAtlas::GetSlopeMaterialID`; test `VoxelWorlds.MaterialAtlas.SlopeMaterial`). The voxels keep their
-material: digging, hardness, the map and scatter see grass where the shader draws rock. The project's atlases
+material: digging, hardness and the map see grass where the shader draws rock; scatter counts it as the rock (G106,
+below). The project's atlases
 (`DemoMaterialAtlas`, `PluginTesting/Config/VoxelMaterialAtlas`) turn Grass and Frozen Dirt to Stone. Dirt stays dirt, so
 a dig's walls look like what was dug; Sand (dunes, beaches), Snow, Sandstone, Stone, the ores, Wood and Leaves never turn.
 
@@ -731,24 +732,49 @@ For non-occluding materials, `ShouldRenderFace()` returns true if **either** the
 
 Non-occluding faces are emitted as individual 1x1 quads in a **pre-pass** before greedy meshing. This prevents them from being merged into larger quads (which would lose per-voxel visual variation).
 
-### The Registry's Table and the Atlas (G100)
 
-`FVoxelMaterialRegistry` answers every query from one immutable table. Until an atlas is bound it is the defaults (IDs
-0-21, `BuildDefaultMaterials`), built once by the first query on any thread (a function-local static, which C++ builds
-on one thread while the others wait). `SetAtlasPositions` publishes an atlas's table: a new table from the defaults,
-grown with placeholders (`Material<ID>`, the default hardness) up to the atlas's highest MaterialID, so an atlas can
-define materials without a change to C++, and each configured material's atlas position, scales, name and masked and
-non-occluding flags from its config. Each atlas sets the whole table; it does not build on the last atlas's.
+### The Material Tables: the Registry's and Each World's (G100, G101)
 
-The table is published with one atomic pointer: the meshers' workers (the cubic mesher's `IsNonOccluding`, per face) and
-the map's read it with no lock and see the old table or the new one, whole. No published table is changed or freed, so
-the pointer `GetMaterial` returns and the array `GetAllMaterials` returns stay valid; the registry keeps one table per
-distinct content, and an atlas whose table it already holds (`UVoxelRegionComponent::SetMaterialAtlas` calls
-`SetAtlasPositions` for every region component the renderer creates, during streaming) republishes that table and logs
-nothing. Before G100 the defaults were built lazily with no lock, and every `SetAtlasPositions` grew and rewrote, in
-place, the array those workers were reading. Tests `VoxelWorlds.MaterialRegistry.AtlasTable` and
-`VoxelWorlds.MaterialRegistry.WorkerReads` (eight workers read the table while the game thread publishes two atlases
-800 times: every read is one atlas's table whole).
+`FVoxelMaterialRegistry` answers from the built-in defaults only (IDs 0-21, `BuildDefaultMaterials`): an immutable
+`FVoxelMaterialTable` (`FVoxelMaterialTable::Defaults`), built once by the first query on any thread (a function-local
+static, which C++ builds on one thread while the others wait), read with no lock (G100). An atlas's materials are its
+world's table, never the registry's: `FVoxelMaterialTable::FromAtlas` (`UVoxelMaterialAtlas::MakeMaterialTable`) builds
+a new table from the defaults, grown with placeholders (`Material<ID>`, grey, the default hardness) up to the atlas's
+highest MaterialID, so an atlas can define materials without a change to C++, with each configured material's atlas
+position, scales, name, masked and non-occluding flags and slope material (`SlopeMaterialID`, by the LUT's rule,
+`GetSlopeMaterialID`) from its config.
+
+`UVoxelChunkManager::Initialize` builds its world's table from the renderer's atlas (the world actor binds the atlas
+before the chunk manager starts; a world without one uses the defaults) and holds it: the cubic mesher reads its
+non-occluding flags from `FVoxelMeshingConfig::Materials` (the seam mesher copies the config), one member read per face
+with no atomic; the scatter manager reads the slope materials from it (G106, "Slope Rock and Scatter" below); the
+configuration's world-start check reads its tree materials against it (`GetSettingsWarningsAgainst`; the asset's own
+check at load, `GetSettingsWarnings`, knows no atlas and checks the built-in IDs). The map's palette falls back to the
+atlas's own table (`GetMapColor`). Two worlds with different atlases at once each mesh and validate with their own, and a
+table goes with the last world holding it.
+
+Before G100 the defaults were built lazily with no lock and every region component's `SetMaterialAtlas` rewrote, in
+place, the array the workers were reading; G100 made that one table immutable and published it with an atomic pointer.
+It stayed one table for the process (G101): two worlds took turns publishing theirs, and the last atlas bound outlived
+its world, so in an editor session after a PIE that bound `VoxelMaterialAtlas` the registry held its IDs 22 and 23 and
+`VoxelWorlds.Configuration.TreeTemplateMaterials` failed. Chosen over the renderer publishing the defaults again at
+shutdown, which fixes only the outliving half. Tests `VoxelWorlds.Streaming.Cubic.TwoWorldsOwnAtlases` (two chunk managers
+with different atlases at once: each mesher holds its atlas's table, a 2x2x2 leaf block meshes with its inner faces in one
+world and without in the other, and the registry stays the defaults), `VoxelWorlds.MaterialRegistry.AtlasTable`,
+`.WorkerReads` (eight workers read two worlds' tables while the game thread builds 800 more: every read is its own table
+whole), `.SlopeMaterials` and `VoxelWorlds.Configuration.TreeTemplateMaterials` (a world's table too).
+
+### Slope Rock and Scatter (G106)
+
+Scatter places by the material the shader draws, not the voxel's: on the smooth terrain a surface point where a
+material's slope rock has at least half its weight counts as the slope material (`FVoxelMaterialTable::GetDrawnMaterial`:
+the slope 1 - N.Up past the middle of `SlopeRockStart` and `SlopeRockEnd`, 0.135, about 30 degrees), so ground cover
+limited to grass no longer stands on the rock, and a definition that allows Stone grows there. The thresholds are the
+include's `VOXEL_SLOPE_ROCK_START` and `_END`, which test `VoxelWorlds.Rendering.SlopeRock.Thresholds` keeps equal to
+the C++ constants. Two approximations: the shader's noise (up to 0.04 either way, patches a few tiles across) is left
+out, and scatter's normal is its density-gradient estimate (a few degrees off the mesh's vertex normal), so the border
+the scatter keeps is within a few degrees of the drawn one. The cubic atlas path draws no slope rock and is unchanged.
+See [SCATTER_SYSTEM.md](SCATTER_SYSTEM.md) "1. Surface Extraction".
 
 ### Texture Requirements
 
@@ -775,7 +801,7 @@ See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed 
 **C++ Code:**
 - `VoxelCore/Public/VoxelMaterialAtlas.h` - Data asset header
 - `VoxelCore/Private/VoxelMaterialAtlas.cpp` - BuildTextureArrays(), BuildMaterialLUT()
-- `VoxelCore/Private/VoxelMaterialRegistry.cpp` - The registry's defaults and the published table (`SetAtlasPositions`)
+- `VoxelCore/Private/VoxelMaterialRegistry.cpp` - The registry's defaults and the per-world tables (`FVoxelMaterialTable::FromAtlas`)
 - `VoxelRendering/Private/VoxelRegionComponent.cpp` - UpdateMaterialAtlasParameters(), the `voxel.Material.*` switches
 - `VoxelRendering/Private/VoxelMeshRenderer.cpp` - Automatic mode sync
 
