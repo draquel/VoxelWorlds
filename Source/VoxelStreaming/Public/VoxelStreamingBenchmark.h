@@ -226,6 +226,10 @@ private:
 		int32 ShadowBatchesDrawn;
 		// Far-field stand-ins over the voxel window since the last sample (visual polish VP4)
 		int32 FarFieldStandIns;
+		// Of ShadowBatchesDrawn, the batches drawn into the sun's far cascades (visual polish D-VP3)
+		int32 FarShadowBatchesDrawn;
+		// The most batches one GetDynamicMeshElements call drew since the last sample (the per-call cap is 2,000)
+		int32 MaxBatchesPerCall;
 	};
 
 	void TakeSample(float DeltaTime);

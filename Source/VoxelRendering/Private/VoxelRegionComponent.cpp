@@ -162,6 +162,8 @@ UVoxelRegionComponent::UVoxelRegionComponent(const FObjectInitializer& ObjectIni
 
 	// Rendering settings
 	SetCastShadow(true);
+	// Into the sun's far cascades too, where the proxy draws the coarse chunks only (FVoxelViewCull, D-VP3)
+	bCastFarShadow = true;
 	SetReceivesDecals(true);
 	bUseAsOccluder = true;
 

@@ -18,6 +18,14 @@
 
 namespace
 {
+	TAutoConsoleVariable<int32> CVarVoxelFarShadowMinLOD(
+		TEXT("voxel.Render.FarShadowMinLOD"),
+		1,
+		TEXT("The finest chunk LOD drawn into the sun's far shadow cascades (visual polish D-VP3, F3.2): chunks and seams meshed ")
+		TEXT("finer are left out, since the far cascades' receivers lie past the near cascades, in the coarse bands. ")
+		TEXT("0 = every chunk; a large value = none (the far cascades without the terrain)."),
+		ECVF_RenderThreadSafe);
+
 	/**
 	 * How GetDynamicMeshElements culls one view's batches (visual polish VP3-O1). A shadow depth pass calls with a snapshot
 	 * of the camera's view, whose ViewFrustum is still the camera's, and passes the shadow's caster volume as
@@ -31,6 +39,12 @@ namespace
 		FVector Translation = FVector::ZeroVector;
 		/** A shadow gather culled by its caster volume: batches that cast no shadow (RVT clones, water) are left out. */
 		bool bShadowCasters = false;
+		/**
+		 * A gather for one of the sun's far cascades (EDrawDynamicFlags::FarShadowCascade, D-VP3): the coarse terrain only
+		 * (chunks and seams of LOD MinLOD and coarser), each batch once with the opaque material (no crossfade halves).
+		 */
+		bool bFarShadowCascade = false;
+		int32 MinLOD = 0;
 
 		explicit FVoxelViewCull(const FSceneView& View)
 			: Frustum(&View.ViewFrustum)
@@ -41,6 +55,8 @@ namespace
 				Frustum = ShadowFrustum;
 				Translation = View.GetPreShadowTranslation();
 				bShadowCasters = true;
+				bFarShadowCascade = (View.DrawDynamicFlags & EDrawDynamicFlags::FarShadowCascade) != 0;
+				MinLOD = bFarShadowCascade ? CVarVoxelFarShadowMinLOD.GetValueOnRenderThread() : 0;
 			}
 		}
 
@@ -48,6 +64,12 @@ namespace
 		bool Intersects(const FBox& WorldBox) const
 		{
 			return Frustum->IntersectBox(WorldBox.GetCenter() + Translation, WorldBox.GetExtent());
+		}
+
+		/** @return Whether a mesh at this LOD is too fine for the view (a far cascade's detail) */
+		bool IsTooFine(int32 LODLevel) const
+		{
+			return bFarShadowCascade && LODLevel < MinLOD;
 		}
 	};
 
@@ -443,6 +465,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 	int32 SkippedInvisible = 0;
 	int32 SkippedFrustum = 0;
 	int32 SkippedOverLimit = 0;
+	int32 SkippedTooFine = 0;
 
 	// Safety limit for mesh batches - should rarely be hit with proper frustum culling
 	// The Non-Nanite job queue overflow was caused by Virtual Shadow Maps, not mesh count.
@@ -457,6 +480,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 
 	// A shadow gather passes one view carrying the shadow's caster volume (FVoxelViewCull)
 	const bool bShadowGather = Views.Num() > 0 && Views[0]->GetDynamicMeshElementsShadowCullFrustum() != nullptr;
+	const bool bFarShadowGather = bShadowGather && (Views[0]->DrawDynamicFlags & EDrawDynamicFlags::FarShadowCascade) != 0;
 	if (!bShadowGather)
 	{
 		LastMainViewFrame = GFrameNumberRenderThread;
@@ -494,6 +518,13 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			if (!RenderData.HasValidBuffers() || RenderData.IndexCount < 3)
 			{
 				SkippedInvisible++;
+				continue;
+			}
+
+			// A far cascade takes the coarse chunks only (voxel.Render.FarShadowMinLOD)
+			if (Cull.IsTooFine(RenderData.LODLevel))
+			{
+				SkippedTooFine++;
 				continue;
 			}
 
@@ -544,9 +575,11 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			// The exception is an appearance (R24 P3): no previous mesh, the current one alone
 			// dithers in from nothing.
 			// See Documentation/Research/Archive/SEAM_OWNERSHIP_ARCHITECTURE.md §5.
+			// A far cascade draws the current mesh alone with the opaque material: its texels are metres across, where a
+			// dither mask is noise and the outgoing half one more batch.
 			const FVoxelChunkFadeState* FadeState = nullptr;
 			const FVoxelChunkPreviousMesh* PreviousMesh = nullptr;
-			if (bAnyFades && !bWireframe)
+			if (bAnyFades && !bWireframe && !Cull.bFarShadowCascade)
 			{
 				FadeState = ChunkFadeStates.Find(ChunkCoord);
 				if (FadeState)
@@ -772,6 +805,12 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 					continue;
 				}
 
+				if (Cull.IsTooFine(RenderData.LODLevel))
+				{
+					SkippedTooFine++;
+					continue;
+				}
+
 				const TSharedPtr<FLocalVertexFactory>* VertexFactoryPtr = SeamVertexFactories.Find(SeamKey);
 				if (!VertexFactoryPtr || !VertexFactoryPtr->IsValid())
 				{
@@ -793,8 +832,9 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 					continue;
 				}
 
-				// A crossfade has both MIDs; an appearance (R24 P3) has only the fade-in one.
-				const FVoxelChunkFadeState* FadeState = bAnySeamFades ? SeamFadeStates.Find(SeamKey) : nullptr;
+				// A crossfade has both MIDs; an appearance (R24 P3) has only the fade-in one. A far cascade draws the
+				// current bucket alone with the opaque material, as it does chunks.
+				const FVoxelChunkFadeState* FadeState = (bAnySeamFades && !Cull.bFarShadowCascade) ? SeamFadeStates.Find(SeamKey) : nullptr;
 				const bool bFading = FadeState && FadeState->FadeInProxy && (FadeState->FadeOutProxy || FadeState->bAppear);
 				if (bFading && FadeState->FadeOutProxy)
 				{
@@ -811,7 +851,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 			}
 
 			// Buckets fading out to nothing (removed during a fade): only their Previous set remains.
-			if (bAnySeamFades)
+			if (bAnySeamFades && !Cull.bFarShadowCascade)
 			{
 				for (const auto& Pair : SeamPreviousMeshes)
 				{
@@ -967,7 +1007,10 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 		Counts.SkippedInvisible = SkippedInvisible;
 		Counts.SkippedFrustum = SkippedFrustum;
 		Counts.SkippedOverLimit = SkippedOverLimit;
+		Counts.SkippedTooFine = SkippedTooFine;
 		Counts.ShadowDrawn = bShadowGather ? TotalMeshesAdded : 0;
+		Counts.FarShadowDrawn = bFarShadowGather ? TotalMeshesAdded : 0;
+		Counts.MaxPerCall = TotalMeshesAdded;
 		FVoxelBatchCounters::Add(Counts);
 	}
 
@@ -977,8 +1020,8 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 	if (LogCounter >= 60)
 	{
 		LogCounter = 0;
-		UE_LOG(LogVoxelRendering, Log, TEXT("GetDynamicMeshElements: Added %d meshes (limit=%d, water=%d), Skipped: %d invisible, %d frustum, %d over-limit"),
-			TotalMeshesAdded, MaxMeshBatchesPerFrame, WaterTileRenderData.Num(), SkippedInvisible, SkippedFrustum, SkippedOverLimit);
+		UE_LOG(LogVoxelRendering, Log, TEXT("GetDynamicMeshElements: Added %d meshes (limit=%d, water=%d), Skipped: %d invisible, %d frustum, %d over-limit, %d too fine for a far cascade"),
+			TotalMeshesAdded, MaxMeshBatchesPerFrame, WaterTileRenderData.Num(), SkippedInvisible, SkippedFrustum, SkippedOverLimit, SkippedTooFine);
 	}
 }
 
@@ -989,6 +1032,9 @@ namespace
 	std::atomic<int32> GVoxelBatchesSkippedFrustum{0};
 	std::atomic<int32> GVoxelBatchesSkippedOverLimit{0};
 	std::atomic<int32> GVoxelBatchesShadowDrawn{0};
+	std::atomic<int32> GVoxelBatchesSkippedTooFine{0};
+	std::atomic<int32> GVoxelBatchesFarShadowDrawn{0};
+	std::atomic<int32> GVoxelBatchesMaxPerCall{0};
 }
 
 void FVoxelBatchCounters::Add(const FCounts& Counts)
@@ -998,6 +1044,12 @@ void FVoxelBatchCounters::Add(const FCounts& Counts)
 	GVoxelBatchesSkippedFrustum.fetch_add(Counts.SkippedFrustum, std::memory_order_relaxed);
 	GVoxelBatchesSkippedOverLimit.fetch_add(Counts.SkippedOverLimit, std::memory_order_relaxed);
 	GVoxelBatchesShadowDrawn.fetch_add(Counts.ShadowDrawn, std::memory_order_relaxed);
+	GVoxelBatchesSkippedTooFine.fetch_add(Counts.SkippedTooFine, std::memory_order_relaxed);
+	GVoxelBatchesFarShadowDrawn.fetch_add(Counts.FarShadowDrawn, std::memory_order_relaxed);
+	int32 Max = GVoxelBatchesMaxPerCall.load(std::memory_order_relaxed);
+	while (Counts.MaxPerCall > Max && !GVoxelBatchesMaxPerCall.compare_exchange_weak(Max, Counts.MaxPerCall, std::memory_order_relaxed))
+	{
+	}
 }
 
 FVoxelBatchCounters::FCounts FVoxelBatchCounters::Consume()
@@ -1008,6 +1060,9 @@ FVoxelBatchCounters::FCounts FVoxelBatchCounters::Consume()
 	Counts.SkippedFrustum = GVoxelBatchesSkippedFrustum.exchange(0, std::memory_order_relaxed);
 	Counts.SkippedOverLimit = GVoxelBatchesSkippedOverLimit.exchange(0, std::memory_order_relaxed);
 	Counts.ShadowDrawn = GVoxelBatchesShadowDrawn.exchange(0, std::memory_order_relaxed);
+	Counts.SkippedTooFine = GVoxelBatchesSkippedTooFine.exchange(0, std::memory_order_relaxed);
+	Counts.FarShadowDrawn = GVoxelBatchesFarShadowDrawn.exchange(0, std::memory_order_relaxed);
+	Counts.MaxPerCall = GVoxelBatchesMaxPerCall.exchange(0, std::memory_order_relaxed);
 	return Counts;
 }
 
