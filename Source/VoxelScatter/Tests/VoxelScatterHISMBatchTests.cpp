@@ -110,7 +110,7 @@ namespace VoxelScatterHISMBatchTestUtils
 			Config->MeshingMode = EMeshingMode::DualContouring;
 			StartManager(/*bSmoothDefinitions=*/true);
 			Manager->SetSurfacePointSpacing(VoxelSize);
-			UseWorldMode(&TiltedPlane());
+			UseWorldMode(TiltedPlaneMode());
 			for (const int32 ID : TypeIDs)
 			{
 				if (const FScatterDefinition* Def = Manager->GetScatterDefinition(ID))

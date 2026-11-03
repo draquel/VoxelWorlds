@@ -92,7 +92,7 @@ namespace VoxelScatterTesting
 		}
 
 		/** Give the manager a world mode for the test (cleared before the manager shuts down). */
-		void UseWorldMode(const IVoxelWorldMode* Mode)
+		void UseWorldMode(TSharedPtr<const IVoxelWorldMode> Mode)
 		{
 			Manager->SetWorldMode(Mode);
 			bWorldModeSet = true;
@@ -130,11 +130,14 @@ namespace VoxelScatterTesting
 	};
 
 	/** The plane H = 300.37 + 0.13 X + 0.11 Y (300 to 1,068 over two chunks each way, inside chunk layer 0, about 10 degrees of slope). */
-	inline const FTiltedPlaneWorldMode& TiltedPlane()
+	inline const TSharedRef<const FTiltedPlaneWorldMode>& TiltedPlaneMode()
 	{
-		static const FTiltedPlaneWorldMode Mode(300.37f, 0.13f, 0.11f);
+		static const TSharedRef<const FTiltedPlaneWorldMode> Mode = MakeShared<const FTiltedPlaneWorldMode>(300.37f, 0.13f, 0.11f);
 		return Mode;
 	}
+
+	/** The same plane by reference, for the chunks' heights. */
+	inline const FTiltedPlaneWorldMode& TiltedPlane() { return *TiltedPlaneMode(); }
 
 	/**
 	 * A heightmap chunk's voxels as the heightmap generator makes them (the signed distance to the column's height, as

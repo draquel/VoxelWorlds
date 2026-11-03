@@ -96,7 +96,7 @@ namespace VoxelScatterHorizonTestUtils
 			Config->MeshingMode = EMeshingMode::DualContouring;
 			StartManager(/*bSmoothDefinitions=*/true);
 			Manager->SetSurfacePointSpacing(VoxelSize);
-			UseWorldMode(&TiltedPlane());
+			UseWorldMode(TiltedPlaneMode());
 			for (const int32 ID : { GrassID, RockID, TreeID })
 			{
 				if (const FScatterDefinition* Def = Manager->GetScatterDefinition(ID))

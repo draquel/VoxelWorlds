@@ -117,7 +117,7 @@ namespace VoxelScatterReloadTestUtils
 			Config->MeshingMode = EMeshingMode::DualContouring;
 			StartManager(/*bSmoothDefinitions=*/true);
 			Manager->SetSurfacePointSpacing(VoxelSize);
-			UseWorldMode(&TiltedPlane());
+			UseWorldMode(TiltedPlaneMode());
 
 			// The test definitions have no mesh, so the renderer would make no instance.Give each the engine cube; trees
 			// dense enough that every chunk has some.

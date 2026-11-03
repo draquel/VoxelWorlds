@@ -447,13 +447,13 @@ bool FVoxelScatterTopFaceEditsAboveTest::RunTest(const FString& Parameters)
 	}
 
 	// Wiring: the scatter manager's own pipeline asks its edit layer source for the chunk above (the dig case).
-	const FPlaneWorldMode Mode(0.0f, LayerTop + 0.5f * VoxelSize);
+	const TSharedRef<const FPlaneWorldMode> Mode = MakeShared<const FPlaneWorldMode>(0.0f, LayerTop + 0.5f * VoxelSize);
 	const FChunkEditLayer Dig = MakeBottomPatch(PatchMin, PatchMax, FVoxelData::Air());
-	const TArray<FVoxelData> LowerVoxels = MakeChunk(Lower, Mode);
+	const TArray<FVoxelData> LowerVoxels = MakeChunk(Lower, *Mode);
 	for (const bool bSource : { true, false })
 	{
 		FHarness Harness;
-		Harness.Manager->SetWorldMode(&Mode);
+		Harness.Manager->SetWorldMode(Mode);
 		if (bSource)
 		{
 			Harness.Manager->SetEditLayerSource([&Dig](const FIntVector& ChunkCoord) -> const FChunkEditLayer*
