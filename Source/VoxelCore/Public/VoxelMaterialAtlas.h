@@ -6,6 +6,8 @@
 #include "Engine/DataAsset.h"
 #include "VoxelMaterialAtlas.generated.h"
 
+class FVoxelMaterialTable;
+
 class UTexture2D;
 class UTexture2DArray;
 
@@ -475,8 +477,8 @@ public:
 	void BakeMapColors();
 
 	/**
-	 * Representative map color for a material: the baked MapColor when present, otherwise the
-	 * material registry's palette entry. Safe at runtime and in cooked builds.
+	 * Representative map color for a material: the baked MapColor when present, otherwise this
+	 * atlas's material table's colour (MakeMaterialTable). Safe at runtime and in cooked builds.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Material Atlas")
 	FColor GetMapColor(uint8 MaterialID) const;
@@ -488,6 +490,20 @@ public:
 	 * background thread never touches this UObject.
 	 */
 	void BuildMapPalette(TArray<FColor>& OutPalette) const;
+
+	/**
+	 * This atlas's material table (FVoxelMaterialTable::FromAtlas over MaterialConfigs): the materials its world meshes
+	 * with (the cubic mesher's non-occluding faces) and maps with (G101). Built on each call, on the game thread; a world
+	 * builds it once and holds it.
+	 * @return The new table
+	 */
+	TSharedRef<const FVoxelMaterialTable> MakeMaterialTable() const;
+
+private:
+	/** GetMapColor against a table built once (BuildMapPalette's 256 entries). */
+	FColor GetMapColor(uint8 MaterialID, const FVoxelMaterialTable& Materials) const;
+
+public:
 
 	/**
 	 * Get the atlas tile for a material and face type.

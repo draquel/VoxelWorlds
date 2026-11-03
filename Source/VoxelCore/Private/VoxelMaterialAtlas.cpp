@@ -526,25 +526,36 @@ void UVoxelMaterialAtlas::BakeMapColors()
 
 FColor UVoxelMaterialAtlas::GetMapColor(uint8 MaterialID) const
 {
+	return GetMapColor(MaterialID, *MakeMaterialTable());
+}
+
+FColor UVoxelMaterialAtlas::GetMapColor(uint8 MaterialID, const FVoxelMaterialTable& Materials) const
+{
 	if (const FVoxelMaterialTextureConfig* Config = GetMaterialConfig(MaterialID))
 	{
-		// Alpha 0 = never baked (or bake failed) -> fall through to the registry palette.
+		// Alpha 0 = never baked (or bake failed) -> fall through to the table's palette.
 		if (Config->MapColor.A > 0)
 		{
 			return Config->MapColor;
 		}
 	}
 
-	return FVoxelMaterialRegistry::GetMaterialColor(MaterialID);
+	return Materials.GetMaterialColor(MaterialID);
 }
 
 void UVoxelMaterialAtlas::BuildMapPalette(TArray<FColor>& OutPalette) const
 {
+	const TSharedRef<const FVoxelMaterialTable> Materials = MakeMaterialTable();
 	OutPalette.SetNumUninitialized(256);
 	for (int32 i = 0; i < 256; ++i)
 	{
-		OutPalette[i] = GetMapColor(static_cast<uint8>(i));
+		OutPalette[i] = GetMapColor(static_cast<uint8>(i), *Materials);
 	}
+}
+
+TSharedRef<const FVoxelMaterialTable> UVoxelMaterialAtlas::MakeMaterialTable() const
+{
+	return FVoxelMaterialTable::FromAtlas(MaterialConfigs, AtlasColumns, AtlasRows);
 }
 
 void UVoxelMaterialAtlas::RebuildConfigIndexCache() const

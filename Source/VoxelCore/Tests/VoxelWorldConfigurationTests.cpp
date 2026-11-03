@@ -4,6 +4,7 @@
 #include "Misc/AutomationTest.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelMaterialRegistry.h"
+#include "VoxelMaterialAtlas.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -50,6 +51,19 @@ bool FVoxelConfigTreeTemplateMaterialsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Names the leaf id 23"), AnyWarningContains(Warnings, TEXT("LeafMaterialID 23")));
 	TestTrue(TEXT("Names the allowed ground id 200"), AnyWarningContains(Warnings, TEXT("200")));
 	TestFalse(TEXT("A trunk on a registered id is not flagged, even if it is Leaves"), AnyWarningContains(Warnings, TEXT("TrunkMaterialID")));
+
+	// A world whose atlas defines 22 and 23 checks its templates against its own table (G101): only 200 is unknown there.
+	TArray<FVoxelMaterialTextureConfig> Atlas;
+	for (const uint8 ID : { static_cast<uint8>(22), static_cast<uint8>(23) })
+	{
+		FVoxelMaterialTextureConfig& Entry = Atlas.AddDefaulted_GetRef();
+		Entry.MaterialID = ID;
+		Entry.MaterialName = FString::Printf(TEXT("Leaves%d"), ID);
+	}
+	const TArray<FString> WorldWarnings = Config->GetSettingsWarningsAgainst(*FVoxelMaterialTable::FromAtlas(Atlas, 4, 8));
+	TestEqual(TEXT("Against an atlas defining 22 and 23, one warning (200)"), WorldWarnings.Num(), 1);
+	TestTrue(TEXT("Names the allowed ground id 200"), AnyWarningContains(WorldWarnings, TEXT("200")));
+	TestEqual(TEXT("The asset's own check still uses the built-in ids"), Config->GetSettingsWarnings().Num(), 3);
 	return true;
 }
 

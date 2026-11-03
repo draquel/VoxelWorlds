@@ -30,6 +30,7 @@ class FVoxelGPUNoiseGenerator;
 class IVoxelLODStrategy;
 class IVoxelMeshRenderer;
 class UVoxelMaterialAtlas;
+class FVoxelMaterialTable;
 class UVoxelEditManager;
 class UVoxelCollisionManager;
 class UVoxelScatterManager;
@@ -2430,6 +2431,13 @@ private:
 
 	/** Analytic world mode matching the config's WorldMode (FVoxelWorldModeFactory::Create) */
 	TSharedPtr<IVoxelWorldMode> WorldMode;
+
+	/**
+	 * The world's material table, its atlas's (UVoxelMaterialAtlas::MakeMaterialTable, built at Initialize), or null for
+	 * the registry's defaults: the cubic mesher reads it from its config, and the configuration's checks at world start
+	 * (G101).
+	 */
+	TSharedPtr<const FVoxelMaterialTable> MaterialTable;
 
 	/** The static terrain conditioning zones (gen-time flattening under POIs/claims; Phase 6c) and the game's conditioner */
 	FVoxelConditioningZoneSet ConditioningZones;
