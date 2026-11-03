@@ -1244,7 +1244,7 @@ void UVoxelChunkManager::Initialize(
 		ScatterManager->SetWorldSeed(static_cast<uint32>(Configuration->WorldSeed));
 		// Give scatter the analytic world mode so surface extraction can classify points covered by
 		// terrain in a neighboring chunk (cross-chunk cave floors / overhangs) as underground.
-		ScatterManager->SetWorldMode(WorldMode.Get());
+		ScatterManager->SetWorldMode(WorldMode);
 		// The chunk's conditioning zones, the ones generation layered onto it, so scatter's analytic surface is the
 		// generated ground: the buried-chunk test's height on a heightmap (its XY footprint, world modes review G23), a
 		// line's crossing at a planet chunk's upper face (the cap its box subtends, SP-B10). The scatter manager is ours

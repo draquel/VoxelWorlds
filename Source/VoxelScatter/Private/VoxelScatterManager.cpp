@@ -486,6 +486,7 @@ void UVoxelScatterManager::Shutdown()
 
 	Configuration = nullptr;
 	CachedWorld = nullptr;
+	WorldMode.Reset(); // extractions still on workers hold their own reference (G104)
 	bIsInitialized = false;
 
 	UE_LOG(LogVoxelScatter, Log, TEXT("VoxelScatterManager shutdown. Stats: Chunks=%lld, SurfacePoints=%lld, SpawnPoints=%lld"),
@@ -2036,9 +2037,9 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 	}
 
 	const bool bCubicExtraction = Configuration && Configuration->MeshingMode == EMeshingMode::Cubic;
-	// Build the classification context on the game thread and capture it by value. It holds a
-	// non-owning world-mode pointer (same lifetime as the owning ChunkManager, per its async-gen
-	// pattern) plus water level and noise params.
+	// Build the classification context on the game thread and capture it by value. It shares the
+	// world mode with the chunk manager (WorldModeOwner), so an extraction still running after a PIE
+	// stop's Shutdown reads a live mode (G104), plus water level and noise params.
 	const FScatterExtractionContext ExtractionContext = MakeExtractionContext(ChunkCoord);
 	TWeakObjectPtr<UVoxelScatterManager> WeakThis(this);
 
@@ -3087,7 +3088,8 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_MakeExtractionContext);
 	FScatterExtractionContext Context;
-	Context.WorldMode = WorldMode;
+	Context.WorldMode = WorldMode.Get();
+	Context.WorldModeOwner = WorldMode;
 	if (Configuration)
 	{
 		Context.NoiseParams = Configuration->GetNoiseParams();

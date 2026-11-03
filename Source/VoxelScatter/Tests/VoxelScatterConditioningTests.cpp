@@ -306,7 +306,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterConditioningWiringTest,
 bool FVoxelScatterConditioningWiringTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelScatterConditioningTestUtils;
-	const FSlopeWorldMode Mode;
+	const TSharedRef<const FSlopeWorldMode> Mode = MakeShared<FSlopeWorldMode>();
 	const TArray<FVoxelConditioningZone> Zones = { CutZone() };
 
 	// X 6,400-9,600 under the cut: the pad (X <= 9,000, ground 3,000) and the ring's first 600 uu (ground <= ~3,080) lie in
@@ -317,7 +317,7 @@ bool FVoxelScatterConditioningWiringTest::RunTest(const FString& Parameters)
 	for (const bool bGatherer : { true, false })
 	{
 		FHarness Harness;
-		Harness.Manager->SetWorldMode(&Mode);
+		Harness.Manager->SetWorldMode(Mode);
 		if (bGatherer)
 		{
 			// What the chunk manager installs (its region gather over the chunk's XY footprint).

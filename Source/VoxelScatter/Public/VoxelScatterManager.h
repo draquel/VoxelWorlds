@@ -494,10 +494,13 @@ public:
 	/**
 	 * Provide the world mode for the analytic terrain-height coverage check during surface extraction.
 	 * Lets the extractor classify surface points that are covered by terrain in a neighboring chunk
-	 * (cross-chunk cave floors / overhangs) as underground. Non-owning — the ChunkManager owns the world
-	 * mode and outlives this manager. Optional: when null, only the per-chunk/flag classification is used.
+	 * (cross-chunk cave floors / overhangs) as underground. Shared with the chunk manager: every extraction
+	 * context holds a reference too, so a task still on a worker when the chunk manager shuts down (a PIE stop)
+	 * keeps the mode alive until it finishes (G104). Optional: when null, only the per-chunk/flag
+	 * classification is used.
+	 * @param InWorldMode The world's mode, or null
 	 */
-	void SetWorldMode(const IVoxelWorldMode* InWorldMode) { WorldMode = InWorldMode; }
+	void SetWorldMode(TSharedPtr<const IVoxelWorldMode> InWorldMode) { WorldMode = MoveTemp(InWorldMode); }
 
 	/**
 	 * How to gather the terrain conditioning zones over a chunk's world box, the zones generation layered onto it: the
@@ -617,8 +620,8 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UWorld> CachedWorld;
 
-	/** World mode for analytic terrain-height coverage queries during extraction (non-owning; see SetWorldMode). */
-	const IVoxelWorldMode* WorldMode = nullptr;
+	/** World mode for analytic terrain-height coverage queries during extraction (shared; see SetWorldMode). */
+	TSharedPtr<const IVoxelWorldMode> WorldMode;
 
 	/** The chunk's conditioning zones (see SetConditioningGatherer). */
 	TFunction<void(const FBox&, TArray<FVoxelConditioningZone>&)> ConditioningGatherer;

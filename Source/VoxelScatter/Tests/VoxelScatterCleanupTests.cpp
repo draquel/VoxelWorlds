@@ -12,6 +12,7 @@
 #include "IVoxelWorldMode.h"
 #include "VoxelData.h"
 #include "VoxelMaterialRegistry.h"
+#include <atomic>
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -165,6 +166,33 @@ namespace VoxelScatterCleanupTestUtils
 		virtual int32 GetMaxZ() const override { return 100000; }
 		virtual EWorldMode GetWorldModeType() const override { return EWorldMode::InfinitePlane; }
 		virtual uint8 GetMaterialAtDepth(const FVector&, float, float) const override { return 0; }
+	};
+
+	/**
+	 * A fixed-height mode whose first surface query waits for the test's release: holds an extraction on its worker at
+	 * a known point, so the test can shut the manager down under it (G104).
+	 */
+	struct FGatedWorldMode : public FFixedHeightWorldMode
+	{
+		struct FGate
+		{
+			std::atomic<bool> bEntered{ false };
+			std::atomic<bool> bReleased{ false };
+		};
+		TSharedRef<FGate> Gate = MakeShared<FGate>();
+		explicit FGatedWorldMode(float InHeight) : FFixedHeightWorldMode(InHeight) {}
+		virtual FVoxelTerrainSurfacePoint GetSurfaceOnUpLine(const FVector& P, const FVoxelNoiseParams& N) const override
+		{
+			if (!Gate->bEntered.exchange(true))
+			{
+				const double Deadline = FPlatformTime::Seconds() + 10.0;
+				while (!Gate->bReleased.load() && FPlatformTime::Seconds() < Deadline)
+				{
+					FPlatformProcess::Sleep(0.001f);
+				}
+			}
+			return FFixedHeightWorldMode::GetSurfaceOnUpLine(P, N);
+		}
 	};
 
 	/** Submit a chunk to the scatter manager as if its mesh just arrived. */
@@ -716,13 +744,13 @@ bool FVoxelScatterCrossChunkCoverTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelScatterCleanupTestUtils;
 
-	// Declared before the harness so it outlives the manager that holds a raw pointer to it.
+	// Shared with the manager, which hands it to each extraction (G104).
 	// Analytic terrain surface far ABOVE this chunk's local ~800 surface: the chunk is effectively
 	// buried, so its surface points are covered by terrain in the chunk(s) above.
-	FFixedHeightWorldMode WorldMode(100000.0f);
+	const TSharedRef<const FFixedHeightWorldMode> WorldMode = MakeShared<FFixedHeightWorldMode>(100000.0f);
 
 	FScatterTestHarness Harness(2);
-	Harness.Manager->SetWorldMode(&WorldMode);
+	Harness.Manager->SetWorldMode(WorldMode);
 
 	const FIntVector Coord(0, 0, 0);
 	Harness.Manager->HandOffChunkVoxels(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
@@ -755,6 +783,45 @@ bool FVoxelScatterCrossChunkCoverTest::RunTest(const FString& Parameters)
 }
 
 // ---------------------------------------------------------------------------
+// G104: PIE stop crashed in an extraction still on a worker that read the world mode after the chunk manager had
+// freed it (the context held a raw pointer). The manager and each extraction context share the mode now: an
+// extraction held inside its first world-mode query while the manager shuts down and the mode's owner lets go keeps
+// the mode alive, and the mode goes when that extraction ends.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterWorldModeOutlivesShutdownTest,
+	"VoxelWorlds.Scatter.Extraction.WorldModeOutlivesShutdown",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterWorldModeOutlivesShutdownTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterCleanupTestUtils;
+
+	FScatterTestHarness Harness(2);
+	TSharedPtr<FGatedWorldMode> Mode = MakeShared<FGatedWorldMode>(100000.0f);
+	const TSharedRef<FGatedWorldMode::FGate> Gate = Mode->Gate;
+	const TWeakPtr<FGatedWorldMode> WeakMode = Mode;
+	Harness.Manager->SetWorldMode(Mode);
+	Mode.Reset(); // the manager holds the only reference, as the chunk manager's is the only one at a PIE stop
+
+	Harness.Manager->HandOffChunkVoxels(FIntVector(0, 0, 0), MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
+	const bool bEntered = PumpUntil(Harness.Manager, 15.0f, [&Gate]() { return Gate->bEntered.load(); });
+	TestTrue(TEXT("An extraction reached the world mode on its worker"), bEntered);
+
+	// The chunk manager's Shutdown resets its pointer and shuts the scatter manager down, the extraction still running.
+	Harness.Manager->Shutdown();
+	TestTrue(TEXT("The extraction still running keeps the world mode alive"), WeakMode.IsValid());
+
+	Gate->bReleased = true;
+	const double Deadline = FPlatformTime::Seconds() + 15.0;
+	while (WeakMode.IsValid() && FPlatformTime::Seconds() < Deadline)
+	{
+		FPlatformProcess::Sleep(0.005f);
+	}
+	TestFalse(TEXT("The world mode goes with the last extraction holding it"), WeakMode.IsValid());
+	return true;
+}
+
+// ---------------------------------------------------------------------------
 // Edit-aware coverage is CHUNK-level, not per-point: a chunk whose TOP sits above the
 // analytic terrain height is a surface chunk and must NOT be classified underground,
 // even when its local (meshed) surface dips below that analytic height. The old
@@ -772,10 +839,10 @@ bool FVoxelScatterSurfaceChunkNotBuriedTest::RunTest(const FString& Parameters)
 
 	// Analytic height above the flat chunk's ~800 surface (would trip the OLD per-point cover test:
 	// 800 < 1000 - 150) but well below the chunk top (16 * 100 = 1600). Chunk-level test: not buried.
-	FFixedHeightWorldMode WorldMode(1000.0f);
+	const TSharedRef<const FFixedHeightWorldMode> WorldMode = MakeShared<FFixedHeightWorldMode>(1000.0f);
 
 	FScatterTestHarness Harness(2);
-	Harness.Manager->SetWorldMode(&WorldMode);
+	Harness.Manager->SetWorldMode(WorldMode);
 
 	const FIntVector Coord(0, 0, 0);
 	Harness.Manager->HandOffChunkVoxels(Coord, MakeFlatGrassChunk(), TestChunkSize, TestVoxelSize);
@@ -827,10 +894,10 @@ bool FVoxelScatterExposedFloorTest::RunTest(const FString& Parameters)
 	// Analytic height above the cave floor (~350) but below the chunk top (1600): the edit-blind
 	// procedural height a world reports where a cave once had a roof — what the old per-point test
 	// wrongly buried the floor against.
-	FFixedHeightWorldMode WorldMode(1000.0f);
+	const TSharedRef<const FFixedHeightWorldMode> WorldMode = MakeShared<FFixedHeightWorldMode>(1000.0f);
 
 	FScatterTestHarness Harness(2);
-	Harness.Manager->SetWorldMode(&WorldMode);
+	Harness.Manager->SetWorldMode(WorldMode);
 
 	// Covered-cave chunk with its UPPER solid layer (Z=[8,12)) removed — the edit-merged voxels a
 	// player sees after carving the ceiling away. The lower floor (top at Z=3) is now open sky.
