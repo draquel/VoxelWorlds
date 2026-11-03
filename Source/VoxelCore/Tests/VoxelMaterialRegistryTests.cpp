@@ -20,6 +20,9 @@
 // - MaterialRegistry.WorkerReads: workers reading two atlases' tables at once (two worlds) while the game thread builds
 //   more see each table whole and their own on every read (G100's torn reads, G101's one table for the process).
 //
+// - MaterialRegistry.SlopeMaterials: an atlas's table names each material's slope material as the atlas's material LUT
+//   does (UVoxelMaterialAtlas::GetSlopeMaterialID), which scatter reads for the material drawn on steep ground (G106).
+//
 // The chunk managers holding their atlases' tables: VoxelWorlds.Streaming.Cubic.TwoWorldsOwnAtlases.
 // ---------------------------------------------------------------------------
 
@@ -195,6 +198,46 @@ bool FVoxelMaterialRegistryWorkerReadsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("the game thread built its tables"), Built, 800);
 	TestTrue(TEXT("the workers read"), ReadsDone >= 24);
 	TestEqual(TEXT("every read sees its own world's table whole and the registry's defaults"), WrongReads, 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelMaterialRegistrySlopeMaterialsTest,
+	"VoxelWorlds.MaterialRegistry.SlopeMaterials",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelMaterialRegistrySlopeMaterialsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelMaterialRegistryTestUtils;
+
+	// Grass turns to Stone, Frozen Dirt to Sand, Dirt to itself, Snow to an ID with no config (40), Sandstone to none.
+	UVoxelMaterialAtlas* Atlas = NewObject<UVoxelMaterialAtlas>();
+	Atlas->MaterialConfigs = ConfigsOf(FVoxelMaterialTable::Defaults().GetAll());
+	Atlas->MaterialConfigs[EVoxelMaterial::Grass].SlopeMaterialID = EVoxelMaterial::Stone;
+	Atlas->MaterialConfigs[EVoxelMaterial::FrozenDirt].SlopeMaterialID = EVoxelMaterial::Sand;
+	Atlas->MaterialConfigs[EVoxelMaterial::Dirt].SlopeMaterialID = EVoxelMaterial::Dirt;
+	Atlas->MaterialConfigs[EVoxelMaterial::Snow].SlopeMaterialID = 40;
+	const TSharedRef<const FVoxelMaterialTable> Table = Atlas->MakeMaterialTable();
+
+	int32 Agree = 0;
+	for (int32 ID = 0; ID < 256; ++ID)
+	{
+		const FVoxelMaterialDefinition* Mat = Table->GetMaterial(static_cast<uint8>(ID));
+		Agree += (Mat ? Mat->SlopeMaterialID : -1) == Atlas->GetSlopeMaterialID(static_cast<uint8>(ID)) ? 1 : 0;
+	}
+	TestEqual(TEXT("Every ID's slope material is the atlas LUT's"), Agree, 256);
+	TestEqual(TEXT("Grass turns to Stone"), Table->GetMaterial(EVoxelMaterial::Grass)->SlopeMaterialID, static_cast<int32>(EVoxelMaterial::Stone));
+	TestEqual(TEXT("Dirt to itself: none"), Table->GetMaterial(EVoxelMaterial::Dirt)->SlopeMaterialID, -1);
+	TestEqual(TEXT("Snow to an ID with no config: none"), Table->GetMaterial(EVoxelMaterial::Snow)->SlopeMaterialID, -1);
+	TestTrue(TEXT("The table has slope materials"), Table->HasSlopeMaterials());
+	TestFalse(TEXT("The defaults have none"), FVoxelMaterialTable::Defaults().HasSlopeMaterials());
+
+	// The drawn material: past the middle of the rock's start and end (cos 0.865, about 30 degrees) Grass draws as Stone.
+	const float Middle = 1.0f - 0.5f * (FVoxelMaterialTable::SlopeRockStart + FVoxelMaterialTable::SlopeRockEnd);
+	TestEqual(TEXT("Flat grass is grass"), Table->GetDrawnMaterial(EVoxelMaterial::Grass, 1.0f), EVoxelMaterial::Grass);
+	TestEqual(TEXT("Grass just under the middle is grass"), Table->GetDrawnMaterial(EVoxelMaterial::Grass, Middle + 0.01f), EVoxelMaterial::Grass);
+	TestEqual(TEXT("Grass past the middle is stone"), Table->GetDrawnMaterial(EVoxelMaterial::Grass, Middle - 0.01f), EVoxelMaterial::Stone);
+	TestEqual(TEXT("Steep sand stays sand"), Table->GetDrawnMaterial(EVoxelMaterial::Sand, 0.0f), EVoxelMaterial::Sand);
+	TestEqual(TEXT("An unknown ID stays itself"), Table->GetDrawnMaterial(200, 0.0f), static_cast<uint8>(200));
 	return true;
 }
 

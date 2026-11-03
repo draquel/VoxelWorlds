@@ -108,6 +108,37 @@ public:
 	/** @return The non-occluding materials as "Name(ID), ...", for logs */
 	FString DescribeNonOccluding() const;
 
+	/**
+	 * The slope rock's thresholds on the smooth terrain (visual polish VP2-O3), the slope being 1 - N.Up of the surface
+	 * normal against local up: where the rock starts (about 23 degrees) and where it is whole (about 36). The shader's are
+	 * VOXEL_SLOPE_ROCK_START and _END in Shaders/Private/VoxelSlopeRock.ush; test VoxelWorlds.Rendering.SlopeRock.Thresholds
+	 * keeps the two equal.
+	 */
+	static constexpr float SlopeRockStart = 0.08f;
+	static constexpr float SlopeRockEnd = 0.19f;
+
+	/**
+	 * The material the smooth terrain's shader draws at a surface point: the material's slope material (SlopeMaterialID)
+	 * where the slope rock's weight is at least a half, the slope past the middle of SlopeRockStart and SlopeRockEnd (about
+	 * 30 degrees), else the material itself. The shader's noise moves its border by up to 0.04 either way in patches; this
+	 * is the border without it. Scatter places by it, so ground cover does not grow on the rock (G106).
+	 * @param MaterialID The voxel's material
+	 * @param CosToUp The cosine of the angle between the surface normal and local up
+	 * @return The material drawn there
+	 */
+	uint8 GetDrawnMaterial(uint8 MaterialID, float CosToUp) const
+	{
+		if (MaterialID < Materials.Num() && Materials[MaterialID].SlopeMaterialID >= 0
+			&& 1.0f - CosToUp >= 0.5f * (SlopeRockStart + SlopeRockEnd))
+		{
+			return static_cast<uint8>(Materials[MaterialID].SlopeMaterialID);
+		}
+		return MaterialID;
+	}
+
+	/** @return Whether a material of the table has a slope material (a world whose scatter GetDrawnMaterial can change) */
+	bool HasSlopeMaterials() const;
+
 	/** @param InMaterials The definitions in MaterialID order */
 	explicit FVoxelMaterialTable(TArray<FVoxelMaterialDefinition>&& InMaterials) : Materials(MoveTemp(InMaterials)) {}
 

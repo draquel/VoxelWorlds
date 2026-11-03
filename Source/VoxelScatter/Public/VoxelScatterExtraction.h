@@ -10,6 +10,7 @@
 
 class IVoxelWorldMode;
 class UVoxelCaveConfiguration;
+class FVoxelMaterialTable;
 struct FVoxelConditioningZone;
 
 /**
@@ -32,6 +33,13 @@ struct FScatterExtractionContext
 	 * mode (G104). Null for a synchronous caller that owns the mode itself.
 	 */
 	TSharedPtr<const IVoxelWorldMode> WorldModeOwner;
+
+	/**
+	 * The world's material table (its atlas's): on the smooth terrain a surface point where the shader draws a material's
+	 * slope rock counts as that material (FVoxelMaterialTable::GetDrawnMaterial), so a definition limited to grass does not
+	 * grow on the rock (G106). Null: the voxels' materials.
+	 */
+	TSharedPtr<const FVoxelMaterialTable> Materials;
 	/** Noise params for IVoxelWorldMode::GetTerrainHeightAt. */
 	FVoxelNoiseParams NoiseParams;
 	/**

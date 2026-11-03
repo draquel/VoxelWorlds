@@ -205,7 +205,26 @@ TSharedRef<const FVoxelMaterialTable> FVoxelMaterialTable::FromAtlas(const TArra
 		Mat.bNonOccluding = Config.bNonOccluding;
 	}
 
+	// The slope materials, by UVoxelMaterialAtlas::GetSlopeMaterialID's rule: -1, the material's own ID, past 254 or an ID
+	// the atlas has no config for is none (G106)
+	TBitArray<> Configured(false, 256);
+	for (const FVoxelMaterialTextureConfig& Config : Configs)
+	{
+		Configured[Config.MaterialID] = true;
+	}
+	for (const FVoxelMaterialTextureConfig& Config : Configs)
+	{
+		const int32 Slope = Config.SlopeMaterialID;
+		Materials[Config.MaterialID].SlopeMaterialID =
+			(Slope < 0 || Slope > 254 || Slope == Config.MaterialID || !Configured[Slope]) ? -1 : Slope;
+	}
+
 	return MakeShared<const FVoxelMaterialTable>(MoveTemp(Materials));
+}
+
+bool FVoxelMaterialTable::HasSlopeMaterials() const
+{
+	return Materials.ContainsByPredicate([](const FVoxelMaterialDefinition& Mat) { return Mat.SlopeMaterialID >= 0; });
 }
 
 FString FVoxelMaterialTable::DescribeNonOccluding() const

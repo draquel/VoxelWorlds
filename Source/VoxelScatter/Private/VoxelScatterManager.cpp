@@ -487,6 +487,7 @@ void UVoxelScatterManager::Shutdown()
 	Configuration = nullptr;
 	CachedWorld = nullptr;
 	WorldMode.Reset(); // extractions still on workers hold their own reference (G104)
+	MaterialTable.Reset();
 	bIsInitialized = false;
 
 	UE_LOG(LogVoxelScatter, Log, TEXT("VoxelScatterManager shutdown. Stats: Chunks=%lld, SurfacePoints=%lld, SpawnPoints=%lld"),
@@ -2402,10 +2403,13 @@ void UVoxelScatterManager::ExtractSurfacePointsByColumn(
 					break; // Skip rest of this column
 				}
 
-				// Compute normal from density gradient (central differences)
-				const float GradX = GetDensity(X + 1, Y, Z) - GetDensity(X - 1, Y, Z);
-				const float GradY = GetDensity(X, Y + 1, Z) - GetDensity(X, Y - 1, Z);
-				const float GradZ = GetDensity(X, Y, Z + 1) - GetDensity(X, Y, Z - 1);
+				// Compute normal from density gradient (central differences). At the chunk's faces the neighbour's voxels are
+				// not here and the difference is one-sided, over one voxel instead of two: divided by its span, so an edge
+				// column's slope is not halved (a 40-degree flank read 18 there: grass on the slope rock, G106)
+				auto Span = [ChunkSize](int32 I) { return static_cast<float>(FMath::Max(FMath::Min(I + 1, ChunkSize - 1) - FMath::Max(I - 1, 0), 1)); };
+				const float GradX = (GetDensity(X + 1, Y, Z) - GetDensity(X - 1, Y, Z)) / Span(X);
+				const float GradY = (GetDensity(X, Y + 1, Z) - GetDensity(X, Y - 1, Z)) / Span(Y);
+				const float GradZ = (GetDensity(X, Y, Z + 1) - GetDensity(X, Y, Z - 1)) / Span(Z);
 
 				// Normal points from solid toward air (negative gradient direction)
 				FVector Normal(-GradX, -GradY, -GradZ);
@@ -2547,6 +2551,17 @@ void UVoxelScatterManager::ExtractChunkSurfacePoints(
 	{
 		ExtractSurfacePointsByColumn(VoxelData, ChunkCoord, ChunkWorldOrigin, ChunkSize, VoxelSize, PointSpacing, ClearedVolumes,
 			Context, OutSurfaceData);
+	}
+
+	// The smooth terrain's shader draws a material's slope rock on its steep ground (VP2-O3): a point there counts as the
+	// rock, so ground cover limited to grass does not stand on it (G106). The cubic atlas path draws no slope rock.
+	if (!bCubic && Context.Materials.IsValid() && Context.Materials->HasSlopeMaterials())
+	{
+		for (FVoxelSurfacePoint& Point : OutSurfaceData.SurfacePoints)
+		{
+			Point.MaterialID = Context.Materials->GetDrawnMaterial(Point.MaterialID,
+				static_cast<float>(FVector::DotProduct(Point.Normal, Point.LocalUp)));
+		}
 	}
 }
 
@@ -3090,6 +3105,7 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 	FScatterExtractionContext Context;
 	Context.WorldMode = WorldMode.Get();
 	Context.WorldModeOwner = WorldMode;
+	Context.Materials = MaterialTable;
 	if (Configuration)
 	{
 		Context.NoiseParams = Configuration->GetNoiseParams();

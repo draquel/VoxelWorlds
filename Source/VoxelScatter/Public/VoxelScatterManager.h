@@ -12,6 +12,7 @@
 class UVoxelWorldConfiguration;
 class UVoxelScatterRenderer;
 class IVoxelWorldMode;
+class FVoxelMaterialTable;
 class UVoxelCaveConfiguration;
 struct FVoxelConditioningZone;
 
@@ -503,6 +504,14 @@ public:
 	void SetWorldMode(TSharedPtr<const IVoxelWorldMode> InWorldMode) { WorldMode = MoveTemp(InWorldMode); }
 
 	/**
+	 * Provide the world's material table (its atlas's), so the smooth terrain's surface points take the material the
+	 * shader draws there: a material's slope rock on its steep ground (G106). Set before the first extraction; null =
+	 * the voxels' materials.
+	 * @param InMaterials The world's table, or null
+	 */
+	void SetMaterialTable(TSharedPtr<const FVoxelMaterialTable> InMaterials) { MaterialTable = MoveTemp(InMaterials); }
+
+	/**
 	 * How to gather the terrain conditioning zones over a chunk's world box, the zones generation layered onto it: the
 	 * chunk manager's region gather on a heightmap (its XY footprint, world modes review G23), the cap the box subtends
 	 * on a planet (GetPlanetCapOfBox + GatherConditioningZonesOnSphere, spherical SP-B10). Called on the game thread
@@ -622,6 +631,9 @@ protected:
 
 	/** World mode for analytic terrain-height coverage queries during extraction (shared; see SetWorldMode). */
 	TSharedPtr<const IVoxelWorldMode> WorldMode;
+
+	/** The world's material table for the drawn material (see SetMaterialTable). */
+	TSharedPtr<const FVoxelMaterialTable> MaterialTable;
 
 	/** The chunk's conditioning zones (see SetConditioningGatherer). */
 	TFunction<void(const FBox&, TArray<FVoxelConditioningZone>&)> ConditioningGatherer;
