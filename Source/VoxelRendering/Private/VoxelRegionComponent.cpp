@@ -63,6 +63,12 @@ static constexpr double VoxelFadeHoldFailsafeSeconds = 3.0;
 /** Scalar parameter names on the fade material */
 static const FName VoxelFadeAlphaParamName(TEXT("FadeAlpha"));
 static const FName VoxelFadeInvertParamName(TEXT("FadeInvert"));
+/**
+ * The local up the smooth terrain's slope-aware rock is measured against (visual polish VP2-O3, the triplanar functions'
+ * LocalUpCenter parameter): xyz a planet's centre, w 1 for radial up from it, 0 for world +Z (heightmap worlds). A
+ * float centre is precise enough for a direction: a planet centred 10^8 uu out is off by 8 uu, under 10^-5 rad at 1 km.
+ */
+static const FName VoxelLocalUpCenterParamName(TEXT("LocalUpCenter"));
 
 static TAutoConsoleVariable<float> CVarVoxelMaterialMacroVariation(
 	TEXT("voxel.Material.MacroVariation"),
@@ -1629,6 +1635,11 @@ void UVoxelRegionComponent::SetRadialFaceUp(bool bRadial, const FVector& Center)
 	}
 	bRadialFaceUp = bRadial;
 	FaceUpCenter = Center;
+	if (DynamicMaterialInstance)
+	{
+		DynamicMaterialInstance->SetVectorParameterValue(VoxelLocalUpCenterParamName,
+			FLinearColor(static_cast<float>(FaceUpCenter.X), static_cast<float>(FaceUpCenter.Y), static_cast<float>(FaceUpCenter.Z), bRadialFaceUp ? 1.0f : 0.0f));
+	}
 	MarkRenderStateDirty();
 }
 
@@ -1691,6 +1702,10 @@ void UVoxelRegionComponent::UpdateMaterialAtlasParameters()
 	// Set smooth meshing switch (matches bSmoothTerrain parameter in M_VoxelMaster)
 	// Note: Static switches can't be changed at runtime, this is a scalar parameter fallback
 	DynamicMaterialInstance->SetScalarParameterValue(FName("bSmoothTerrain"), bUseSmoothMeshing ? 1.0f : 0.0f);
+
+	// The local up for the slope-aware rock (VP2-O3): the planet's radial up, or world +Z
+	DynamicMaterialInstance->SetVectorParameterValue(VoxelLocalUpCenterParamName,
+		FLinearColor(static_cast<float>(FaceUpCenter.X), static_cast<float>(FaceUpCenter.Y), static_cast<float>(FaceUpCenter.Z), bRadialFaceUp ? 1.0f : 0.0f));
 
 	if (!MaterialAtlas)
 	{

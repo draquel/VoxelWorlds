@@ -108,6 +108,17 @@ uint8 UVoxelMaterialAtlas::GetArraySlice(const TArray<uint8>& Slices, uint8 Mate
 	return Slices.IsValidIndex(MaterialID) ? Slices[MaterialID] : MaterialID;
 }
 
+int32 UVoxelMaterialAtlas::GetSlopeMaterialID(uint8 MaterialID) const
+{
+	const FVoxelMaterialTextureConfig* Config = GetMaterialConfig(MaterialID);
+	if (!Config || Config->SlopeMaterialID < 0 || Config->SlopeMaterialID > 254 || Config->SlopeMaterialID == MaterialID
+		|| !GetMaterialConfig(static_cast<uint8>(Config->SlopeMaterialID)))
+	{
+		return -1;
+	}
+	return Config->SlopeMaterialID;
+}
+
 float UVoxelMaterialAtlas::GetTriplanarScale(uint8 MaterialID) const
 {
 	const FVoxelMaterialTextureConfig* Config = GetMaterialConfig(MaterialID);
@@ -285,14 +296,15 @@ void UVoxelMaterialAtlas::BuildMaterialLUT()
 		}
 	}
 
-	// The slice row: each material's slice in the texture arrays (smooth terrain's triplanar functions), BGRA
+	// The slice row: each material's slice in the texture arrays (smooth terrain's triplanar functions), BGRA; A is the
+	// material the triplanar functions blend toward on steep ground (VP2-O3), plus one so that 0 is none
 	for (int32 MaterialID = 0; MaterialID < 256; ++MaterialID)
 	{
 		const int32 PixelIndex = (SliceRow * LUTWidth + MaterialID) * 4;
 		PixelData[PixelIndex + 0] = GetArraySlice(RoughnessArraySlices, static_cast<uint8>(MaterialID)); // B
 		PixelData[PixelIndex + 1] = GetArraySlice(NormalArraySlices, static_cast<uint8>(MaterialID));    // G
 		PixelData[PixelIndex + 2] = GetArraySlice(AlbedoArraySlices, static_cast<uint8>(MaterialID));    // R
-		PixelData[PixelIndex + 3] = 0;
+		PixelData[PixelIndex + 3] = static_cast<uint8>(GetSlopeMaterialID(static_cast<uint8>(MaterialID)) + 1);  // A
 	}
 
 	// Unlock and update
@@ -701,6 +713,7 @@ void UVoxelMaterialAtlas::PostEditChangeProperty(FPropertyChangedEvent& Property
 		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, UVScale),
 		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, bIsMasked),
 		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, bNonOccluding),
+		GET_MEMBER_NAME_CHECKED(FVoxelMaterialTextureConfig, SlopeMaterialID),
 	};
 
 	if (LUTAffectingProperties.Contains(PropertyName) || LUTAffectingProperties.Contains(MemberPropertyName))
