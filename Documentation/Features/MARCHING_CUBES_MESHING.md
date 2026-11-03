@@ -104,7 +104,7 @@ The two smooth meshers handle LOD boundaries differently:
 |-|---------------|-----------------|
 | Mechanism | Transvoxel ribbon + band-confined geomorph, in the face seam job | Mixed-LOD seam meshers fan fine crossings onto the coarse rings |
 | Lookup tables | 512-entry tables (56 classes) | None |
-| Request fields | `TransitionFaces`, `NeighborLODLevels`, `MorphWidthOverride` | `NeighborLODLevels` |
+| Request fields | `TransitionFaces`, `NeighborLODLevels`, `MorphWidth` | `NeighborLODLevels` |
 
 ---
 
@@ -296,9 +296,10 @@ Low-res corners: 0, 2, 6, 8 (the 4 corners)
    boundary plane matching both LOD levels
 
 The same job **geomorphs** the fine band toward the coarse contour (along the axis nearest local up, steep slopes
-skipped) with a band-confined ramp (`MorphWidthOverride`) that reaches zero at the band's inner edge, so morphed band
-vertices stay coincident with the unmorphed interior mesh; whole-chunk meshing uses `voxel.Mesh.MCBoundaryMorphWidth`
-(2 coarse cells, also `UVoxelWorldsSettings::MCBoundaryMorphWidth`). Ribbon cells that would need voxels beyond the
+skipped) with a band-confined ramp (the request's `MorphWidth`, in coarse cells) that reaches zero at the band's inner
+edge, so morphed band vertices stay coincident with the unmorphed interior mesh. A whole-chunk mesh with transition
+faces, which only tests and the mesh digests make, keeps the default of 2 coarse cells; the width has no cvar or setting
+(`voxel.Mesh.MCBoundaryMorphWidth` reached no mesh the world draws or cooks and was retired, G118). Ribbon cells that would need voxels beyond the
 two face participants (the positive-perpendicular perimeter rows) skip themselves (`HasRequiredNeighborData`), leaving
 small boundary-plane gaps along those face edges at mixed LOD that the geomorph makes less visible. `bUseTransvoxel` is
 on unless the world configuration's `bEnableLODSeams` is off. Tests `Meshing.MarchingCubes.LODBoundary.*`,

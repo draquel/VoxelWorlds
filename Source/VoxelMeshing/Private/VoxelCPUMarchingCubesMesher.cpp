@@ -1,14 +1,12 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelCPUMarchingCubesMesher.h"
-#include "VoxelWorldsSettings.h"
 #include "VoxelCrossingGradient.h"
 #include "VoxelMeshingVoxelSampler.h"
 #include "VoxelDigitalLine.h"
 #include "VoxelMeshing.h"
 #include "MarchingCubesTables.h"
 #include "TransvoxelTables.h"
-#include "HAL/IConsoleManager.h"
 
 // Note: MarchingCubes meshing uses triplanar blending, so FaceType is not needed.
 // UV1.x stores MaterialID, UV1.y is reserved (set to 0).
@@ -17,12 +15,9 @@
 // coarser neighbour, ramp the fine surface toward the coarse-LOD surface so the boundary
 // contour meets the coarse neighbour with no vertical step. Baked at mesh time (the chunk is
 // re-meshed when its own or a neighbour's LOD changes), so it needs no vertex-format or shader
-// change on the CPU path. See Documentation/Research/Archive/GEOMORPH_IMPLEMENTATION_PLAN.md.
-TAutoConsoleVariable<float> CVarMCBoundaryMorphWidth(
-	TEXT("voxel.Mesh.MCBoundaryMorphWidth"),
-	2.0f,
-	TEXT("MC LOD-seam geomorph ramp width, in coarse cells. Larger = gentler ramp, more fine detail traded."),
-	ECVF_Default);
+// change on the CPU path. The ramp's width is the request's (FVoxelMeshingRequest::MorphWidth):
+// a seam job's is confined to its band (G118). See
+// Documentation/Research/Archive/GEOMORPH_IMPLEMENTATION_PLAN.md.
 
 /**
  * Vertex normals of strided cells (G61, WORLD_MODES_REVIEW_PLAN.md §14.1 and §20.9; Dual Contouring's G44 in §20.8).
@@ -655,9 +650,7 @@ void FVoxelCPUMarchingCubesMesher::MorphVertexToCoarse(
 	const int32 SelfLOD = Request.LODLevel;
 	// Seam jobs pass a band-confined ramp width (zero exactly at the band's inner edge) so
 	// morphed band vertices stay coincident with the unmorphed interior mesh at the junction.
-	const float MorphWidth = (Request.MorphWidthOverride > 0.0f)
-		? Request.MorphWidthOverride
-		: FMath::Max(0.01f, VoxelSettings::ResolveAnyThread(CVarMCBoundaryMorphWidth, UVoxelWorldsSettings::Get().MCBoundaryMorphWidth));
+	const float MorphWidth = FMath::Max(0.01f, Request.MorphWidth);
 
 	const float Vx = Vertex.X / VoxelSize;
 	const float Vy = Vertex.Y / VoxelSize;

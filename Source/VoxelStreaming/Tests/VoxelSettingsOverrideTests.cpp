@@ -65,7 +65,6 @@ bool FVoxelSettingsOverrideTest::RunTest(const FString& Parameters)
 		{ TEXT("voxel.Nav.MaxRadius"), S.NavMaxRadius },
 		{ TEXT("voxel.MeshFade.Duration"), S.MeshFadeDuration },
 		{ TEXT("voxel.MeshFade.AppearMinDistance"), S.MeshFadeAppearMinDistance },
-		{ TEXT("voxel.Mesh.MCBoundaryMorphWidth"), S.MCBoundaryMorphWidth },
 		{ TEXT("voxel.Scatter.HISMBatchSeconds"), S.ScatterHISMBatchSeconds },
 		{ TEXT("voxel.Scatter.HISMCompactMinPooled"), static_cast<float>(S.ScatterHISMCompactMinPooled) },
 		{ TEXT("voxel.Edit.UndoHistoryMB"), S.EditUndoHistoryMB },
