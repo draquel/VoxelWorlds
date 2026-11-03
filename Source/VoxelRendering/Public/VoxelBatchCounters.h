@@ -20,8 +20,14 @@ struct VOXELRENDERING_API FVoxelBatchCounters
 		int32 SkippedOverLimit = 0;
 		/** Of Drawn, the batches drawn in shadow gathers (calls whose view carries a shadow cull volume; visual polish VP3) */
 		int32 ShadowDrawn = 0;
+		/** Batches a far shadow cascade left out as finer than voxel.Render.FarShadowMinLOD (visual polish D-VP3) */
+		int32 SkippedTooFine = 0;
+		/** Of ShadowDrawn, the batches drawn in the sun's far cascades (D-VP3) */
+		int32 FarShadowDrawn = 0;
+		/** The most batches one call drew, against the per-call cap of 2,000 (a maximum, not a sum) */
+		int32 MaxPerCall = 0;
 
-		int32 Skipped() const { return SkippedInvisible + SkippedFrustum + SkippedOverLimit; }
+		int32 Skipped() const { return SkippedInvisible + SkippedFrustum + SkippedOverLimit + SkippedTooFine; }
 	};
 
 	/** Render thread: add one GetDynamicMeshElements call's counts. */
