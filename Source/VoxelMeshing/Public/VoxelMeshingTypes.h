@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "VoxelData.h"
 
+class FVoxelMaterialTable;
+
 /**
  * Cell-domain restriction for seam-ownership meshing (SEAM_OWNERSHIP_ARCHITECTURE.md §2).
  *
@@ -747,4 +749,11 @@ struct VOXELMESHING_API FVoxelMeshingConfig
 	 * Default 0.5 provides good balance between feature preservation and stability.
 	 */
 	float QEFBiasStrength = 0.5f;
+
+	/**
+	 * The world's material table (its atlas's, UVoxelMaterialAtlas::MakeMaterialTable), which the cubic mesher reads the
+	 * non-occluding flags from; null = the registry's defaults. Set by the chunk manager when it creates its meshers and
+	 * shared by every job they run, so two worlds with different atlases mesh with their own (G101).
+	 */
+	TSharedPtr<const FVoxelMaterialTable> Materials;
 };

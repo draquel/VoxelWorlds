@@ -37,11 +37,90 @@ namespace EVoxelMaterial
 struct FVoxelMaterialTextureConfig;
 
 /**
+ * An immutable table of voxel material definitions in MaterialID order: the built-in defaults (Defaults, what the
+ * registry answers from), or a world's atlas's (FromAtlas: the defaults grown to the atlas's highest MaterialID, its
+ * configs applied). A world holds its atlas's table (UVoxelChunkManager hands it to its meshers in FVoxelMeshingConfig)
+ * and reads it on any thread with no lock; two worlds with different atlases each read their own, and a table goes with
+ * the last world holding it (G101).
+ */
+class VOXELCORE_API FVoxelMaterialTable
+{
+public:
+	/**
+	 * The built-in definitions, built once on the first call (thread-safely).
+	 * @return The defaults' table (valid for the process)
+	 */
+	static const FVoxelMaterialTable& Defaults();
+
+	/**
+	 * The table of an atlas: the defaults, grown to the atlas's highest MaterialID with placeholders, with each
+	 * configured material's atlas position, scales, name and flags from its config (hardness and colour stay the
+	 * defaults'). Built on the caller's thread; nothing global changes.
+	 * @param Configs The atlas's material texture configurations
+	 * @param AtlasColumns Number of columns in the atlas (placeholders' positions)
+	 * @param AtlasRows Number of rows in the atlas
+	 * @return The new table
+	 */
+	static TSharedRef<const FVoxelMaterialTable> FromAtlas(const TArray<FVoxelMaterialTextureConfig>& Configs, int32 AtlasColumns, int32 AtlasRows);
+
+	/**
+	 * @param MaterialID The material ID to look up
+	 * @return The definition (valid while the table lives), or nullptr when the table does not define the ID
+	 */
+	const FVoxelMaterialDefinition* GetMaterial(uint8 MaterialID) const
+	{
+		return MaterialID < Materials.Num() ? &Materials[MaterialID] : nullptr;
+	}
+
+	/**
+	 * @param MaterialID The material ID to check
+	 * @return Whether the material is non-occluding (doesn't cull adjacent faces); false for an unknown ID
+	 */
+	bool IsNonOccluding(uint8 MaterialID) const
+	{
+		return MaterialID < Materials.Num() && Materials[MaterialID].bNonOccluding;
+	}
+
+	/**
+	 * @param MaterialID The material ID to check
+	 * @return Whether the material uses masked (alpha cutout) blending; false for an unknown ID
+	 */
+	bool IsMaterialMasked(uint8 MaterialID) const
+	{
+		return MaterialID < Materials.Num() && Materials[MaterialID].bIsMasked;
+	}
+
+	/**
+	 * @param MaterialID The material ID to look up
+	 * @return The material's colour, or magenta for an unknown ID
+	 */
+	FColor GetMaterialColor(uint8 MaterialID) const
+	{
+		return MaterialID < Materials.Num() ? Materials[MaterialID].Color : FColor::Magenta;
+	}
+
+	/** @return The number of materials the table defines (IDs 0 to Num() - 1) */
+	int32 Num() const { return Materials.Num(); }
+
+	/** @return The definitions in MaterialID order */
+	const TArray<FVoxelMaterialDefinition>& GetAll() const { return Materials; }
+
+	/** @return The non-occluding materials as "Name(ID), ...", for logs */
+	FString DescribeNonOccluding() const;
+
+	/** @param InMaterials The definitions in MaterialID order */
+	explicit FVoxelMaterialTable(TArray<FVoxelMaterialDefinition>&& InMaterials) : Materials(MoveTemp(InMaterials)) {}
+
+private:
+	TArray<FVoxelMaterialDefinition> Materials;
+};
+
+/**
  * Static registry of voxel material definitions.
  * Provides lookup of material properties by MaterialID.
- * The definitions are an immutable table: the defaults, built on the first query, or the table an atlas published
- * (SetAtlasPositions). Any thread may query with no lock and sees one table whole; no table is changed or freed once
- * published, so the pointers and references the queries return stay valid (G100).
+ * Answers from the built-in defaults (FVoxelMaterialTable::Defaults), an immutable table built on the first query: any
+ * thread may query with no lock (G100). An atlas's materials are its world's table (FVoxelMaterialTable::FromAtlas),
+ * never the registry's, so two worlds with different atlases do not share one and no atlas outlives its world (G101).
  */
 class VOXELCORE_API FVoxelMaterialRegistry
 {
@@ -67,7 +146,7 @@ public:
 
 	/**
 	 * Get all registered material definitions.
-	 * @return The table published now, in MaterialID order (valid for the process; a later atlas publishes another)
+	 * @return The defaults in MaterialID order (valid for the process)
 	 */
 	static const TArray<FVoxelMaterialDefinition>& GetAllMaterials();
 
@@ -131,22 +210,4 @@ public:
 	 * Get the set of all MaterialIDs that use masked blending.
 	 */
 	static TSet<uint8> GetMaskedMaterialIDs();
-
-	/**
-	 * Publish the table of an atlas: the defaults, grown to the atlas's highest MaterialID with placeholders, with each
-	 * configured material's atlas position, scales, name and flags from its config. A table is built and published whole,
-	 * never changed in place (queries on other threads see the old table or the new one); an atlas whose table was
-	 * published before republishes that table. Called by UVoxelRegionComponent::SetMaterialAtlas on the game thread.
-	 * @param Configs Array of material texture configurations
-	 * @param AtlasColumns Number of columns in the atlas
-	 * @param AtlasRows Number of rows in the atlas
-	 */
-	static void SetAtlasPositions(const TArray<FVoxelMaterialTextureConfig>& Configs, int32 AtlasColumns, int32 AtlasRows);
-
-private:
-	/**
-	 * The table published now: the last atlas's, or the defaults (built once on the first call, thread-safely).
-	 * @return The material definitions in MaterialID order
-	 */
-	static const TArray<FVoxelMaterialDefinition>& Table();
 };

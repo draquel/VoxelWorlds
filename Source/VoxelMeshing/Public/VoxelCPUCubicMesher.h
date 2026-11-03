@@ -246,6 +246,12 @@ private:
 	/** Current configuration */
 	FVoxelMeshingConfig Config;
 
+	/**
+	 * The table the non-occluding flags come from: the world's (Config.Materials), or the registry's defaults (G101).
+	 * @return The table
+	 */
+	const FVoxelMaterialTable& GetMaterials() const;
+
 	// ============================================================================
 	// Face Data Tables
 	// ============================================================================

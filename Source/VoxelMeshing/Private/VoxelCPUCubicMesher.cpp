@@ -250,21 +250,6 @@ void FVoxelCPUCubicMesher::Initialize()
 		return;
 	}
 
-	// Log non-occluding status for all materials that have it set
-	{
-		const TArray<FVoxelMaterialDefinition>& AllMats = FVoxelMaterialRegistry::GetAllMaterials();
-		FString NonOccludingList;
-		for (const FVoxelMaterialDefinition& MatDef : AllMats)
-		{
-			if (MatDef.bNonOccluding)
-			{
-				if (NonOccludingList.Len() > 0) NonOccludingList += TEXT(", ");
-				NonOccludingList += FString::Printf(TEXT("%s(%d)"), *MatDef.Name, MatDef.MaterialID);
-			}
-		}
-		UE_LOG(LogVoxelMeshing, Log, TEXT("CPU Cubic Mesher initialized (%d materials, NonOccluding: [%s])"),
-			AllMats.Num(), *NonOccludingList);
-	}
 	bIsInitialized = true;
 }
 
@@ -551,7 +536,7 @@ void FVoxelCPUCubicMesher::ProcessSliceGreedy(
 			}
 
 			const uint8 MatID = static_cast<uint8>((FaceMask[Index] & 0xFF) - 1);
-			if (FVoxelMaterialRegistry::IsNonOccluding(MatID))
+			if (GetMaterials().IsNonOccluding(MatID))
 			{
 				// Recover XYZ from slice coordinates
 				int32 Coords[3];
@@ -1045,6 +1030,11 @@ void FVoxelCPUCubicMesher::EmitMergedQuad(
 	MeshData.Indices.Add(BaseVertex + 2);
 }
 
+const FVoxelMaterialTable& FVoxelCPUCubicMesher::GetMaterials() const
+{
+	return Config.Materials.IsValid() ? *Config.Materials : FVoxelMaterialTable::Defaults();
+}
+
 bool FVoxelCPUCubicMesher::ShouldRenderFace(
 	const FCubicPass& Pass,
 	int32 X, int32 Y, int32 Z,
@@ -1069,8 +1059,8 @@ bool FVoxelCPUCubicMesher::ShouldRenderFace(
 	// - Leaf renders all its own faces (internal density)
 	// - Neighbors render their face toward leaves (no void through alpha holes)
 	const FVoxelData Voxel = Pass.GetVoxel(X, Y, Z);
-	if (FVoxelMaterialRegistry::IsNonOccluding(Voxel.MaterialID) ||
-		FVoxelMaterialRegistry::IsNonOccluding(Neighbor.MaterialID))
+	const FVoxelMaterialTable& Materials = GetMaterials();
+	if (Materials.IsNonOccluding(Voxel.MaterialID) || Materials.IsNonOccluding(Neighbor.MaterialID))
 	{
 		return true;
 	}

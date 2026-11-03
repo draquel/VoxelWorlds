@@ -73,6 +73,10 @@ namespace VoxelTesting
 		}
 		virtual void SetMaterial(UMaterialInterface* Material) override {}
 		virtual UMaterialInterface* GetMaterial() const override { return nullptr; }
+		/** The atlas the world draws with: set it before StartManager, as the world actor binds its atlas before the chunk
+		 *  manager initialises (the chunk manager reads its material table from it, G101). The test keeps it alive. */
+		virtual void SetMaterialAtlas(UVoxelMaterialAtlas* InAtlas) override { Atlas = InAtlas; }
+		virtual UVoxelMaterialAtlas* GetMaterialAtlas() const override { return Atlas; }
 		virtual void UpdateMaterialParameters() override {}
 		virtual void UpdateSeamMeshFromCPU(const FIntVector& OwnerChunkCoord, uint8 SeamSlot, int32 LODLevel, FChunkMeshData&& MeshData, bool bCrossfade) override
 		{
@@ -127,6 +131,7 @@ namespace VoxelTesting
 		}
 
 	private:
+		UVoxelMaterialAtlas* Atlas = nullptr;
 		bool bInitialized = false;
 		bool bLost = false;
 		TArray<FIntVector> LostChunks;

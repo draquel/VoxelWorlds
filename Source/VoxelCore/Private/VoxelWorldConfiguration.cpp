@@ -187,15 +187,20 @@ void UVoxelWorldConfiguration::GetPlanetTerrainExtent(float& OutHighest, float& 
 
 TArray<FString> UVoxelWorldConfiguration::GetSettingsWarnings() const
 {
+	return GetSettingsWarningsAgainst(FVoxelMaterialTable::Defaults());
+}
+
+TArray<FString> UVoxelWorldConfiguration::GetSettingsWarningsAgainst(const FVoxelMaterialTable& Materials) const
+{
 	TArray<FString> Warnings;
 
 	// Tree templates: an id the registry does not define renders with whatever material slot it lands on
 	// and is not treated as leaves (not masked, not non-occluding). DemoSmoothWorldConfig shipped leaves
 	// 22 and 23 and a trunk of 21 (Leaves), which showed as clay and brick canopies when meshed cubic (KC10).
-	const int32 MaterialCount = FVoxelMaterialRegistry::GetMaterialCount();
-	auto CheckTreeMaterial = [&Warnings, MaterialCount](const FVoxelTreeTemplate& Template, const TCHAR* Field, uint8 MaterialID)
+	const int32 MaterialCount = Materials.Num();
+	auto CheckTreeMaterial = [&Warnings, &Materials, MaterialCount](const FVoxelTreeTemplate& Template, const TCHAR* Field, uint8 MaterialID)
 	{
-		if (!FVoxelMaterialRegistry::GetMaterial(MaterialID))
+		if (!Materials.GetMaterial(MaterialID))
 		{
 			Warnings.Add(FString::Printf(
 				TEXT("tree template %d (%s): %s %d is not a registered voxel material (ids 0-%d; Wood is %d, Leaves %d)"),

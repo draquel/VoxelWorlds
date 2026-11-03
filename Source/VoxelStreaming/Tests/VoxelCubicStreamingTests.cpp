@@ -12,6 +12,8 @@
 #include "IVoxelMeshRenderer.h"
 #include "VoxelCPUCubicMesher.h"
 #include "VoxelMeshingTypes.h"
+#include "VoxelMaterialAtlas.h"
+#include "VoxelMaterialRegistry.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -316,6 +318,100 @@ bool FVoxelCubicStreamingProxyRecreatedTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("No extra face after recovery"), Extra, 0);
 
 	Test.Stop();
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// G101: two worlds with different atlases at once each mesh with their own atlas's materials. World A's atlas keeps
+// Leaves non-occluding and adds a non-occluding ID 22; world B's makes Leaves occluding. Each chunk manager's mesher holds
+// its atlas's table, a 2x2x2 leaf block meshes with its inner faces in A (48 unit faces) and without them in B (24), and
+// the registry still answers the defaults. Before G101 the last atlas bound was every world's.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCubicStreamingTwoWorldsOwnAtlasesTest,
+	"VoxelWorlds.Streaming.Cubic.TwoWorldsOwnAtlases",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelCubicStreamingTwoWorldsOwnAtlasesTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelCubicStreamingTestUtils;
+
+	auto MakeAtlas = [](bool bLeavesNonOccluding, bool bGlass)
+	{
+		UVoxelMaterialAtlas* Atlas = NewObject<UVoxelMaterialAtlas>();
+		Atlas->AddToRoot();
+		Atlas->MaterialConfigs.Reset();
+		for (const FVoxelMaterialDefinition& Mat : FVoxelMaterialTable::Defaults().GetAll())
+		{
+			FVoxelMaterialTextureConfig& Config = Atlas->MaterialConfigs.AddDefaulted_GetRef();
+			Config.MaterialID = Mat.MaterialID;
+			Config.MaterialName = Mat.Name;
+			Config.bIsMasked = Mat.bIsMasked;
+			Config.bNonOccluding = Mat.MaterialID == EVoxelMaterial::Leaves ? bLeavesNonOccluding : Mat.bNonOccluding;
+		}
+		if (bGlass)
+		{
+			FVoxelMaterialTextureConfig& Glass = Atlas->MaterialConfigs.AddDefaulted_GetRef();
+			Glass.MaterialID = EVoxelMaterial::Count;
+			Glass.MaterialName = TEXT("Glass");
+			Glass.bNonOccluding = true;
+		}
+		return Atlas;
+	};
+	UVoxelMaterialAtlas* AtlasA = MakeAtlas(true, true);
+	UVoxelMaterialAtlas* AtlasB = MakeAtlas(false, false);
+
+	FCubicStreamingWorld WorldA;
+	WorldA.Renderer.SetMaterialAtlas(AtlasA);
+	WorldA.Start(TEXT("VoxelCubicTwoAtlasesWorldA"));
+	FCubicStreamingWorld WorldB;
+	WorldB.Renderer.SetMaterialAtlas(AtlasB);
+	WorldB.Start(TEXT("VoxelCubicTwoAtlasesWorldB"));
+
+	IVoxelMesher* MesherA = WorldA.Manager->GetMesherPtr();
+	IVoxelMesher* MesherB = WorldB.Manager->GetMesherPtr();
+	const bool bTables = MesherA && MesherB && MesherA->GetConfig().Materials.IsValid() && MesherB->GetConfig().Materials.IsValid();
+	TestTrue(TEXT("Each world's mesher holds a material table"), bTables);
+	if (bTables)
+	{
+		const FVoxelMaterialTable& TableA = *MesherA->GetConfig().Materials;
+		const FVoxelMaterialTable& TableB = *MesherB->GetConfig().Materials;
+		TestEqual(TEXT("World A's table has its atlas's 23 materials"), TableA.Num(), static_cast<int32>(EVoxelMaterial::Count) + 1);
+		TestTrue(TEXT("and its glass, non-occluding"), TableA.IsNonOccluding(EVoxelMaterial::Count));
+		TestTrue(TEXT("World A's Leaves are non-occluding"), TableA.IsNonOccluding(EVoxelMaterial::Leaves));
+		TestEqual(TEXT("World B's table has the defaults' 22"), TableB.Num(), static_cast<int32>(EVoxelMaterial::Count));
+		TestFalse(TEXT("World B's Leaves are occluding"), TableB.IsNonOccluding(EVoxelMaterial::Leaves));
+
+		// The same chunk, a 2x2x2 leaf block in air, meshed by each world's mesher.
+		const int32 N = WorldA.Config->ChunkSize;
+		FVoxelMeshingRequest Request;
+		Request.ChunkSize = N;
+		Request.VoxelSize = WorldA.Config->VoxelSize;
+		Request.VoxelData.Init(FVoxelData::Air(), N * N * N);
+		for (int32 Z = 7; Z < 9; ++Z)
+		for (int32 Y = 7; Y < 9; ++Y)
+		for (int32 X = 7; X < 9; ++X)
+		{
+			Request.VoxelData[X + Y * N + Z * N * N] = FVoxelData::Solid(EVoxelMaterial::Leaves);
+		}
+		FChunkMeshData MeshA, MeshB;
+		TestTrue(TEXT("World A meshes the block"), MesherA->GenerateMeshCPU(Request, MeshA));
+		TestTrue(TEXT("World B meshes the block"), MesherB->GenerateMeshCPU(Request, MeshB));
+		TMap<FUnitFace, int32> FacesA, FacesB;
+		CollectUnitFaces(MeshA, Request.VoxelSize, FIntVector::ZeroValue, FacesA);
+		CollectUnitFaces(MeshB, Request.VoxelSize, FIntVector::ZeroValue, FacesB);
+		int32 CountA = 0, CountB = 0;
+		for (const TPair<FUnitFace, int32>& Face : FacesA) { CountA += Face.Value; }
+		for (const TPair<FUnitFace, int32>& Face : FacesB) { CountB += Face.Value; }
+		TestEqual(TEXT("World A draws the leaves' inner faces (non-occluding)"), CountA, 48);
+		TestEqual(TEXT("World B draws the outer faces only (occluding)"), CountB, 24);
+	}
+	TestEqual(TEXT("The registry answers the defaults"), FVoxelMaterialRegistry::GetMaterialCount(), static_cast<int32>(EVoxelMaterial::Count));
+	TestTrue(TEXT("with Leaves non-occluding"), FVoxelMaterialRegistry::IsNonOccluding(EVoxelMaterial::Leaves));
+
+	WorldB.Stop();
+	WorldA.Stop();
+	AtlasA->RemoveFromRoot();
+	AtlasB->RemoveFromRoot();
 	return true;
 }
 

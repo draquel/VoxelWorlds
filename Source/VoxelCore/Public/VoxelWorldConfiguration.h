@@ -14,6 +14,7 @@ class UVoxelBiomeConfiguration;
 class UVoxelCaveConfiguration;
 class UVoxelScatterConfiguration;
 class URuntimeVirtualTexture;
+class FVoxelMaterialTable;
 
 /**
  * Configuration data asset for a voxel world.
@@ -680,6 +681,15 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Configuration")
 	TArray<FString> GetSettingsWarnings() const;
+
+	/**
+	 * GetSettingsWarnings with the tree templates' materials checked against a world's material table (its atlas's)
+	 * instead of the registry's defaults: what a world starting with this configuration reports (UVoxelChunkManager, G101).
+	 * The asset itself knows no atlas, so GetSettingsWarnings checks the built-in IDs.
+	 * @param Materials The world's material table
+	 * @return The warnings; empty when nothing is wrong.
+	 */
+	TArray<FString> GetSettingsWarningsAgainst(const FVoxelMaterialTable& Materials) const;
 
 	/**
 	 * Get the spawn position for spherical planet mode over the datum (no terrain: the configuration has no world mode).

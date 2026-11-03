@@ -38,6 +38,7 @@
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
 #include "VoxelMaterialRegistry.h"
+#include "VoxelMaterialAtlas.h"
 #include "VoxelWaterPropagation.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelWaterMesher.h"
@@ -1016,9 +1017,14 @@ void UVoxelChunkManager::Initialize(
 	// The voxel cut-over and the descent prefetch (spherical Phase 6, WM-BP10) start over with the world.
 	ViewerPolicy.Reset();
 
+	// The world's material table: its atlas's (the renderer's, bound before Initialize), or the registry's defaults without
+	// one. The cubic mesher's non-occluding faces and the configuration's tree materials are checked against it (G101).
+	const UVoxelMaterialAtlas* Atlas = MeshRenderer ? MeshRenderer->GetMaterialAtlas() : nullptr;
+	MaterialTable = Atlas ? TSharedPtr<const FVoxelMaterialTable>(Atlas->MakeMaterialTable()) : nullptr;
+
 	// Settings that run but give wrong results (tree template material ids, ...): say so at world start too,
 	// since an editor session loads the asset long before Play.
-	for (const FString& Warning : Configuration->GetSettingsWarnings())
+	for (const FString& Warning : Configuration->GetSettingsWarningsAgainst(MaterialTable.IsValid() ? *MaterialTable : FVoxelMaterialTable::Defaults()))
 	{
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("World configuration %s: %s"), *Configuration->GetName(), *Warning);
 	}
@@ -1181,13 +1187,16 @@ void UVoxelChunkManager::Initialize(
 		MeshConfig.bUseGreedyMeshing = Configuration->bUseGreedyMeshing;
 		MeshConfig.bCalculateAO = Configuration->bCalculateAO;
 		MeshConfig.UVScale = Configuration->UVScale;
+		// The world's material table for the non-occluding faces; the seam mesher copies this config (G101)
+		MeshConfig.Materials = MaterialTable;
+		const FVoxelMaterialTable& Materials = MeshConfig.Materials.IsValid() ? *MeshConfig.Materials : FVoxelMaterialTable::Defaults();
 		CubicMesher->SetConfig(MeshConfig);
 
 		Mesher = MoveTemp(CubicMesher);
-		UE_LOG(LogVoxelStreaming, Log, TEXT("Using Cubic mesher (Greedy=%s, AO=%s, UVScale=%.2f)"),
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Using Cubic mesher (Greedy=%s, AO=%s, UVScale=%.2f, %d materials, NonOccluding: [%s])"),
 			Configuration->bUseGreedyMeshing ? TEXT("true") : TEXT("false"),
 			Configuration->bCalculateAO ? TEXT("true") : TEXT("false"),
-			Configuration->UVScale);
+			Configuration->UVScale, Materials.Num(), *Materials.DescribeNonOccluding());
 	}
 
 	// Cubic boundary geometry lies entirely in face planes (WM-C1): its edge and corner seams would
@@ -1599,6 +1608,7 @@ void UVoxelChunkManager::Shutdown()
 	}
 
 	WorldMode.Reset();
+	MaterialTable.Reset();
 	WorldBoundary.Destroy();
 	FarOcean.Destroy();
 	DestroyFarField();

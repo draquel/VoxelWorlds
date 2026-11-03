@@ -1651,12 +1651,7 @@ void UVoxelRegionComponent::SetMaterialAtlas(UVoxelMaterialAtlas* InAtlas)
 
 	if (MaterialAtlas)
 	{
-		// Update registry with atlas positions
-		FVoxelMaterialRegistry::SetAtlasPositions(
-			MaterialAtlas->MaterialConfigs,
-			MaterialAtlas->AtlasColumns,
-			MaterialAtlas->AtlasRows);
-
+		// The atlas's material table is its world's (the chunk manager's meshers hold it), not the registry's (G101)
 		// Update material parameters if we have a dynamic instance
 		UpdateMaterialAtlasParameters();
 	}
