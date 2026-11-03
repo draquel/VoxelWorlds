@@ -169,6 +169,10 @@ from raised views: a hill's shadow that faded at 200 m now runs on across the fa
 200 m is a thin band and almost no pixel changes. With the near cascades shortened (r.Shadow.DistanceScale 0.1) every
 terrain shadow past 2,000 uu comes from the far cascades, which shows them working end to end.
 
+### What Lumen Sees
+
+The terrain has no mesh distance fields and no ray tracing geometry, so Lumen (hardware ray tracing on this project) sees it on screen only: an overhang that leaves the screen stops darkening what it covers (visual polish F3.3, open). D-VP4's spike (2026-11-03) measured both representations a custom proxy can give: ray tracing geometry per chunk and seam mesh fixes it at about +0.2 ms of GPU frame and 50-60 MB of BLAS on the demo, distance fields per chunk work only under software Lumen at +1.6-2.4 ms; terrain hits return black until the terrain has a Lumen surface cache. The numbers and the plan: [LUMEN_OFFSCREEN_TERRAIN_SPIKE.md](../Research/LUMEN_OFFSCREEN_TERRAIN_SPIKE.md).
+
 ---
 
 ## Crossfades

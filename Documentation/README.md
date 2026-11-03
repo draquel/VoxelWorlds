@@ -62,6 +62,7 @@ system you work on. The project root holds the vocabulary (`Documentation/GLOSSA
 | [TRAVERSAL_LIMITS.md](Research/TRAVERSAL_LIMITS.md) | How far a player can travel and how big a world can be: each limit and its state |
 | [PCG_DECORATION_ARCHITECTURE.md](Research/PCG_DECORATION_ARCHITECTURE.md) | Open: the runtime PCG design; phases 3-6 built, 7 (reactivity) and 8 (coexistence) open |
 | [DC_MATERIAL_BLEND_PLAN.md](Research/DC_MATERIAL_BLEND_PLAN.md) | Open: soft material borders on Dual Contouring meshes, scoped and deferred |
+| [LUMEN_OFFSCREEN_TERRAIN_SPIKE.md](Research/LUMEN_OFFSCREEN_TERRAIN_SPIKE.md) | The D-VP4 spike (2026-11-03): ray tracing geometry and distance fields for Lumen off screen (F3.3), measured; the recommended path and its plan |
 | `Research/Bench/` | JSON bench reports cited by the world modes review (D7, G6, KI12, M1, M4-M6, reviews A and B, SP1-SP2, the vertical window) |
 | [Research/Archive/](Research/Archive/) | Finished or superseded: the build phases, the start-here package, the edit layer's February spec, engine integration, geomorph, the LOD seam investigation, the map accuracy plan, the scatter review and claim suppression, seam ownership, Transvoxel, the voxel QA follow-ups (R22-R24), the custom vertex factory research and plan |
 
