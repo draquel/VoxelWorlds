@@ -67,13 +67,25 @@ Each queue is a priority-sorted array with a set beside it for duplicate checks 
     (`ProcessEditScatterReaders` first), then one `FlushPendingOperations` on the renderer.
 
 While streaming is paused (`SetStreamingEnabled(false)`: `voxel.Stream.Enabled 0`, `vox.Freeze 1 streaming`) the tick
-runs `TickPausedRenderRecovery` instead: nothing is discovered, generated, unloaded or changes LOD, and a plain pause
-submits nothing. A scene proxy recreated meanwhile (a material or render-state change, a Lumen toggle) still gets its
-geometry back (visual polish F3.4): `RecoverLostRenderData` re-meshes the chunks it lost and re-sends the seam buckets,
-the recovered chunks alone of the meshing queue launch, the meshes that land are submitted (with them the meshes that
-were on workers when the pause began, which would otherwise fill the pending queue whose cap stops the launches), the
-water tiles are sent again and the renderer's batch is flushed (it draws its updates only then). Before, the paused tick returned at once and the chunks stayed lost until the resume. Test
-`Streaming.Cubic.RendererProxyRecreatedWhilePaused` (the viewer moved far away while paused loads and unloads nothing).
+runs `TickWhilePaused` instead: nothing is discovered, generated, unloaded or changes LOD, and a plain pause submits
+nothing. Chunks re-meshed in place still are, and they alone of the meshing queue launch (`PausedRemeshChunks`):
+
+- A scene proxy recreated meanwhile (a material or render-state change, a Lumen toggle) gets its geometry back (visual
+  polish F3.4): `RecoverLostRenderData` re-meshes the chunks it lost and re-sends the seam buckets. Before, the paused
+  tick returned at once and the chunks stayed lost until the resume. Test `Streaming.Cubic.RendererProxyRecreatedWhilePaused`
+  (the viewer moved far away while paused loads and unloads nothing).
+- `voxel.Mesh.RemeshAll` (`RemeshAllLoadedChunks`, G115) re-meshes every loaded chunk and restales every seam, and
+  with streaming paused it enlists the chunks it re-meshes in place (Loaded or on a worker; one already queued for a
+  LOD change keeps that request for the resume) and has the paused tick run the seam scheduler, which builds the
+  restaled seams. Pausing is how a scene is held for an A/B: before, the paused tick launched none of these, so a
+  mesher cvar changed and `RemeshAll` run with streaming frozen showed nothing until the resume (F2.9's bisect read
+  that as `RemeshAll` ignoring the cvar). Running, it always re-meshed every interior and seam; the seam registry
+  restales a chunk's seams whatever content version it is passed. Test `Streaming.RemeshAll.Planet` / `.Plane` (a mesh
+  job per loaded chunk, every chunk mesh and seam bucket submitted again, no residency or LOD change, running and paused).
+
+The meshes that land are submitted (with them the meshes that were on workers when the pause began, which would
+otherwise fill the pending queue whose cap stops the launches; a chunk queued again when its mesh lands stays enlisted),
+the water tiles are sent again and the renderer's batch is flushed (it draws its updates only then).
 
 A second tick function (`FVoxelFarFieldCameraTickFunction`, `TG_PostUpdateWork`) runs `TickAfterCameraUpdate`: after
 a camera cut of more than a chunk it updates the far field and runs the streaming decisions again for the camera this
@@ -355,5 +367,5 @@ far compression, §3.7 collision, §3.8 editing). The ones for this system:
 | `voxel.Collision.AuditNeighbors` | stale cooks that read a neighbour as air |
 | `voxel.Edit.MeshWork [reset]` | meshing work and what edits asked of it |
 | `voxel.MeshFade.Stats` | fades, holds, a chunk's proxy state |
-| `voxel.Mesh.RemeshAll` | re-mesh every loaded chunk in place |
+| `voxel.Mesh.RemeshAll` | re-mesh every loaded chunk and seam in place, streaming running or paused |
 | `voxel.Stream.Enabled 0\|1` | pause or resume streaming |
