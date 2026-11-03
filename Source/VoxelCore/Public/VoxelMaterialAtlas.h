@@ -126,6 +126,15 @@ struct VOXELCORE_API FVoxelMaterialTextureConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Properties")
 	bool bNonOccluding = false;
 
+	/**
+	 * The material this one turns into on steep ground (smooth terrain, visual polish VP2-O3): the triplanar functions
+	 * blend toward that material's texture slices by the surface's slope against local up (world Z, or radial on a
+	 * planet). -1, this material's own ID, or an ID with no config: never (sand dunes, snow, the rock itself).
+	 * Rendering only: the voxels keep their material, and the cubic atlas path ignores it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Properties", meta = (ClampMin = "-1", ClampMax = "254"))
+	int32 SlopeMaterialID = -1;
+
 	// ===== 2D Map Representation =====
 
 	/**
@@ -366,7 +375,8 @@ public:
 	 *   - B channel: Reserved (UV scale * 25.5, clamped to 0-255)
 	 *   - A channel: Flags (bit 0 = bIsMasked)
 	 * - Row 3: the material's texture array slices (smooth terrain): R = AlbedoArray slice, G = NormalArray slice,
-	 *   B = RoughnessArray slice, A = 0 (AlbedoArraySlices, NormalArraySlices, RoughnessArraySlices)
+	 *   B = RoughnessArray slice (AlbedoArraySlices, NormalArraySlices, RoughnessArraySlices), A = the material's
+	 *   SlopeMaterialID plus one, 0 for none (GetSlopeMaterialID)
 	 *
 	 * BuildTextureArrays() rebuilds an existing LUT in place, so materials bound to it read the new slices.
 	 */
@@ -385,6 +395,14 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Material Atlas")
 	bool IsLUTDirty() const { return bLUTDirty; }
+
+	/**
+	 * The material a material turns into on steep smooth terrain (FVoxelMaterialTextureConfig::SlopeMaterialID), as the
+	 * LUT's slice row carries it: only when it is another configured material.
+	 * @param MaterialID The material
+	 * @return The slope material's ID, or -1 for none
+	 */
+	int32 GetSlopeMaterialID(uint8 MaterialID) const;
 
 	/**
 	 * Get the set of MaterialIDs that use masked blending.
