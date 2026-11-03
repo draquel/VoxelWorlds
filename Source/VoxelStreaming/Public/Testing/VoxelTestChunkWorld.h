@@ -52,6 +52,9 @@ namespace VoxelTesting
 		int64 ChunkResubmits = 0;
 		/** FlushPendingOperations calls: the real renderer batches its updates and draws them only at the flush (F3.4). */
 		int32 Flushes = 0;
+		/** Chunk meshes submitted per chunk, and seam buckets per owner chunk (every submission; G115's in-place re-mesh). */
+		TMap<FIntVector, int32> ChunkSubmitsByChunk;
+		TMap<FIntVector, int32> SeamSubmitsByOwner;
 
 		virtual void Initialize(UWorld* World, const UVoxelWorldConfiguration* WorldConfig) override { bInitialized = true; }
 		virtual void Shutdown() override { bInitialized = false; }
@@ -60,6 +63,7 @@ namespace VoxelTesting
 		virtual void UpdateChunkMeshFromCPU(const FIntVector& ChunkCoord, int32 LODLevel, const FChunkMeshData& MeshData) override
 		{
 			++ChunkSubmits;
+			++ChunkSubmitsByChunk.FindOrAdd(ChunkCoord);
 			ChunkResubmits += ChunkMeshes.Contains(ChunkCoord) ? 1 : 0;
 			ChunkMeshes.Add(ChunkCoord, bKeepMeshes ? MeshData : FChunkMeshData());
 			ChunkLODs.Add(ChunkCoord, LODLevel);
@@ -84,6 +88,7 @@ namespace VoxelTesting
 		virtual void UpdateSeamMeshFromCPU(const FIntVector& OwnerChunkCoord, uint8 SeamSlot, int32 LODLevel, FChunkMeshData&& MeshData, bool bCrossfade) override
 		{
 			++SeamSubmits;
+			++SeamSubmitsByOwner.FindOrAdd(OwnerChunkCoord);
 			if (MeshData.IsValid())
 			{
 				SeamBuckets.Add(OwnerChunkCoord, bKeepMeshes ? MoveTemp(MeshData) : FChunkMeshData());
