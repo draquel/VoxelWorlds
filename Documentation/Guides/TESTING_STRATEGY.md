@@ -22,6 +22,7 @@ use `WITH_AUTOMATION_TESTS`). The project's test roots:
 | `Interaction.Channeled.*`, `Interaction.Flow.*`, `Interaction.WorldItem.*` | InteractionPlugin |
 | `VoxelWorldSave.*` | VoxelWorldSave |
 | `WorldClock.*` | WorldClockPlugin |
+| `VoxelEngine.*` | the game module (`Source/VoxelEngine/Private/Testing/`): the framework replication test, in the editor only (below) |
 
 The headless run is `Scripts/qa/run_suite.ps1 [-Tag t] [-Filter roots]`: with the editor closed it runs
 
@@ -55,7 +56,9 @@ root proposed); new tests follow the module's existing folder. A test file is na
 (`VoxelSeamRegistryTests.cpp`, `VoxelEditRemeshTests.cpp`), and a test's name says the rule it pins, with the review ID
 in the file's comment (`VoxelWorlds.Streaming.EditRemesh.Plane`, G56/G57).
 
-The game module's `Source/VoxelEngine/Private/Testing/` holds no tests, only the world collector (below).
+The game module's `Source/VoxelEngine/Private/Testing/` holds the world collector (below) and the one test that spans
+the framework plugins, `VoxelEngine.Replication.Framework` (below): the plugins may not depend on each other that way,
+and CommonGameFramework, under all three, cannot depend on them.
 
 ## Tests that need a GPU or a render scene
 
@@ -86,6 +89,32 @@ and `Source/VoxelStreaming/Tests/VoxelEditReachesProxyTests.cpp`. A new test tha
 pattern and in the editor gate's filter. **A green headless suite says nothing about GPU generation or the renderer.**
 The chunk-manager tests stream on the CPU into a recording renderer (below), so they run headless.
 
+## The replication test (PIE, in the editor only)
+
+`VoxelEngine.Replication.Framework` (`Source/VoxelEngine/Private/Testing/FrameworkReplicationTest.cpp`, D-CR23) runs
+the framework plugins' flows over the real net driver: it starts Play In Editor with a dedicated server and one client
+in the editor process (net mode Play As Client, one process, port 17793, a copy of the user's play settings), on
+`/Engine/Maps/Entry` with its own game mode, and drives both worlds from one latent command, a step per editor frame:
+
+1. both worlds up and the client's pawn possessed (120 s), the test's item definitions registered in both machines'
+   item databases, the server spawning a chest with three ore in it and a held interactable;
+2. the chest's ore on the client at its first replication;
+3. an add on the server reaching the client's bag through the fast array, its callback firing there;
+4. an equip the client asks for: the RPC, the server's checks, the sword out of both bags and in the main hand on both,
+   `OnRep_EquipmentSlots` on the client;
+5. a move the client asks for (Pending on the client, the slot changed on both), then one into the chest nobody opened:
+   `NotAuthorized` back through `ClientRPC_OperationFailed`, and after a 0.5 s hold nothing changed on either machine;
+6. a held interaction: the server runs the handler once, after the option's 0.5 s hold, with its copy of the player, and
+   `ClientRPC_InteractionResult` ends the client's channel;
+7. PIE stopped and its end awaited.
+
+Every step but the first has a 20 s deadline (a step takes a few frames on an idle machine) and a failure is an error
+naming its step (`Step '5 client equip request': timed out after 20 s waiting for ...`); a failure stops PIE. The actors
+are test-only classes in the game module (`FrameworkReplicationTestActors.h`), configured in their constructors so both
+machines agree on what does not replicate. The test needs the editor and a renderer: `CanRunInEnvironment` skips it
+under `-nullrhi`, in a commandlet and outside the editor, and its root is outside the headless suite's filter. Stop any
+PIE session before running it. The in-editor gate runs it.
+
 ## The in-editor gate
 
 `Scripts/qa/editor_gate.py <tag> [--port=8081] [--record=<file>]` runs those tests in a running editor and checks the
@@ -94,9 +123,9 @@ GPU against the CPU:
 1. It waits for an editor on a Claudius port (`Scripts/qa/launch_gate_editor.ps1 -Port 8081` starts one beside the
    main checkout's editor on 8080) and turns off its background throttle (`disable_bg_throttle.py`: an unfocused
    editor pins itself to 3 FPS and a run stalls).
-2. It runs `Automation RunTests VoxelWorlds.Generation.GPUvsCPU+VoxelWorlds.Generation.GPUNoiseGeneratorAsync+VoxelWorlds.Rendering.Crossfade+VoxelWorlds.Streaming.EditReachesProxy`:
-   the 12 GPU and proxy tests plus the six crossfade tests that also run headless, **18 results**, each expected to be
-   a single `Success`.
+2. It runs `Automation RunTests VoxelWorlds.Generation.GPUvsCPU+VoxelWorlds.Generation.GPUNoiseGeneratorAsync+VoxelWorlds.Rendering.Crossfade+VoxelWorlds.Streaming.EditReachesProxy+VoxelEngine.Replication.Framework`:
+   the 12 GPU and proxy tests, the six crossfade tests that also run headless and the replication test, **19 results**,
+   each expected to be a single `Success`.
 3. It extracts the **parity lines** (the parity tests' `[N voxels]: density~` lines, one per case and LOD: density,
    material, biome and metadata agreement and the GPU's CRC) and compares all **111** with the record,
    `Documentation/CodeReview/VW8/gpu_parity_lines_2026-11-02_generation.txt` (`parity_lines.py`; CR2's 114 less the
@@ -105,7 +134,8 @@ GPU against the CPU:
    explain, not a tolerance to widen: a change that should not touch generation leaves every line identical.
 4. It copies the editor's log to `Saved/QA/editor/`.
 
-This is the gate for anything touching meshing, generation or rendering. The same tests can be run through
+This is the gate for anything touching meshing, generation or rendering, and for the framework plugins' RPCs and
+replicated state. The same tests can be run through
 `unreal-mcp`'s automation test toolset; the parity comparison then needs `parity_lines.py` on the editor's log.
 
 ## The mesh digest
