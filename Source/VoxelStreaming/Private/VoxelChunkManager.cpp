@@ -1371,14 +1371,14 @@ void UVoxelChunkManager::HandleChunkEdited(const FIntVector& ChunkCoord, EEditSo
 			// Drive that from the claim covering the region once VoxelScatter consumes claims.
 			ScatterManager->RegenerateChunkScatter(ChunkCoord);
 			++EditScatterStats.Broadcasts;
-			// The chunks whose extraction reads the voxels the edit changed here (G33): the chunk below on a heightmap, the
-			// -X / -Y / -Z chunks on a planet, as far as the edit's bounds reach (the edited chunk's six face neighbours
-			// missed a planet's edge and corner readers and re-extracted the rest for nothing). Re-extracted once each in the
-			// next tick (ProcessEditScatterReaders), so an edit across many chunks folds them.
+			// The chunks whose extraction reads the voxels the edit changed here (G33), as far as the edit's bounds reach: on a
+			// smooth heightmap the face neighbours whose facing layer it touched (G109), on a cubic one the chunk below, on a
+			// planet the -X / -Y / -Z chunks (the six face neighbours missed a planet's edge and corner readers). Re-extracted
+			// once each in the next tick (ProcessEditScatterReaders), so an edit across many chunks folds them.
 			FIntVector EditMin, EditMax;
 			const bool bBounds = EditManager->GetBroadcastEditBounds(EditMin, EditMax);
 			TArray<FIntVector> Readers;
-			ScatterManager->GetEditReaders(ChunkCoord, bBounds ? &EditMin : nullptr, Readers);
+			ScatterManager->GetEditReaders(ChunkCoord, bBounds ? &EditMin : nullptr, bBounds ? &EditMax : nullptr, Readers);
 			EditScatterReaderChunks.Append(Readers);
 			EditScatterEditedChunks.Add(ChunkCoord);
 		}

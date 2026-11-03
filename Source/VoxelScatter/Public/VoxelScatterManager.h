@@ -21,6 +21,21 @@ struct FScatterExtractionContext;
 /**
  * Delegate fired when scatter data is ready for a chunk.
  */
+/**
+ * Which voxels past a chunk its extraction reads (UVoxelScatterManager::GetEditReaderOffsets): the edits there are the
+ * neighbours' edits that change the chunk's points.
+ */
+enum class EVoxelScatterOutsideReads : uint8
+{
+	/** A cubic heightmap world's block tops: the voxel over each column's top layer (world modes review G26) */
+	TopLayer,
+	/** A smooth heightmap world's column scan: the layer past each of the six faces (the voxel over the top layer, G26; the
+	 *  density gradient's voxels past the faces and under the bottom layer, G109) */
+	FaceLayers,
+	/** A planet's lines: the layers of the seven neighbours past the +X, +Y and +Z faces (G29, G31) */
+	PlanetShell,
+};
+
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnChunkScatterReady, const FIntVector& /*ChunkCoord*/, int32 /*SpawnPointCount*/);
 
 /**
@@ -258,40 +273,58 @@ public:
 		TFunctionRef<const FChunkEditLayer*(const FIntVector&)> EditLayerSource);
 
 	/**
-	 * Heightmap worlds: the edits of the chunk above on its bottom layer (local Z 0), the voxels over this chunk's top
-	 * layer, keyed by their coordinate in this chunk's frame ((X, Y, ChunkSize); world modes review G26), for
-	 * FScatterExtractionContext::OutsideEdits. Null when the layer has none.
+	 * Heightmap worlds: the edits of the six face neighbours on their layer facing this chunk (the chunk above's bottom
+	 * layer, the voxels over this chunk's top layer, G26; the layers past the other faces, which the column scan's density
+	 * gradient reads, G109), keyed by their coordinate in this chunk's frame (one component -1 or ChunkSize, the others in
+	 * [0, ChunkSize)), for FScatterExtractionContext::OutsideEdits. Null when those layers have none.
+	 * @param ChunkCoord The chunk
+	 * @param ChunkSize Voxels per chunk edge
+	 * @param EditLayerSource A chunk's edit layer, or null when it has none
+	 * @return The edits, or null when there are none
 	 */
-	static TSharedPtr<const TMap<FIntVector, FVoxelEdit>> GatherAboveLayerEdits(const FIntVector& ChunkCoord, int32 ChunkSize,
+	static TSharedPtr<const TMap<FIntVector, FVoxelEdit>> GatherFaceLayerEdits(const FIntVector& ChunkCoord, int32 ChunkSize,
 		TFunctionRef<const FChunkEditLayer*(const FIntVector&)> EditLayerSource);
 
 	/**
+	 * What a chunk's extraction reads past its own voxels on a world (EVoxelScatterOutsideReads).
+	 * @param WorldMode The world's mode
+	 * @param bCubic Whether the world meshes cubic (block tops)
+	 * @return The reads
+	 */
+	static EVoxelScatterOutsideReads GetOutsideReads(const IVoxelWorldMode& WorldMode, bool bCubic);
+
+	/**
 	 * Which other chunks' extraction reads a chunk's edited voxels, as chunk coordinate offsets from it (world modes review
-	 * G33): the inverse of what MakeExtractionContext reads past a chunk. On a heightmap world the chunk below, whose top
-	 * layer's voxel above is the bottom layer here (OutsideEdits at Z = ChunkSize, G26): offset (0, 0, -1) when the edit
-	 * reached local Z 0. On a planet (bPlanet) the chunks whose GetPlanetShellNeighbours include this one: offset -D
+	 * G33): the inverse of what MakeExtractionContext reads past a chunk. TopLayer: the chunk below, whose top layer's voxel
+	 * above is the bottom layer here (OutsideEdits at Z = ChunkSize, G26), when the edit reached local Z 0. FaceLayers: the
+	 * face neighbour at -A when the edit reached local 0 on axis A and the one at +A when it reached ChunkSize - 1 (each
+	 * reads the layer facing it, G109). PlanetShell: the chunks whose GetPlanetShellNeighbours include this one, offset -D
 	 * for each of their offsets D, when the edit reached local 0 on every axis where D is 1 (a face neighbour reads the
 	 * layer facing it, an edge neighbour the column along the shared edge, the corner neighbour the corner voxel;
 	 * OutsideEdits, G29, G31). Pure.
 	 *
-	 * @param bPlanet Whether the world is a planet (extraction reads the voxels past a chunk's +X, +Y and +Z faces) or a
-	 *        heightmap world (the voxels over a chunk's top layer); the caller passes nothing when extraction reads no
-	 *        edits at all
+	 * @param Reads What extraction reads past a chunk on the world (GetOutsideReads); the caller passes nothing when
+	 *        extraction reads no edits at all
+	 * @param ChunkSize Voxels per chunk edge
 	 * @param EditMin The lowest chunk-local coordinate the edit reached on each axis (UVoxelEditManager::
 	 *                GetBroadcastEditBounds); null when not known, which gives every chunk that could read it
+	 * @param EditMax The highest, likewise
 	 * @param OutOffsets Receives the offsets (appended)
 	 */
-	static void GetEditReaderOffsets(bool bPlanet, const FIntVector* EditMin, TArray<FIntVector>& OutOffsets);
+	static void GetEditReaderOffsets(EVoxelScatterOutsideReads Reads, int32 ChunkSize, const FIntVector* EditMin, const FIntVector* EditMax,
+		TArray<FIntVector>& OutOffsets);
 
 	/**
 	 * The chunks whose extraction reads an edited chunk's voxels on this world (GetEditReaderOffsets with this manager's
-	 * world mode and edit layer source, as MakeExtractionContext reads them). The edited chunk itself is not among them.
+	 * world mode, meshing and edit layer source, as MakeExtractionContext reads them). The edited chunk itself is not among
+	 * them.
 	 *
 	 * @param EditedChunk The edited chunk
 	 * @param EditMin The lowest chunk-local coordinate the edit reached on each axis; null when not known
+	 * @param EditMax The highest, likewise
 	 * @param OutChunks Receives the chunk coordinates (appended)
 	 */
-	void GetEditReaders(const FIntVector& EditedChunk, const FIntVector* EditMin, TArray<FIntVector>& OutChunks) const;
+	void GetEditReaders(const FIntVector& EditedChunk, const FIntVector* EditMin, const FIntVector* EditMax, TArray<FIntVector>& OutChunks) const;
 
 	/** One cached chunk's surface points against a fresh extraction now (CompareWithFreshExtraction). */
 	struct FFreshExtractionComparison

@@ -2357,6 +2357,49 @@ void UVoxelScatterManager::ExtractSurfacePointsByColumn(
 		return static_cast<float>(VoxelData[Index].Density);
 	};
 
+	// The density gradient is a central difference over two voxels at every point (G109). At the chunk's faces and in its
+	// top and bottom layers one of the two lies in a neighbour: on a heightmap world it is the voxel as generation makes it
+	// there with the neighbour's edits applied (GetVoxelOutsideChunk, OutsideEdits holds the six faces' layers), judged
+	// against the generated height of its own column. Clamped into the chunk instead, the difference was one-sided over one
+	// voxel read as two, which halved that axis's slope (a 40-degree flank read 18 at an edge column); doubled, it is right
+	// on average but the voxel densities saturate a voxel from the surface, and a one-voxel difference of them read a
+	// 40-degree plane anywhere from 1 to 59 degrees. Without a heightmap world mode (tests), that doubled one-sided
+	// difference is the fallback.
+	const bool bReadOutside = Context.WorldMode != nullptr && Context.WorldMode->IsHeightmapBased();
+	constexpr float UnreadHeight = TNumericLimits<float>::Lowest();
+	TArray<float> SideColumnHeights; // the columns past the -X, +X, -Y and +Y faces, ChunkSize each, UnreadHeight until read
+	if (bReadOutside)
+	{
+		SideColumnHeights.Init(UnreadHeight, 4 * ChunkSize);
+	}
+	auto SideColumnHeight = [&](int32 X, int32 Y) -> float
+	{
+		const int32 Slot = X < 0 ? Y : X >= ChunkSize ? ChunkSize + Y : Y < 0 ? 2 * ChunkSize + X : 3 * ChunkSize + X;
+		float& Height = SideColumnHeights[Slot];
+		if (Height == UnreadHeight)
+		{
+			Height = Context.GetGeneratedTerrainHeight(ChunkWorldOrigin.X + X * VoxelSize, ChunkWorldOrigin.Y + Y * VoxelSize);
+		}
+		return Height;
+	};
+	// One axis's difference at a voxel of the column whose generated height is ColumnHeight (bReadOutside)
+	auto AxisDifference = [&](int32 X, int32 Y, int32 Z, int32 DX, int32 DY, int32 DZ, int32 Along, float ColumnHeight, int32 BiomeID) -> float
+	{
+		const int32 Low = Along > 0 ? 1 : 0;
+		const int32 High = Along + 1 < ChunkSize ? 1 : 0;
+		if (Low + High == 2 || !bReadOutside)
+		{
+			const float Difference = GetDensity(X + DX * High, Y + DY * High, Z + DZ * High) - GetDensity(X - DX * Low, Y - DY * Low, Z - DZ * Low);
+			return Low + High == 2 ? Difference : 2.0f * Difference;
+		}
+		const int32 Step = High ? -1 : 1; // the neighbour past the face the chunk ends at
+		const FIntVector Outside(X + DX * Step, Y + DY * Step, Z + DZ * Step);
+		const float OutsideHeight = DZ != 0 ? ColumnHeight : SideColumnHeight(Outside.X, Outside.Y);
+		const float OutsideDensity = static_cast<float>(Context.GetVoxelOutsideChunk(Outside,
+			ChunkWorldOrigin + FVector(Outside.X * VoxelSize, Outside.Y * VoxelSize, Outside.Z * VoxelSize), VoxelSize, BiomeID, &OutsideHeight).Density);
+		return High ? GetDensity(X + DX, Y + DY, Z + DZ) - OutsideDensity : OutsideDensity - GetDensity(X - DX, Y - DY, Z - DZ);
+	};
+
 	// Scan each column at stride intervals, finding all solid-air transitions.
 	// Underground classification uses the voxel underground flag (set by
 	// ApplyUndergroundClassificationPass) rather than a column-based heuristic,
@@ -2469,9 +2512,9 @@ void UVoxelScatterManager::ExtractSurfacePointsByColumn(
 				}
 
 				// Compute normal from density gradient (central differences)
-				const float GradX = GetDensity(X + 1, Y, Z) - GetDensity(X - 1, Y, Z);
-				const float GradY = GetDensity(X, Y + 1, Z) - GetDensity(X, Y - 1, Z);
-				const float GradZ = GetDensity(X, Y, Z + 1) - GetDensity(X, Y, Z - 1);
+				const float GradX = AxisDifference(X, Y, Z, 1, 0, 0, X, ColumnTerrainHeight, Voxel.BiomeID);
+				const float GradY = AxisDifference(X, Y, Z, 0, 1, 0, Y, ColumnTerrainHeight, Voxel.BiomeID);
+				const float GradZ = AxisDifference(X, Y, Z, 0, 0, 1, Z, ColumnTerrainHeight, Voxel.BiomeID);
 
 				// Normal points from solid toward air (negative gradient direction)
 				FVector Normal(-GradX, -GradY, -GradZ);
@@ -3195,14 +3238,14 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 				Context.ConditioningZones = MakeShared<const TArray<FVoxelConditioningZone>>(MoveTemp(Zones));
 			}
 		}
-		// The edits in the voxels the extraction reads past the chunk: the chunk above's bottom layer on a heightmap world
-		// (the voxels over this chunk's top layer, G26); on a planet the layers of the neighbours past the chunk's +X, +Y
+		// The edits in the voxels the extraction reads past the chunk: on a heightmap world the face neighbours' layers facing
+		// it (the voxels over this chunk's top layer, G26, and the ones the density gradient reads past its faces, G109); on a planet the layers of the neighbours past the chunk's +X, +Y
 		// and +Z faces, which its last cell on each axis reaches (G29, G31).
 		if (EditLayerSource && WorldMode != nullptr)
 		{
 			Context.OutsideEdits = WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet
 				? GatherPlanetTouchingEdits(ChunkCoord, Configuration->ChunkSize, EditLayerSource)
-				: GatherAboveLayerEdits(ChunkCoord, Configuration->ChunkSize, EditLayerSource);
+				: GatherFaceLayerEdits(ChunkCoord, Configuration->ChunkSize, EditLayerSource);
 		}
 	}
 	return Context;
@@ -3216,28 +3259,38 @@ void UVoxelScatterManager::GetPlanetShellNeighbours(TArray<FIntVector>& OutOffse
 	}
 }
 
-TSharedPtr<const TMap<FIntVector, FVoxelEdit>> UVoxelScatterManager::GatherAboveLayerEdits(const FIntVector& ChunkCoord, int32 ChunkSize,
+TSharedPtr<const TMap<FIntVector, FVoxelEdit>> UVoxelScatterManager::GatherFaceLayerEdits(const FIntVector& ChunkCoord, int32 ChunkSize,
 	TFunctionRef<const FChunkEditLayer*(const FIntVector&)> EditLayerSource)
 {
-	const FChunkEditLayer* AboveLayer = EditLayerSource(ChunkCoord + FIntVector(0, 0, 1));
-	if (!AboveLayer)
+	TMap<FIntVector, FVoxelEdit> FaceEdits;
+	for (int32 Axis = 0; Axis < 3; ++Axis)
 	{
-		return nullptr;
-	}
-	TMap<FIntVector, FVoxelEdit> BottomEdits;
-	for (const TPair<int32, FVoxelEdit>& Pair : AboveLayer->Edits)
-	{
-		const FIntVector& Local = Pair.Value.LocalPosition;
-		if (Local.Z == 0 && Local.X >= 0 && Local.X < ChunkSize && Local.Y >= 0 && Local.Y < ChunkSize)
+		for (const int32 Sign : { -1, 1 })
 		{
-			BottomEdits.Add(FIntVector(Local.X, Local.Y, ChunkSize), Pair.Value);
+			FIntVector Offset = FIntVector::ZeroValue;
+			Offset[Axis] = Sign;
+			const FChunkEditLayer* Layer = EditLayerSource(ChunkCoord + Offset);
+			if (!Layer)
+			{
+				continue;
+			}
+			// The neighbour's layer facing this chunk: its local ChunkSize - 1 past this chunk's min face, 0 past its max face.
+			const int32 FacingLayer = Sign < 0 ? ChunkSize - 1 : 0;
+			for (const TPair<int32, FVoxelEdit>& Pair : Layer->Edits)
+			{
+				const FIntVector& Local = Pair.Value.LocalPosition;
+				if (Local[Axis] == FacingLayer && Local.GetMin() >= 0 && Local.GetMax() < ChunkSize)
+				{
+					FaceEdits.Add(Local + Offset * ChunkSize, Pair.Value);
+				}
+			}
 		}
 	}
-	if (BottomEdits.Num() == 0)
+	if (FaceEdits.Num() == 0)
 	{
 		return nullptr;
 	}
-	return MakeShared<const TMap<FIntVector, FVoxelEdit>>(MoveTemp(BottomEdits));
+	return MakeShared<const TMap<FIntVector, FVoxelEdit>>(MoveTemp(FaceEdits));
 }
 
 TSharedPtr<const TMap<FIntVector, FVoxelEdit>> UVoxelScatterManager::GatherPlanetTouchingEdits(const FIntVector& ChunkCoord, int32 ChunkSize,
@@ -3270,14 +3323,42 @@ TSharedPtr<const TMap<FIntVector, FVoxelEdit>> UVoxelScatterManager::GatherPlane
 	return MakeShared<const TMap<FIntVector, FVoxelEdit>>(MoveTemp(Touching));
 }
 
-void UVoxelScatterManager::GetEditReaderOffsets(bool bPlanet, const FIntVector* EditMin, TArray<FIntVector>& OutOffsets)
+EVoxelScatterOutsideReads UVoxelScatterManager::GetOutsideReads(const IVoxelWorldMode& Mode, bool bCubic)
 {
-	// A heightmap chunk reads the voxels over its top layer: the bottom layer (local Z 0) of the chunk above (G26).
-	if (!bPlanet)
+	return Mode.GetWorldModeType() == EWorldMode::SphericalPlanet ? EVoxelScatterOutsideReads::PlanetShell
+		: bCubic ? EVoxelScatterOutsideReads::TopLayer : EVoxelScatterOutsideReads::FaceLayers;
+}
+
+void UVoxelScatterManager::GetEditReaderOffsets(EVoxelScatterOutsideReads Reads, int32 ChunkSize, const FIntVector* EditMin,
+	const FIntVector* EditMax, TArray<FIntVector>& OutOffsets)
+{
+	// A cubic heightmap chunk reads the voxels over its top layer: the bottom layer (local Z 0) of the chunk above (G26).
+	if (Reads == EVoxelScatterOutsideReads::TopLayer)
 	{
 		if (!EditMin || EditMin->Z == 0)
 		{
 			OutOffsets.AddUnique(FIntVector(0, 0, -1));
+		}
+		return;
+	}
+	// A smooth heightmap chunk reads the layer past each of its faces (the voxel over its top layer, G26; the density
+	// gradient's voxels past its faces and under its bottom layer, G109): the face neighbour's layer facing it. So the chunk
+	// at -A reads this one's voxels at local 0 on axis A, the chunk at +A its voxels at local ChunkSize - 1.
+	if (Reads == EVoxelScatterOutsideReads::FaceLayers)
+	{
+		for (int32 Axis = 0; Axis < 3; ++Axis)
+		{
+			FIntVector Offset = FIntVector::ZeroValue;
+			if (!EditMin || (*EditMin)[Axis] == 0)
+			{
+				Offset[Axis] = -1;
+				OutOffsets.AddUnique(Offset);
+			}
+			if (!EditMax || (*EditMax)[Axis] == ChunkSize - 1)
+			{
+				Offset[Axis] = 1;
+				OutOffsets.AddUnique(Offset);
+			}
 		}
 		return;
 	}
@@ -3299,15 +3380,17 @@ void UVoxelScatterManager::GetEditReaderOffsets(bool bPlanet, const FIntVector* 
 	}
 }
 
-void UVoxelScatterManager::GetEditReaders(const FIntVector& EditedChunk, const FIntVector* EditMin, TArray<FIntVector>& OutChunks) const
+void UVoxelScatterManager::GetEditReaders(const FIntVector& EditedChunk, const FIntVector* EditMin, const FIntVector* EditMax,
+	TArray<FIntVector>& OutChunks) const
 {
 	// The same conditions under which MakeExtractionContext reads a neighbour's edits.
-	if (!EditLayerSource || WorldMode == nullptr)
+	if (!EditLayerSource || WorldMode == nullptr || !Configuration)
 	{
 		return;
 	}
 	TArray<FIntVector> Offsets;
-	GetEditReaderOffsets(WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet, EditMin, Offsets);
+	GetEditReaderOffsets(GetOutsideReads(*WorldMode, Configuration->MeshingMode == EMeshingMode::Cubic), Configuration->ChunkSize, EditMin,
+		EditMax, Offsets);
 	for (const FIntVector& Offset : Offsets)
 	{
 		OutChunks.Add(EditedChunk + Offset);

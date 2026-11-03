@@ -146,7 +146,7 @@ static void RunDebugSystemEdit(const TArray<FString>& InArgs, UWorld* World, boo
 			if (ScatterMgr)
 			{
 				TArray<FIntVector> Readers;
-				ScatterMgr->GetEditReaders(Pair.Key, Pair.Value.IsValid() ? &Pair.Value.Min : nullptr, Readers);
+				ScatterMgr->GetEditReaders(Pair.Key, Pair.Value.IsValid() ? &Pair.Value.Min : nullptr, Pair.Value.IsValid() ? &Pair.Value.Max : nullptr, Readers);
 				for (const FIntVector& R : Readers)
 				{
 					ReaderText += FString::Printf(TEXT(" (%d,%d,%d)%s"), R.X, R.Y, R.Z, Edited.Contains(R) ? TEXT("*") : TEXT(""));
