@@ -190,6 +190,13 @@ public:
 
 	virtual bool HasSubprimitiveOcclusionQueries() const override { return false; }
 
+#if RHI_RAYTRACING
+	// SPIKE (D-VP4): ray tracing geometry per chunk and seam mesh (voxel.Render.Spike.RayTracing, VoxelTerrainRepresentationSpike.h)
+	virtual bool IsRayTracingRelevant() const override { return true; }
+	virtual bool HasRayTracingRepresentation() const override { return bSpikeRayTracing; }
+	virtual void GetDynamicRayTracingInstances(FRayTracingInstanceCollector& Collector) override;
+#endif
+
 	// ==================== Chunk Management (Render Thread) ====================
 
 	/**
@@ -609,4 +616,28 @@ private:
 
 	/** Critical section for thread-safe chunk access */
 	mutable FCriticalSection ChunkDataLock;
+
+	/** SPIKE (D-VP4): whether this proxy builds ray tracing geometry (voxel.Render.Spike.RayTracing at creation) */
+	bool bSpikeRayTracing = false;
+
+#if RHI_RAYTRACING
+	/** SPIKE (D-VP4): a mesh's ray tracing geometry and the index buffer it was built from (a replaced mesh has a new one) */
+	struct FSpikeRayTracingEntry
+	{
+		TSharedPtr<FRayTracingGeometry> Geometry;
+		FRHIBuffer* SourceIndexBuffer = nullptr;
+		uint64 Bytes = 0;
+	};
+	TMap<FIntVector, FSpikeRayTracingEntry> SpikeChunkRayTracing;
+	TMap<FVoxelSeamMeshKey, FSpikeRayTracingEntry> SpikeSeamRayTracing;
+
+	/** SPIKE (D-VP4): build (or rebuild) a mesh's ray tracing geometry from its buffers. Render thread. */
+	void SpikeBuildRayTracing_RenderThread(FRHICommandListBase& RHICmdList, const FVoxelChunkRenderData& RenderData, FSpikeRayTracingEntry& Entry);
+
+	/** SPIKE (D-VP4): release the geometry of meshes that were replaced or removed. Caller must hold ChunkDataLock. */
+	void SpikePruneRayTracing_AssumesLocked();
+
+	/** SPIKE (D-VP4): release one entry's geometry. */
+	static void SpikeReleaseRayTracing(FSpikeRayTracingEntry& Entry);
+#endif
 };

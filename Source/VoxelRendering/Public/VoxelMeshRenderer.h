@@ -226,6 +226,15 @@ private:
 	/** Game thread chunk tracking */
 	TMap<FIntVector, FChunkStats> ChunkStatsMap;
 
+	/** SPIKE (D-VP4): one distance-field-only component per chunk with a surface (voxel.Render.Spike.DistanceField) */
+	TMap<FIntVector, TObjectPtr<class UVoxelChunkDistanceFieldComponent>> SpikeDistanceFieldComponents;
+
+	/** SPIKE (D-VP4): create, update or remove a chunk's distance field component from its new mesh. */
+	void UpdateSpikeDistanceField(const FIntVector& ChunkCoord, const FChunkMeshData& MeshData);
+
+	/** SPIKE (D-VP4): destroy a chunk's distance field component, or every one when ChunkCoord is null. */
+	void RemoveSpikeDistanceField(const FIntVector* ChunkCoord);
+
 	/** Total statistics */
 	int64 TotalVertexCount = 0;
 	int64 TotalTriangleCount = 0;
