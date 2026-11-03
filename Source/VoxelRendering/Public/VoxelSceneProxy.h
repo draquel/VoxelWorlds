@@ -8,6 +8,9 @@
 #include "LocalVertexFactory.h"
 #include "VoxelLocalVertexFactory.h"
 #include "VoxelBatchCounters.h"
+#if RHI_RAYTRACING
+#include "RayTracingGeometry.h"
+#endif
 
 class UVoxelRegionComponent;
 
@@ -124,6 +127,18 @@ struct FVoxelChunkDrawInfo
 
 	/** A frame draws the current mesh alone with the terrain material (no fade) */
 	bool DrawsCurrentOnly() const { return CurrentTriangles > 0 && bVisible && !bCrossfading && !bAppearing; }
+
+	/** The proxy gives its meshes ray tracing geometry (visual polish F3.3: voxel.Render.RayTracing and the project's ray
+	 *  tracing support, fixed when the proxy was created) */
+	bool bRayTracing = false;
+
+	/** Triangles of the current mesh's ray tracing geometry (0 = none: the previous mesh of a crossfade is never traced) */
+	uint32 RayTracingTriangles = 0;
+
+	/** Ray tracing geometries the whole proxy holds, chunk interiors and seam buckets, and their acceleration structures' bytes */
+	int32 ProxyRayTracingChunks = 0;
+	int32 ProxyRayTracingSeams = 0;
+	uint64 ProxyRayTracingBytes = 0;
 };
 
 /** A vertex's two packed tangents as the tangent SRV holds them (the scene proxy's mesh buffers) */
@@ -189,6 +204,30 @@ public:
 	virtual bool CanBeOccluded() const override { return true; }
 
 	virtual bool HasSubprimitiveOcclusionQueries() const override { return false; }
+
+#if RHI_RAYTRACING
+	// ==================== Ray Tracing (visual polish F3.3) ====================
+	// Every current chunk and seam mesh has an FRayTracingGeometry over the buffers the proxy uploaded, built once on the
+	// GPU, so hardware Lumen (and ray traced shadows and reflections) see the terrain off screen. The instances are gathered
+	// per frame (the dynamic path): the scene's cached path (CacheInstances) takes instance transforms from GPUScene, which
+	// this proxy does not use (its batches carry the primitive uniform buffer). The gather allocates nothing: each mesh keeps
+	// its mesh batch, and the instances view it and the proxy's transform. Off with voxel.Render.RayTracing 0.
+
+	/** Always: whether a proxy of this type is in the ray tracing scene depends on HasRayTracingRepresentation. */
+	virtual bool IsRayTracingRelevant() const override { return true; }
+
+	/** @return Whether this proxy gives its meshes ray tracing geometry (fixed for its life: the scene caches it) */
+	virtual bool HasRayTracingRepresentation() const override { return bRayTracing; }
+
+	/**
+	 * One instance per current chunk and seam mesh whose acceleration structure is built (one still building joins once it
+	 * is), with the terrain material, for each view the primitive is visible in and whose Lumen max trace distance
+	 * (times voxel.Render.RayTracing.TraceDistanceScale) reaches the mesh's box.
+	 *
+	 * @param Collector Receives the instances
+	 */
+	virtual void GetDynamicRayTracingInstances(FRayTracingInstanceCollector& Collector) override;
+#endif
 
 	// ==================== Chunk Management (Render Thread) ====================
 
@@ -518,6 +557,59 @@ private:
 
 	/** Release every seam Previous set and fade state. Caller must hold ChunkDataLock. */
 	void ReleaseAllSeamFadeStates_AssumesLocked();
+
+	// ==================== Ray Tracing Data (visual polish F3.3) ====================
+
+	/**
+	 * Whether this proxy gives its chunk and seam meshes ray tracing geometry: voxel.Render.RayTracing and the project's
+	 * ray tracing support, read at creation. Fixed for the proxy's life (the scene reads HasRayTracingRepresentation once);
+	 * a change of the cvar recreates the proxies.
+	 */
+	bool bRayTracing = false;
+
+#if RHI_RAYTRACING
+	/** A current mesh's ray tracing geometry, its acceleration structure's size and the mesh batch its instances view */
+	struct FVoxelMeshRayTracing
+	{
+		TUniquePtr<FRayTracingGeometry> Geometry;
+		uint64 Bytes = 0;
+		FMeshBatch MeshBatch;
+		/** The mesh's world box: the gather leaves out a mesh beyond a view's Lumen trace distance (TraceDistanceScale) */
+		FBox WorldBounds = FBox(ForceInit);
+	};
+
+	/** Per current chunk mesh (a crossfade's Previous mesh has none: it is not traced) */
+	TMap<FIntVector, FVoxelMeshRayTracing> ChunkRayTracing;
+
+	/** Per current seam bucket */
+	TMap<FVoxelSeamMeshKey, FVoxelMeshRayTracing> SeamRayTracing;
+
+	/** The primitive's transform, which every instance views (GetDynamicRayTracingInstances refreshes it) */
+	FMatrix RayTracingTransform = FMatrix::Identity;
+
+	/**
+	 * Build a mesh's geometry and mesh batch over its uploaded buffers, replacing any it had. Caller must hold ChunkDataLock.
+	 *
+	 * @param RenderData    The mesh's buffers and counts
+	 * @param VertexFactory The mesh's vertex factory (the batch's; it lives as long as the entry)
+	 * @param IndexBuffer   The mesh's index buffer wrapper (likewise)
+	 * @param DebugName     The geometry's name in GPU captures and stats
+	 * @param Entry         Receives the geometry
+	 */
+	void BuildRayTracing_AssumesLocked(FRHICommandListBase& RHICmdList, const FVoxelChunkRenderData& RenderData,
+		const FLocalVertexFactory* VertexFactory, const FIndexBuffer* IndexBuffer, const TCHAR* DebugName, FVoxelMeshRayTracing& Entry);
+
+	/** Release one entry's geometry. Caller must hold ChunkDataLock. */
+	void ReleaseRayTracing_AssumesLocked(FVoxelMeshRayTracing& Entry);
+
+	/** Release a chunk's or a seam bucket's geometry, if it has one. Caller must hold ChunkDataLock. */
+	void ReleaseChunkRayTracing_AssumesLocked(const FIntVector& ChunkCoord);
+	void ReleaseSeamRayTracing_AssumesLocked(const FVoxelSeamMeshKey& Key);
+
+	/** Release every chunk's (or every seam bucket's) geometry. Caller must hold ChunkDataLock. */
+	void ReleaseAllChunkRayTracing_AssumesLocked();
+	void ReleaseAllSeamRayTracing_AssumesLocked();
+#endif
 
 	// ==================== Water Tile Data ====================
 

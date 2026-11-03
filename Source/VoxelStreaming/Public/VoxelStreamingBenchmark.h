@@ -230,6 +230,9 @@ private:
 		int32 FarShadowBatchesDrawn;
 		// The most batches one GetDynamicMeshElements call drew since the last sample (the per-call cap is 2,000)
 		int32 MaxBatchesPerCall;
+		// The terrain's ray tracing geometries alive and their acceleration structures (MB; visual polish F3.3)
+		int32 RTGeomN;
+		float BLASMB;
 	};
 
 	void TakeSample(float DeltaTime);

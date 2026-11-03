@@ -13,11 +13,86 @@
 #include "MeshBatch.h"
 #include "DataDrivenShaderPlatformInfo.h"
 #include "GlobalRenderResources.h"
+#include "RenderUtils.h"
+#include "UObject/UObjectIterator.h"
+#include "VoxelRayTracingCounters.h"
+#if RHI_RAYTRACING
+#include "RayTracingInstance.h"
+#endif
 
 #include <atomic>
 
 namespace
 {
+	/** Recreate every region component's scene proxy (game thread): ray tracing is fixed per proxy, and a new proxy gets its
+	 *  geometry back from its owner (UVoxelChunkManager::RecoverLostRenderData, G15). */
+	void RecreateVoxelRegionProxies(IConsoleVariable* Var)
+	{
+		static int32 Applied = 1;
+		const int32 Value = Var ? Var->GetInt() : Applied;
+		if (Value == Applied)
+		{
+			return;
+		}
+		Applied = Value;
+		int32 Recreated = 0;
+		for (TObjectIterator<UVoxelRegionComponent> It; It; ++It)
+		{
+			if (It->IsRegistered() && It->IsRenderStateCreated())
+			{
+				It->MarkRenderStateDirty();
+				++Recreated;
+			}
+		}
+		UE_LOG(LogVoxelRendering, Log, TEXT("voxel.Render.RayTracing %d: recreated %d region proxies"), Value, Recreated);
+	}
+
+	TAutoConsoleVariable<int32> CVarVoxelRayTracing(
+		TEXT("voxel.Render.RayTracing"),
+		1,
+		TEXT("Ray tracing geometry for the terrain's chunk and seam meshes (visual polish F3.3), so hardware Lumen and ray traced ")
+		TEXT("shadows and reflections see the terrain off screen. Needs the project's ray tracing support. A change recreates the ")
+		TEXT("terrain's region proxies (their chunks re-mesh). 0 = off: Lumen sees the terrain in screen space only."),
+		FConsoleVariableDelegate::CreateStatic(&RecreateVoxelRegionProxies),
+		ECVF_Default);
+
+	TAutoConsoleVariable<float> CVarVoxelRayTracingTraceDistanceScale(
+		TEXT("voxel.Render.RayTracing.TraceDistanceScale"),
+		1.0f,
+		TEXT("The terrain's ray tracing instances (voxel.Render.RayTracing) are gathered each frame for the chunk and seam meshes ")
+		TEXT("within this multiple of the view's Lumen max trace distance (the post process setting, 20,000 uu by default), measured ")
+		TEXT("from the camera to the mesh's box: rays from the pixels near the camera end before the meshes left out, which cost ")
+		TEXT("the gather every frame. 0 = every mesh."),
+		ECVF_RenderThreadSafe);
+
+	std::atomic<int64> GVoxelRTGeometriesLive{ 0 };
+	std::atomic<int64> GVoxelRTBytesLive{ 0 };
+	std::atomic<int64> GVoxelRTBuilds{ 0 };
+	std::atomic<int64> GVoxelRTReleases{ 0 };
+	std::atomic<int64> GVoxelRTInstancesLastFrame{ 0 };
+	std::atomic<uint32> GVoxelRTInstancesFrame{ 0 };
+	std::atomic<int64> GVoxelRTSkippedPending{ 0 };
+	std::atomic<int64> GVoxelRTProxiesLive{ 0 };
+
+	FAutoConsoleCommand CmdVoxelRayTracingStats(
+		TEXT("voxel.Render.RayTracingStats"),
+		TEXT("The terrain's ray tracing geometry (visual polish F3.3), over every voxel scene proxy: proxies with it, geometries ")
+		TEXT("alive and their BLAS megabytes, the instances the last frame's gather emitted, and since the start or the last reset ")
+		TEXT("the geometries built and released and the gathers that left a geometry out while its BLAS was building. 'reset' clears ")
+		TEXT("the cumulative counts."),
+		FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+		{
+			const FVoxelRayTracingCounters::FCounts C = FVoxelRayTracingCounters::Get();
+			UE_LOG(LogVoxelRendering, Display,
+				TEXT("voxel.Render.RayTracing %d (ray tracing %s): %lld proxies, %lld geometries live, %.1f MB BLAS, %lld instances last frame; %lld built, %lld released, %lld left out while building"),
+				CVarVoxelRayTracing.GetValueOnGameThread(), IsRayTracingAllowed() ? TEXT("allowed") : TEXT("not allowed"),
+				C.ProxiesLive, C.GeometriesLive, C.BytesLive / (1024.0 * 1024.0), C.ProxiesLive > 0 ? C.InstancesLastFrame : 0, C.Builds, C.Releases, C.SkippedPending);
+			if (Args.Num() > 0 && Args[0].Equals(TEXT("reset"), ESearchCase::IgnoreCase))
+			{
+				FVoxelRayTracingCounters::Reset();
+			}
+		}));
+
 	TAutoConsoleVariable<int32> CVarVoxelFarShadowMinLOD(
 		TEXT("voxel.Render.FarShadowMinLOD"),
 		1,
@@ -226,13 +301,32 @@ FVoxelSceneProxy::FVoxelSceneProxy(UVoxelRegionComponent* InComponent, UMaterial
 	// batches in GetDynamicMeshElements. See Documentation/Research/Archive/ENGINE_INTEGRATION.md.
 	bSupportsRuntimeVirtualTexture = true;
 
-	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Created with FLocalVertexFactory (RVT material types=%d)"), RuntimeVirtualTextureMaterialTypes.Num());
+#if RHI_RAYTRACING
+	// Ray tracing geometry per chunk and seam mesh (visual polish F3.3), fixed for the proxy's life
+	bRayTracing = IsRayTracingAllowed() && CVarVoxelRayTracing.GetValueOnAnyThread() != 0;
+	if (bRayTracing)
+	{
+		FVoxelRayTracingCounters::AddProxy(1);
+	}
+#endif
+
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Created with FLocalVertexFactory (RVT material types=%d, ray tracing %s)"),
+		RuntimeVirtualTextureMaterialTypes.Num(), bRayTracing ? TEXT("on") : TEXT("off"));
 }
 
 FVoxelSceneProxy::~FVoxelSceneProxy()
 {
 	// Release all chunk resources
 	FScopeLock Lock(&ChunkDataLock);
+
+#if RHI_RAYTRACING
+	ReleaseAllChunkRayTracing_AssumesLocked();
+	ReleaseAllSeamRayTracing_AssumesLocked();
+	if (bRayTracing)
+	{
+		FVoxelRayTracingCounters::AddProxy(-1);
+	}
+#endif
 
 	ReleaseAllChunkFadeStates_AssumesLocked();
 
@@ -1135,6 +1229,11 @@ void FVoxelSceneProxy::ReleaseAllChunkFadeStates_AssumesLocked()
 
 void FVoxelSceneProxy::RetireOrReleaseChunk_AssumesLocked(const FIntVector& ChunkCoord, bool bMoveToPrevious)
 {
+#if RHI_RAYTRACING
+	// The current mesh leaves its slot (released, or kept as a crossfade's Previous, which is not traced)
+	ReleaseChunkRayTracing_AssumesLocked(ChunkCoord);
+#endif
+
 	// Held at alpha 0 by a coordinated LOD transition: the surface on screen is the retained
 	// Previous mesh and the current one was uploaded but never shown. Replace only the current —
 	// releasing Previous here would change the visible surface in the middle of the hold.
@@ -1209,6 +1308,10 @@ void FVoxelSceneProxy::RemoveChunk_RenderThread(const FIntVector& ChunkCoord)
 	// Drop any crossfade state along with the chunk
 	ReleaseChunkFadeState_AssumesLocked(ChunkCoord);
 
+#if RHI_RAYTRACING
+	ReleaseChunkRayTracing_AssumesLocked(ChunkCoord);
+#endif
+
 	if (FVoxelChunkRenderData* RenderData = ChunkRenderData.Find(ChunkCoord))
 	{
 		RenderData->ReleaseResources();
@@ -1252,6 +1355,10 @@ void FVoxelSceneProxy::ClearAllChunks_RenderThread()
 	FScopeLock Lock(&ChunkDataLock);
 
 	ReleaseAllChunkFadeStates_AssumesLocked();
+
+#if RHI_RAYTRACING
+	ReleaseAllChunkRayTracing_AssumesLocked();
+#endif
 
 	for (auto& Pair : ChunkRenderData)
 	{
@@ -1702,6 +1809,11 @@ void FVoxelSceneProxy::UpdateSeamMeshFromCPUData_RenderThread(
 	SeamVertexFactory->InitResource(RHICmdList);
 	SeamVertexFactories.Add(Key, SeamVertexFactory);
 
+#if RHI_RAYTRACING
+	BuildRayTracing_AssumesLocked(RHICmdList, NewRenderData, SeamVertexFactory.Get(), IndexBufferWrapper.Get(), TEXT("VoxelSeamRayTracing"),
+		SeamRayTracing.FindOrAdd(Key));
+#endif
+
 	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelSceneProxy: Updated seam mesh %s axis=%d - %d vertices, %d indices"),
 		*OwnerChunkCoord.ToString(), Axis, VertexCount, IndexCount);
 }
@@ -1732,6 +1844,10 @@ void FVoxelSceneProxy::RetireOrReleaseSeam_AssumesLocked(const FVoxelSeamMeshKey
 	// only the never-shown current bucket is replaced; otherwise one retained generation at most.
 	// Seams add one case: a bucket that is fading out to nothing has a Previous and no current, and
 	// a new bucket arriving for it keeps that remnant as the outgoing half of the restarted fade.
+#if RHI_RAYTRACING
+	// The current bucket leaves its slot (released, or kept as a fade's Previous, which is not traced)
+	ReleaseSeamRayTracing_AssumesLocked(Key);
+#endif
 	const FVoxelChunkFadeState* HeldFade = bMoveToPrevious ? SeamFadeStates.Find(Key) : nullptr;
 	// An appearance has nothing to fade from: the replaced bucket goes, the new one continues the fade-in.
 	if (HeldFade && HeldFade->bAppear)
@@ -1807,11 +1923,12 @@ void FVoxelSceneProxy::RemoveSeamMesh_RenderThread(const FIntVector& OwnerChunkC
 		// Fade to nothing: the bucket becomes a Previous set that dithers out under its fade state
 		// (attached by the game thread just before this command) and is released on completion.
 		RetireOrReleaseSeam_AssumesLocked(Key, /*bMoveToPrevious*/ true);
-		return;
 	}
-
-	ReleaseSeamFadeState_AssumesLocked(Key);
-	RetireOrReleaseSeam_AssumesLocked(Key, /*bMoveToPrevious*/ false);
+	else
+	{
+		ReleaseSeamFadeState_AssumesLocked(Key);
+		RetireOrReleaseSeam_AssumesLocked(Key, /*bMoveToPrevious*/ false);
+	}
 }
 
 void FVoxelSceneProxy::ClearAllSeamMeshes_RenderThread()
@@ -1821,6 +1938,10 @@ void FVoxelSceneProxy::ClearAllSeamMeshes_RenderThread()
 	FScopeLock Lock(&ChunkDataLock);
 
 	ReleaseAllSeamFadeStates_AssumesLocked();
+
+#if RHI_RAYTRACING
+	ReleaseAllSeamRayTracing_AssumesLocked();
+#endif
 
 	for (auto& Pair : SeamRenderData)
 	{
@@ -1912,6 +2033,10 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 
 		// Drop any crossfade state along with the chunk
 		ReleaseChunkFadeState_AssumesLocked(ChunkCoord);
+
+#if RHI_RAYTRACING
+		ReleaseChunkRayTracing_AssumesLocked(ChunkCoord);
+#endif
 
 		if (FVoxelChunkRenderData* RenderData = ChunkRenderData.Find(ChunkCoord))
 		{
@@ -2075,6 +2200,11 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 		);
 		ChunkVertexFactory->InitResource(RHICmdList);
 		ChunkVertexFactories.Add(ChunkCoord, ChunkVertexFactory);
+
+#if RHI_RAYTRACING
+		BuildRayTracing_AssumesLocked(RHICmdList, NewRenderData, ChunkVertexFactory.Get(), IndexBufferWrapper.Get(), TEXT("VoxelChunkRayTracing"),
+			ChunkRayTracing.FindOrAdd(ChunkCoord));
+#endif
 	}
 
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Batch update - %d adds, %d removals processed"),
@@ -2125,6 +2255,17 @@ SIZE_T FVoxelSceneProxy::GetGPUMemoryUsage() const
 	{
 		Total += Pair.Value.RenderData.GetGPUMemoryUsage();
 	}
+#if RHI_RAYTRACING
+	// The acceleration structures of the current meshes (F3.3)
+	for (const auto& Pair : ChunkRayTracing)
+	{
+		Total += Pair.Value.Bytes;
+	}
+	for (const auto& Pair : SeamRayTracing)
+	{
+		Total += Pair.Value.Bytes;
+	}
+#endif
 	return Total;
 }
 
@@ -2157,6 +2298,23 @@ bool FVoxelSceneProxy::GetChunkDrawInfo_RenderThread(const FIntVector& ChunkCoor
 	// As GetDynamicMeshElements decides it (outside wireframe)
 	OutInfo.bCrossfading = IsChunkFadeDrawable(FadeState, PreviousMesh);
 	OutInfo.bAppearing = !OutInfo.bCrossfading && FadeState && FadeState->bAppear && FadeState->FadeInProxy;
+	OutInfo.bRayTracing = bRayTracing;
+#if RHI_RAYTRACING
+	if (const FVoxelMeshRayTracing* CurrentRayTracing = ChunkRayTracing.Find(ChunkCoord); CurrentRayTracing && CurrentRayTracing->Geometry.IsValid())
+	{
+		OutInfo.RayTracingTriangles = CurrentRayTracing->Geometry->GetInitializer().TotalPrimitiveCount;
+	}
+	for (const auto& Pair : ChunkRayTracing)
+	{
+		OutInfo.ProxyRayTracingChunks += Pair.Value.Geometry.IsValid() ? 1 : 0;
+		OutInfo.ProxyRayTracingBytes += Pair.Value.Bytes;
+	}
+	for (const auto& Pair : SeamRayTracing)
+	{
+		OutInfo.ProxyRayTracingSeams += Pair.Value.Geometry.IsValid() ? 1 : 0;
+		OutInfo.ProxyRayTracingBytes += Pair.Value.Bytes;
+	}
+#endif
 	return OutInfo.CurrentTriangles > 0;
 }
 
@@ -2239,3 +2397,233 @@ FString FVoxelSceneProxy::GetFadeDebugString_RenderThread(int32 MaxEntries, cons
 	}
 	return Out;
 }
+
+// ==================== Ray Tracing (visual polish F3.3) ====================
+
+FVoxelRayTracingCounters::FCounts FVoxelRayTracingCounters::Get()
+{
+	FCounts Counts;
+	Counts.GeometriesLive = GVoxelRTGeometriesLive.load(std::memory_order_relaxed);
+	Counts.BytesLive = GVoxelRTBytesLive.load(std::memory_order_relaxed);
+	Counts.Builds = GVoxelRTBuilds.load(std::memory_order_relaxed);
+	Counts.Releases = GVoxelRTReleases.load(std::memory_order_relaxed);
+	Counts.InstancesLastFrame = GVoxelRTInstancesLastFrame.load(std::memory_order_relaxed);
+	Counts.SkippedPending = GVoxelRTSkippedPending.load(std::memory_order_relaxed);
+	Counts.ProxiesLive = GVoxelRTProxiesLive.load(std::memory_order_relaxed);
+	return Counts;
+}
+
+void FVoxelRayTracingCounters::Reset()
+{
+	GVoxelRTBuilds.store(0, std::memory_order_relaxed);
+	GVoxelRTReleases.store(0, std::memory_order_relaxed);
+	GVoxelRTSkippedPending.store(0, std::memory_order_relaxed);
+}
+
+void FVoxelRayTracingCounters::AddBuild(int64 Bytes)
+{
+	GVoxelRTGeometriesLive.fetch_add(1, std::memory_order_relaxed);
+	GVoxelRTBytesLive.fetch_add(Bytes, std::memory_order_relaxed);
+	GVoxelRTBuilds.fetch_add(1, std::memory_order_relaxed);
+}
+
+void FVoxelRayTracingCounters::AddRelease(int64 Bytes)
+{
+	GVoxelRTGeometriesLive.fetch_sub(1, std::memory_order_relaxed);
+	GVoxelRTBytesLive.fetch_sub(Bytes, std::memory_order_relaxed);
+	GVoxelRTReleases.fetch_add(1, std::memory_order_relaxed);
+}
+
+void FVoxelRayTracingCounters::AddGathered(int64 Instances, int64 SkippedPending)
+{
+	// Summed over the proxies of one render frame: the first gather of a new frame starts the sum again
+	const uint32 Frame = GFrameNumberRenderThread;
+	if (GVoxelRTInstancesFrame.exchange(Frame, std::memory_order_relaxed) != Frame)
+	{
+		GVoxelRTInstancesLastFrame.store(Instances, std::memory_order_relaxed);
+	}
+	else
+	{
+		GVoxelRTInstancesLastFrame.fetch_add(Instances, std::memory_order_relaxed);
+	}
+	GVoxelRTSkippedPending.fetch_add(SkippedPending, std::memory_order_relaxed);
+}
+
+void FVoxelRayTracingCounters::AddProxy(int32 Delta)
+{
+	GVoxelRTProxiesLive.fetch_add(Delta, std::memory_order_relaxed);
+}
+
+#if RHI_RAYTRACING
+void FVoxelSceneProxy::GetDynamicRayTracingInstances(FRayTracingInstanceCollector& Collector)
+{
+	const FMaterialRenderProxy* MaterialProxy = (bRayTracing && Material) ? Material->GetRenderProxy() : nullptr;
+	if (!MaterialProxy)
+	{
+		return;
+	}
+
+	FScopeLock Lock(&ChunkDataLock);
+
+	const TConstArrayView<const FSceneView*> Views = Collector.GetViews();
+	const uint32 VisibilityMap = Collector.GetVisibilityMap();
+	RayTracingTransform = GetLocalToWorld();
+	int64 Emitted = 0;
+	int64 SkippedPending = 0;
+
+	// Per view: its origin and the squared distance beyond which a mesh is left out (0 = none)
+	const double TraceDistanceScale = CVarVoxelRayTracingTraceDistanceScale.GetValueOnRenderThread();
+	TArray<TPair<FVector, double>, TInlineAllocator<4>> ViewCulls;
+	for (const FSceneView* View : Views)
+	{
+		const double Distance = TraceDistanceScale * View->FinalPostProcessSettings.LumenMaxTraceDistance;
+		ViewCulls.Emplace(View->ViewMatrices.GetViewOrigin(), Distance > 0.0 ? Distance * Distance : 0.0);
+	}
+
+	auto Emit = [&](FVoxelMeshRayTracing& Entry)
+	{
+		const FRayTracingGeometry* Geometry = Entry.Geometry.Get();
+		if (!Geometry || !Geometry->IsValid() || Geometry->IsEvicted())
+		{
+			return;
+		}
+		// The engine skips (with an ensure) an instance whose acceleration structure is still building: it joins next frame
+		if (Geometry->GetRequiresBuild() || Geometry->HasPendingBuildRequest())
+		{
+			++SkippedPending;
+			return;
+		}
+		// The material is the proxy's current one (SetMaterial_RenderThread may have replaced it since the build)
+		Entry.MeshBatch.MaterialRenderProxy = MaterialProxy;
+
+		FRayTracingInstance Instance;
+		Instance.Geometry = Geometry;
+		Instance.MaterialsView = MakeArrayView(&Entry.MeshBatch, 1);
+		Instance.InstanceTransformsView = MakeArrayView(&RayTracingTransform, 1);
+		Instance.NumTransforms = 1;
+		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+		{
+			const TPair<FVector, double>& ViewCull = ViewCulls[ViewIndex];
+			if ((VisibilityMap & (1u << ViewIndex))
+				&& (ViewCull.Value <= 0.0 || Entry.WorldBounds.ComputeSquaredDistanceToPoint(ViewCull.Key) <= ViewCull.Value))
+			{
+				Collector.AddRayTracingInstance(ViewIndex, Instance);
+				++Emitted;
+			}
+		}
+	};
+
+	for (auto& Pair : ChunkRayTracing)
+	{
+		Emit(Pair.Value);
+	}
+	for (auto& Pair : SeamRayTracing)
+	{
+		Emit(Pair.Value);
+	}
+	FVoxelRayTracingCounters::AddGathered(Emitted, SkippedPending);
+}
+
+void FVoxelSceneProxy::BuildRayTracing_AssumesLocked(FRHICommandListBase& RHICmdList, const FVoxelChunkRenderData& RenderData,
+	const FLocalVertexFactory* VertexFactory, const FIndexBuffer* IndexBuffer, const TCHAR* DebugName, FVoxelMeshRayTracing& Entry)
+{
+	ReleaseRayTracing_AssumesLocked(Entry);
+	if (!bRayTracing || !RenderData.HasValidBuffers() || RenderData.IndexCount < 3 || !VertexFactory || !IndexBuffer)
+	{
+		return;
+	}
+
+	// Over the buffers just uploaded: the positions are the interleaved FVoxelLocalVertex's first member, relative to
+	// RenderOrigin. Built once on the GPU (fast build, no updates: a re-mesh uploads new buffers and builds anew).
+	FRayTracingGeometryInitializer Initializer;
+	Initializer.DebugName = FName(DebugName);
+	Initializer.IndexBuffer = RenderData.IndexBufferRHI;
+	Initializer.TotalPrimitiveCount = RenderData.IndexCount / 3;
+	Initializer.GeometryType = RTGT_Triangles;
+	Initializer.bFastBuild = true;
+	Initializer.bAllowUpdate = false;
+
+	FRayTracingGeometrySegment Segment;
+	Segment.VertexBuffer = RenderData.VertexBufferRHI;
+	Segment.VertexBufferElementType = VET_Float3;
+	Segment.VertexBufferOffset = STRUCT_OFFSET(FVoxelLocalVertex, Position);
+	Segment.VertexBufferStride = sizeof(FVoxelLocalVertex);
+	Segment.MaxVertices = RenderData.VertexCount;
+	Segment.NumPrimitives = Initializer.TotalPrimitiveCount;
+	Initializer.Segments.Add(Segment);
+
+	Entry.Bytes = RHICalcRayTracingGeometrySize(Initializer).ResultSize;
+	Entry.Geometry = MakeUnique<FRayTracingGeometry>();
+	Entry.Geometry->SetInitializer(MoveTemp(Initializer));
+	Entry.Geometry->InitResource(RHICmdList);
+	Entry.WorldBounds = RenderData.WorldBounds;
+
+	// The one segment's material: the batch the instances view every frame (its material proxy is set at the gather)
+	FMeshBatch& MeshBatch = Entry.MeshBatch;
+	MeshBatch = FMeshBatch();
+	MeshBatch.VertexFactory = VertexFactory;
+	// Ray tracing needs no flip for a mirroring transform (and the primitive's transform is a translation)
+	MeshBatch.ReverseCulling = false;
+	MeshBatch.Type = PT_TriangleList;
+	MeshBatch.DepthPriorityGroup = SDPG_World;
+	MeshBatch.bCanApplyViewModeOverrides = false;
+	MeshBatch.CastRayTracedShadow = true;
+	MeshBatch.SegmentIndex = 0;
+	FMeshBatchElement& Element = MeshBatch.Elements[0];
+	Element.IndexBuffer = IndexBuffer;
+	Element.FirstIndex = 0;
+	Element.NumPrimitives = RenderData.IndexCount / 3;
+	Element.MinVertexIndex = 0;
+	Element.MaxVertexIndex = RenderData.VertexCount - 1;
+	Element.PrimitiveUniformBuffer = GetUniformBuffer();
+
+	FVoxelRayTracingCounters::AddBuild(static_cast<int64>(Entry.Bytes));
+}
+
+void FVoxelSceneProxy::ReleaseRayTracing_AssumesLocked(FVoxelMeshRayTracing& Entry)
+{
+	if (Entry.Geometry.IsValid())
+	{
+		Entry.Geometry->ReleaseResource();
+		Entry.Geometry.Reset();
+		FVoxelRayTracingCounters::AddRelease(static_cast<int64>(Entry.Bytes));
+	}
+	Entry.Bytes = 0;
+}
+
+void FVoxelSceneProxy::ReleaseChunkRayTracing_AssumesLocked(const FIntVector& ChunkCoord)
+{
+	if (FVoxelMeshRayTracing* Entry = ChunkRayTracing.Find(ChunkCoord))
+	{
+		ReleaseRayTracing_AssumesLocked(*Entry);
+		ChunkRayTracing.Remove(ChunkCoord);
+	}
+}
+
+void FVoxelSceneProxy::ReleaseSeamRayTracing_AssumesLocked(const FVoxelSeamMeshKey& Key)
+{
+	if (FVoxelMeshRayTracing* Entry = SeamRayTracing.Find(Key))
+	{
+		ReleaseRayTracing_AssumesLocked(*Entry);
+		SeamRayTracing.Remove(Key);
+	}
+}
+
+void FVoxelSceneProxy::ReleaseAllChunkRayTracing_AssumesLocked()
+{
+	for (auto& Pair : ChunkRayTracing)
+	{
+		ReleaseRayTracing_AssumesLocked(Pair.Value);
+	}
+	ChunkRayTracing.Empty();
+}
+
+void FVoxelSceneProxy::ReleaseAllSeamRayTracing_AssumesLocked()
+{
+	for (auto& Pair : SeamRayTracing)
+	{
+		ReleaseRayTracing_AssumesLocked(Pair.Value);
+	}
+	SeamRayTracing.Empty();
+}
+#endif

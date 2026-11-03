@@ -1,0 +1,165 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+#include "CoreMinimal.h"
+#include "Misc/AutomationTest.h"
+#include "Engine/Engine.h"
+#include "Engine/World.h"
+#include "Testing/VoxelTestScopedCVar.h"
+#include "RHI.h"             // GUsingNullRHI: no scene proxy under -nullrhi, the test skips there
+#include "RenderUtils.h"     // IsRayTracingAllowed
+#include "Materials/MaterialInterface.h"
+#include "VoxelMeshRenderer.h"
+#include "VoxelSceneProxy.h"
+#include "VoxelRegionComponent.h"
+#include "VoxelWorldConfiguration.h"
+#include "ChunkRenderData.h"
+
+#if WITH_DEV_AUTOMATION_TESTS
+
+// ---------------------------------------------------------------------------
+// Visual polish F3.3: every current chunk and seam mesh of the scene proxy has ray tracing geometry, and it goes with the
+// mesh. A real world component and scene proxy: a chunk's first mesh gets geometry with its triangles; a crossfaded swap
+// traces the new mesh only (the retained previous mesh has none); a seam bucket gets its own and loses it on removal; an
+// unloaded chunk leaves the proxy with none; with voxel.Render.RayTracing 0 the recreated proxy builds none. Needs a render
+// scene and ray tracing: runs in the editor on a ray tracing GPU, skips under -nullrhi or without ray tracing support.
+// ---------------------------------------------------------------------------
+
+namespace VoxelRayTracingProxyTest
+{
+	/** Quads in a row at height Z (chunk-local): 2 triangles each, so meshes are told apart by their triangle counts. */
+	FChunkMeshData MakeQuads(int32 NumQuads, float Z)
+	{
+		FChunkMeshData Mesh;
+		for (int32 Q = 0; Q < NumQuads; ++Q)
+		{
+			const uint32 Base = Mesh.Positions.Num();
+			const float X = 10.0f + Q * 60.0f;
+			Mesh.Positions.Append({ FVector3f(X, 10, Z), FVector3f(X + 50, 10, Z), FVector3f(X + 50, 60, Z), FVector3f(X, 60, Z) });
+			for (int32 i = 0; i < 4; ++i)
+			{
+				Mesh.Normals.Add(FVector3f::UpVector);
+				Mesh.UVs.Add(FVector2f::ZeroVector);
+			}
+			Mesh.Indices.Append({ Base, Base + 2, Base + 1, Base, Base + 3, Base + 2 });
+		}
+		return Mesh;
+	}
+
+	using FScopedCVar = VoxelTesting::FScopedCVar;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelRayTracingChunkGeometryTest,
+	"VoxelWorlds.Rendering.RayTracing.ChunkGeometry",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelRayTracingChunkGeometryTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelRayTracingProxyTest;
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: needs a render scene (run without -nullrhi, where components create no scene proxy)")); return true; }
+	if (!IsRayTracingAllowed()) { AddInfo(TEXT("Skipped: ray tracing is not allowed here (the project's support, the RHI or the GPU)")); return true; }
+
+	UMaterialInterface* Master = LoadObject<UMaterialInterface>(nullptr, TEXT("/VoxelWorlds/Materials/M_VoxelMaster.M_VoxelMaster"));
+	if (!TestNotNull(TEXT("The terrain master loads"), Master))
+	{
+		return false;
+	}
+	const FScopedCVar RayTracing(TEXT("voxel.Render.RayTracing"), TEXT("1"));
+	const FScopedCVar Fade(TEXT("voxel.MeshFade"), TEXT("1"));
+	const FScopedCVar Duration(TEXT("voxel.MeshFade.Duration"), TEXT("0.35"));
+
+	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+	Config->AddToRoot();
+	Config->WorldMode = EWorldMode::InfinitePlane;
+	Config->WorldOrigin = FVector::ZeroVector;
+	Config->VoxelSize = 50.0f;
+	Config->ChunkSize = 32;
+	Config->MeshingMode = EMeshingMode::DualContouring;
+
+	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelRayTracingProxyTestWorld"));
+	FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
+	WorldContext.SetCurrentWorld(World);
+	{
+		FVoxelMeshRenderer Renderer;
+		Renderer.SetMaterial(Master);
+		Renderer.Initialize(World, Config);
+		UVoxelRegionComponent* Component = Renderer.GetOriginRegionComponent();
+		auto Finish = [&]()
+		{
+			Renderer.Shutdown();
+		};
+		if (!TestNotNull(TEXT("The renderer has a world component"), Component))
+		{
+			Finish();
+			GEngine->DestroyWorldContext(World);
+			World->DestroyWorld(false);
+			Config->RemoveFromRoot();
+			return false;
+		}
+
+		// A chunk of render region (0, 0, 0), the world component's own
+		const FIntVector Chunk(2, 1, 0);
+		auto Info = [&]()
+		{
+			FVoxelChunkDrawInfo Out;
+			Component->GetChunkDrawInfo(Chunk, Out);
+			return Out;
+		};
+
+		// A first mesh: traced with its triangles
+		Renderer.UpdateChunkMeshFromCPU(Chunk, 0, MakeQuads(4, 100.0f));
+		Renderer.FlushPendingOperations();
+		FVoxelChunkDrawInfo I = Info();
+		TestTrue(TEXT("The proxy gives its meshes ray tracing geometry"), I.bRayTracing);
+		TestTrue(*FString::Printf(TEXT("First mesh: traced with its 8 triangles (%u)"), I.RayTracingTriangles), I.CurrentTriangles == 8 && I.RayTracingTriangles == 8);
+		TestTrue(*FString::Printf(TEXT("First mesh: one chunk geometry in the proxy, with a size (%d, %llu bytes)"), I.ProxyRayTracingChunks, I.ProxyRayTracingBytes),
+			I.ProxyRayTracingChunks == 1 && I.ProxyRayTracingBytes > 0);
+
+		// An LOD swap crossfades: the new mesh is traced, the retained previous mesh is not
+		Renderer.UpdateChunkMeshFromCPU(Chunk, 1, MakeQuads(3, 101.0f));
+		Renderer.FlushPendingOperations();
+		I = Info();
+		TestTrue(*FString::Printf(TEXT("LOD swap: crossfading from the old mesh (current %u, previous %u tris)"), I.CurrentTriangles, I.PreviousTriangles),
+			I.bCrossfading && I.CurrentTriangles == 6 && I.PreviousTriangles == 8);
+		TestTrue(*FString::Printf(TEXT("LOD swap: the new mesh is traced, alone (%u tris, %d chunk geometries)"), I.RayTracingTriangles, I.ProxyRayTracingChunks),
+			I.RayTracingTriangles == 6 && I.ProxyRayTracingChunks == 1);
+
+		// A seam bucket (face +X of the chunk) gets its own geometry and loses it with the bucket
+		Renderer.UpdateSeamMeshFromCPU(Chunk, 0, 1, MakeQuads(2, 99.0f));
+		Renderer.FlushPendingOperations();
+		I = Info();
+		TestEqual(TEXT("Seam bucket: one seam geometry"), I.ProxyRayTracingSeams, 1);
+		Renderer.RemoveSeamMesh(Chunk, 0);
+		Renderer.FlushPendingOperations();
+		I = Info();
+		TestEqual(TEXT("Seam bucket removed: no seam geometry"), I.ProxyRayTracingSeams, 0);
+
+		// Unloaded: the chunk's geometry goes with its mesh
+		Renderer.RemoveChunk(Chunk);
+		Renderer.FlushPendingOperations();
+		I = Info();
+		TestTrue(*FString::Printf(TEXT("Unloaded: no mesh and no geometry left (%u tris, %d chunk and %d seam geometries, %llu bytes)"),
+			I.CurrentTriangles, I.ProxyRayTracingChunks, I.ProxyRayTracingSeams, I.ProxyRayTracingBytes),
+			I.CurrentTriangles == 0 && I.RayTracingTriangles == 0 && I.ProxyRayTracingChunks == 0 && I.ProxyRayTracingSeams == 0 && I.ProxyRayTracingBytes == 0);
+
+		// voxel.Render.RayTracing 0 recreates the proxies; the new one builds no geometry
+		{
+			const FScopedCVar Off(TEXT("voxel.Render.RayTracing"), TEXT("0"));
+			World->SendAllEndOfFrameUpdates();
+			Renderer.UpdateChunkMeshFromCPU(Chunk, 0, MakeQuads(5, 100.0f));
+			Renderer.FlushPendingOperations();
+			I = Info();
+			TestTrue(*FString::Printf(TEXT("voxel.Render.RayTracing 0: the mesh is drawn (%u tris) and not traced (ray tracing %d, %u tris)"),
+				I.CurrentTriangles, I.bRayTracing ? 1 : 0, I.RayTracingTriangles),
+				I.CurrentTriangles == 10 && !I.bRayTracing && I.RayTracingTriangles == 0 && I.ProxyRayTracingChunks == 0);
+		}
+		World->SendAllEndOfFrameUpdates();
+
+		Finish();
+	}
+	GEngine->DestroyWorldContext(World);
+	World->DestroyWorld(false);
+	Config->RemoveFromRoot();
+	return true;
+}
+
+#endif // WITH_DEV_AUTOMATION_TESTS
