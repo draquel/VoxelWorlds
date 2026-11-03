@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "ChunkRenderData.generated.h"
 
+class FDistanceFieldVolumeData;
+
 /**
  * A chunk's mesh as the meshers produce it: the chunk manager uploads it to the renderer and
  * cooks collision from it. (FChunkRenderData, the GPU-buffer twin of this struct, went with the
@@ -47,6 +49,13 @@ struct VOXELCORE_API FChunkMeshData
 	/** Whether this mesh contains any triangles with masked (alpha-cutout) materials.
 	 *  Used by renderers to decide whether to create a masked mesh section. */
 	bool bHasMaskedMaterial = false;
+
+	/** SPIKE (D-VP4): the chunk's distance field, built from its voxels on the mesh worker when
+	 * voxel.Render.Spike.DistanceField is on (VoxelTerrainRepresentationSpike.h); null when off or the chunk has no surface */
+	TSharedPtr<FDistanceFieldVolumeData, ESPMode::ThreadSafe> SpikeDistanceField;
+
+	/** SPIKE (D-VP4): whether a distance field build ran for this mesh (a null field then means no surface) */
+	bool bSpikeDistanceFieldBuilt = false;
 
 	/** Clear all mesh data */
 	void Reset()

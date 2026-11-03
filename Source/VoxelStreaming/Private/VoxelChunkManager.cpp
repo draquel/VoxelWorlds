@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelChunkManager.h"
+#include "VoxelTerrainRepresentationSpike.h"
 #include "VoxelWorkerJobGuard.h"
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelWorldsSettings.h"
@@ -4236,6 +4237,14 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 		TakeDeferredMeshVoxels(DeferredVoxels, DeferredDecode, MeshRequest.VoxelData);
 		const bool bSuccess = MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);
 		const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
+		// SPIKE (D-VP4): the chunk's distance field from the same voxels, outside WorkerMs (its own counters)
+		if (bSuccess && VoxelTerrainSpike::IsDistanceFieldEnabled())
+		{
+			int32 SpikeBricks = 0;
+			MeshData.SpikeDistanceField = VoxelTerrainSpike::BuildChunkDistanceField(MeshRequest.VoxelData, MeshRequest.ChunkSize,
+				MeshRequest.VoxelSize, VoxelTerrainSpike::GetDistanceFieldResolution(), SpikeBricks);
+			MeshData.bSpikeDistanceFieldBuilt = true;
+		}
 
 		// Queue result for game thread (thread-safe MPSC queue)
 		if (UVoxelChunkManager* This = WeakThis.Get())

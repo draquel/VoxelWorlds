@@ -13,6 +13,11 @@
 #include "MeshBatch.h"
 #include "DataDrivenShaderPlatformInfo.h"
 #include "GlobalRenderResources.h"
+#include "VoxelTerrainRepresentationSpike.h"
+#if RHI_RAYTRACING
+#include "RayTracingGeometry.h"
+#include "RayTracingInstance.h"
+#endif
 
 #include <atomic>
 
@@ -226,6 +231,9 @@ FVoxelSceneProxy::FVoxelSceneProxy(UVoxelRegionComponent* InComponent, UMaterial
 	// batches in GetDynamicMeshElements. See Documentation/Research/Archive/ENGINE_INTEGRATION.md.
 	bSupportsRuntimeVirtualTexture = true;
 
+	// SPIKE (D-VP4): ray tracing geometry when the project and the spike cvar both allow it
+	bSpikeRayTracing = VoxelTerrainSpike::IsRayTracingEnabled() && ::IsRayTracingEnabled();
+
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Created with FLocalVertexFactory (RVT material types=%d)"), RuntimeVirtualTextureMaterialTypes.Num());
 }
 
@@ -233,6 +241,19 @@ FVoxelSceneProxy::~FVoxelSceneProxy()
 {
 	// Release all chunk resources
 	FScopeLock Lock(&ChunkDataLock);
+
+#if RHI_RAYTRACING
+	for (auto& Pair : SpikeChunkRayTracing)
+	{
+		SpikeReleaseRayTracing(Pair.Value);
+	}
+	SpikeChunkRayTracing.Empty();
+	for (auto& Pair : SpikeSeamRayTracing)
+	{
+		SpikeReleaseRayTracing(Pair.Value);
+	}
+	SpikeSeamRayTracing.Empty();
+#endif
 
 	ReleaseAllChunkFadeStates_AssumesLocked();
 
@@ -1242,6 +1263,10 @@ void FVoxelSceneProxy::RemoveChunk_RenderThread(const FIntVector& ChunkCoord)
 		ChunkVertexFactories.Remove(ChunkCoord);
 	}
 
+#if RHI_RAYTRACING
+	SpikePruneRayTracing_AssumesLocked();
+#endif
+
 	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelSceneProxy: Removed chunk %s"), *ChunkCoord.ToString());
 }
 
@@ -1250,6 +1275,14 @@ void FVoxelSceneProxy::ClearAllChunks_RenderThread()
 	check(IsInRenderingThread());
 
 	FScopeLock Lock(&ChunkDataLock);
+
+#if RHI_RAYTRACING
+	for (auto& Pair : SpikeChunkRayTracing)
+	{
+		SpikeReleaseRayTracing(Pair.Value);
+	}
+	SpikeChunkRayTracing.Empty();
+#endif
 
 	ReleaseAllChunkFadeStates_AssumesLocked();
 
@@ -1285,6 +1318,10 @@ void FVoxelSceneProxy::ClearAllChunks_RenderThread()
 		}
 	}
 	ChunkVertexFactories.Empty();
+
+#if RHI_RAYTRACING
+	SpikePruneRayTracing_AssumesLocked();
+#endif
 
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Cleared all chunks"));
 }
@@ -1702,6 +1739,15 @@ void FVoxelSceneProxy::UpdateSeamMeshFromCPUData_RenderThread(
 	SeamVertexFactory->InitResource(RHICmdList);
 	SeamVertexFactories.Add(Key, SeamVertexFactory);
 
+#if RHI_RAYTRACING
+	if (bSpikeRayTracing)
+	{
+		FScopeLock SpikeLock(&ChunkDataLock);
+		SpikeBuildRayTracing_RenderThread(RHICmdList, NewRenderData, SpikeSeamRayTracing.FindOrAdd(Key));
+		SpikePruneRayTracing_AssumesLocked();
+	}
+#endif
+
 	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelSceneProxy: Updated seam mesh %s axis=%d - %d vertices, %d indices"),
 		*OwnerChunkCoord.ToString(), Axis, VertexCount, IndexCount);
 }
@@ -1807,11 +1853,17 @@ void FVoxelSceneProxy::RemoveSeamMesh_RenderThread(const FIntVector& OwnerChunkC
 		// Fade to nothing: the bucket becomes a Previous set that dithers out under its fade state
 		// (attached by the game thread just before this command) and is released on completion.
 		RetireOrReleaseSeam_AssumesLocked(Key, /*bMoveToPrevious*/ true);
+#if RHI_RAYTRACING
+		SpikePruneRayTracing_AssumesLocked();
+#endif
 		return;
 	}
 
 	ReleaseSeamFadeState_AssumesLocked(Key);
 	RetireOrReleaseSeam_AssumesLocked(Key, /*bMoveToPrevious*/ false);
+#if RHI_RAYTRACING
+	SpikePruneRayTracing_AssumesLocked();
+#endif
 }
 
 void FVoxelSceneProxy::ClearAllSeamMeshes_RenderThread()
@@ -1854,6 +1906,10 @@ void FVoxelSceneProxy::ClearAllSeamMeshes_RenderThread()
 		}
 	}
 	SeamVertexFactories.Empty();
+
+#if RHI_RAYTRACING
+	SpikePruneRayTracing_AssumesLocked();
+#endif
 
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Cleared all seam meshes"));
 }
@@ -2075,7 +2131,21 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 		);
 		ChunkVertexFactory->InitResource(RHICmdList);
 		ChunkVertexFactories.Add(ChunkCoord, ChunkVertexFactory);
+
+#if RHI_RAYTRACING
+		if (bSpikeRayTracing)
+		{
+			SpikeBuildRayTracing_RenderThread(RHICmdList, NewRenderData, SpikeChunkRayTracing.FindOrAdd(ChunkCoord));
+		}
+#endif
 	}
+
+#if RHI_RAYTRACING
+	{
+		FScopeLock Lock(&ChunkDataLock);
+		SpikePruneRayTracing_AssumesLocked();
+	}
+#endif
 
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Batch update - %d adds, %d removals processed"),
 		Adds.Num(), Removals.Num());
@@ -2239,3 +2309,170 @@ FString FVoxelSceneProxy::GetFadeDebugString_RenderThread(int32 MaxEntries, cons
 	}
 	return Out;
 }
+
+#if RHI_RAYTRACING
+// ==================== SPIKE (D-VP4): ray tracing geometry ====================
+
+void FVoxelSceneProxy::SpikeReleaseRayTracing(FSpikeRayTracingEntry& Entry)
+{
+	if (Entry.Geometry.IsValid())
+	{
+		Entry.Geometry->ReleaseResource();
+		Entry.Geometry.Reset();
+		VoxelTerrainSpike::Counters().RTGeometriesLive.fetch_sub(1);
+		VoxelTerrainSpike::Counters().RTBytesLive.fetch_sub(static_cast<int64>(Entry.Bytes));
+	}
+	Entry.SourceIndexBuffer = nullptr;
+	Entry.Bytes = 0;
+}
+
+void FVoxelSceneProxy::SpikeBuildRayTracing_RenderThread(FRHICommandListBase& RHICmdList, const FVoxelChunkRenderData& RenderData, FSpikeRayTracingEntry& Entry)
+{
+	SpikeReleaseRayTracing(Entry);
+	if (!RenderData.HasValidBuffers() || RenderData.IndexCount < 3)
+	{
+		return;
+	}
+
+	FRayTracingGeometryInitializer Initializer;
+	Initializer.DebugName = FName(TEXT("VoxelChunkRayTracing"));
+	Initializer.IndexBuffer = RenderData.IndexBufferRHI;
+	Initializer.TotalPrimitiveCount = RenderData.IndexCount / 3;
+	Initializer.GeometryType = RTGT_Triangles;
+	Initializer.bFastBuild = true;
+	Initializer.bAllowUpdate = false;
+
+	// The positions are the interleaved FVoxelLocalVertex's first member, relative to the proxy's RenderOrigin
+	FRayTracingGeometrySegment Segment;
+	Segment.VertexBuffer = RenderData.VertexBufferRHI;
+	Segment.VertexBufferElementType = VET_Float3;
+	Segment.VertexBufferOffset = STRUCT_OFFSET(FVoxelLocalVertex, Position);
+	Segment.VertexBufferStride = sizeof(FVoxelLocalVertex);
+	Segment.MaxVertices = RenderData.VertexCount;
+	Segment.NumPrimitives = Initializer.TotalPrimitiveCount;
+	Initializer.Segments.Add(Segment);
+
+	Entry.Geometry = MakeShared<FRayTracingGeometry>();
+	Entry.Geometry->SetInitializer(Initializer);
+	Entry.Geometry->InitResource(RHICmdList);
+	Entry.SourceIndexBuffer = RenderData.IndexBufferRHI.GetReference();
+	Entry.Bytes = RHICalcRayTracingGeometrySize(Initializer).ResultSize;
+
+	VoxelTerrainSpike::FCounters& Counters = VoxelTerrainSpike::Counters();
+	Counters.RTGeometriesLive.fetch_add(1);
+	Counters.RTBytesLive.fetch_add(static_cast<int64>(Entry.Bytes));
+	Counters.RTBuilds.fetch_add(1);
+	Counters.RTTrianglesBuilt.fetch_add(Initializer.TotalPrimitiveCount);
+}
+
+void FVoxelSceneProxy::SpikePruneRayTracing_AssumesLocked()
+{
+	for (auto It = SpikeChunkRayTracing.CreateIterator(); It; ++It)
+	{
+		const FVoxelChunkRenderData* Current = ChunkRenderData.Find(It.Key());
+		if (!Current || Current->IndexBufferRHI.GetReference() != It.Value().SourceIndexBuffer)
+		{
+			SpikeReleaseRayTracing(It.Value());
+			It.RemoveCurrent();
+		}
+	}
+	for (auto It = SpikeSeamRayTracing.CreateIterator(); It; ++It)
+	{
+		const FVoxelChunkRenderData* Current = SeamRenderData.Find(It.Key());
+		if (!Current || Current->IndexBufferRHI.GetReference() != It.Value().SourceIndexBuffer)
+		{
+			SpikeReleaseRayTracing(It.Value());
+			It.RemoveCurrent();
+		}
+	}
+}
+
+void FVoxelSceneProxy::GetDynamicRayTracingInstances(FRayTracingInstanceCollector& Collector)
+{
+	if (!bSpikeRayTracing || !VoxelTerrainSpike::IsRayTracingEnabled() || !Material)
+	{
+		return;
+	}
+	const FMaterialRenderProxy* MaterialProxy = Material->GetRenderProxy();
+	if (!MaterialProxy)
+	{
+		return;
+	}
+
+	FScopeLock Lock(&ChunkDataLock);
+	const TConstArrayView<const FSceneView*> Views = Collector.GetViews();
+	const uint32 VisibilityMap = Collector.GetVisibilityMap();
+	int64 Added = 0;
+
+	// One instance per current mesh with the opaque material: the geometry is the current mesh only (no crossfade halves)
+	auto Emit = [&](const FSpikeRayTracingEntry& Entry, const FVoxelChunkRenderData& RenderData, const FLocalVertexFactory* VertexFactory,
+		const FIndexBuffer* IndexBuffer)
+	{
+		FRayTracingInstance Instance;
+		Instance.Geometry = Entry.Geometry.Get();
+		Instance.InstanceTransforms.Add(GetLocalToWorld());
+		Instance.NumTransforms = 1;
+
+		FMeshBatch MeshBatch;
+		MeshBatch.VertexFactory = VertexFactory;
+		MeshBatch.MaterialRenderProxy = MaterialProxy;
+		MeshBatch.ReverseCulling = IsLocalToWorldDeterminantNegative();
+		MeshBatch.Type = PT_TriangleList;
+		MeshBatch.DepthPriorityGroup = SDPG_World;
+		MeshBatch.bCanApplyViewModeOverrides = false;
+		MeshBatch.CastRayTracedShadow = true;
+		MeshBatch.SegmentIndex = 0;
+		FMeshBatchElement& Element = MeshBatch.Elements[0];
+		Element.IndexBuffer = IndexBuffer;
+		Element.FirstIndex = 0;
+		Element.NumPrimitives = RenderData.IndexCount / 3;
+		Element.MinVertexIndex = 0;
+		Element.MaxVertexIndex = RenderData.VertexCount - 1;
+		Element.PrimitiveUniformBuffer = GetUniformBuffer();
+		Instance.Materials.Add(MeshBatch);
+
+		for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
+		{
+			if (VisibilityMap & (1 << ViewIndex))
+			{
+				Collector.AddRayTracingInstance(ViewIndex, Instance);
+				++Added;
+			}
+		}
+	};
+
+	for (const auto& Pair : SpikeChunkRayTracing)
+	{
+		const FVoxelChunkRenderData* RenderData = ChunkRenderData.Find(Pair.Key);
+		const TSharedPtr<FLocalVertexFactory>* VertexFactory = ChunkVertexFactories.Find(Pair.Key);
+		const TSharedPtr<FVoxelLocalIndexBuffer>* IndexBuffer = ChunkIndexBuffers.Find(Pair.Key);
+		if (Pair.Value.Geometry.IsValid() && RenderData && RenderData->IndexBufferRHI.GetReference() == Pair.Value.SourceIndexBuffer
+			&& VertexFactory && VertexFactory->IsValid() && IndexBuffer && IndexBuffer->IsValid())
+		{
+			Emit(Pair.Value, *RenderData, VertexFactory->Get(), IndexBuffer->Get());
+		}
+	}
+	for (const auto& Pair : SpikeSeamRayTracing)
+	{
+		const FVoxelChunkRenderData* RenderData = SeamRenderData.Find(Pair.Key);
+		const TSharedPtr<FLocalVertexFactory>* VertexFactory = SeamVertexFactories.Find(Pair.Key);
+		const TSharedPtr<FVoxelLocalIndexBuffer>* IndexBuffer = SeamIndexBuffers.Find(Pair.Key);
+		if (Pair.Value.Geometry.IsValid() && RenderData && RenderData->IndexBufferRHI.GetReference() == Pair.Value.SourceIndexBuffer
+			&& VertexFactory && VertexFactory->IsValid() && IndexBuffer && IndexBuffer->IsValid())
+		{
+			Emit(Pair.Value, *RenderData, VertexFactory->Get(), IndexBuffer->Get());
+		}
+	}
+	// Summed over the region proxies of one frame
+	static std::atomic<uint32> CountedFrame{ 0 };
+	const uint32 Frame = GFrameNumberRenderThread;
+	if (CountedFrame.exchange(Frame) != Frame)
+	{
+		VoxelTerrainSpike::Counters().RTInstancesLastFrame.store(Added);
+	}
+	else
+	{
+		VoxelTerrainSpike::Counters().RTInstancesLastFrame.fetch_add(Added);
+	}
+}
+#endif

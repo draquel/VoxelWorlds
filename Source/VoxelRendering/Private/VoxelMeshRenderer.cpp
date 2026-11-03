@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelMeshRenderer.h"
+#include "VoxelTerrainRepresentationSpike.h"
 #include "VoxelRendering.h"
 #include "VoxelRegionComponent.h"
 #include "VoxelWorldConfiguration.h"
@@ -324,6 +325,9 @@ void FVoxelMeshRenderer::SubmitChunkMeshInternal(
 	FBox LocalBounds(ForceInit);
 	ConvertToVoxelVertices(MeshData, Vertices, LocalBounds);
 
+	// SPIKE (D-VP4): the chunk's distance field travels with its mesh
+	UpdateSpikeDistanceField(ChunkCoord, MeshData);
+
 	// Update statistics
 	FChunkStats* ExistingStats = ChunkStatsMap.Find(ChunkCoord);
 	if (ExistingStats)
@@ -379,6 +383,8 @@ void FVoxelMeshRenderer::RemoveChunk(const FIntVector& ChunkCoord)
 		ChunkStatsMap.Remove(ChunkCoord);
 	}
 
+	RemoveSpikeDistanceField(&ChunkCoord);
+
 	// Forward to the chunk's region component
 	if (UVoxelRegionComponent* Component = FindRegionComponent(ChunkCoord))
 	{
@@ -389,6 +395,8 @@ void FVoxelMeshRenderer::RemoveChunk(const FIntVector& ChunkCoord)
 void FVoxelMeshRenderer::ClearAllChunks()
 {
 	check(IsInGameThread());
+
+	RemoveSpikeDistanceField(nullptr);
 
 	ChunkStatsMap.Empty();
 	TotalVertexCount = 0;
@@ -955,4 +963,62 @@ FBox FVoxelMeshRenderer::CalculateChunkBounds(const FIntVector& ChunkCoord) cons
 	const FVector ChunkMin = WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
 	const FVector ChunkMax = ChunkMin + FVector(ChunkWorldSize);
 	return FBox(ChunkMin, ChunkMax);
+}
+
+void FVoxelMeshRenderer::UpdateSpikeDistanceField(const FIntVector& ChunkCoord, const FChunkMeshData& MeshData)
+{
+	if (!MeshData.bSpikeDistanceFieldBuilt)
+	{
+		return;
+	}
+	if (!MeshData.SpikeDistanceField.IsValid())
+	{
+		RemoveSpikeDistanceField(&ChunkCoord);
+		return;
+	}
+	AActor* Actor = ContainerActor.Get();
+	if (!Actor)
+	{
+		return;
+	}
+
+	const double StartSeconds = FPlatformTime::Seconds();
+	TObjectPtr<UVoxelChunkDistanceFieldComponent>& Component = SpikeDistanceFieldComponents.FindOrAdd(ChunkCoord);
+	if (!Component)
+	{
+		Component = NewObject<UVoxelChunkDistanceFieldComponent>(Actor, NAME_None, RF_Transient);
+		Component->SetUsingAbsoluteLocation(true);
+		Component->SetUsingAbsoluteRotation(true);
+		Component->SetUsingAbsoluteScale(true);
+		Component->SetWorldLocation((CachedConfig.IsValid() ? CachedConfig->WorldOrigin : FVector::ZeroVector) + FVector(ChunkCoord) * ChunkWorldSize);
+		Component->SetDistanceField(MeshData.SpikeDistanceField);
+		Component->RegisterComponent();
+	}
+	else
+	{
+		Component->SetDistanceField(MeshData.SpikeDistanceField);
+	}
+	VoxelTerrainSpike::Counters().DFRegisterMicrosTotal.fetch_add(static_cast<int64>((FPlatformTime::Seconds() - StartSeconds) * 1.0e6));
+	VoxelTerrainSpike::Counters().DFRegisters.fetch_add(1);
+}
+
+void FVoxelMeshRenderer::RemoveSpikeDistanceField(const FIntVector* ChunkCoord)
+{
+	if (!ChunkCoord)
+	{
+		for (const TPair<FIntVector, TObjectPtr<UVoxelChunkDistanceFieldComponent>>& Pair : SpikeDistanceFieldComponents)
+		{
+			if (Pair.Value)
+			{
+				Pair.Value->DestroyComponent();
+			}
+		}
+		SpikeDistanceFieldComponents.Empty();
+		return;
+	}
+	TObjectPtr<UVoxelChunkDistanceFieldComponent> Component;
+	if (SpikeDistanceFieldComponents.RemoveAndCopyValue(*ChunkCoord, Component) && Component)
+	{
+		Component->DestroyComponent();
+	}
 }
