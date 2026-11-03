@@ -62,9 +62,9 @@ static FAutoConsoleCommandWithWorld GVoxelFarOceanStatsCmd(
 	}));
 
 // Console: voxel.Mesh.RemeshAll
-// Re-mesh every currently-loaded chunk IN PLACE (marks them dirty without changing LOD), so a live
-// mesher CVar change (e.g. voxel.Mesh.MCBoundaryMorphWidth) takes effect immediately while the LOD rings /
-// seams stay exactly where they are. Handy for A/B-ing meshing changes while detached and flying.
+// Re-mesh every loaded chunk in place and rebuild every seam (UVoxelChunkManager::RemeshAllLoadedChunks), so a mesher
+// cvar changed mid-session (the meshers read theirs per job) shows while the LOD stays where it is; with streaming paused
+// too, the usual way to hold a scene for an A/B (G115).
 static FAutoConsoleCommandWithWorldAndArgs GVoxelRemeshAllCmd(
 	TEXT("voxel.Mesh.RemeshAll"),
 	TEXT("Re-mesh all loaded voxel chunks in place (apply a live mesher CVar change without moving LOD)."),
@@ -89,20 +89,17 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelRemeshAllCmd(
 		}
 
 		int32 Managers = 0;
+		int32 Paused = 0;
 		int32 TotalDirtied = 0;
 		for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
 		{
 			if (!CM) { continue; }
 			++Managers;
-			TArray<FIntVector> Loaded;
-			CM->GetLoadedChunks(Loaded);
-			for (const FIntVector& Coord : Loaded)
-			{
-				CM->MarkChunkDirty(Coord);
-			}
-			TotalDirtied += Loaded.Num();
+			Paused += CM->IsStreamingEnabled() ? 0 : 1;
+			TotalDirtied += CM->RemeshAllLoadedChunks();
 		}
-		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Mesh.RemeshAll: re-meshing %d chunk(s) across %d manager(s)"), TotalDirtied, Managers);
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Mesh.RemeshAll: re-meshing %d chunk(s) across %d manager(s)%s"), TotalDirtied, Managers,
+			Paused > 0 ? TEXT(" (streaming paused: these chunks and their seams alone re-mesh)") : TEXT(""));
 	}));
 
 // Console: voxel.Stream.AuditResidency

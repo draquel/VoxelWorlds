@@ -472,6 +472,16 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
 	void MarkChunkDirty(const FIntVector& ChunkCoord);
 
+	/**
+	 * Re-mesh every loaded chunk in place and rebuild every seam they touch, without moving the LOD (voxel.Mesh.RemeshAll:
+	 * the way to see a mesher cvar change mid-session, as the meshers read theirs per job). It works with streaming paused,
+	 * the usual way to hold a scene for an A/B (G115): the paused tick then launches these chunks' meshes and builds their
+	 * seams, and nothing else of the queue. A chunk already queued for another mesh (a LOD change) keeps that request.
+	 *
+	 * @return The chunks marked for re-meshing
+	 */
+	int32 RemeshAllLoadedChunks();
+
 	// ==================== Queries ====================
 
 	/**
@@ -1787,18 +1797,19 @@ protected:
 	 * The renderer lost its geometry (a recreated scene proxy starts empty): re-mesh every chunk whose mesh it
 	 * held, and send every seam bucket and water tile again. Each chunk is meshed once on the seam path, so
 	 * nothing else would ever replace a lost mesh. Called at the start of each tick, paused or not; while streaming is
-	 * paused the chunks it re-meshes go to PausedRecoveryChunks for TickPausedRenderRecovery.
+	 * paused the chunks it re-meshes go to PausedRemeshChunks for TickWhilePaused.
 	 */
 	void RecoverLostRenderData();
 
 	/**
 	 * The tick while streaming is paused (SetStreamingEnabled(false), `vox.Freeze 1 streaming`): nothing is discovered,
-	 * generated, unloaded or changes LOD, but a scene proxy recreated meanwhile (a material or render-state change, a
-	 * Lumen toggle) gets its geometry back (visual polish F3.4): RecoverLostRenderData re-meshes the chunks it lost, which
-	 * alone of the meshing queue launch here, the meshes that land are submitted (with them the meshes already on workers
-	 * when the pause began) and the water tiles are sent again. Without a recovery since the pause it does nothing.
+	 * generated, unloaded or changes LOD, but the chunks re-meshed in place since the pause (PausedRemeshChunks) alone of
+	 * the meshing queue launch here: those a recreated scene proxy lost (a material or render-state change, a Lumen
+	 * toggle; RecoverLostRenderData, visual polish F3.4) and those RemeshAllLoadedChunks marked (G115), whose restaled
+	 * seams are rebuilt here too. The meshes that land are submitted (with them the meshes already on workers when the
+	 * pause began) and the water tiles are sent again. Without either since the pause it does nothing.
 	 */
-	void TickPausedRenderRecovery();
+	void TickWhilePaused();
 
 	/**
 	 * Called when chunk generation completes.
@@ -1995,11 +2006,17 @@ protected:
 	/** Whether streaming is enabled */
 	bool bStreamingEnabled = true;
 
-	/** While streaming is paused: the chunks RecoverLostRenderData re-meshes, until their meshes are submitted (F3.4) */
-	TSet<FIntVector> PausedRecoveryChunks;
+	/**
+	 * While streaming is paused: the chunks re-meshed in place (RecoverLostRenderData, F3.4; RemeshAllLoadedChunks, G115),
+	 * until their meshes are submitted
+	 */
+	TSet<FIntVector> PausedRemeshChunks;
 
-	/** While streaming is paused: a recovery ran since the pause, so the paused tick sends meshes and water tiles (F3.4) */
-	bool bPausedRecoveryActive = false;
+	/** While streaming is paused: a recovery or a RemeshAllLoadedChunks ran since the pause, so the paused tick sends meshes and water tiles */
+	bool bPausedRemeshActive = false;
+
+	/** While streaming is paused: RemeshAllLoadedChunks restaled every seam since the pause, so the paused tick runs the seam scheduler (G115) */
+	bool bPausedSeamRebuild = false;
 
 	// ==================== Chunk State ====================
 

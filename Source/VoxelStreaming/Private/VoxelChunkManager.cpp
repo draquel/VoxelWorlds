@@ -584,7 +584,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	}
 	if (!bStreamingEnabled)
 	{
-		TickPausedRenderRecovery();
+		TickWhilePaused();
 		return;
 	}
 
@@ -1665,9 +1665,10 @@ void UVoxelChunkManager::Shutdown()
 void UVoxelChunkManager::SetStreamingEnabled(bool bEnabled)
 {
 	bStreamingEnabled = bEnabled;
-	// A recovery begun while paused finishes in the streaming tick (its chunks are queued, in flight or pending).
-	PausedRecoveryChunks.Reset();
-	bPausedRecoveryActive = false;
+	// A re-mesh begun while paused finishes in the streaming tick (its chunks are queued, in flight or pending, its seams dirty).
+	PausedRemeshChunks.Reset();
+	bPausedRemeshActive = false;
+	bPausedSeamRebuild = false;
 
 	if (bEnabled)
 	{
@@ -1741,6 +1742,36 @@ void UVoxelChunkManager::MarkChunkDirty(const FIntVector& ChunkCoord)
 			}
 		}
 	}
+}
+
+int32 UVoxelChunkManager::RemeshAllLoadedChunks()
+{
+	if (!bIsInitialized)
+	{
+		return 0;
+	}
+
+	// MarkChunkDirty re-queues a Loaded chunk's interior, has a Meshing one re-mesh once its mesh lands, and restales
+	// every seam each touches (the seam registry dirties them whatever the content version).
+	const TArray<FIntVector> Loaded = LoadedChunkCoords.Array();
+	for (const FIntVector& Coord : Loaded)
+	{
+		const EChunkState Before = GetChunkState(Coord);
+		MarkChunkDirty(Coord);
+		// G115: the paused tick launched none of these, so a re-mesh asked for with streaming paused (the scene held for an
+		// A/B) changed nothing until the resume. They go to the paused tick's set; a chunk queued before (PendingMeshing,
+		// usually a LOD change) does not, as its request is not an in-place one.
+		if (!bStreamingEnabled && (Before == EChunkState::Loaded || Before == EChunkState::Meshing))
+		{
+			PausedRemeshChunks.Add(Coord);
+		}
+	}
+	if (!bStreamingEnabled && Loaded.Num() > 0)
+	{
+		bPausedRemeshActive = true;
+		bPausedSeamRebuild = true;
+	}
+	return Loaded.Num();
 }
 
 // ==================== Queries ====================
@@ -7340,11 +7371,11 @@ void UVoxelChunkManager::RecoverLostRenderData()
 			++Remeshed;
 			if (!bStreamingEnabled)
 			{
-				PausedRecoveryChunks.Add(Coord);
+				PausedRemeshChunks.Add(Coord);
 			}
 		}
 	}
-	bPausedRecoveryActive |= !bStreamingEnabled;
+	bPausedRemeshActive |= !bStreamingEnabled;
 
 	// The merged seam buckets are rebuilt from the slots kept here; no seam job has to run again.
 	TArray<FIntVector> SeamOwners;
@@ -7360,21 +7391,21 @@ void UVoxelChunkManager::RecoverLostRenderData()
 		Remeshed, SeamOwners.Num(), WaterTiles.Num(), bStreamingEnabled ? TEXT("") : TEXT(" (streaming paused: the chunks alone re-mesh)"));
 }
 
-void UVoxelChunkManager::TickPausedRenderRecovery()
+void UVoxelChunkManager::TickWhilePaused()
 {
 	RecoverLostRenderData();
-	if (!bPausedRecoveryActive || !MeshRenderer)
+	if (!bPausedRemeshActive || !MeshRenderer)
 	{
 		return;
 	}
 
-	// Launch the recovered chunks' meshes alone: the rest of the meshing queue waits for the resume, as it did before.
-	if (PausedRecoveryChunks.Num() > 0)
+	// Launch the meshes of the chunks re-meshed in place alone: the rest of the meshing queue waits for the resume.
+	if (PausedRemeshChunks.Num() > 0)
 	{
 		TArray<FChunkLODRequest> Held;
 		for (int32 i = MeshingQueue.Num() - 1; i >= 0; --i)
 		{
-			if (!PausedRecoveryChunks.Contains(MeshingQueue[i].ChunkCoord))
+			if (!PausedRemeshChunks.Contains(MeshingQueue[i].ChunkCoord))
 			{
 				Held.Add(MeshingQueue[i]);
 				MeshingQueueSet.Remove(MeshingQueue[i].ChunkCoord);
@@ -7400,11 +7431,16 @@ void UVoxelChunkManager::TickPausedRenderRecovery()
 	{
 		const FIntVector ChunkCoord = PendingMeshQueue.Last().ChunkCoord;
 		OnChunkMeshingComplete(ChunkCoord);
-		PausedRecoveryChunks.Remove(ChunkCoord);
+		// A chunk whose landed mesh was on a worker when the re-mesh was asked for is queued again (RemeshIfEditedWhileMeshing)
+		// and stays in the set, so its next mesh launches here too.
+		if (GetChunkState(ChunkCoord) == EChunkState::Loaded)
+		{
+			PausedRemeshChunks.Remove(ChunkCoord);
+		}
 	}
-	// A recovered chunk that left the pipeline another way (a failed mesh retries as PendingMeshing) is no longer waited on
-	// once it is neither queued nor meshing.
-	for (auto It = PausedRecoveryChunks.CreateIterator(); It; ++It)
+	// A chunk that left the pipeline another way (a failed mesh retries as PendingMeshing) is no longer waited on once it is
+	// neither queued nor meshing.
+	for (auto It = PausedRemeshChunks.CreateIterator(); It; ++It)
 	{
 		const EChunkState State = GetChunkState(*It);
 		if (State != EChunkState::PendingMeshing && State != EChunkState::Meshing)
@@ -7416,6 +7452,13 @@ void UVoxelChunkManager::TickPausedRenderRecovery()
 	if (UsesWaterTiles())
 	{
 		ProcessDirtyWaterTiles(8);
+	}
+
+	// The seams RemeshAllLoadedChunks restaled (G115): the scheduler builds the ready dirty seams, which with no residency or
+	// LOD change while paused are those and any left dirty from before the pause, and submits what lands.
+	if (bPausedSeamRebuild)
+	{
+		TickSeamScheduler();
 	}
 
 	// The renderer batches its updates and draws them at the flush, as at the end of the streaming tick.
