@@ -79,6 +79,7 @@ without running them:
 | `VoxelWorlds.Generation.GPUvsCPUSphericalParity` | GPU generation | yes |
 | `VoxelWorlds.Rendering.Crossfade.SwapReachesProxy` | a scene proxy | yes |
 | `VoxelWorlds.Rendering.RayTracing.ChunkGeometry` | a scene proxy and ray tracing (it also skips where ray tracing is not allowed) | yes |
+| `VoxelWorlds.Rendering.RayTracing.FarFieldGeometry` | a scene proxy and ray tracing (it also skips where ray tracing is not enabled) | yes |
 | `VoxelWorlds.Streaming.EditReachesProxy.Smooth` | a scene proxy | yes |
 | `VoxelWorlds.Streaming.EditReachesProxy.Cubic` | a scene proxy | yes |
 | `VoxelWorlds.WorldModes.InfinitePlane.GPUConsistency` | GPU generation | no |
@@ -86,7 +87,7 @@ without running them:
 
 The skip sites are in `Source/VoxelGeneration/Tests/VoxelNoiseGeneratorTests.cpp`,
 `Source/VoxelGeneration/Tests/InfinitePlaneWorldModeTests.cpp`, `Source/VoxelRendering/Tests/VoxelCrossfadeProxyTests.cpp`,
-`Source/VoxelRendering/Tests/VoxelRayTracingProxyTests.cpp` and `Source/VoxelStreaming/Tests/VoxelEditReachesProxyTests.cpp`. A new test that needs either belongs in the same
+`Source/VoxelRendering/Tests/VoxelRayTracingProxyTests.cpp`, `Source/VoxelStreaming/Tests/VoxelFarFieldRayTracingProxyTests.cpp` and `Source/VoxelStreaming/Tests/VoxelEditReachesProxyTests.cpp`. A new test that needs either belongs in the same
 pattern and in the editor gate's filter. **A green headless suite says nothing about GPU generation or the renderer.**
 The chunk-manager tests stream on the CPU into a recording renderer (below), so they run headless.
 
@@ -125,8 +126,8 @@ GPU against the CPU:
    main checkout's editor on 8080) and turns off its background throttle (`disable_bg_throttle.py`: an unfocused
    editor pins itself to 3 FPS and a run stalls).
 2. It runs `Automation RunTests VoxelWorlds.Generation.GPUvsCPU+VoxelWorlds.Generation.GPUNoiseGeneratorAsync+VoxelWorlds.Rendering.Crossfade+VoxelWorlds.Rendering.RayTracing+VoxelWorlds.Streaming.EditReachesProxy+VoxelEngine.Replication.Framework`:
-   the 13 GPU and proxy tests, the six crossfade tests that also run headless and the replication test, **20 results**
-   (19 before F3.3's `Rendering.RayTracing.ChunkGeometry`),
+   the 14 GPU and proxy tests, the six crossfade tests that also run headless and the replication test, **21 results**
+   (19 before F3.3's `Rendering.RayTracing.ChunkGeometry`, 20 before G121's `Rendering.RayTracing.FarFieldGeometry`),
    each expected to be a single `Success`.
 3. It extracts the **parity lines** (the parity tests' `[N voxels]: density~` lines, one per case and LOD: density,
    material, biome and metadata agreement and the GPU's CRC) and compares all **111** with the record,
