@@ -214,6 +214,9 @@ private:
 		// The engine's last game thread, render thread and GPU frame times (ms; stat unit's), to place frame time outside
 		// the chunk manager
 		float GTMs, RTMs, GPUMs;
+		// The render thread's last frame from its begin to its end (ms; FCoreDelegates::OnBeginFrameRT / OnEndFrameRT): the
+		// engine's render thread time (RTMs, from the Slate present) reads 0 in the editor's PIE (G116)
+		float RTSpanMs;
 		// Far-compressed chunks expanded on the game thread since the last sample, and their time (ms; world modes
 		// review G65, VoxelResidencyStats)
 		int32 DecodeN;
@@ -239,6 +242,8 @@ private:
 	};
 
 	void TakeSample(float DeltaTime);
+	/** Remove the render thread's frame hooks (RTSpanMs): on the render thread, waiting for it */
+	void RemoveRenderThreadHooks();
 	void SampleMemory();
 	/** Position along the configured path at arc length S (before terrain following). */
 	FVector EvaluatePath(double S) const;
@@ -363,6 +368,9 @@ private:
 	int64 LastTotalGenerated = 0;
 	// Chunk primitives added in all when the last sample was taken (the PrimAddN column, G116; -1 before the first)
 	int64 LastPrimitivesAdded = -1;
+	// The render thread's frame hooks for the RTSpanMs column, added and removed on the render thread
+	FDelegateHandle RenderThreadBeginHandle;
+	FDelegateHandle RenderThreadEndHandle;
 	// The far field's stand-ins over the window in all when the last sample was taken (the FarFieldStandInN column, VP4).
 	int64 LastFarFieldStandIns = 0;
 	// The chunk manager's cut-over transition count when the run started (the report lists the run's own; G49).
