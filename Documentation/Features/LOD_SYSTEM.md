@@ -354,7 +354,8 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   partly covered patch stays drawn a voxel under the voxel surface, which hides it: no gap and no overlap along the
   window's ragged edge, and no far-field floor in a hole or cave where the chunks are drawn. Patch geometry never depends
   on the window: the hole moves with the window by visibility alone, recomputed when a chunk changes state.
-- **Residency.** One procedural mesh component per resident patch at the patch's origin (its centre's point on the
+- **Residency.** One patch component (`UVoxelFarFieldPatchComponent`: sections drawn like a procedural mesh's, through
+  `FLocalVertexFactory`) per resident patch at the patch's origin (its centre's point on the
   datum, double), vertices as float offsets of the patch's size; a patch hidden for 10 s releases its component and
   builds again when needed (its subtree draws meanwhile), except the roots and edge patches near the window's edge,
   which are built while covered so they show the moment their chunks unload (a covered one the viewer leaves there
@@ -362,8 +363,10 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   after a teleport onto a face the camera never saw its root stands in at once (F4.2; before, a root was built once some
   of its face came into view and the first update there drew no far field; test `FarField.Planet.TeleportOntoUnseenFace`).
   The components sit in the ray tracing scene's far-field layer, for Lumen's far-field traces
-  (`voxel.World.FarFieldRayTracing`, G117; [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) "What Lumen Sees"; test
-  `FarField.Planet.RayTracingLayer`).
+  (`voxel.World.FarFieldRayTracing`, G117), and build an acceleration structure for their terrain section alone, only
+  while something can trace it: in that layer, only with Lumen's far field on (G121;
+  [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) "What Lumen Sees"; tests `FarField.Planet.RayTracingLayer`,
+  `Rendering.RayTracing.FarFieldGeometry`).
 - **The sea**, at scale: where the sea sphere would sag past its budget (`ShouldDrawSea`: from about R 3.3 x 10^5) each
   patch draws a sea section over the cells near or under the sea, 8 x 8 cells a patch, over the voxel window too (a
   planet has no voxel water tiles), with an underside near the window shown from under the sea. The small planet keeps

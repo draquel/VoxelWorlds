@@ -11,6 +11,7 @@
 class AActor;
 class UBoxComponent;
 class UProceduralMeshComponent;
+class UVoxelFarFieldPatchComponent;
 class UMaterialInterface;
 class FVoxelFarField;
 struct FVoxelFarFieldChanges;
@@ -162,8 +163,8 @@ private:
 };
 
 /**
- * The far field's components (spherical Phase 6 WM-BP9; every world mode since MP3): one procedural mesh component per
- * built patch at the patch's origin, section 0 the terrain, 1 the sea's top and 2 its underside. FVoxelFarField selects
+ * The far field's components (spherical Phase 6 WM-BP9; every world mode since MP3): one UVoxelFarFieldPatchComponent per
+ * built patch at the patch's origin, section 0 the terrain, 1 the sea's top and 2 its underside (only the terrain traced, G121). FVoxelFarField selects
  * and builds the patches; this applies an update's changes to the components (gone with their patches, filled when a
  * patch is built, its sections shown as the selection drew them) and keeps their memory estimate.
  */
@@ -194,18 +195,18 @@ struct VOXELSTREAMING_API FVoxelFarFieldPresenter
 	void ResetUnderside() { bUndersideShown = false; }
 
 	/** @return A built patch's component, or null */
-	UProceduralMeshComponent* Find(uint64 PackedPatchKey) const;
+	UVoxelFarFieldPatchComponent* Find(uint64 PackedPatchKey) const;
 
 	/** @return How many components are alive */
 	int32 Num() const { return Components.Num(); }
 
-	/** @return What the components hold on the CPU and the GPU (an estimate: a proc-mesh vertex and a GPU vertex) */
+	/** @return What the components hold on the CPU and the GPU (an estimate: a component's vertex and a GPU vertex) */
 	int64 GetMemoryBytes() const;
 
 private:
 	/** One component per built patch (owned by the chunk manager's actor) */
 	UPROPERTY(Transient)
-	TMap<uint64, TObjectPtr<UProceduralMeshComponent>> Components;
+	TMap<uint64, TObjectPtr<UVoxelFarFieldPatchComponent>> Components;
 
 	/** Vertices and indices each component holds (its memory estimate) */
 	TMap<uint64, FIntPoint> Sizes;
