@@ -144,6 +144,11 @@ struct FVoxelChunkDrawInfo
 	 *  buffer the whole proxy holds (FVoxelSceneProxy::GetMeshBufferBytes) */
 	uint32 VertexStride = 0;
 	int64 ProxyMeshBufferBytes = 0;
+
+	/** The chunk primitive's Lumen cards (G116 step 4: 6 with cards, 0 without; the region proxy has none) and whether
+	 *  the primitive is in Lumen's scene (it is with cards when Lumen traces the ray tracing scene) */
+	int32 LumenCards = 0;
+	bool bVisibleInLumenScene = false;
 };
 
 /** A vertex's two packed tangents as the tangent SRV holds them (the scene proxy's mesh buffers) */

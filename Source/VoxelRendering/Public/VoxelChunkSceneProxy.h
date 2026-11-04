@@ -16,6 +16,8 @@
 
 struct FPrimitiveSceneProxyDesc;
 class UMaterialInterface;
+class FCardRepresentationData;
+class FMeshCardsBuildData;
 
 /**
  * The chunk primitives of every region component (G116): alive now, and added and removed since the start (the streaming
@@ -65,9 +67,11 @@ public:
 	 * @param InLocalBounds Its box relative to InOrigin
 	 * @param InOrigin     The chunk's (or the seam owner chunk's) world position
 	 * @param InByteCounter The region component's count of its chunk meshes' buffer bytes (outlives the mesh)
+	 * @param InLumenCardSlices Build its Lumen card representation with this many slices per axis (G116 step 4,
+	 *                      BuildVoxelChunkMeshCards); 0 = none (voxel.Render.LumenCards 0)
 	 */
 	FVoxelChunkMesh(TArray<FVoxelVertex>&& InVertices, TArray<uint32>&& InIndices, int32 InLODLevel, const FBox& InLocalBounds,
-		const FVector& InOrigin, const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe>& InByteCounter);
+		const FVector& InOrigin, const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe>& InByteCounter, int32 InLumenCardSlices = 0);
 
 	/** Render thread: releases the buffers, the vertex factory and the ray tracing geometry. */
 	~FVoxelChunkMesh();
@@ -103,6 +107,13 @@ public:
 	const FBox LocalBounds;
 	const FVector Origin;
 
+	/**
+	 * Its Lumen card representation (G116 step 4), relative to Origin: axis-aligned cards over LocalBounds, two per slice
+	 * of each axis (BuildVoxelChunkMeshCards), so a ray that hits the mesh reads the surface cache. Built with the mesh,
+	 * fixed for its life (any thread); null when the cards are off or the mesh has no triangles.
+	 */
+	TUniquePtr<FCardRepresentationData> CardRepresentation;
+
 	/** The buffers (positions relative to Origin) */
 	FVoxelChunkRenderData RenderData;
 	TSharedPtr<FVoxelLocalVertexBuffer> VertexBuffer;
@@ -123,6 +134,20 @@ private:
 	uint32 NumTriangles = 0;
 	TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe> ByteCounter;
 };
+
+/** The most slices per axis a chunk mesh's cards take: Lumen looks up at most 32 cards per mesh (6 a slice) */
+constexpr int32 MaxVoxelChunkMeshCardSlices = 5;
+
+/**
+ * A chunk mesh's Lumen cards (G116 step 4): the box cut into Slices equal parts along each axis, and for each part the two
+ * cards facing along that axis, over the part's depth and the whole box across (MeshCardRepresentation::SetCardsFromBounds
+ * on the part). 1 slice = the six cards over the whole box. Any thread.
+ *
+ * @param LocalBounds  The mesh's box
+ * @param Slices       Parts per axis (clamped to 1..MaxVoxelChunkMeshCardSlices): 6 x Slices cards
+ * @param OutCardData  Receives the cards (its Bounds and two-sidedness are the caller's)
+ */
+VOXELRENDERING_API void BuildVoxelChunkMeshCards(const FBox& LocalBounds, int32 Slices, FMeshCardsBuildData& OutCardData);
 
 /** A reference to a chunk mesh, shared across threads */
 using FVoxelChunkMeshRef = TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>;
@@ -186,6 +211,8 @@ public:
 		FVector FaceUpCenter = FVector::ZeroVector;
 		/** A seam bucket (the counters tell chunk and seam geometry apart) */
 		bool bSeam = false;
+		/** In Lumen's scene with its mesh's cards (G116 step 4, voxel.Render.LumenCards; needs the mesh's cards) */
+		bool bLumenCards = false;
 	};
 
 	/**
@@ -233,6 +260,14 @@ public:
 	/** @return The ray tracing geometry group of its mesh's geometry (fixed for its life) */
 	virtual RayTracing::FGeometryGroupHandle GetRayTracingGeometryGroupHandle() const override;
 #endif
+
+	/**
+	 * Lumen's surface cache asks for it when the primitive joins its scene (G116 step 4): the cards Lumen captures from
+	 * the cached static batch (its LumenCardCapture command) and samples where a ray hits the mesh.
+	 *
+	 * @return Its mesh's six axis-aligned cards, null without cards (fixed for its life)
+	 */
+	virtual const FCardRepresentationData* GetMeshCardRepresentation() const override;
 
 	// ==================== Render Thread ====================
 
@@ -287,6 +322,7 @@ private:
 	bool bRadialFaceUp = false;
 	FVector FaceUpCenter = FVector::ZeroVector;
 	bool bSeam = false;
+	bool bLumenCards = false;
 
 	/** Guards the state the render commands change against the frame's own tasks */
 	mutable FCriticalSection StateLock;
