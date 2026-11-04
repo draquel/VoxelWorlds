@@ -178,6 +178,7 @@ void InitVoxelLocalVertexFactory(
 	FRHICommandListBase& RHICmdList,
 	FLocalVertexFactory* VertexFactory,
 	const FVertexBuffer* VertexBuffer,
+	bool bPositionOnly,
 	FRHIShaderResourceView* ColorSRV,
 	FRHIShaderResourceView* TangentsSRV,
 	FRHIShaderResourceView* TexCoordSRV)
@@ -186,12 +187,12 @@ void InitVoxelLocalVertexFactory(
 	check(VertexFactory != nullptr);
 	check(VertexBuffer != nullptr);
 
-	const uint32 Stride = sizeof(FVoxelLocalVertex);
+	const uint32 Stride = bPositionOnly ? sizeof(FVector3f) : sizeof(FVoxelLocalVertex);
 
 	// Build FDataType for FLocalVertexFactory
 	FLocalVertexFactory::FDataType NewData;
 
-	// Position stream component - reads from interleaved buffer via vertex input
+	// Position stream component - reads from the vertex buffer via vertex input (offset 0 in both layouts)
 	NewData.PositionComponent = FVertexStreamComponent(
 		VertexBuffer,
 		STRUCT_OFFSET(FVoxelLocalVertex, Position),
@@ -203,19 +204,19 @@ void InitVoxelLocalVertexFactory(
 	// The actual vertex data comes from the vertex stream components
 	NewData.PositionComponentSRV = GNullColorVertexBuffer.VertexBufferSRV;
 
+	// The other attributes' stream components, for traditional vertex input. With the positions alone (G120) the shaders
+	// read them from the SRVs: the components name the same buffer at offset 0, flagged ManualFetch, so no stream binds
+	// them (FVertexFactory::GetStreams), and the position buffer stays the tangent one, as interleaved, so the vertex
+	// factory makes no position-only declarations and the depth and shadow passes draw it as before.
+	const EVertexStreamUsage AttributeUsage = bPositionOnly ? EVertexStreamUsage::ManualFetch : EVertexStreamUsage::Default;
+	auto AttributeComponent = [VertexBuffer, Stride, bPositionOnly, AttributeUsage](uint32 InterleavedOffset, EVertexElementType Type)
+	{
+		return FVertexStreamComponent(VertexBuffer, bPositionOnly ? 0 : InterleavedOffset, Stride, Type, AttributeUsage);
+	};
+
 	// Tangent basis stream components - for traditional vertex input
-	NewData.TangentBasisComponents[0] = FVertexStreamComponent(
-		VertexBuffer,
-		STRUCT_OFFSET(FVoxelLocalVertex, TangentX),
-		Stride,
-		VET_PackedNormal
-	);
-	NewData.TangentBasisComponents[1] = FVertexStreamComponent(
-		VertexBuffer,
-		STRUCT_OFFSET(FVoxelLocalVertex, TangentZ),
-		Stride,
-		VET_PackedNormal
-	);
+	NewData.TangentBasisComponents[0] = AttributeComponent(STRUCT_OFFSET(FVoxelLocalVertex, TangentX), VET_PackedNormal);
+	NewData.TangentBasisComponents[1] = AttributeComponent(STRUCT_OFFSET(FVoxelLocalVertex, TangentZ), VET_PackedNormal);
 
 	// Tangents SRV - for manual vertex fetch (GPUScene path)
 	NewData.TangentsSRV = TangentsSRV ? TangentsSRV : GNullColorVertexBuffer.VertexBufferSRV.GetReference();
@@ -224,30 +225,15 @@ void InitVoxelLocalVertexFactory(
 	// UV0: Face UVs for texture tiling within atlas tiles
 	// UV1: MaterialID (X) and FaceType (Y) as floats to avoid sRGB issues
 	NewData.TextureCoordinates.Empty();
-	NewData.TextureCoordinates.Add(FVertexStreamComponent(
-		VertexBuffer,
-		STRUCT_OFFSET(FVoxelLocalVertex, TexCoord),
-		Stride,
-		VET_Float2
-	));
-	NewData.TextureCoordinates.Add(FVertexStreamComponent(
-		VertexBuffer,
-		STRUCT_OFFSET(FVoxelLocalVertex, TexCoord1),
-		Stride,
-		VET_Float2
-	));
+	NewData.TextureCoordinates.Add(AttributeComponent(STRUCT_OFFSET(FVoxelLocalVertex, TexCoord), VET_Float2));
+	NewData.TextureCoordinates.Add(AttributeComponent(STRUCT_OFFSET(FVoxelLocalVertex, TexCoord1), VET_Float2));
 	// TexCoord SRV - for manual vertex fetch (GPUScene path)
 	NewData.TextureCoordinatesSRV = TexCoordSRV ? TexCoordSRV : GNullColorVertexBuffer.VertexBufferSRV.GetReference();
 
 	// Vertex color - for traditional vertex input
 	// Note: VET_Color applies sRGB conversion. Use gamma correction in shader to recover linear values.
 	// MaterialID and FaceType are now in UV1 to avoid sRGB issues.
-	NewData.ColorComponent = FVertexStreamComponent(
-		VertexBuffer,
-		STRUCT_OFFSET(FVoxelLocalVertex, Color),
-		Stride,
-		VET_Color
-	);
+	NewData.ColorComponent = AttributeComponent(STRUCT_OFFSET(FVoxelLocalVertex, Color), VET_Color);
 	// Color SRV - for manual vertex fetch (GPUScene path)
 	NewData.ColorComponentsSRV = ColorSRV ? ColorSRV : GNullColorVertexBuffer.VertexBufferSRV.GetReference();
 
@@ -285,6 +271,9 @@ FVoxelSceneProxy::FVoxelSceneProxy(UVoxelRegionComponent* InComponent, UMaterial
 	// Cache material relevance
 	MaterialRelevance = Material->GetRelevance(GetFeatureLevelShaderPlatform(FeatureLevel));
 
+	// The positions alone in the vertex streams where the vertex factory fetches the rest from the SRVs (G120)
+	bPositionOnlyVertexStream = FLocalVertexFactory::StaticType.SupportsManualVertexFetch(FeatureLevel);
+
 	// Note: Per-chunk vertex factories are created in ProcessBatchUpdate_RenderThread
 
 	// Set proxy properties
@@ -310,8 +299,9 @@ FVoxelSceneProxy::FVoxelSceneProxy(UVoxelRegionComponent* InComponent, UMaterial
 	}
 #endif
 
-	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Created with FLocalVertexFactory (RVT material types=%d, ray tracing %s)"),
-		RuntimeVirtualTextureMaterialTypes.Num(), bRayTracing ? TEXT("on") : TEXT("off"));
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelSceneProxy: Created with FLocalVertexFactory (RVT material types=%d, ray tracing %s, vertex stream %s)"),
+		RuntimeVirtualTextureMaterialTypes.Num(), bRayTracing ? TEXT("on") : TEXT("off"),
+		bPositionOnlyVertexStream ? TEXT("positions") : TEXT("interleaved"));
 }
 
 FVoxelSceneProxy::~FVoxelSceneProxy()
@@ -444,14 +434,27 @@ void FVoxelSceneProxy::CreateMeshBuffers_RenderThread(FRHICommandListBase& RHICm
 	const uint32 VertexCount = ConvertedVertices.Num();
 	const uint32 IndexCount = Indices.Num();
 
-	// Create vertex buffer
-	const uint32 ConvertedVertexSize = VertexCount * sizeof(FVoxelLocalVertex);
+	// Create vertex buffer: the positions alone where the vertex factory fetches the rest from the SRVs below (G120: the
+	// interleaved vertices' other 28 bytes were uploaded twice and never read), the interleaved vertices elsewhere
+	NewRenderData.VertexStride = bPositionOnlyVertexStream ? sizeof(FVector3f) : sizeof(FVoxelLocalVertex);
+	const uint32 VertexBufferSize = VertexCount * NewRenderData.VertexStride;
 	NewRenderData.VertexBufferRHI = RHICmdList.CreateBuffer(
-		FRHIBufferCreateDesc::Create(Names.Vertex, ConvertedVertexSize, sizeof(FVoxelLocalVertex), BUF_Static | BUF_VertexBuffer)
+		FRHIBufferCreateDesc::Create(Names.Vertex, VertexBufferSize, NewRenderData.VertexStride, BUF_Static | BUF_VertexBuffer)
 			.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
 
-	void* VertexData = RHICmdList.LockBuffer(NewRenderData.VertexBufferRHI, 0, ConvertedVertexSize, RLM_WriteOnly);
-	FMemory::Memcpy(VertexData, ConvertedVertices.GetData(), ConvertedVertexSize);
+	void* VertexData = RHICmdList.LockBuffer(NewRenderData.VertexBufferRHI, 0, VertexBufferSize, RLM_WriteOnly);
+	if (bPositionOnlyVertexStream)
+	{
+		FVector3f* Positions = static_cast<FVector3f*>(VertexData);
+		for (uint32 i = 0; i < VertexCount; ++i)
+		{
+			Positions[i] = ConvertedVertices[i].Position;
+		}
+	}
+	else
+	{
+		FMemory::Memcpy(VertexData, ConvertedVertices.GetData(), VertexBufferSize);
+	}
 	RHICmdList.UnlockBuffer(NewRenderData.VertexBufferRHI);
 
 	// Create color buffer for SRV
@@ -1614,6 +1617,7 @@ void FVoxelSceneProxy::UpdateWaterTileFromCPUData_RenderThread(
 		RHICmdList,
 		TileVertexFactory.Get(),
 		VertexBufferWrapper.Get(),
+		NewRenderData.VertexStride == sizeof(FVector3f),
 		NewRenderData.ColorSRV,
 		NewRenderData.TangentsSRV,
 		NewRenderData.TexCoordSRV
@@ -1810,6 +1814,7 @@ void FVoxelSceneProxy::UpdateSeamMeshFromCPUData_RenderThread(
 		RHICmdList,
 		SeamVertexFactory.Get(),
 		VertexBufferWrapper.Get(),
+		NewRenderData.VertexStride == sizeof(FVector3f),
 		NewRenderData.ColorSRV,
 		NewRenderData.TangentsSRV,
 		NewRenderData.TexCoordSRV
@@ -2202,6 +2207,7 @@ void FVoxelSceneProxy::ProcessBatchUpdate_RenderThread(
 			RHICmdList,
 			ChunkVertexFactory.Get(),
 			VertexBufferWrapper.Get(),
+			NewRenderData.VertexStride == sizeof(FVector3f),
 			NewRenderData.ColorSRV,
 			NewRenderData.TangentsSRV,
 			NewRenderData.TexCoordSRV
@@ -2282,7 +2288,9 @@ bool FVoxelSceneProxy::GetChunkDrawInfo_RenderThread(const FIntVector& ChunkCoor
 		OutInfo.LODLevel = Current->LODLevel;
 		OutInfo.bVisible = true;
 		OutInfo.VertexFactory = VertexFactoryPtr->Get();
+		OutInfo.VertexStride = Current->VertexStride;
 	}
+	OutInfo.ProxyMeshBufferBytes = GetMeshBufferBytes();
 	OutInfo.PreviousTriangles = PreviousMesh ? PreviousMesh->RenderData.IndexCount / 3 : 0;
 	if (FadeState)
 	{
@@ -2529,8 +2537,8 @@ void FVoxelSceneProxy::BuildRayTracing_AssumesLocked(FRHICommandListBase& RHICmd
 		return;
 	}
 
-	// Over the buffers just uploaded: the positions are the interleaved FVoxelLocalVertex's first member, relative to
-	// RenderOrigin. Built once on the GPU (fast build, no updates: a re-mesh uploads new buffers and builds anew).
+	// Over the buffers just uploaded: the positions, at the vertex stream's offset 0 and stride (12 bytes for the positions
+	// alone, G120; the hit shaders read them from this segment), relative to RenderOrigin. Built once on the GPU (fast build, no updates: a re-mesh uploads new buffers and builds anew).
 	FRayTracingGeometryInitializer Initializer;
 	Initializer.DebugName = FName(DebugName);
 	Initializer.IndexBuffer = RenderData.IndexBufferRHI;
@@ -2543,7 +2551,7 @@ void FVoxelSceneProxy::BuildRayTracing_AssumesLocked(FRHICommandListBase& RHICmd
 	Segment.VertexBuffer = RenderData.VertexBufferRHI;
 	Segment.VertexBufferElementType = VET_Float3;
 	Segment.VertexBufferOffset = STRUCT_OFFSET(FVoxelLocalVertex, Position);
-	Segment.VertexBufferStride = sizeof(FVoxelLocalVertex);
+	Segment.VertexBufferStride = RenderData.VertexStride;
 	Segment.MaxVertices = RenderData.VertexCount;
 	Segment.NumPrimitives = Initializer.TotalPrimitiveCount;
 	Initializer.Segments.Add(Segment);

@@ -191,8 +191,15 @@ struct VOXELRENDERING_API FVoxelChunkRenderData
 	/** World position of chunk origin */
 	FVector ChunkWorldPosition = FVector::ZeroVector;
 
-	/** Interleaved vertex buffer (FVoxelLocalVertex format) */
+	/**
+	 * The vertex stream: the positions alone (FVector3f) where FLocalVertexFactory fetches the other attributes from the
+	 * shader resource views below (manual vertex fetch), else interleaved FVoxelLocalVertex (G120). The position is at
+	 * offset 0 in both, VertexStride bytes apart.
+	 */
 	FBufferRHIRef VertexBufferRHI;
+
+	/** VertexBufferRHI's bytes a vertex: sizeof(FVector3f) for the positions alone, else sizeof(FVoxelLocalVertex) */
+	uint32 VertexStride = sizeof(FVoxelLocalVertex);
 
 	/** Index buffer */
 	FBufferRHIRef IndexBufferRHI;
@@ -234,7 +241,7 @@ struct VOXELRENDERING_API FVoxelChunkRenderData
 	 *
 	 * @param InVertexCount Vertices
 	 * @param InIndexCount Indices
-	 * @param InVertexStride The vertex stream's bytes a vertex (sizeof(FVoxelLocalVertex))
+	 * @param InVertexStride The vertex stream's bytes a vertex (VertexStride: 12 for the positions alone, 40 interleaved)
 	 * @return The bytes
 	 */
 	static SIZE_T CalcGPUMemoryUsage(uint32 InVertexCount, uint32 InIndexCount, uint32 InVertexStride)
@@ -246,7 +253,7 @@ struct VOXELRENDERING_API FVoxelChunkRenderData
 	/** @return The GPU memory of this mesh's buffers in bytes (CalcGPUMemoryUsage) */
 	FORCEINLINE SIZE_T GetGPUMemoryUsage() const
 	{
-		return CalcGPUMemoryUsage(VertexCount, IndexCount, sizeof(FVoxelLocalVertex));
+		return CalcGPUMemoryUsage(VertexCount, IndexCount, VertexStride);
 	}
 
 	/** Release GPU resources (and take their bytes off the proxy's count) */
@@ -339,7 +346,9 @@ private:
  *
  * @param RHICmdList RHI command list
  * @param VertexFactory Vertex factory to initialize
- * @param VertexBuffer Vertex buffer containing FVoxelLocalVertex data
+ * @param VertexBuffer Vertex buffer: FVoxelLocalVertex data, or the positions alone (bPositionOnly)
+ * @param bPositionOnly The buffer holds the positions alone (FVector3f): only for a vertex factory with manual vertex
+ *        fetch, which reads the tangents, texcoords and colours from the SRVs (G120)
  * @param ColorSRV SRV for vertex colors (manual vertex fetch)
  * @param TangentsSRV Optional SRV for tangents (manual vertex fetch, used by GPUScene)
  * @param TexCoordSRV Optional SRV for texture coordinates (manual vertex fetch, used by GPUScene)
@@ -348,6 +357,7 @@ void VOXELRENDERING_API InitVoxelLocalVertexFactory(
 	FRHICommandListBase& RHICmdList,
 	FLocalVertexFactory* VertexFactory,
 	const FVertexBuffer* VertexBuffer,
+	bool bPositionOnly,
 	FRHIShaderResourceView* ColorSRV,
 	FRHIShaderResourceView* TangentsSRV = nullptr,
 	FRHIShaderResourceView* TexCoordSRV = nullptr);
