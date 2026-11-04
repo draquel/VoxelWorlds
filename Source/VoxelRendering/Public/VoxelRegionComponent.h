@@ -755,6 +755,8 @@ private:
 	{
 		FVoxelChunkSceneProxy* Proxy = nullptr;
 		TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe> Mesh;
+		/** The mesh its crossfade dithers out (step 2), until the fade ends */
+		TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe> Previous;
 		/** Created and queued, not yet handed to the scene */
 		bool bPendingAdd = false;
 		/** The slot as the engine's component interface (GetChunkPrimitiveInterfaces), for the slot's life */
@@ -784,9 +786,11 @@ private:
 	/** The bytes of the chunk meshes' buffers alive now (the meshes add and remove theirs on the render thread) */
 	TSharedPtr<std::atomic<int64>, ESPMode::ThreadSafe> ChunkMeshBytes;
 
-	/** The terrain material's relevance, computed for ChunkMaterialRelevanceSource (a primitive's creation needs it) */
+	/** The terrain and fade materials' relevances, computed for their Source (a primitive's creation needs them) */
 	FMaterialRelevance ChunkMaterialRelevance;
 	const UMaterialInterface* ChunkMaterialRelevanceSource = nullptr;
+	FMaterialRelevance ChunkFadeMaterialRelevance;
+	const UMaterialInterface* ChunkFadeMaterialRelevanceSource = nullptr;
 
 	/**
 	 * The water tiles as sent, while chunk primitives are in use: a recreated scene proxy gets them from here
@@ -812,9 +816,25 @@ private:
 	 * @param LODLevel    The mesh's LOD
 	 * @param LocalBounds Its box relative to Origin
 	 * @param Origin      The chunk's (the seam owner chunk's) world position
+	 * @param bFade       The submit carries the fade FadeScheduler and ActiveFades hold for Key (step 2)
 	 */
 	void SubmitChunkPrimitive(const FIntVector4& Key, TArray<FVoxelVertex>&& Vertices, TArray<uint32>&& Indices, int32 LODLevel,
-		const FBox& LocalBounds, const FVector& Origin);
+		const FBox& LocalBounds, const FVector& Origin, bool bFade);
+
+	/**
+	 * Replace Key's primitive with one drawing Mesh (step 2). With bFade the new primitive starts with Key's fade and draws
+	 * dynamically until it ends: an appearance from nothing, or a crossfade from the mesh on screen (the replaced one, or
+	 * the one a held fade keeps); a null Mesh fades the replaced one out to nothing (a seam bucket that dissolved).
+	 *
+	 * @param Key   FadeScheduler's key of the chunk or bucket
+	 * @param Mesh  The new mesh, or null
+	 * @param bFade The submit carries Key's fade
+	 */
+	void SubmitChunkPrimitiveMesh(const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh, bool bFade);
+
+	/** End Key's fade on its primitive (step 2): it draws its cached static batches from the next frame, and one fading to
+	 *  nothing leaves the scene. */
+	void ClearChunkPrimitiveFade(const FIntVector4& Key);
 
 	/** Remove a chunk interior's or seam bucket's primitive (queued for the next flush). */
 	void RemoveChunkPrimitive(const FIntVector4& Key);
@@ -840,8 +860,9 @@ private:
 	void DestroyChunkPrimitiveRenderState(const FIntVector4& Key);
 	void CreateChunkPrimitiveRenderState(const FIntVector4& Key);
 
-	/** @return A new primitive drawing Mesh for Key (game thread) */
-	FVoxelChunkSceneProxy* CreateChunkPrimitive(const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh);
+	/** @return A new primitive drawing Mesh for Key, with Previous and Key's fade when bFading (game thread) */
+	FVoxelChunkSceneProxy* CreateChunkPrimitive(const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh,
+		const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Previous, bool bFading);
 
 	/** Critical section for chunk info access */
 	mutable FCriticalSection ChunkInfoLock;

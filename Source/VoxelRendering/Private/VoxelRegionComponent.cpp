@@ -466,7 +466,7 @@ void UVoxelRegionComponent::UpdateChunkBuffersFromCPUData(
 	if (bUseChunkPrimitives)
 	{
 		// The chunk's own primitive (G116), replacing the one it had
-		SubmitChunkPrimitive(FadeKey, MoveTemp(Vertices), MoveTemp(Indices), LODLevel, LocalBounds, ChunkWorldPos);
+		SubmitChunkPrimitive(FadeKey, MoveTemp(Vertices), MoveTemp(Indices), LODLevel, LocalBounds, ChunkWorldPos, bCrossfade);
 		if (!bCrossfade && ActiveFades.Contains(FadeKey))
 		{
 			CancelFade(FadeKey, /*bClearRenderState=*/true);
@@ -791,7 +791,7 @@ void UVoxelRegionComponent::UpdateSeamMeshFromCPUData(
 		{
 			SeamBounds += FVector(Vertex.Position);
 		}
-		SubmitChunkPrimitive(FadeKey, MoveTemp(Vertices), MoveTemp(Indices), LODLevel, SeamBounds, OwnerWorldPosition);
+		SubmitChunkPrimitive(FadeKey, MoveTemp(Vertices), MoveTemp(Indices), LODLevel, SeamBounds, OwnerWorldPosition, bFade);
 		return;
 	}
 
@@ -837,7 +837,15 @@ void UVoxelRegionComponent::RemoveSeamMesh(const FIntVector& OwnerChunkCoord, ui
 
 	if (bUseChunkPrimitives)
 	{
-		RemoveChunkPrimitive(FadeKey);
+		// Fading out to nothing: a primitive of the bucket's last mesh dithering out until the fade ends (step 2)
+		if (bFade)
+		{
+			SubmitChunkPrimitiveMesh(FadeKey, nullptr, /*bFade*/ true);
+		}
+		else
+		{
+			RemoveChunkPrimitive(FadeKey);
+		}
 		return;
 	}
 
@@ -904,9 +912,18 @@ void UVoxelRegionComponent::SetFadeMaterial(UMaterialInterface* InFadeMaterial)
 	// Active fades reference MIDs of the old material — finish them instantly
 	if (ActiveFades.Num() > 0)
 	{
+		TArray<FIntVector4> FadeKeys;
+		ActiveFades.GetKeys(FadeKeys);
 		CancelAllFades();
 
-		if (FVoxelSceneProxy* Proxy = GetVoxelSceneProxy())
+		if (bUseChunkPrimitives)
+		{
+			for (const FIntVector4& Key : FadeKeys)
+			{
+				ClearChunkPrimitiveFade(Key);
+			}
+		}
+		else if (FVoxelSceneProxy* Proxy = GetVoxelSceneProxy())
 		{
 			ENQUEUE_RENDER_COMMAND(ClearVoxelChunkFades)(
 				[Proxy](FRHICommandListImmediate& RHICmdList)
@@ -937,8 +954,7 @@ bool UVoxelRegionComponent::CanSwapFade() const
 {
 	return CVarVoxelMeshFade.GetValueOnGameThread() != 0
 		&& FadeMaterial != nullptr
-		&& GetVoxelSceneProxy() != nullptr
-		&& !bUseChunkPrimitives;
+		&& GetVoxelSceneProxy() != nullptr;
 }
 
 bool UVoxelRegionComponent::CanSwapFadeSeams() const
@@ -1047,7 +1063,11 @@ bool UVoxelRegionComponent::StartAppearFade(const FIntVector4& Key, bool bBypass
 	Fade.InMID->SetScalarParameterValue(VoxelFadeAlphaParamName, 0.0f);
 	const FMaterialRenderProxy* FadeInProxy = Fade.InMID->GetRenderProxy();
 
-	if (bSeam)
+	// A chunk primitive (G116) gets the fade when it is created for the submit that follows (SubmitChunkPrimitiveMesh)
+	if (bUseChunkPrimitives)
+	{
+	}
+	else if (bSeam)
 	{
 		const uint8 Slot = static_cast<uint8>(Key.W);
 		ENQUEUE_RENDER_COMMAND(AttachVoxelSeamAppearFade)(
@@ -1349,7 +1369,11 @@ bool UVoxelRegionComponent::StartFade(const FIntVector4& Key)
 	const FMaterialRenderProxy* FadeInProxy = Fade.InMID->GetRenderProxy();
 	const FMaterialRenderProxy* FadeOutProxy = Fade.OutMID->GetRenderProxy();
 
-	if (bSeam)
+	// A chunk primitive (G116) gets the fade when it is created for the submit that follows (SubmitChunkPrimitiveMesh)
+	if (bUseChunkPrimitives)
+	{
+	}
+	else if (bSeam)
 	{
 		const uint8 Slot = static_cast<uint8>(Key.W);
 		ENQUEUE_RENDER_COMMAND(AttachVoxelSeamFade)(
@@ -1375,6 +1399,11 @@ bool UVoxelRegionComponent::StartFade(const FIntVector4& Key)
 
 void UVoxelRegionComponent::EnqueueClearFadeState(const FIntVector4& Key)
 {
+	if (bUseChunkPrimitives)
+	{
+		ClearChunkPrimitiveFade(Key);
+		return;
+	}
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (!Proxy)
 	{
@@ -1446,6 +1475,32 @@ void UVoxelRegionComponent::FlushHoldReleases()
 	{
 		return;
 	}
+	if (bUseChunkPrimitives)
+	{
+		// To the primitives the released fades belong to (G116), in one command
+		TArray<FVoxelChunkSceneProxy*> Released;
+		for (const FIntVector4& Key : PendingHoldReleases)
+		{
+			if (const FChunkPrimitive* Primitive = ChunkPrimitives.Find(Key); Primitive && Primitive->Proxy)
+			{
+				Released.Add(Primitive->Proxy);
+			}
+		}
+		PendingHoldReleases.Reset();
+		if (Released.Num() > 0)
+		{
+			ENQUEUE_RENDER_COMMAND(ReleaseVoxelChunkPrimitiveHolds)(
+				[Released = MoveTemp(Released)](FRHICommandListImmediate& RHICmdList)
+				{
+					for (FVoxelChunkSceneProxy* Each : Released)
+					{
+						Each->ReleaseFadeHold_RenderThread();
+					}
+				}
+			);
+		}
+		return;
+	}
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	if (!Proxy)
 	{
@@ -1511,7 +1566,7 @@ void UVoxelRegionComponent::AdvanceFades()
 
 	FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
 	UWorld* World = GetWorld();
-	if (!Proxy || !World)
+	if ((!Proxy && !bUseChunkPrimitives) || !World)
 	{
 		CancelAllFades();
 		SetComponentTickEnabled(false);
@@ -1554,6 +1609,7 @@ void UVoxelRegionComponent::AdvanceFades()
 		// bookkeeping copies (one batched command per kind per tick).
 		TArray<TPair<FIntVector, float>> ChunkAlphas;
 		TArray<TPair<FIntVector4, float>> SeamAlphas;
+		TArray<TPair<FVoxelChunkSceneProxy*, float>> PrimitiveAlphas;
 		for (const TPair<FIntVector4, float>& Pair : Result.Alphas)
 		{
 			if (FActiveChunkFade* Fade = ActiveFades.Find(Pair.Key))
@@ -1567,7 +1623,14 @@ void UVoxelRegionComponent::AdvanceFades()
 					Fade->OutMID->SetScalarParameterValue(VoxelFadeAlphaParamName, Pair.Value);
 				}
 			}
-			if (FVoxelFadeScheduler::IsSeamKey(Pair.Key))
+			if (bUseChunkPrimitives)
+			{
+				if (const FChunkPrimitive* Primitive = ChunkPrimitives.Find(Pair.Key); Primitive && Primitive->Proxy)
+				{
+					PrimitiveAlphas.Emplace(Primitive->Proxy, Pair.Value);
+				}
+			}
+			else if (FVoxelFadeScheduler::IsSeamKey(Pair.Key))
 			{
 				SeamAlphas.Add(Pair);
 			}
@@ -1575,6 +1638,18 @@ void UVoxelRegionComponent::AdvanceFades()
 			{
 				ChunkAlphas.Emplace(FVoxelFadeScheduler::KeyCoord(Pair.Key), Pair.Value);
 			}
+		}
+		if (PrimitiveAlphas.Num() > 0)
+		{
+			ENQUEUE_RENDER_COMMAND(UpdateVoxelChunkPrimitiveFadeAlphas)(
+				[Batch = MoveTemp(PrimitiveAlphas)](FRHICommandListImmediate& RHICmdList)
+				{
+					for (const TPair<FVoxelChunkSceneProxy*, float>& Pair : Batch)
+					{
+						Pair.Key->SetFadeAlpha_RenderThread(Pair.Value);
+					}
+				}
+			);
 		}
 		if (ChunkAlphas.Num() > 0)
 		{
@@ -2302,14 +2377,18 @@ TArray<IPrimitiveComponent*> UVoxelRegionComponent::GetChunkPrimitiveInterfaces(
 UVoxelRegionComponent::FPendingChunkPrimitive UVoxelRegionComponent::MakePendingChunkPrimitive(const FIntVector4& Key, const FChunkPrimitive& Primitive) const
 {
 	// The box the scene culls it by, padded by two voxels as the region proxy padded each mesh's (seam strips, the surface
-	// motion of a swap)
+	// motion of a swap), around both meshes of a crossfade (one slot, one origin)
 	FPendingChunkPrimitive Pending;
 	Pending.Key = Key;
 	Pending.Proxy = Primitive.Proxy;
-	if (Primitive.Mesh.IsValid())
+	const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Any = Primitive.Mesh.IsValid() ? Primitive.Mesh : Primitive.Previous;
+	if (Any.IsValid())
 	{
-		Pending.Origin = Primitive.Mesh->Origin;
-		Pending.LocalBox = Primitive.Mesh->LocalBounds.ExpandBy(FVector(VoxelSize * 2.0f));
+		FBox LocalBox(ForceInit);
+		LocalBox += Primitive.Mesh.IsValid() ? Primitive.Mesh->LocalBounds : FBox(ForceInit);
+		LocalBox += Primitive.Previous.IsValid() ? Primitive.Previous->LocalBounds : FBox(ForceInit);
+		Pending.Origin = Any->Origin;
+		Pending.LocalBox = LocalBox.ExpandBy(FVector(VoxelSize * 2.0f));
 	}
 	return Pending;
 }
@@ -2349,12 +2428,13 @@ void UVoxelRegionComponent::CreateChunkPrimitiveRenderState(const FIntVector4& K
 
 	FChunkPrimitive* Primitive = ChunkPrimitives.Find(Key);
 	FSceneInterface* Scene = GetScene();
-	if (!Primitive || Primitive->Proxy || !Primitive->Mesh.IsValid() || !Scene)
+	if (!Primitive || Primitive->Proxy || (!Primitive->Mesh.IsValid() && !Primitive->Previous.IsValid()) || !Scene)
 	{
 		return;
 	}
-	// A new primitive over the meshes the slot holds (their buffers stay: the render thread made them once)
-	Primitive->Proxy = CreateChunkPrimitive(Key, Primitive->Mesh);
+	// A new primitive over the meshes the slot holds (their buffers stay: the render thread made them once), with the
+	// slot's fade if one runs
+	Primitive->Proxy = CreateChunkPrimitive(Key, Primitive->Mesh, Primitive->Previous, ActiveFades.Contains(Key));
 	Primitive->bPendingAdd = false;
 	FPrimitiveSceneDesc Desc;
 	FillChunkPrimitiveSceneDesc(MakePendingChunkPrimitive(Key, *Primitive), Desc);
@@ -2437,7 +2517,8 @@ void UVoxelRegionComponent::EnsureChunkPrimitiveMode()
 	RequestRenderBoundsRefresh();
 }
 
-FVoxelChunkSceneProxy* UVoxelRegionComponent::CreateChunkPrimitive(const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh)
+FVoxelChunkSceneProxy* UVoxelRegionComponent::CreateChunkPrimitive(const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh,
+	const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Previous, bool bFading)
 {
 	UMaterialInterface* MaterialToUse = VoxelMaterial ? VoxelMaterial.Get() : UMaterial::GetDefaultMaterial(MD_Surface);
 	const ERHIFeatureLevel::Type FeatureLevel = GetScene()->GetFeatureLevel();
@@ -2453,10 +2534,28 @@ FVoxelChunkSceneProxy* UVoxelRegionComponent::CreateChunkPrimitive(const FIntVec
 	Desc.PrimitiveComponentInterface = nullptr;
 	Desc.ComponentId = FPrimitiveSceneInfoData().PrimitiveSceneId;
 	// The sun's far cascades take the coarse terrain only (D-VP3: the region proxy's per-mesh filter, per primitive)
-	Desc.bCastFarShadow = bCastFarShadow && (!Mesh.IsValid() || Mesh->LODLevel >= GetVoxelFarShadowMinLOD());
+	Desc.bCastFarShadow = bCastFarShadow && Mesh.IsValid() && Mesh->LODLevel >= GetVoxelFarShadowMinLOD();
 
 	FVoxelChunkSceneProxy::FInit Init;
 	Init.Mesh = Mesh;
+	if (bFading)
+	{
+		// The fade this submit started or continues: its pooled MIDs (alpha 0 or where an appearance is), held and
+		// appearance flags (step 2)
+		const FActiveChunkFade* Active = ActiveFades.Find(Key);
+		Init.bFading = true;
+		Init.Previous = Previous;
+		Init.Fade.FadeInProxy = (Active && Active->InMID) ? Active->InMID->GetRenderProxy() : nullptr;
+		Init.Fade.FadeOutProxy = (Active && Active->OutMID) ? Active->OutMID->GetRenderProxy() : nullptr;
+		Init.Fade.bHeld = FadeScheduler.IsHeld(Key);
+		Init.Fade.bAppear = FadeScheduler.IsAppearing(Key);
+		if (FadeMaterial && ChunkFadeMaterialRelevanceSource != FadeMaterial)
+		{
+			ChunkFadeMaterialRelevance = FadeMaterial->GetRelevance(GetFeatureLevelShaderPlatform(FeatureLevel));
+			ChunkFadeMaterialRelevanceSource = FadeMaterial;
+		}
+		Init.FadeMaterialRelevance = ChunkFadeMaterialRelevance;
+	}
 	Init.Material = MaterialToUse;
 	Init.MaterialRelevance = ChunkMaterialRelevance;
 	Init.FeatureLevel = FeatureLevel;
@@ -2469,7 +2568,7 @@ FVoxelChunkSceneProxy* UVoxelRegionComponent::CreateChunkPrimitive(const FIntVec
 }
 
 void UVoxelRegionComponent::SubmitChunkPrimitive(const FIntVector4& Key, TArray<FVoxelVertex>&& Vertices, TArray<uint32>&& Indices,
-	int32 LODLevel, const FBox& LocalBounds, const FVector& Origin)
+	int32 LODLevel, const FBox& LocalBounds, const FVector& Origin, bool bFade)
 {
 	check(IsInGameThread());
 
@@ -2478,19 +2577,75 @@ void UVoxelRegionComponent::SubmitChunkPrimitive(const FIntVector4& Key, TArray<
 		// Not registered: nothing to draw into (the registration's ConsumeLostRenderData brings it back)
 		return;
 	}
+	SubmitChunkPrimitiveMesh(Key, MakeShared<FVoxelChunkMesh, ESPMode::ThreadSafe>(MoveTemp(Vertices), MoveTemp(Indices), LODLevel,
+		LocalBounds, Origin, ChunkMeshBytes.ToSharedRef()), bFade);
+}
+
+void UVoxelRegionComponent::SubmitChunkPrimitiveMesh(const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh, bool bFade)
+{
+	check(IsInGameThread());
+
+	if (!GetScene())
+	{
+		return;
+	}
 
 	FChunkPrimitive& Primitive = ChunkPrimitives.FindOrAdd(Key);
+
+	// What the new primitive dithers out (the region proxy's rules, SEAM_OWNERSHIP_ARCHITECTURE.md §5, R24): nothing for
+	// an appearance (the new mesh takes over its fade-in); the mesh on screen while a held fade replaces a never-shown
+	// one; the replaced mesh otherwise (one generation: an older one goes); and a bucket fading out to nothing that gets a
+	// new mesh keeps its remnant
+	const FActiveChunkFade* Active = bFade ? ActiveFades.Find(Key) : nullptr;
+	const bool bFading = Active && (Active->InMID || Active->OutMID);
+	TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe> Previous;
+	if (bFading && !FadeScheduler.IsAppearing(Key))
+	{
+		Previous = (FadeScheduler.IsHeld(Key) && Primitive.Previous.IsValid()) || !Primitive.Mesh.IsValid() ? Primitive.Previous : Primitive.Mesh;
+	}
+	if (!Mesh.IsValid() && !Previous.IsValid())
+	{
+		// Nothing to draw or to fade out
+		RetireChunkPrimitive(Primitive);
+		ChunkPrimitives.Remove(Key);
+		return;
+	}
+
 	RetireChunkPrimitive(Primitive);
 	if (!Primitive.Interface.IsValid())
 	{
 		Primitive.Interface = MakeShared<FVoxelChunkPrimitiveInterface>(this, Key);
 	}
-
-	Primitive.Mesh = MakeShared<FVoxelChunkMesh, ESPMode::ThreadSafe>(MoveTemp(Vertices), MoveTemp(Indices), LODLevel, LocalBounds, Origin,
-		ChunkMeshBytes.ToSharedRef());
-	Primitive.Proxy = CreateChunkPrimitive(Key, Primitive.Mesh);
+	Primitive.Mesh = Mesh;
+	Primitive.Previous = Previous;
+	Primitive.Proxy = CreateChunkPrimitive(Key, Mesh, Previous, bFading);
 	Primitive.bPendingAdd = true;
 	PendingPrimitiveAdds.Add(MakePendingChunkPrimitive(Key, Primitive));
+}
+
+void UVoxelRegionComponent::ClearChunkPrimitiveFade(const FIntVector4& Key)
+{
+	FChunkPrimitive* Primitive = ChunkPrimitives.Find(Key);
+	if (!Primitive)
+	{
+		return;
+	}
+	if (!Primitive->Mesh.IsValid())
+	{
+		// A bucket that faded out to nothing: its primitive leaves the scene
+		RemoveChunkPrimitive(Key);
+		return;
+	}
+	if (FVoxelChunkSceneProxy* Proxy = Primitive->Proxy)
+	{
+		ENQUEUE_RENDER_COMMAND(ClearVoxelChunkPrimitiveFade)(
+			[Proxy](FRHICommandListImmediate& RHICmdList)
+			{
+				Proxy->ClearFade_RenderThread();
+			}
+		);
+	}
+	ReleaseChunkMeshOnRenderThread(MoveTemp(Primitive->Previous));
 }
 
 void UVoxelRegionComponent::RetireChunkPrimitive(FChunkPrimitive& Primitive)
@@ -2518,6 +2673,7 @@ void UVoxelRegionComponent::RetireChunkPrimitive(FChunkPrimitive& Primitive)
 	Primitive.Proxy = nullptr;
 	Primitive.bPendingAdd = false;
 	ReleaseChunkMeshOnRenderThread(MoveTemp(Primitive.Mesh));
+	ReleaseChunkMeshOnRenderThread(MoveTemp(Primitive.Previous));
 }
 
 void UVoxelRegionComponent::RemoveChunkPrimitive(const FIntVector4& Key)
@@ -2563,6 +2719,7 @@ void UVoxelRegionComponent::FlushChunkPrimitives()
 			if (FChunkPrimitive* Primitive = ChunkPrimitives.Find(Pending.Key); Primitive && Primitive->Proxy == Pending.Proxy)
 			{
 				ReleaseChunkMeshOnRenderThread(MoveTemp(Primitive->Mesh));
+				ReleaseChunkMeshOnRenderThread(MoveTemp(Primitive->Previous));
 				ChunkPrimitives.Remove(Pending.Key);
 			}
 			ENQUEUE_RENDER_COMMAND(DeleteVoxelChunkPrimitive)(

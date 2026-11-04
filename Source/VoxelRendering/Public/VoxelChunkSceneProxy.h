@@ -166,6 +166,13 @@ public:
 	{
 		/** The mesh it draws (null: a seam bucket fading out to nothing, which draws Previous alone) */
 		FVoxelChunkMeshRef Mesh;
+		/** The mesh a crossfade dithers out (step 2: the slot's previous primitive's, or the one a held fade keeps) */
+		FVoxelChunkMeshRef Previous;
+		/** A fade from the first frame (crossfade, appearance or fade to nothing): drawn dynamically until it ends */
+		bool bFading = false;
+		FVoxelChunkFadeState Fade;
+		/** The masked fade material's relevance, joined to the terrain's while fading */
+		FMaterialRelevance FadeMaterialRelevance;
 		/** The terrain material and its relevance (computed on the game thread) */
 		UMaterialInterface* Material = nullptr;
 		FMaterialRelevance MaterialRelevance;
@@ -237,12 +244,29 @@ public:
 	/** @return Whether it is a seam bucket */
 	bool IsSeam() const { return bSeam; }
 
+	/** Fade commands from the region component (FVoxelFadeScheduler's clock): the bookkeeping alpha (the MIDs carry the
+	 *  drawn one), a released hold, and the fade's end, which drops Previous and turns the primitive back to its cached
+	 *  static draws from the next frame. Render thread. */
+	void SetFadeAlpha_RenderThread(float Alpha);
+	void ReleaseFadeHold_RenderThread();
+	void ClearFade_RenderThread();
+
 private:
 	/** The terrain batch over a mesh with a material (the static batch, the dynamic draws and the ray tracing batch share it) */
 	void InitMeshBatch(FMeshBatch& MeshBatch, const FVoxelChunkMesh& InMesh, const FMaterialRenderProxy* MaterialProxy) const;
 
 	/** The mesh it draws, and the one a crossfade dithers out (null: none) */
 	FVoxelChunkMeshRef Mesh;
+	FVoxelChunkMeshRef Previous;
+
+	/**
+	 * A fade runs (G116 step 2): the primitive answers dynamic relevance, so the scene skips its cached static draws and
+	 * GetDynamicMeshElements draws the dithered halves, until ClearFade_RenderThread; the switch lands between two frames,
+	 * so no frame draws neither
+	 */
+	std::atomic<bool> bFading{ false };
+	FVoxelChunkFadeState Fade;
+	FMaterialRelevance FadeMaterialRelevance;
 
 	/** The terrain material and its relevance */
 	UMaterialInterface* Material = nullptr;

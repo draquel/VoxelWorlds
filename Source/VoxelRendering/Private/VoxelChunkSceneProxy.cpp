@@ -213,6 +213,9 @@ void ReleaseChunkMeshOnRenderThread(FVoxelChunkMeshRef&& Mesh)
 FVoxelChunkSceneProxy::FVoxelChunkSceneProxy(const FPrimitiveSceneProxyDesc& Desc, FInit&& Init)
 	: FPrimitiveSceneProxy(Desc)
 	, Mesh(MoveTemp(Init.Mesh))
+	, Previous(MoveTemp(Init.Previous))
+	, Fade(Init.Fade)
+	, FadeMaterialRelevance(Init.FadeMaterialRelevance)
 	, Material(Init.Material)
 	, MaterialRelevance(Init.MaterialRelevance)
 	, FeatureLevel(Init.FeatureLevel)
@@ -225,6 +228,7 @@ FVoxelChunkSceneProxy::FVoxelChunkSceneProxy(const FPrimitiveSceneProxyDesc& Des
 	// The scene's record of this primitive carries the id the description gave it (FPrimitiveSceneInfo's ComponentId)
 	SceneData.PrimitiveSceneId = Desc.ComponentId;
 	SceneData.SceneProxy = this;
+	bFading.store(Init.bFading, std::memory_order_relaxed);
 
 	if (Material == nullptr)
 	{
@@ -261,10 +265,18 @@ FVoxelChunkSceneProxy::~FVoxelChunkSceneProxy()
 	if (IsInRenderingThread())
 	{
 		Mesh.Reset();
+		Previous.Reset();
 	}
-	else if (Mesh.IsValid())
+	else
 	{
-		GVoxelChunkMeshReleases.Enqueue(MoveTemp(Mesh));
+		if (Mesh.IsValid())
+		{
+			GVoxelChunkMeshReleases.Enqueue(MoveTemp(Mesh));
+		}
+		if (Previous.IsValid())
+		{
+			GVoxelChunkMeshReleases.Enqueue(MoveTemp(Previous));
+		}
 	}
 #if RHI_RAYTRACING
 	if (bRayTracing)
@@ -371,7 +383,8 @@ FPrimitiveViewRelevance FVoxelChunkSceneProxy::GetViewRelevance(const FSceneView
 	Result.bShadowRelevance = IsShadowCast(View);
 	// The wireframe view mode draws the mesh dynamically with the wireframe material
 	const bool bWireframe = AllowDebugViewmodes() && View->Family->EngineShowFlags.Wireframe;
-	const bool bDynamic = bWireframe || CVarVoxelChunkPrimitivesDynamic.GetValueOnRenderThread() != 0;
+	// A fade draws dynamically too (its dithered halves): the scene skips the cached static batches while it runs
+	const bool bDynamic = bWireframe || bFading.load(std::memory_order_relaxed) || CVarVoxelChunkPrimitivesDynamic.GetValueOnRenderThread() != 0;
 	Result.bStaticRelevance = !bDynamic;
 	Result.bDynamicRelevance = bDynamic;
 	Result.bRenderInMainPass = ShouldRenderInMainPass();
@@ -379,7 +392,13 @@ FPrimitiveViewRelevance FVoxelChunkSceneProxy::GetViewRelevance(const FSceneView
 	Result.bRenderCustomDepth = ShouldRenderCustomDepth();
 	Result.bTranslucentSelfShadow = false;
 	Result.bVelocityRelevance = false;
-	MaterialRelevance.SetPrimitiveViewRelevance(Result);
+	// SetPrimitiveViewRelevance overwrites the bits: the fade material's relevance (masked) joins the terrain's first
+	FMaterialRelevance Combined = MaterialRelevance;
+	if (bFading.load(std::memory_order_relaxed))
+	{
+		Combined |= FadeMaterialRelevance;
+	}
+	Combined.SetPrimitiveViewRelevance(Result);
 	return Result;
 }
 
@@ -389,40 +408,124 @@ void FVoxelChunkSceneProxy::GetDynamicMeshElements(const TArray<const FSceneView
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_VoxelChunkSceneProxy_GetDynamicMeshElements);
 
 	FScopeLock Lock(&StateLock);
-	if (!Mesh.IsValid() || !Mesh->IsDrawable())
+	const bool bCurrent = Mesh.IsValid() && Mesh->IsDrawable();
+	const bool bPrevious = Previous.IsValid() && Previous->IsDrawable();
+	const FMaterialRenderProxy* TerrainMaterial = Material ? Material->GetRenderProxy() : nullptr;
+	if ((!bCurrent && !bPrevious) || !TerrainMaterial)
 	{
 		return;
 	}
 
-	// The wireframe view mode (GetViewRelevance): the current mesh with the wireframe material
+	// The wireframe view mode: the current mesh with the wireframe material
 	const bool bWireframe = AllowDebugViewmodes() && ViewFamily.EngineShowFlags.Wireframe;
-	const FMaterialRenderProxy* DrawMaterial = Material ? Material->GetRenderProxy() : nullptr;
+	FColoredMaterialRenderProxy* WireframeMaterial = nullptr;
 	if (bWireframe)
 	{
-		FColoredMaterialRenderProxy* WireframeMaterial = new FColoredMaterialRenderProxy(
+		WireframeMaterial = new FColoredMaterialRenderProxy(
 			GEngine->WireframeMaterial ? GEngine->WireframeMaterial->GetRenderProxy() : nullptr, FLinearColor(0, 0.5f, 1.f));
 		Collector.RegisterOneFrameMaterialProxy(WireframeMaterial);
-		DrawMaterial = WireframeMaterial;
 	}
 
-	int32 Drawn = 0;
+	// What the fade draws (as the region proxy decided it per mesh): a crossfade, the previous mesh dithering out under the
+	// current one dithering in, both pooled MIDs on the same alpha with complementary masks; an appearance, the current
+	// one alone dithering in from nothing; a seam bucket fading out to nothing, the previous one alone dithering out
+	const bool bFadeNow = !bWireframe && bFading.load(std::memory_order_relaxed);
+	const bool bCrossfade = bFadeNow && bCurrent && bPrevious && Fade.FadeInProxy && Fade.FadeOutProxy;
+	const bool bAppear = bFadeNow && !bCrossfade && bCurrent && Fade.bAppear && Fade.FadeInProxy;
+	const bool bFadeOutOnly = bFadeNow && !bCurrent && bPrevious && Fade.FadeOutProxy;
+
+	FVoxelBatchCounters::FCounts Counts;
+	const bool bShadowGather = Views.Num() > 0 && Views[0]->GetDynamicMeshElementsShadowCullFrustum() != nullptr;
+	const bool bFarShadowGather = bShadowGather && (Views[0]->DrawDynamicFlags & EDrawDynamicFlags::FarShadowCascade) != 0;
+	auto Emit = [&](int32 ViewIndex, const FVoxelChunkMesh& InMesh, const FMaterialRenderProxy* DrawMaterial)
+	{
+		FMeshBatch& MeshBatch = Collector.AllocateMesh();
+		InitMeshBatch(MeshBatch, InMesh, DrawMaterial);
+		MeshBatch.bWireframe = bWireframe;
+		Collector.AddMesh(ViewIndex, MeshBatch);
+		++Counts.Drawn;
+	};
+
 	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
 	{
 		if (!(VisibilityMap & (1 << ViewIndex)))
 		{
 			continue;
 		}
-		FMeshBatch& MeshBatch = Collector.AllocateMesh();
-		InitMeshBatch(MeshBatch, *Mesh, DrawMaterial);
-		MeshBatch.bWireframe = bWireframe;
-		Collector.AddMesh(ViewIndex, MeshBatch);
-		++Drawn;
+		if (bWireframe)
+		{
+			if (bCurrent)
+			{
+				Emit(ViewIndex, *Mesh, WireframeMaterial);
+			}
+			continue;
+		}
+
+		// A far cascade draws the current mesh alone with the opaque material: its texels are metres across, where a
+		// dither mask is noise and the outgoing half one more batch (the region proxy's rule, D-VP3)
+		if (bFarShadowGather)
+		{
+			if (bCurrent)
+			{
+				Emit(ViewIndex, *Mesh, TerrainMaterial);
+			}
+			continue;
+		}
+
+		if (bCrossfade || bFadeOutOnly)
+		{
+			Emit(ViewIndex, *Previous, Fade.FadeOutProxy);
+		}
+		if (bCurrent)
+		{
+			Emit(ViewIndex, *Mesh, (bCrossfade || bAppear) ? Fade.FadeInProxy : TerrainMaterial);
+
+			// The runtime virtual texture always takes the current mesh with the opaque material (a dither mask would punch
+			// transient holes into the cached pages); a shadow pass draws none
+			if (!bShadowGather)
+			{
+				for (ERuntimeVirtualTextureMaterialType RVTMaterialType : RuntimeVirtualTextureMaterialTypes)
+				{
+					FMeshBatch& VirtualMeshBatch = Collector.AllocateMesh();
+					InitMeshBatch(VirtualMeshBatch, *Mesh, TerrainMaterial);
+					VirtualMeshBatch.CastShadow = false;
+					VirtualMeshBatch.bUseAsOccluder = false;
+					VirtualMeshBatch.bUseForDepthPass = false;
+					VirtualMeshBatch.bUseForMaterial = false;
+					VirtualMeshBatch.bDitheredLODTransition = false;
+					VirtualMeshBatch.bRenderToVirtualTexture = true;
+					VirtualMeshBatch.RuntimeVirtualTextureMaterialType = (uint32)RVTMaterialType;
+					Collector.AddMesh(ViewIndex, VirtualMeshBatch);
+				}
+			}
+		}
 	}
 
-	FVoxelBatchCounters::FCounts Counts;
-	Counts.Drawn = Drawn;
-	Counts.MaxPerCall = Drawn;
+	Counts.ShadowDrawn = bShadowGather ? Counts.Drawn : 0;
+	Counts.FarShadowDrawn = bFarShadowGather ? Counts.Drawn : 0;
+	Counts.MaxPerCall = Counts.Drawn;
 	FVoxelBatchCounters::Add(Counts);
+}
+
+void FVoxelChunkSceneProxy::SetFadeAlpha_RenderThread(float Alpha)
+{
+	FScopeLock Lock(&StateLock);
+	Fade.FadeAlpha = FMath::Clamp(Alpha, 0.0f, 1.0f);
+}
+
+void FVoxelChunkSceneProxy::ReleaseFadeHold_RenderThread()
+{
+	FScopeLock Lock(&StateLock);
+	Fade.bHeld = false;
+}
+
+void FVoxelChunkSceneProxy::ClearFade_RenderThread()
+{
+	FScopeLock Lock(&StateLock);
+	// From the next frame the scene draws the cached static batches (cached when the primitive was added)
+	bFading.store(false, std::memory_order_relaxed);
+	Fade = FVoxelChunkFadeState();
+	Previous.Reset();
 }
 
 void FVoxelChunkSceneProxy::GetDrawInfo_RenderThread(FVoxelChunkDrawInfo& OutInfo) const
@@ -438,6 +541,18 @@ void FVoxelChunkSceneProxy::GetDrawInfo_RenderThread(FVoxelChunkDrawInfo& OutInf
 		OutInfo.VertexFactory = Mesh->VertexFactory.Get();
 		OutInfo.VertexStride = Mesh->RenderData.VertexStride;
 	}
+	OutInfo.PreviousTriangles = Previous.IsValid() ? Previous->RenderData.IndexCount / 3 : 0;
+	if (bFading.load(std::memory_order_relaxed))
+	{
+		OutInfo.bHasFadeState = true;
+		OutInfo.FadeAlpha = Fade.FadeAlpha;
+		OutInfo.bHeld = Fade.bHeld;
+		OutInfo.bAppear = Fade.bAppear;
+		// As GetDynamicMeshElements decides it (outside wireframe)
+		const bool bCurrent = Mesh.IsValid() && Mesh->IsDrawable();
+		OutInfo.bCrossfading = bCurrent && Previous.IsValid() && Previous->IsDrawable() && Fade.FadeInProxy && Fade.FadeOutProxy;
+		OutInfo.bAppearing = !OutInfo.bCrossfading && bCurrent && Fade.bAppear && Fade.FadeInProxy;
+	}
 	OutInfo.bRayTracing = bRayTracing;
 #if RHI_RAYTRACING
 	if (Mesh.IsValid() && Mesh->RayTracingGeometry.IsValid())
@@ -450,7 +565,9 @@ void FVoxelChunkSceneProxy::GetDrawInfo_RenderThread(FVoxelChunkDrawInfo& OutInf
 int64 FVoxelChunkSceneProxy::GetMeshBufferBytes_RenderThread() const
 {
 	FScopeLock Lock(&StateLock);
-	return (Mesh.IsValid() && Mesh->RenderData.HasValidBuffers()) ? static_cast<int64>(Mesh->RenderData.GetGPUMemoryUsage()) : 0;
+	int64 Bytes = (Mesh.IsValid() && Mesh->RenderData.HasValidBuffers()) ? static_cast<int64>(Mesh->RenderData.GetGPUMemoryUsage()) : 0;
+	Bytes += (Previous.IsValid() && Previous->RenderData.HasValidBuffers()) ? static_cast<int64>(Previous->RenderData.GetGPUMemoryUsage()) : 0;
+	return Bytes;
 }
 
 uint64 FVoxelChunkSceneProxy::GetRayTracingBytes_RenderThread() const
