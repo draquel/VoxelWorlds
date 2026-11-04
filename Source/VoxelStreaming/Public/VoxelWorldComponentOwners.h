@@ -214,4 +214,7 @@ private:
 
 	/** Whether the sea's underside sections are shown (the viewer is inside the sea radius) */
 	bool bUndersideShown = false;
+
+	/** The ray tracing mode the components were given (voxel.World.FarFieldRayTracing; -1 before the first update, G117) */
+	int32 RayTracingMode = -1;
 };

@@ -1013,6 +1013,128 @@ bool FFarFieldPlanetChunkManagerTest::RunTest(const FString& Parameters)
 }
 
 /**
+ * G117: the far field's patches in the ray tracing scene. A chunk manager on a small planet (R 20,000) builds its far
+ * field; voxel.World.FarFieldRayTracing 1 (the default) puts every patch component in the engine's far-field layer
+ * (bRayTracingFarField: Lumen's far-field traces), 2 in the near-field layer, 0 out of the scene, and voxel.Render.RayTracing 0
+ * takes them out whatever the mode. A change reaches the components already built at the next update, and the patches
+ * built after it (the viewer moved to the other side of the planet) take it too.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlanetRayTracingLayerTest,
+	"VoxelWorlds.FarField.Planet.RayTracingLayer",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFarFieldPlanetRayTracingLayerTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelPlanetFarFieldTestUtils;
+
+	const double Radius = 20000.0;
+	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("FarFieldRayTracingWorld"));
+	FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
+	WorldContext.SetCurrentWorld(World);
+	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+	Config->AddToRoot();
+	Config->WorldMode = EWorldMode::SphericalPlanet;
+	Config->WorldOrigin = FVector::ZeroVector;
+	Config->WorldRadius = Radius;
+	Config->PlanetHeightScale = 1600.0f;
+	Config->BaseHeight = 0.0f;
+	Config->PlanetMaxTerrainHeight = 1000.0f;
+	Config->PlanetMaxTerrainDepth = 1000.0f;
+	Config->MeshingMode = EMeshingMode::DualContouring;
+	Config->ChunkSize = 32;
+	Config->VoxelSize = 50.0f;
+	Config->ViewDistance = 3000.0f;
+	Config->bUseGPUGeneration = false;
+	Config->bGenerateCollision = false;
+	Config->bEnableScatter = false;
+	Config->bEnableCaves = false;
+	Config->bEnableBiomes = false;
+	Config->NoiseParams.Seed = 9001;
+	Config->NoiseParams.Frequency = 0.0004f;
+	Config->NoiseParams.Octaves = 3;
+
+	AActor* Owner = World->SpawnActor<AActor>();
+	UVoxelChunkManager* Manager = NewObject<UVoxelChunkManager>(Owner);
+	Manager->RegisterComponent();
+	VoxelTesting::FRecordingMeshRenderer Renderer;
+	Renderer.bKeepMeshes = false;
+	Renderer.Initialize(World, Config);
+	Manager->Initialize(Config, new FDistanceBandLODStrategy(), &Renderer);
+
+	FVoxelFarField* FarField = Manager->GetFarFieldMutable();
+	TestNotNull(TEXT("a planet in a game world has a far field"), FarField);
+	if (FarField)
+	{
+		FarField->SetSynchronousBuilds(true);
+		FarField->SetMaxBuildsInFlight(256);
+		auto Converge = [Manager, FarField](const FVector& Viewer)
+		{
+			for (int32 Update = 0; Update < 200; ++Update)
+			{
+				Manager->UpdateFarFieldForViewer(Viewer);
+				if (FarField->GetBuildsPending() == 0 && Update > 2)
+				{
+					break;
+				}
+			}
+			Manager->UpdateFarFieldForViewer(Viewer);
+		};
+		// Every built patch's component in the layer a mode gives: the far-field layer, the scene at all.
+		auto Check = [this, Manager, FarField](const TCHAR* What, bool bFarField, bool bVisible)
+		{
+			int32 Components = 0, Matching = 0;
+			FarField->ForEachPatch([&](const FVoxelFarField::FPatchState& Patch)
+			{
+				if (const UProceduralMeshComponent* Component = Patch.bResident ? Manager->GetFarFieldComponent(Patch.Key.Pack()) : nullptr)
+				{
+					++Components;
+					Matching += (Component->bRayTracingFarField == bFarField && Component->bVisibleInRayTracing == bVisible) ? 1 : 0;
+				}
+			});
+			AddInfo(FString::Printf(TEXT("%s: %d of %d components"), What, Matching, Components));
+			TestTrue(*FString::Printf(TEXT("%s: patch components built"), What), Components > 6);
+			TestEqual(*FString::Printf(TEXT("%s: every component in its layer"), What), Matching, Components);
+		};
+
+		const FVector Up = FVector(1, 1, 1).GetSafeNormal();
+		const FVector Viewer = Up * (Radius + 1200.0);
+		{
+			const FScopedCVar TerrainRayTracing(TEXT("voxel.Render.RayTracing"), 1);
+			const FScopedCVar Default(TEXT("voxel.World.FarFieldRayTracing"), 1);
+			Converge(Viewer);
+			Check(TEXT("1, the far-field layer"), true, true);
+			{
+				const FScopedCVar NearField(TEXT("voxel.World.FarFieldRayTracing"), 2);
+				Manager->UpdateFarFieldForViewer(Viewer);
+				Check(TEXT("2, the near-field layer"), false, true);
+				// Patches built while the mode holds take it from their creation.
+				Converge(-Viewer);
+				Check(TEXT("2, after a move to the far side"), false, true);
+			}
+			{
+				const FScopedCVar Out(TEXT("voxel.World.FarFieldRayTracing"), 0);
+				Manager->UpdateFarFieldForViewer(-Viewer);
+				Check(TEXT("0, out of the scene"), false, false);
+			}
+			{
+				const FScopedCVar TerrainOff(TEXT("voxel.Render.RayTracing"), 0);
+				Manager->UpdateFarFieldForViewer(-Viewer);
+				Check(TEXT("voxel.Render.RayTracing 0"), false, false);
+			}
+			Manager->UpdateFarFieldForViewer(-Viewer);
+			Check(TEXT("1 again"), true, true);
+		}
+	}
+
+	Manager->Shutdown();
+	Owner->Destroy();
+	GEngine->DestroyWorldContext(World);
+	World->DestroyWorld(false);
+	Config->RemoveFromRoot();
+	return true;
+}
+
+/**
  * Visual polish F4.3: the far field for the camera a frame renders with. A chunk manager on a small planet (R 20,000,
  * terrain +-1,000) in a game world with a player controller whose view target is a camera actor, frames stepped in
  * UWorld::Tick's order: the chunk manager's tick (TG_PrePhysics, reading the camera manager's camera), the camera managers,

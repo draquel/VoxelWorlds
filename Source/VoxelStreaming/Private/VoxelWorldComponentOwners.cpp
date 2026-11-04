@@ -348,8 +348,44 @@ void FVoxelPlanetOceanOwner::SetVisible(bool bVisible)
 
 namespace VoxelFarFieldManagerPrivate
 {
+	TAutoConsoleVariable<int32> CVarFarFieldRayTracing(
+		TEXT("voxel.World.FarFieldRayTracing"),
+		1,
+		TEXT("Where the far field's patches sit in the ray tracing scene while voxel.Render.RayTracing is on (G117). 1 = the engine's\n")
+		TEXT("far-field layer (bRayTracingFarField): Lumen's far-field traces (r.LumenScene.FarField 1) see the terrain past the near\n")
+		TEXT("field's reach, out to r.LumenScene.FarField.MaxTraceDistance; with Lumen's far field off nothing gathers them.\n")
+		TEXT("2 = the near-field layer like any primitive, where r.RayTracing.Culling removes everything past its radius (30,000 uu):\n")
+		TEXT("past the voxel window, every patch. 0 = out of the ray tracing scene. The procedural mesh builds an acceleration\n")
+		TEXT("structure per section in every mode."),
+		ECVF_Default);
+
+	/** @return The patches' ray tracing mode: 0 out, 1 the far-field layer, 2 the near-field layer (0 with voxel.Render.RayTracing 0) */
+	int32 GetPatchRayTracingMode()
+	{
+		static IConsoleVariable* TerrainRayTracing = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Render.RayTracing"));
+		if (TerrainRayTracing && TerrainRayTracing->GetInt() == 0)
+		{
+			return 0;
+		}
+		return FMath::Clamp(CVarFarFieldRayTracing.GetValueOnGameThread(), 0, 2);
+	}
+
+	/** Put a patch component in the ray tracing layer of Mode (GetPatchRayTracingMode); a registered one recreates its proxy. */
+	void SetPatchRayTracingMode(UProceduralMeshComponent* Component, int32 Mode)
+	{
+		const bool bFarField = Mode == 1;
+		const bool bVisible = Mode != 0;
+		if (Component->bRayTracingFarField == bFarField && Component->bVisibleInRayTracing == bVisible)
+		{
+			return;
+		}
+		Component->bRayTracingFarField = bFarField;
+		Component->bVisibleInRayTracing = bVisible;
+		Component->MarkRenderStateDirty();
+	}
+
 	/** A procedural mesh component for one far-field patch at its origin (no collision, no shadow, nothing to navigate). */
-	UProceduralMeshComponent* MakePatchComponent(AActor* Owner, const FVector& Location)
+	UProceduralMeshComponent* MakePatchComponent(AActor* Owner, const FVector& Location, int32 RayTracingMode)
 	{
 		UProceduralMeshComponent* Component = NewObject<UProceduralMeshComponent>(Owner, NAME_None, RF_Transient);
 		Component->SetUsingAbsoluteLocation(true);
@@ -361,6 +397,7 @@ namespace VoxelFarFieldManagerPrivate
 		Component->SetGenerateOverlapEvents(false);
 		Component->SetCastShadow(false);
 		Component->bUseAsyncCooking = false;
+		SetPatchRayTracingMode(Component, RayTracingMode);
 		Component->SetWorldLocationAndRotation(Location, FRotator::ZeroRotator);
 		Component->RegisterComponent();
 		return Component;
@@ -428,6 +465,19 @@ void FVoxelFarFieldPresenter::Apply(FVoxelFarField& FarField, const FVoxelFarFie
 {
 	using namespace VoxelFarFieldManagerPrivate;
 	const FVoxelFarFieldSettings& Settings = FarField.GetSettings();
+	// The ray tracing layer follows voxel.World.FarFieldRayTracing and voxel.Render.RayTracing from one update to the next.
+	const int32 Mode = GetPatchRayTracingMode();
+	if (Mode != RayTracingMode)
+	{
+		for (const TPair<uint64, TObjectPtr<UProceduralMeshComponent>>& Pair : Components)
+		{
+			if (IsValid(Pair.Value))
+			{
+				SetPatchRayTracingMode(Pair.Value, Mode);
+			}
+		}
+		RayTracingMode = Mode;
+	}
 	for (const uint64 Key : Changes.Removed)
 	{
 		if (TObjectPtr<UProceduralMeshComponent>* Found = Components.Find(Key))
@@ -456,7 +506,7 @@ void FVoxelFarFieldPresenter::Apply(FVoxelFarField& FarField, const FVoxelFarFie
 		TObjectPtr<UProceduralMeshComponent>& Component = Components.FindOrAdd(Key);
 		if (!IsValid(Component))
 		{
-			Component = MakePatchComponent(Owner, Mesh.Origin);
+			Component = MakePatchComponent(Owner, Mesh.Origin, Mode);
 		}
 		else
 		{

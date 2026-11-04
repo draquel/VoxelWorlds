@@ -361,6 +361,9 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   builds while it draws nothing, VP4). Every root is built from the first updates, also a face under the horizon, so
   after a teleport onto a face the camera never saw its root stands in at once (F4.2; before, a root was built once some
   of its face came into view and the first update there drew no far field; test `FarField.Planet.TeleportOntoUnseenFace`).
+  The components sit in the ray tracing scene's far-field layer, for Lumen's far-field traces
+  (`voxel.World.FarFieldRayTracing`, G117; [RENDERING_SYSTEM.md](RENDERING_SYSTEM.md) "What Lumen Sees"; test
+  `FarField.Planet.RayTracingLayer`).
 - **The sea**, at scale: where the sea sphere would sag past its budget (`ShouldDrawSea`: from about R 3.3 x 10^5) each
   patch draws a sea section over the cells near or under the sea, 8 x 8 cells a patch, over the voxel window too (a
   planet has no voxel water tiles), with an underside near the window shown from under the sea. The small planet keeps
