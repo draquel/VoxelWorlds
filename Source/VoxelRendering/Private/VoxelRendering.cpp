@@ -8,6 +8,7 @@
 #include "VoxelRegionComponent.h"
 #include "VoxelChunkSceneProxy.h"
 #include "RenderingThread.h"
+#include "Containers/Ticker.h"
 
 #define LOCTEXT_NAMESPACE "FVoxelRenderingModule"
 
@@ -31,12 +32,21 @@ void FVoxelRenderingModule::StartupModule()
 			return CastChecked<UVoxelRegionComponent>(Object)->GetChunkPrimitiveInterfaces();
 		})));
 
+	// The chunk meshes the scene's deletion task queued for release go to the render thread each frame, also when no region
+	// flushes any more (the last region component unregistered at the end of play)
+	ChunkMeshReleaseTicker = FTSTicker::GetCoreTicker().AddTicker(TEXT("VoxelChunkMeshReleases"), 0.0f, [](float)
+	{
+		EnqueueDrainChunkMeshReleases();
+		return true;
+	});
+
 	UE_LOG(LogVoxelRendering, Log, TEXT("VoxelRendering module started - Shader directory: %s"), *PluginShaderDir);
 }
 
 void FVoxelRenderingModule::ShutdownModule()
 {
 	IPrimitiveComponent::RemoveImplementer(UVoxelRegionComponent::StaticClass());
+	FTSTicker::RemoveTicker(ChunkMeshReleaseTicker);
 	// The chunk meshes still queued for release (G116)
 	ENQUEUE_RENDER_COMMAND(DrainVoxelChunkMeshReleasesAtShutdown)([](FRHICommandListImmediate&) { DrainChunkMeshReleases_RenderThread(); });
 	FlushRenderingCommands();

@@ -33,6 +33,14 @@ namespace
 	 * tracing geometry are released on the render thread instead (DrainChunkMeshReleases_RenderThread).
 	 */
 	TQueue<FVoxelChunkMeshRef, EQueueMode::Mpsc> GVoxelChunkMeshReleases;
+	/** The meshes in GVoxelChunkMeshReleases: the producers' and the game thread's view of it (IsEmpty is the consumer's) */
+	std::atomic<int32> GVoxelChunkMeshReleasesQueued{ 0 };
+
+	void QueueChunkMeshRelease(FVoxelChunkMeshRef&& Mesh)
+	{
+		GVoxelChunkMeshReleases.Enqueue(MoveTemp(Mesh));
+		GVoxelChunkMeshReleasesQueued.fetch_add(1, std::memory_order_release);
+	}
 
 	std::atomic<int64> GVoxelChunkPrimitivesAdded{ 0 };
 	std::atomic<int64> GVoxelChunkPrimitivesRemoved{ 0 };
@@ -187,13 +195,14 @@ void DrainChunkMeshReleases_RenderThread()
 	FVoxelChunkMeshRef Mesh;
 	while (GVoxelChunkMeshReleases.Dequeue(Mesh))
 	{
+		GVoxelChunkMeshReleasesQueued.fetch_sub(1, std::memory_order_relaxed);
 		Mesh.Reset();
 	}
 }
 
 void EnqueueDrainChunkMeshReleases()
 {
-	if (GVoxelChunkMeshReleases.IsEmpty())
+	if (GVoxelChunkMeshReleasesQueued.load(std::memory_order_acquire) <= 0)
 	{
 		return;
 	}
@@ -281,11 +290,11 @@ FVoxelChunkSceneProxy::~FVoxelChunkSceneProxy()
 	{
 		if (Mesh.IsValid())
 		{
-			GVoxelChunkMeshReleases.Enqueue(MoveTemp(Mesh));
+			QueueChunkMeshRelease(MoveTemp(Mesh));
 		}
 		if (Previous.IsValid())
 		{
-			GVoxelChunkMeshReleases.Enqueue(MoveTemp(Previous));
+			QueueChunkMeshRelease(MoveTemp(Previous));
 		}
 	}
 #if RHI_RAYTRACING
@@ -313,7 +322,12 @@ void FVoxelChunkSceneProxy::CreateRenderThreadResources(FRHICommandListBase& RHI
 	{
 		Mesh->InitResources_RenderThread(RHICmdList, bPositionOnly, bRadialFaceUp, FaceUpCenter, bRayTracing, FeatureLevel);
 	}
-
+	// A fade's outgoing mesh normally has its buffers from the primitive that drew it; one replaced twice before a flush
+	// came from a primitive the scene never added, and uploads here (once: a mesh with buffers returns at once)
+	if (Previous.IsValid())
+	{
+		Previous->InitResources_RenderThread(RHICmdList, bPositionOnly, bRadialFaceUp, FaceUpCenter, bRayTracing, FeatureLevel);
+	}
 }
 
 void FVoxelChunkSceneProxy::InitMeshBatch(FMeshBatch& MeshBatch, const FVoxelChunkMesh& InMesh, const FMaterialRenderProxy* MaterialProxy) const

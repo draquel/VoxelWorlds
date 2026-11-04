@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Modules/ModuleManager.h"
+#include "Containers/Ticker.h"
 
 DECLARE_LOG_CATEGORY_EXTERN(LogVoxelRendering, Log, All);
 
@@ -41,4 +42,8 @@ public:
 	{
 		return FModuleManager::Get().IsModuleLoaded("VoxelRendering");
 	}
+
+private:
+	/** Sends the chunk meshes queued for release to the render thread each frame (G116's chunk primitives) */
+	FTSTicker::FDelegateHandle ChunkMeshReleaseTicker;
 };

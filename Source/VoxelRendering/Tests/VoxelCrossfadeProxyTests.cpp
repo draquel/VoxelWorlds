@@ -155,6 +155,18 @@ namespace VoxelCrossfadeProxyTest
 			I = Info();
 			Test.TestTrue(TEXT("LOD swap: LOD 1 drawn alone after the fade"), I.DrawsCurrentOnly() && I.CurrentTriangles == 6 && I.LODLevel == 1);
 
+			// Two re-meshes before one flush: the second crossfades from a mesh that was never drawn (on the chunk primitives
+			// the first one's primitive never joins the scene, and the fade's primitive uploads its outgoing mesh itself)
+			Renderer.UpdateChunkMeshFromCPU(Chunk, 1, MakeQuads(4, 101.0f));
+			Renderer.UpdateChunkMeshFromCPU(Chunk, 1, MakeQuads(3, 101.0f));
+			Renderer.FlushPendingOperations();
+			I = Info();
+			Test.TestTrue(*FString::Printf(TEXT("Two swaps in one flush: crossfades into the second (current %u, previous %u tris)"), I.CurrentTriangles, I.PreviousTriangles),
+				I.bCrossfading && I.CurrentTriangles == 6 && I.PreviousTriangles > 0);
+			Advance(0.5);
+			I = Info();
+			Test.TestTrue(TEXT("Two swaps in one flush: the second drawn alone after the fade"), I.DrawsCurrentOnly() && I.CurrentTriangles == 6 && I.LODLevel == 1);
+
 			// An LOD transition held for its seams (R24): the old mesh stays on screen until the release, then fades
 			Component->SetChunkFadeHold(Chunk, true);
 			Submit(0, 5);

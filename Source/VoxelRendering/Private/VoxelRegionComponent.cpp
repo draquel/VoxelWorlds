@@ -2420,6 +2420,10 @@ void UVoxelRegionComponent::DestroyChunkPrimitiveRenderState(const FIntVector4& 
 	Scene->BatchRemovePrimitives(TArray<FPrimitiveSceneProxy*>{ Primitive->Proxy });
 	Primitive->Proxy = nullptr;
 	Primitive->Interface->NotifyRemoved();
+	// The engine recreates a primitive after a material recompile or a feature level change: the next one reads the
+	// materials' relevance again
+	ChunkMaterialRelevanceSource = nullptr;
+	ChunkFadeMaterialRelevanceSource = nullptr;
 }
 
 void UVoxelRegionComponent::CreateChunkPrimitiveRenderState(const FIntVector4& Key)
@@ -2446,8 +2450,14 @@ void UVoxelRegionComponent::CreateChunkPrimitiveRenderState(const FIntVector4& K
 void UVoxelRegionComponent::OnRegister()
 {
 	Super::OnRegister();
-	bUseChunkPrimitives = CVarVoxelChunkPrimitives.GetValueOnGameThread() != 0;
-	bChunkPrimitiveRayTracing = IsVoxelRayTracingWanted();
+	// A component holding nothing takes the mode now; one that holds meshes keeps its mode until the flush's
+	// EnsureChunkPrimitiveMode, which has the owner send them again in the new one
+	FScopeLock Lock(&ChunkInfoLock);
+	if (ChunkInfoMap.Num() == 0 && SeamBucketSlotMasks.Num() == 0)
+	{
+		bUseChunkPrimitives = CVarVoxelChunkPrimitives.GetValueOnGameThread() != 0;
+		bChunkPrimitiveRayTracing = IsVoxelRayTracingWanted();
+	}
 }
 
 void UVoxelRegionComponent::OnUnregister()
@@ -2462,7 +2472,7 @@ void UVoxelRegionComponent::OnUnregister()
 		if (bHadPrimitives)
 		{
 			FScopeLock Lock(&ChunkInfoLock);
-			bRenderDataLost |= ChunkInfoMap.Num() > 0;
+			bRenderDataLost |= ChunkInfoMap.Num() > 0 || SeamBucketSlotMasks.Num() > 0;
 		}
 	}
 	Super::OnUnregister();

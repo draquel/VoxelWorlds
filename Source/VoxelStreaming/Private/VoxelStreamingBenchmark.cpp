@@ -26,6 +26,10 @@
 #include "VoxelChunkSceneProxy.h"
 #include "Misc/CoreDelegates.h"
 #include "RenderingThread.h"
+#if PLATFORM_WINDOWS
+#include "Windows/WindowsHWrapper.h"
+#include <intrin.h>
+#endif
 #include "VoxelScatterManager.h"
 #include "VoxelScatterRenderer.h"
 #include "RenderTimer.h"
@@ -39,9 +43,27 @@ DEFINE_LOG_CATEGORY_STATIC(LogVoxelBench, Log, All);
 
 namespace
 {
-	/** The render thread's current frame's start (cycles) and its last frame's span (ms) for the RTSpanMs column */
-	std::atomic<uint64> GVoxelBenchRenderFrameStart{ 0 };
-	std::atomic<float> GVoxelBenchRenderFrameSpanMs{ 0.0f };
+	/** The render thread's current frame's start (platform cycles, the time stamp counter, the thread's own cycles) and its
+	 * last frame's busy time (ms) for the RTBusyMs column; written and read on the render thread but the last */
+	uint64 GVoxelBenchRenderFrameStart = 0;
+	uint64 GVoxelBenchRenderFrameStartTsc = 0;
+	uint64 GVoxelBenchRenderFrameStartThreadCycles = 0;
+	std::atomic<float> GVoxelBenchRenderFrameBusyMs{ 0.0f };
+
+	/** The calling thread's own cycles and the time stamp counter (Windows: QueryThreadCycleTime counts in the counter's
+	 * units, so their ratio over a span is the share of it the thread ran); 0 elsewhere */
+	void ReadThreadCycles(uint64& OutThreadCycles, uint64& OutTsc)
+	{
+#if PLATFORM_WINDOWS
+		ULONG64 Cycles = 0;
+		::QueryThreadCycleTime(::GetCurrentThread(), &Cycles);
+		OutThreadCycles = Cycles;
+		OutTsc = __rdtsc();
+#else
+		OutThreadCycles = 0;
+		OutTsc = 0;
+#endif
+	}
 }
 
 FVoxelStreamingBenchmark::FVoxelStreamingBenchmark(const FVoxelBenchConfig& InConfig, UVoxelChunkManager* InChunkManager)
@@ -112,21 +134,30 @@ FVoxelStreamingBenchmark::FVoxelStreamingBenchmark(const FVoxelBenchConfig& InCo
 	}
 	FVoxelBatchCounters::Consume(); // the first sample counts the run's own frames only
 	LastPrimitivesAdded = FVoxelChunkPrimitiveCounters::Get().Added;
-	// The render thread's frame span (RTSpanMs): the hooks join the render thread's delegates on it
+	// The render thread's busy time a frame (RTBusyMs): the hooks join the render thread's delegates on it
 	ENQUEUE_RENDER_COMMAND(VoxelBenchRenderFrameHooks)(
 		[this](FRHICommandListImmediate&)
 		{
 			RenderThreadBeginHandle = FCoreDelegates::OnBeginFrameRT.AddLambda([]()
 			{
-				GVoxelBenchRenderFrameStart.store(FPlatformTime::Cycles64(), std::memory_order_relaxed);
+				GVoxelBenchRenderFrameStart = FPlatformTime::Cycles64();
+				ReadThreadCycles(GVoxelBenchRenderFrameStartThreadCycles, GVoxelBenchRenderFrameStartTsc);
 			});
 			RenderThreadEndHandle = FCoreDelegates::OnEndFrameRT.AddLambda([]()
 			{
-				const uint64 Start = GVoxelBenchRenderFrameStart.load(std::memory_order_relaxed);
-				if (Start != 0)
+				if (GVoxelBenchRenderFrameStart == 0)
 				{
-					GVoxelBenchRenderFrameSpanMs.store(static_cast<float>(FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - Start)), std::memory_order_relaxed);
+					return;
 				}
+				const double SpanMs = FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - GVoxelBenchRenderFrameStart);
+				uint64 ThreadCycles = 0;
+				uint64 Tsc = 0;
+				ReadThreadCycles(ThreadCycles, Tsc);
+				const uint64 TscSpan = Tsc - GVoxelBenchRenderFrameStartTsc;
+				const double Share = TscSpan > 0
+					? FMath::Clamp(static_cast<double>(ThreadCycles - GVoxelBenchRenderFrameStartThreadCycles) / static_cast<double>(TscSpan), 0.0, 1.0)
+					: 1.0;
+				GVoxelBenchRenderFrameBusyMs.store(static_cast<float>(SpanMs * Share), std::memory_order_relaxed);
 			});
 		});
 	Samples.Reserve(4096);
@@ -546,7 +577,7 @@ void FVoxelStreamingBenchmark::TakeSample(float DeltaTime)
 	}
 	S.GTMs = static_cast<float>(FPlatformTime::ToMilliseconds(GGameThreadTime));
 	S.RTMs = static_cast<float>(FPlatformTime::ToMilliseconds(GRenderThreadTime));
-	S.RTSpanMs = GVoxelBenchRenderFrameSpanMs.load(std::memory_order_relaxed);
+	S.RTBusyMs = GVoxelBenchRenderFrameBusyMs.load(std::memory_order_relaxed);
 	S.GPUMs = static_cast<float>(FPlatformTime::ToMilliseconds(RHIGetGPUFrameCycles()));
 	VoxelResidencyStats::ConsumeGameThread(S.DecodeN, S.DecodeMs);
 
@@ -901,7 +932,7 @@ void FVoxelStreamingBenchmark::WriteReport()
 	ReportCsvPath = Base + TEXT(".csv");
 
 	// ---- CSV time-series ----
-	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenApplyN,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs,Altitude,LOD0N,LOD1N,LOD2N,LOD3N,LOD4N,ReachUU,GroundReachUU,BatchesN,BatchSkipN,GenDoneN,FarFieldMs,FarFieldPatchN,FarFieldMB,FarFieldBuiltN,Suspended,LeadUU,SurfAlt,ScatEditMs,ScatApplyMs,ScatLaunchMs,ScatDistMs,ScatFlushMs,ScatApplyN,ScatLaunchN,ScatAddN,ScatRelN,GTMs,RTMs,GPUMs,ScatBatchN,ScatCompactN,DecodeN,DecodeMs,SnapMB,ShellMB,ShadowBatchN,FarFieldStandInN,FarShadowBatchN,MaxCallBatchN,RTGeomN,BLASMB,PrimN,PrimAddN,RTSpanMs\n");
+	FString Csv = TEXT("SimTime,Phase,PosX,PosY,PosZ,GenQ,MeshQ,UnloadQ,UploadQ,GenInFlight,Loaded,Total,FrameMs,GenMs,MeshMs,LODMs,StreamMs,TotalMs,RenderMs,CollMs,ScatMs,GenLaunchMs,GenPollMs,GenApplyMs,GenStoreMs,GenNotifyMs,GenApplyN,MeshLaunchMs,MeshApplyMs,MeshSnapMs,MeshDispMs,MeshLaunchN,RendMeshMs,RendSubRendMs,RendSubScatMs,RendSubWatMs,RendUnloadMs,RendWTileMs,RendFlushMs,RendSubmitN,Remesh,SeamMs,CollPrepMs,CollApplyMs,VoxelMB,EditMB,RendGPUMB,CollMB,ScatMB,ProcessMB,ResidentN,UniformN,CompressedN,EmptyN,FarCompMs,FarCompDispN,FarCompApplyN,LODCand,LODQueued,LODStale,LODStaleNear,LODUpdMs,Altitude,LOD0N,LOD1N,LOD2N,LOD3N,LOD4N,ReachUU,GroundReachUU,BatchesN,BatchSkipN,GenDoneN,FarFieldMs,FarFieldPatchN,FarFieldMB,FarFieldBuiltN,Suspended,LeadUU,SurfAlt,ScatEditMs,ScatApplyMs,ScatLaunchMs,ScatDistMs,ScatFlushMs,ScatApplyN,ScatLaunchN,ScatAddN,ScatRelN,GTMs,RTMs,GPUMs,ScatBatchN,ScatCompactN,DecodeN,DecodeMs,SnapMB,ShellMB,ShadowBatchN,FarFieldStandInN,FarShadowBatchN,MaxCallBatchN,RTGeomN,BLASMB,PrimN,PrimAddN,RTBusyMs\n");
 	for (const FSample& S : Samples)
 	{
 		Csv += FString::Printf(TEXT("%.3f,%d,%.0f,%.0f,%.0f,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%lld,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%.3f,%.1f,%d,%d,%d,%d,%d,%.0f,%.0f,%d,%d,%d,%.3f,%d,%.1f,%d,%d,%.0f,%.0f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%.3f,%.1f,%.1f,%d,%d,%d,%d,%d,%.1f,%d,%d,%.3f\n"),
@@ -922,7 +953,7 @@ void FVoxelStreamingBenchmark::WriteReport()
 			S.BatchesDrawn, S.BatchesSkipped, S.GenDone, S.FarFieldMs, S.FarFieldPatches, S.FarFieldMB, S.FarFieldBuilt,
 			S.WindowSuspended, S.StreamingLeadUU, S.SurfaceAltitude,
 			S.ScatEditMs, S.ScatApplyMs, S.ScatLaunchMs, S.ScatDistMs, S.ScatFlushMs, S.ScatApplyN, S.ScatLaunchN, S.ScatAddN,
-			S.ScatRelN, S.GTMs, S.RTMs, S.GPUMs, S.ScatBatchN, S.ScatCompactN, S.DecodeN, S.DecodeMs, S.SnapMB, S.ShellMB, S.ShadowBatchesDrawn, S.FarFieldStandIns, S.FarShadowBatchesDrawn, S.MaxBatchesPerCall, S.RTGeomN, S.BLASMB, S.PrimN, S.PrimAddN, S.RTSpanMs);
+			S.ScatRelN, S.GTMs, S.RTMs, S.GPUMs, S.ScatBatchN, S.ScatCompactN, S.DecodeN, S.DecodeMs, S.SnapMB, S.ShellMB, S.ShadowBatchesDrawn, S.FarFieldStandIns, S.FarShadowBatchesDrawn, S.MaxBatchesPerCall, S.RTGeomN, S.BLASMB, S.PrimN, S.PrimAddN, S.RTBusyMs);
 	}
 	FFileHelper::SaveStringToFile(Csv, *ReportCsvPath);
 
