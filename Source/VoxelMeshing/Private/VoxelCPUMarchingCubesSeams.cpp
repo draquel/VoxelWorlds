@@ -25,7 +25,7 @@
 // data beyond the two face participants (the positive-perpendicular perimeter rows) self-skip via
 // HasRequiredNeighborData — a known v1 limitation (small boundary-plane gaps along those face
 // edges at mixed LOD; the boundary geomorph reduces their visibility). The geomorph runs with a
-// BAND-CONFINED ramp (MorphWidthOverride: zero exactly at the band's inner edge) so morphed band
+// BAND-CONFINED ramp (FVoxelMeshingRequest::MorphWidth: zero exactly at the band's inner edge) so morphed band
 // vertices stay coincident with the unmorphed interior mesh.
 
 #include "VoxelCPUMarchingCubesMesher.h"
@@ -333,7 +333,7 @@ bool FVoxelCPUMarchingCubesMesher::GenerateFaceSeamMeshCPU(
 			R.TransitionFaces = Mask;
 			// Band-confined geomorph ramp: zero at the band's inner edge (depth S voxels),
 			// expressed in the coarse neighbor's cells.
-			R.MorphWidthOverride = static_cast<float>(S) / static_cast<float>(EOther);
+			R.MorphWidth = static_cast<float>(S) / static_cast<float>(EOther);
 		}
 
 		FIntVector BandMin(S, S, S), BandMaxEx(CS - S, CS - S, CS - S);
@@ -444,7 +444,7 @@ bool FVoxelCPUMarchingCubesMesher::GenerateEdgeSeamMeshCPU(
 		if (Mask)
 		{
 			R.TransitionFaces = Mask;
-			R.MorphWidthOverride = static_cast<float>(S) / static_cast<float>(MaxCoarser);
+			R.MorphWidth = static_cast<float>(S) / static_cast<float>(MaxCoarser);
 		}
 
 		FIntVector BandMin(S, S, S), BandMaxEx(CS - S, CS - S, CS - S);
@@ -540,7 +540,7 @@ bool FVoxelCPUMarchingCubesMesher::GenerateCornerSeamMeshCPU(
 		if (Mask)
 		{
 			R.TransitionFaces = Mask;
-			R.MorphWidthOverride = static_cast<float>(S) / static_cast<float>(MaxCoarserStride);
+			R.MorphWidth = static_cast<float>(S) / static_cast<float>(MaxCoarserStride);
 		}
 
 		FIntVector BandMin, BandMaxEx;

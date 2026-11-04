@@ -78,12 +78,6 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Rendering", meta = (ClampMin = "0"))
 	float MeshFadeAppearMinDistance = 7000.0f;
 
-	// ==================== Meshing ====================
-
-	/** Marching Cubes' LOD-seam geomorph ramp width, in coarse cells (voxel.Mesh.MCBoundaryMorphWidth) */
-	UPROPERTY(config, EditAnywhere, Category = "Meshing", meta = (ClampMin = "0.01"))
-	float MCBoundaryMorphWidth = 2.0f;
-
 	// ==================== Scatter ====================
 
 	/** A scatter HISM applies its held instance changes at most this often, in seconds; 0 = at once (voxel.Scatter.HISMBatchSeconds) */

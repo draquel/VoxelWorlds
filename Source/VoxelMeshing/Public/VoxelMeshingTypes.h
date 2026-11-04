@@ -224,12 +224,13 @@ struct VOXELMESHING_API FVoxelMeshingRequest
 	EVoxelMeshCellDomain MeshCellDomain = EVoxelMeshCellDomain::WholeChunk;
 
 	/**
-	 * MC seam jobs only: overrides voxel.Mesh.MCBoundaryMorphWidth (units: coarse cells) for
-	 * the boundary geomorph. Seam-band cells morph with a ramp that reaches ZERO exactly at
-	 * the band's inner edge — a wider ramp would move vertices shared with the
-	 * unmorphed interior mesh and crack the junction. <= 0 uses the cvar (whole-chunk meshing).
+	 * Marching Cubes' boundary geomorph ramp width, in coarse cells: the morph toward a coarser
+	 * neighbour fades to zero this far in from a transition face. MC seam jobs set it so the
+	 * ramp reaches ZERO exactly at the band's inner edge — a wider ramp would move vertices
+	 * shared with the unmorphed interior mesh and crack the junction. The default is a whole-chunk
+	 * mesh's (tests and digests; streaming meshes no whole chunk with transition faces, G118).
 	 */
-	float MorphWidthOverride = -1.0f;
+	float MorphWidth = 2.0f;
 
 	/**
 	 * Local up at the chunk (spherical Phase 4, SP-D1, SP-D2): +Z in heightmap modes, the chunk centre's radial direction
