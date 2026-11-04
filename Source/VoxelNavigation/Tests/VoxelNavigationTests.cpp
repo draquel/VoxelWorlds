@@ -243,13 +243,26 @@ bool FVoxelNavPocketTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Wall: the goal is not in a pocket"), Stats.bGoalInPocket);
 	TestTrue(TEXT("Wall: the route took more nodes than the check's threshold"), Stats.NodesExpanded > P.PocketCheckNodes);
 
-	// No height past x = 1500: a goal at x = 3050 gets a partial route, marked capped, never past the line.
-	auto Capped = [](double X, double) { return X > 1500.0 ? std::numeric_limits<float>::quiet_NaN() : 0.f; };
-	FVoxelSurfacePathfinder Cap(P, Capped);
-	TestTrue(TEXT("Cap: short of the line, a complete route"), Cap.FindPath(FVector(50, 50, 0), FVector(1250, 50, 0), Points, &Stats) && !Stats.bPartial);
-	TestTrue(TEXT("Cap: beyond it, partial"), Cap.FindPath(FVector(50, 50, 0), FVector(3050, 50, 0), Points, &Stats) && Stats.bPartial);
+	// No height for a band of cells across the way (x = 15, y in [-3, 3]): the route goes around it, marked capped; a goal
+	// with no height (and no snapping) gets no route.
+	auto Band = [](double X, double Y)
+	{
+		const int32 CX = FMath::FloorToInt(X / 100.0), CY = FMath::FloorToInt(Y / 100.0);
+		return CX == 15 && CY >= -3 && CY <= 3 ? std::numeric_limits<float>::quiet_NaN() : 0.f;
+	};
+	FVoxelSurfacePathfinder Cap(P, Band);
+	const FVector CapFrom(550, 50, 0);
+	TestTrue(TEXT("Cap: a complete route around the band"), Cap.FindPath(CapFrom, FVector(2550, 50, 0), Points, &Stats) && !Stats.bPartial);
 	TestTrue(TEXT("Cap: marked"), Stats.bSamplesCapped);
-	TestFalse(TEXT("Cap: never past the line"), VoxelNavTest::PathTouches(Points, FVector(50, 50, 0), [](const FVector& Pt) { return Pt.X > 1500.f; }));
+	TestFalse(TEXT("Cap: never through the band"), VoxelNavTest::PathTouches(Points, CapFrom, [](const FVector& Pt)
+	{
+		const int32 CX = FMath::FloorToInt(Pt.X / 100.f), CY = FMath::FloorToInt(Pt.Y / 100.f);
+		return CX == 15 && CY >= -3 && CY <= 3;
+	}));
+	FVoxelSurfaceNavParams NoSnap = P;
+	NoSnap.GoalSnapCells = 0;
+	FVoxelSurfacePathfinder CapNoSnap(NoSnap, Band);
+	TestFalse(TEXT("Cap: a goal with no height gets no route"), CapNoSnap.FindPath(CapFrom, FVector(1550, 50, 0), Points, &Stats));
 	return true;
 }
 
