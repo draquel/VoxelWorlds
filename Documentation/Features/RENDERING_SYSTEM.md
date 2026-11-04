@@ -209,9 +209,16 @@ What it does not give yet:
 - **Bounce light from the terrain.** A ray that hits the terrain finds no Lumen surface cache (the terrain has no mesh
   cards) and returns black: occlusion is right, the bounce off the terrain is lost, so the ground under an overhang
   reads a little darker off screen than on screen (0.90 of it on `VoxelDemo`) and on a planet's shaded ground can go
-  black. Lumen captures cards only from static mesh draw commands, so the fix starts with the proxy drawing through the
-  static path (GPUScene, cached mesh draw commands per chunk, a real position SRV for hit lighting), which would also
-  let the scene cache the ray tracing instances; G116 in the project's findings.
+  black. Lumen captures cards from a primitive's cached static mesh draw commands, and the engine culls static meshes,
+  caches ray tracing instances and captures cards per primitive, so the fix needs a primitive per chunk mesh rather than
+  this proxy's per-region one (G116 in the project's findings; the plan is
+  [LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md](../Research/LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md)).
+- **Hit lighting is not the answer.** `r.Lumen.HardwareRayTracing.LightingMode 1` evaluates the terrain's material and
+  direct light at a hit, and works with this proxy as it is (hit shaders take positions from the ray tracing geometry,
+  not the vertex factory's position view, which the proxy leaves null). Sunlit terrain seen in a ray turns from black to
+  lit, but terrain in shadow still reads its own indirect light from the missing surface cache: off screen under the
+  overhang 0.160 → 0.171 on `VoxelDemo` and 0.376 → 0.383 on `PlanetTest`, the sealed caves unchanged (0.111, 0.029),
+  for +1.3 ms of GPU frame P50 on the chord (4.91 → 6.20) and +0.85 ms on the great circle (4.83 → 5.68) (the streaming bench, three interleaved runs each) (2026-11-03, G116's work; captures on the parent's `media/g116-surface-cache-plan` branch).
 - **Water.** Water tiles have no ray tracing geometry: the sea is translucent (or Single Layer Water) and is not an
   occluder Lumen needs.
 - **The far field, unless Lumen's far field is on.** Its procedural mesh components build their own ray tracing

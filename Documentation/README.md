@@ -63,6 +63,7 @@ system you work on. The project root holds the vocabulary (`Documentation/GLOSSA
 | [PCG_DECORATION_ARCHITECTURE.md](Research/PCG_DECORATION_ARCHITECTURE.md) | Open: the runtime PCG design; phases 3-6 built, 7 (reactivity) and 8 (coexistence) open |
 | [DC_MATERIAL_BLEND_PLAN.md](Research/DC_MATERIAL_BLEND_PLAN.md) | Open: soft material borders on Dual Contouring meshes, scoped and deferred |
 | [LUMEN_OFFSCREEN_TERRAIN_SPIKE.md](Research/LUMEN_OFFSCREEN_TERRAIN_SPIKE.md) | The D-VP4 spike (2026-11-03): ray tracing geometry and distance fields for Lumen off screen (F3.3), measured; the recommended path and its plan |
+| [LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md](Research/LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md) | Open (G116): Lumen's surface cache for the terrain; why the static draw path needs a primitive per chunk mesh, the steps to it and to the cards |
 | `Research/Bench/` | JSON bench reports cited by the world modes review (D7, G6, KI12, M1, M4-M6, reviews A and B, SP1-SP2, the vertical window) |
 | [Research/Archive/](Research/Archive/) | Finished or superseded: the build phases, the start-here package, the edit layer's February spec, engine integration, geomorph, the LOD seam investigation, the map accuracy plan, the scatter review and claim suppression, seam ownership, Transvoxel, the voxel QA follow-ups (R22-R24), the custom vertex factory research and plan |
 
