@@ -431,6 +431,10 @@ FVoxelSceneProxy::~FVoxelSceneProxy()
 		}
 	}
 	SeamVertexFactories.Empty();
+
+	// Every mesh released: a count left over is a mesh whose buffers were dropped without ReleaseResources
+	const int64 LeftOver = MeshBufferBytes.load(std::memory_order_relaxed);
+	UE_CLOG(LeftOver != 0, LogVoxelRendering, Warning, TEXT("FVoxelSceneProxy: %lld mesh buffer bytes counted at destruction"), LeftOver);
 }
 
 void FVoxelSceneProxy::CreateMeshBuffers_RenderThread(FRHICommandListBase& RHICmdList, const FVoxelMeshBufferNames& Names,
@@ -495,6 +499,10 @@ void FVoxelSceneProxy::CreateMeshBuffers_RenderThread(FRHICommandListBase& RHICm
 	void* IndexData = RHICmdList.LockBuffer(NewRenderData.IndexBufferRHI, 0, IndexBufferSize, RLM_WriteOnly);
 	FMemory::Memcpy(IndexData, Indices.GetData(), IndexBufferSize);
 	RHICmdList.UnlockBuffer(NewRenderData.IndexBufferRHI);
+
+	// The proxy's count of what it holds (the bench's RendGPUMB); ReleaseResources takes it off
+	NewRenderData.LiveBytesCounter = &MeshBufferBytes;
+	MeshBufferBytes.fetch_add(static_cast<int64>(NewRenderData.GetGPUMemoryUsage()), std::memory_order_relaxed);
 }
 
 SIZE_T FVoxelSceneProxy::GetTypeHash() const
@@ -2241,20 +2249,8 @@ SIZE_T FVoxelSceneProxy::GetGPUMemoryUsage() const
 {
 	FScopeLock Lock(&ChunkDataLock);
 
-	SIZE_T Total = 0;
-	for (const auto& Pair : ChunkRenderData)
-	{
-		Total += Pair.Value.GetGPUMemoryUsage();
-	}
-	// Meshes retained for active crossfades (transient, released when each fade ends)
-	for (const auto& Pair : ChunkPreviousMeshes)
-	{
-		Total += Pair.Value.RenderData.GetGPUMemoryUsage();
-	}
-	for (const auto& Pair : SeamPreviousMeshes)
-	{
-		Total += Pair.Value.RenderData.GetGPUMemoryUsage();
-	}
+	// Chunk, seam and water meshes and the ones retained for crossfades (this used to leave the seams and water out)
+	SIZE_T Total = static_cast<SIZE_T>(GetMeshBufferBytes());
 #if RHI_RAYTRACING
 	// The acceleration structures of the current meshes (F3.3)
 	for (const auto& Pair : ChunkRayTracing)

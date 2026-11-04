@@ -428,8 +428,16 @@ public:
 	/** Get total triangle count */
 	int64 GetTotalTriangleCount() const;
 
-	/** Get total GPU memory usage */
+	/** @return The GPU memory the proxy holds: its mesh buffers (GetMeshBufferBytes) and the ray tracing acceleration structures */
 	SIZE_T GetGPUMemoryUsage() const;
+
+	/**
+	 * The bytes of the mesh buffers the proxy holds now: the chunk, seam and water meshes and the ones a crossfade retains
+	 * (FVoxelChunkRenderData::GetGPUMemoryUsage each; not the ray tracing structures). Any thread, no lock.
+	 *
+	 * @return The bytes
+	 */
+	int64 GetMeshBufferBytes() const { return MeshBufferBytes.load(std::memory_order_relaxed); }
 
 	/**
 	 * How the proxy draws one chunk interior now (diagnostics and tests, world modes review G74): its current mesh,
@@ -701,4 +709,10 @@ private:
 
 	/** Critical section for thread-safe chunk access */
 	mutable FCriticalSection ChunkDataLock;
+
+	/**
+	 * The bytes of the mesh buffers the proxy holds now (GetMeshBufferBytes): CreateMeshBuffers_RenderThread adds a mesh's,
+	 * FVoxelChunkRenderData::ReleaseResources takes them off. Written on the render thread, read on any.
+	 */
+	std::atomic<int64> MeshBufferBytes{ 0 };
 };

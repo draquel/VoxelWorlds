@@ -406,7 +406,8 @@ public:
 	virtual void GetLoadedChunks(TArray<FIntVector>& OutChunks) const = 0;
 
 	/**
-	 * Get total GPU memory usage (approximate).
+	 * Get the GPU memory of the terrain's mesh buffers: what the renderer's scene proxies hold now (chunk, seam and water
+	 * meshes and the ones crossfades retain, as uploaded; not the ray tracing structures). The streaming bench's RendGPUMB.
 	 *
 	 * @return GPU memory in bytes
 	 */

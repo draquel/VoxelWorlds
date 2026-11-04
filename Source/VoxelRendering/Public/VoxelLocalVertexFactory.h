@@ -8,6 +8,8 @@
 #include "VoxelVertex.h"
 #include "RenderUtils.h"  // For FPackedNormal
 
+#include <atomic>
+
 /**
  * Vertex format compatible with FLocalVertexFactory.
  * 40 bytes per vertex.
@@ -213,26 +215,48 @@ struct VOXELRENDERING_API FVoxelChunkRenderData
 	/** TexCoord SRV for FLocalVertexFactory (needed for GPUScene manual vertex fetch) */
 	FShaderResourceViewRHIRef TexCoordSRV;
 
+	/**
+	 * The scene proxy's count of the mesh buffer bytes it holds (FVoxelSceneProxy::GetMeshBufferBytes): set when the buffers
+	 * are created, which add GetGPUMemoryUsage to it, and ReleaseResources takes them off again. Null on data that never held
+	 * buffers.
+	 */
+	std::atomic<int64>* LiveBytesCounter = nullptr;
+
 	/** Check if GPU buffers are valid */
 	FORCEINLINE bool HasValidBuffers() const
 	{
 		return VertexBufferRHI.IsValid() && IndexBufferRHI.IsValid() && VertexCount > 0 && IndexCount > 0;
 	}
 
-	/** Get approximate GPU memory usage in bytes */
-	FORCEINLINE SIZE_T GetGPUMemoryUsage() const
+	/**
+	 * The bytes of one mesh's buffers as the scene proxy creates them: the vertex stream, the colour (4 bytes a vertex),
+	 * tangent (8) and texcoord (UV0 and UV1, 16: G119 counted 8) buffers of the shader resource views, and the indices.
+	 *
+	 * @param InVertexCount Vertices
+	 * @param InIndexCount Indices
+	 * @param InVertexStride The vertex stream's bytes a vertex (sizeof(FVoxelLocalVertex))
+	 * @return The bytes
+	 */
+	static SIZE_T CalcGPUMemoryUsage(uint32 InVertexCount, uint32 InIndexCount, uint32 InVertexStride)
 	{
-		SIZE_T VertexSize = VertexCount * sizeof(FVoxelLocalVertex);
-		SIZE_T IndexSize = IndexCount * sizeof(uint32);
-		SIZE_T ColorSize = VertexCount * sizeof(FColor);
-		SIZE_T TangentSize = VertexCount * 8; // 2 x FPackedNormal (4 bytes each)
-		SIZE_T TexCoordSize = VertexCount * sizeof(FVector2f);
-		return VertexSize + IndexSize + ColorSize + TangentSize + TexCoordSize;
+		const SIZE_T PerVertex = InVertexStride + sizeof(FColor) + 2 * sizeof(FPackedNormal) + sizeof(FVector4f);
+		return static_cast<SIZE_T>(InVertexCount) * PerVertex + static_cast<SIZE_T>(InIndexCount) * sizeof(uint32);
 	}
 
-	/** Release GPU resources */
+	/** @return The GPU memory of this mesh's buffers in bytes (CalcGPUMemoryUsage) */
+	FORCEINLINE SIZE_T GetGPUMemoryUsage() const
+	{
+		return CalcGPUMemoryUsage(VertexCount, IndexCount, sizeof(FVoxelLocalVertex));
+	}
+
+	/** Release GPU resources (and take their bytes off the proxy's count) */
 	void ReleaseResources()
 	{
+		if (LiveBytesCounter && VertexBufferRHI.IsValid())
+		{
+			LiveBytesCounter->fetch_sub(static_cast<int64>(GetGPUMemoryUsage()), std::memory_order_relaxed);
+		}
+		LiveBytesCounter = nullptr;
 		TexCoordSRV.SafeRelease();
 		TexCoordBufferRHI.SafeRelease();
 		TangentsSRV.SafeRelease();
