@@ -460,7 +460,7 @@ FMaterialRelevance WaterMaterialRelevance;
 
 **GetViewRelevance**: Water material relevance is OR'd with terrain relevance so the scene proxy correctly reports translucency support.
 
-**Buffer creation**: Water vertices go through the same `FVoxelVertex → FVoxelLocalVertex` conversion pipeline as terrain, creating identical GPU buffer structures (vertex, color SRV, tangent SRV, texcoord SRV, index buffer, FLocalVertexFactory).
+**Buffer creation**: Water vertices go through the same `FVoxelVertex → FVoxelLocalVertex` conversion pipeline as terrain, creating identical GPU buffer structures (the vertex stream, the positions alone under manual vertex fetch (G120), color SRV, tangent SRV, texcoord SRV, index buffer, FLocalVertexFactory).
 
 ## Configuration
 

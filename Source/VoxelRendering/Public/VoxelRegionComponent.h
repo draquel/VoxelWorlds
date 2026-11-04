@@ -437,9 +437,21 @@ public:
 
 	// ==================== Statistics ====================
 
-	/** Get the GPU memory, in bytes, of the chunk meshes currently held (seam meshes and water tiles not included) */
+	/**
+	 * Get the memory, in bytes, of the chunk meshes currently submitted, as the mesher's vertices and the indices (seam
+	 * meshes and water tiles not included): kept on the game thread, with or without a scene proxy.
+	 * GetProxyGPUMemoryUsage is what the proxy holds on the GPU.
+	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Stats")
 	int64 GetGPUMemoryUsage() const;
+
+	/**
+	 * The bytes of the mesh buffers the scene proxy holds now (FVoxelSceneProxy::GetMeshBufferBytes): the chunk, seam and
+	 * water meshes and the ones crossfades retain, as uploaded. Game thread.
+	 *
+	 * @return The bytes, 0 without a scene proxy
+	 */
+	int64 GetProxyGPUMemoryUsage() const;
 
 	/** Get the vertex count of the chunk meshes currently held */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Stats")

@@ -219,7 +219,6 @@ private:
 		int32 VertexCount = 0;
 		int32 TriangleCount = 0;
 		int32 LODLevel = 0;
-		SIZE_T MemoryUsage = 0;
 		FBox Bounds = FBox(ForceInit);
 	};
 
@@ -229,7 +228,6 @@ private:
 	/** Total statistics */
 	int64 TotalVertexCount = 0;
 	int64 TotalTriangleCount = 0;
-	int64 TotalGPUMemory = 0;
 
 	/** Cached configuration values */
 	float VoxelSize = 100.0f;

@@ -139,6 +139,11 @@ struct FVoxelChunkDrawInfo
 	int32 ProxyRayTracingChunks = 0;
 	int32 ProxyRayTracingSeams = 0;
 	uint64 ProxyRayTracingBytes = 0;
+
+	/** The current mesh's vertex stream stride (12 = the positions alone, G120; 0 = no mesh) and the bytes of every mesh
+	 *  buffer the whole proxy holds (FVoxelSceneProxy::GetMeshBufferBytes) */
+	uint32 VertexStride = 0;
+	int64 ProxyMeshBufferBytes = 0;
 };
 
 /** A vertex's two packed tangents as the tangent SRV holds them (the scene proxy's mesh buffers) */
@@ -428,8 +433,16 @@ public:
 	/** Get total triangle count */
 	int64 GetTotalTriangleCount() const;
 
-	/** Get total GPU memory usage */
+	/** @return The GPU memory the proxy holds: its mesh buffers (GetMeshBufferBytes) and the ray tracing acceleration structures */
 	SIZE_T GetGPUMemoryUsage() const;
+
+	/**
+	 * The bytes of the mesh buffers the proxy holds now: the chunk, seam and water meshes and the ones a crossfade retains
+	 * (FVoxelChunkRenderData::GetGPUMemoryUsage each; not the ray tracing structures). Any thread, no lock.
+	 *
+	 * @return The bytes
+	 */
+	int64 GetMeshBufferBytes() const { return MeshBufferBytes.load(std::memory_order_relaxed); }
 
 	/**
 	 * How the proxy draws one chunk interior now (diagnostics and tests, world modes review G74): its current mesh,
@@ -465,7 +478,8 @@ public:
 private:
 	/**
 	 * Create a mesh's vertex, colour, tangent, texcoord and index buffers and their SRVs into NewRenderData (render thread):
-	 * the chunk batches', the seams' and the water tiles' one body (code review CR4, REND-09).
+	 * the chunk batches', the seams' and the water tiles' one body (code review CR4, REND-09). The vertex buffer holds the
+	 * positions alone under bPositionOnlyVertexStream (NewRenderData.VertexStride), and the mesh's bytes join MeshBufferBytes.
 	 */
 	void CreateMeshBuffers_RenderThread(FRHICommandListBase& RHICmdList, const FVoxelMeshBufferNames& Names,
 		const TArray<FVoxelLocalVertex>& ConvertedVertices, const TArray<FColor>& ColorData, const TArray<FVoxelPackedTangentPair>& TangentData,
@@ -566,6 +580,13 @@ private:
 	 * a change of the cvar recreates the proxies.
 	 */
 	bool bRayTracing = false;
+
+	/**
+	 * Whether the meshes' vertex streams hold the positions alone (G120): FLocalVertexFactory fetches the other attributes
+	 * from the shader resource views at this feature level (manual vertex fetch, every desktop RHI). Elsewhere they hold the
+	 * interleaved FVoxelLocalVertex, which the vertex declaration reads. Set at creation.
+	 */
+	bool bPositionOnlyVertexStream = false;
 
 #if RHI_RAYTRACING
 	/** A current mesh's ray tracing geometry, its acceleration structure's size and the mesh batch its instances view */
@@ -701,4 +722,10 @@ private:
 
 	/** Critical section for thread-safe chunk access */
 	mutable FCriticalSection ChunkDataLock;
+
+	/**
+	 * The bytes of the mesh buffers the proxy holds now (GetMeshBufferBytes): CreateMeshBuffers_RenderThread adds a mesh's,
+	 * FVoxelChunkRenderData::ReleaseResources takes them off. Written on the render thread, read on any.
+	 */
+	std::atomic<int64> MeshBufferBytes{ 0 };
 };

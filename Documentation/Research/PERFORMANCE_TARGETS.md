@@ -26,7 +26,7 @@ fresh world. PIE in the level viewport (2874×1360, D3D12 SM6), editor in the fo
 | Loaded chunks | 1,123 (about 424 with geometry) |
 | Time to settle | 13-16 s |
 | Voxel data | 134 MB (112 resident, 79 uniform, 932 compressed chunks) |
-| Renderer GPU | 23 MB, 0.86-0.98 M triangles |
+| Renderer GPU | 23 MB, 0.86-0.98 M triangles (the estimate before G119; `RendGPUMB` counts the proxies' buffers since 2026-11-04, about 2.5 times this, a third less after G120: `RENDERING_SYSTEM.md`, "The Mesh Buffers") |
 | Collision / scatter | about 100 / 90 MB |
 | Voxel systems in all | about 0.35 GB |
 

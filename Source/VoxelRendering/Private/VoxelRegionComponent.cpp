@@ -1897,6 +1897,14 @@ int64 UVoxelRegionComponent::GetGPUMemoryUsage() const
 	return CachedGPUMemory;
 }
 
+int64 UVoxelRegionComponent::GetProxyGPUMemoryUsage() const
+{
+	check(IsInGameThread());
+	// The game thread clears SceneProxy before it queues the proxy's deletion, so a proxy seen here is alive
+	const FVoxelSceneProxy* Proxy = GetVoxelSceneProxy();
+	return Proxy ? Proxy->GetMeshBufferBytes() : 0;
+}
+
 int64 UVoxelRegionComponent::GetTotalVertexCount() const
 {
 	return CachedVertexCount;

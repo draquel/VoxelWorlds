@@ -262,7 +262,6 @@ void FVoxelMeshRenderer::Shutdown()
 	ChunkStatsMap.Empty();
 	TotalVertexCount = 0;
 	TotalTriangleCount = 0;
-	TotalGPUMemory = 0;
 
 	bIsInitialized = false;
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelMeshRenderer shutdown"));
@@ -330,20 +329,17 @@ void FVoxelMeshRenderer::SubmitChunkMeshInternal(
 	{
 		TotalVertexCount -= ExistingStats->VertexCount;
 		TotalTriangleCount -= ExistingStats->TriangleCount;
-		TotalGPUMemory -= ExistingStats->MemoryUsage;
 	}
 
 	FChunkStats& Stats = ChunkStatsMap.FindOrAdd(ChunkCoord);
 	Stats.VertexCount = Vertices.Num();
 	Stats.TriangleCount = Indices.Num() / 3;
 	Stats.LODLevel = LODLevel;
-	Stats.MemoryUsage = (Vertices.Num() * sizeof(FVoxelVertex)) + (Indices.Num() * sizeof(uint32));
 	// Bounds are in local space here, will be offset in scene proxy
 	Stats.Bounds = LocalBounds;
 
 	TotalVertexCount += Stats.VertexCount;
 	TotalTriangleCount += Stats.TriangleCount;
-	TotalGPUMemory += Stats.MemoryUsage;
 
 	// Use DIRECT CPU PATH - no GPU buffer roundtrip!
 	// This passes CPU arrays directly to the render thread, avoiding:
@@ -375,7 +371,6 @@ void FVoxelMeshRenderer::RemoveChunk(const FIntVector& ChunkCoord)
 	{
 		TotalVertexCount -= Stats->VertexCount;
 		TotalTriangleCount -= Stats->TriangleCount;
-		TotalGPUMemory -= Stats->MemoryUsage;
 		ChunkStatsMap.Remove(ChunkCoord);
 	}
 
@@ -393,7 +388,6 @@ void FVoxelMeshRenderer::ClearAllChunks()
 	ChunkStatsMap.Empty();
 	TotalVertexCount = 0;
 	TotalTriangleCount = 0;
-	TotalGPUMemory = 0;
 
 	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
 	{
@@ -792,7 +786,16 @@ void FVoxelMeshRenderer::GetLoadedChunks(TArray<FIntVector>& OutChunks) const
 
 int64 FVoxelMeshRenderer::GetGPUMemoryUsage() const
 {
-	return TotalGPUMemory;
+	// What the region proxies hold as uploaded (G119; this was the mesher's vertices and the indices, chunk meshes only)
+	int64 Total = 0;
+	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
+	{
+		if (Pair.Value)
+		{
+			Total += Pair.Value->GetProxyGPUMemoryUsage();
+		}
+	}
+	return Total;
 }
 
 int64 FVoxelMeshRenderer::GetTotalVertexCount() const
@@ -872,7 +875,7 @@ FString FVoxelMeshRenderer::GetDebugStats() const
 		ChunkStatsMap.Num(),
 		TotalVertexCount,
 		TotalTriangleCount,
-		TotalGPUMemory / (1024.0 * 1024.0),
+		GetGPUMemoryUsage() / (1024.0 * 1024.0),
 		VoxelSize,
 		ChunkWorldSize,
 		InteriorStarts, InteriorRestarts, SeamStarts, SeamRestarts,

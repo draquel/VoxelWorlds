@@ -13,6 +13,7 @@
 #include "VoxelRegionComponent.h"
 #include "VoxelWorldConfiguration.h"
 #include "ChunkRenderData.h"
+#include "LocalVertexFactory.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -22,6 +23,9 @@
 // traces the new mesh only (the retained previous mesh has none); a seam bucket gets its own and loses it on removal; an
 // unloaded chunk leaves the proxy with none; with voxel.Render.RayTracing 0 the recreated proxy builds none. Needs a render
 // scene and ray tracing: runs in the editor on a ray tracing GPU, skips under -nullrhi or without ray tracing support.
+// G119 and G120 on the same meshes: under manual vertex fetch the vertex stream holds the positions alone (the geometry
+// above is built over it at stride 12), and the proxy's mesh buffer count, which the renderer reports (the bench's
+// RendGPUMB), follows every upload, retained crossfade mesh, seam and release to 0.
 // ---------------------------------------------------------------------------
 
 namespace VoxelRayTracingProxyTest
@@ -43,6 +47,12 @@ namespace VoxelRayTracingProxyTest
 			Mesh.Indices.Append({ Base, Base + 2, Base + 1, Base, Base + 3, Base + 2 });
 		}
 		return Mesh;
+	}
+
+	/** The bytes the proxy uploads for MakeQuads(NumQuads): 4 vertices and 6 indices a quad */
+	int64 QuadBytes(int32 NumQuads, uint32 VertexStride)
+	{
+		return static_cast<int64>(FVoxelChunkRenderData::CalcGPUMemoryUsage(4 * NumQuads, 6 * NumQuads, VertexStride));
 	}
 
 	using FScopedCVar = VoxelTesting::FScopedCVar;
@@ -113,6 +123,11 @@ bool FVoxelRayTracingChunkGeometryTest::RunTest(const FString& Parameters)
 		TestTrue(*FString::Printf(TEXT("First mesh: traced with its 8 triangles (%u)"), I.RayTracingTriangles), I.CurrentTriangles == 8 && I.RayTracingTriangles == 8);
 		TestTrue(*FString::Printf(TEXT("First mesh: one chunk geometry in the proxy, with a size (%d, %llu bytes)"), I.ProxyRayTracingChunks, I.ProxyRayTracingBytes),
 			I.ProxyRayTracingChunks == 1 && I.ProxyRayTracingBytes > 0);
+		const bool bManualVertexFetch = FLocalVertexFactory::StaticType.SupportsManualVertexFetch(World->GetFeatureLevel());
+		const uint32 Stride = bManualVertexFetch ? sizeof(FVector3f) : sizeof(FVoxelLocalVertex);
+		TestEqual(TEXT("First mesh: the vertex stream holds the positions alone under manual vertex fetch"), I.VertexStride, Stride);
+		TestEqual(TEXT("First mesh: the proxy counts its buffers"), I.ProxyMeshBufferBytes, QuadBytes(4, Stride));
+		TestEqual(TEXT("First mesh: the renderer reports the proxy's count"), Renderer.GetGPUMemoryUsage(), QuadBytes(4, Stride));
 
 		// An LOD swap crossfades: the new mesh is traced, the retained previous mesh is not
 		Renderer.UpdateChunkMeshFromCPU(Chunk, 1, MakeQuads(3, 101.0f));
@@ -122,12 +137,14 @@ bool FVoxelRayTracingChunkGeometryTest::RunTest(const FString& Parameters)
 			I.bCrossfading && I.CurrentTriangles == 6 && I.PreviousTriangles == 8);
 		TestTrue(*FString::Printf(TEXT("LOD swap: the new mesh is traced, alone (%u tris, %d chunk geometries)"), I.RayTracingTriangles, I.ProxyRayTracingChunks),
 			I.RayTracingTriangles == 6 && I.ProxyRayTracingChunks == 1);
+		TestEqual(TEXT("LOD swap: the count holds the new mesh and the retained one"), I.ProxyMeshBufferBytes, QuadBytes(3, Stride) + QuadBytes(4, Stride));
 
 		// A seam bucket (face +X of the chunk) gets its own geometry and loses it with the bucket
 		Renderer.UpdateSeamMeshFromCPU(Chunk, 0, 1, MakeQuads(2, 99.0f));
 		Renderer.FlushPendingOperations();
 		I = Info();
 		TestEqual(TEXT("Seam bucket: one seam geometry"), I.ProxyRayTracingSeams, 1);
+		TestEqual(TEXT("Seam bucket: counted"), I.ProxyMeshBufferBytes, QuadBytes(3, Stride) + QuadBytes(4, Stride) + QuadBytes(2, Stride));
 		Renderer.RemoveSeamMesh(Chunk, 0);
 		Renderer.FlushPendingOperations();
 		I = Info();
@@ -140,6 +157,8 @@ bool FVoxelRayTracingChunkGeometryTest::RunTest(const FString& Parameters)
 		TestTrue(*FString::Printf(TEXT("Unloaded: no mesh and no geometry left (%u tris, %d chunk and %d seam geometries, %llu bytes)"),
 			I.CurrentTriangles, I.ProxyRayTracingChunks, I.ProxyRayTracingSeams, I.ProxyRayTracingBytes),
 			I.CurrentTriangles == 0 && I.RayTracingTriangles == 0 && I.ProxyRayTracingChunks == 0 && I.ProxyRayTracingSeams == 0 && I.ProxyRayTracingBytes == 0);
+		TestEqual(TEXT("Unloaded: no mesh buffer bytes left"), I.ProxyMeshBufferBytes, int64(0));
+		TestEqual(TEXT("Unloaded: the renderer reports none"), Renderer.GetGPUMemoryUsage(), int64(0));
 
 		// voxel.Render.RayTracing 0 recreates the proxies; the new one builds no geometry
 		{
