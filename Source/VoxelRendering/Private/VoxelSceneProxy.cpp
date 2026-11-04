@@ -163,6 +163,21 @@ namespace
 	}
 }
 
+bool IsVoxelRayTracingWanted()
+{
+	return IsRayTracingAllowed() && CVarVoxelRayTracing.GetValueOnAnyThread() != 0;
+}
+
+int32 GetVoxelFarShadowMinLOD()
+{
+	return CVarVoxelFarShadowMinLOD.GetValueOnAnyThread();
+}
+
+float GetVoxelRayTracingTraceDistanceScale()
+{
+	return CVarVoxelRayTracingTraceDistanceScale.GetValueOnRenderThread();
+}
+
 namespace VoxelFadeDebug
 {
 	/** voxel.MeshFade.Stats' focus chunk: GetDynamicMeshElements records what the main view drew of it. */
@@ -427,23 +442,23 @@ FVoxelSceneProxy::~FVoxelSceneProxy()
 	UE_CLOG(LeftOver != 0, LogVoxelRendering, Warning, TEXT("FVoxelSceneProxy: %lld mesh buffer bytes counted at destruction"), LeftOver);
 }
 
-void FVoxelSceneProxy::CreateMeshBuffers_RenderThread(FRHICommandListBase& RHICmdList, const FVoxelMeshBufferNames& Names,
+void CreateVoxelMeshBuffers_RenderThread(FRHICommandListBase& RHICmdList, const FVoxelMeshBufferNames& Names, bool bPositionOnly,
 	const TArray<FVoxelLocalVertex>& ConvertedVertices, const TArray<FColor>& ColorData, const TArray<FVoxelPackedTangentPair>& TangentData,
-	const TArray<FVector4f>& TexCoordData, const TArray<uint32>& Indices, FVoxelChunkRenderData& NewRenderData)
+	const TArray<FVector4f>& TexCoordData, const TArray<uint32>& Indices, std::atomic<int64>* ByteCounter, FVoxelChunkRenderData& NewRenderData)
 {
 	const uint32 VertexCount = ConvertedVertices.Num();
 	const uint32 IndexCount = Indices.Num();
 
 	// Create vertex buffer: the positions alone where the vertex factory fetches the rest from the SRVs below (G120: the
 	// interleaved vertices' other 28 bytes were uploaded twice and never read), the interleaved vertices elsewhere
-	NewRenderData.VertexStride = bPositionOnlyVertexStream ? sizeof(FVector3f) : sizeof(FVoxelLocalVertex);
+	NewRenderData.VertexStride = bPositionOnly ? sizeof(FVector3f) : sizeof(FVoxelLocalVertex);
 	const uint32 VertexBufferSize = VertexCount * NewRenderData.VertexStride;
 	NewRenderData.VertexBufferRHI = RHICmdList.CreateBuffer(
 		FRHIBufferCreateDesc::Create(Names.Vertex, VertexBufferSize, NewRenderData.VertexStride, BUF_Static | BUF_VertexBuffer)
 			.SetInitialState(ERHIAccess::VertexOrIndexBuffer));
 
 	void* VertexData = RHICmdList.LockBuffer(NewRenderData.VertexBufferRHI, 0, VertexBufferSize, RLM_WriteOnly);
-	if (bPositionOnlyVertexStream)
+	if (bPositionOnly)
 	{
 		FVector3f* Positions = static_cast<FVector3f*>(VertexData);
 		for (uint32 i = 0; i < VertexCount; ++i)
@@ -503,9 +518,20 @@ void FVoxelSceneProxy::CreateMeshBuffers_RenderThread(FRHICommandListBase& RHICm
 	FMemory::Memcpy(IndexData, Indices.GetData(), IndexBufferSize);
 	RHICmdList.UnlockBuffer(NewRenderData.IndexBufferRHI);
 
-	// The proxy's count of what it holds (the bench's RendGPUMB); ReleaseResources takes it off
-	NewRenderData.LiveBytesCounter = &MeshBufferBytes;
-	MeshBufferBytes.fetch_add(static_cast<int64>(NewRenderData.GetGPUMemoryUsage()), std::memory_order_relaxed);
+	// The holder's count of what it holds (the bench's RendGPUMB); ReleaseResources takes it off
+	NewRenderData.LiveBytesCounter = ByteCounter;
+	if (ByteCounter)
+	{
+		ByteCounter->fetch_add(static_cast<int64>(NewRenderData.GetGPUMemoryUsage()), std::memory_order_relaxed);
+	}
+}
+
+void FVoxelSceneProxy::CreateMeshBuffers_RenderThread(FRHICommandListBase& RHICmdList, const FVoxelMeshBufferNames& Names,
+	const TArray<FVoxelLocalVertex>& ConvertedVertices, const TArray<FColor>& ColorData, const TArray<FVoxelPackedTangentPair>& TangentData,
+	const TArray<FVector4f>& TexCoordData, const TArray<uint32>& Indices, FVoxelChunkRenderData& NewRenderData)
+{
+	CreateVoxelMeshBuffers_RenderThread(RHICmdList, Names, bPositionOnlyVertexStream, ConvertedVertices, ColorData, TangentData, TexCoordData,
+		Indices, &MeshBufferBytes, NewRenderData);
 }
 
 SIZE_T FVoxelSceneProxy::GetTypeHash() const
@@ -2459,6 +2485,42 @@ void FVoxelRayTracingCounters::AddProxy(int32 Delta)
 }
 
 #if RHI_RAYTRACING
+uint64 InitVoxelRayTracingGeometry(FRHICommandListBase& RHICmdList, const FVoxelChunkRenderData& RenderData, const TCHAR* DebugName, FRayTracingGeometry& OutGeometry,
+	RayTracing::FGeometryGroupHandle GroupHandle)
+{
+	// Over the buffers just uploaded: the positions, at the vertex stream's offset 0 and stride (12 bytes for the positions
+	// alone, G120; the hit shaders read them from this segment), relative to the primitive's origin (a region proxy's
+	// RenderOrigin, a chunk primitive's chunk). Built once on the GPU (fast build, no updates: a re-mesh uploads new buffers
+	// and builds anew).
+	FRayTracingGeometryInitializer Initializer;
+	Initializer.DebugName = FName(DebugName);
+	Initializer.IndexBuffer = RenderData.IndexBufferRHI;
+	Initializer.TotalPrimitiveCount = RenderData.IndexCount / 3;
+	Initializer.GeometryType = RTGT_Triangles;
+	Initializer.bFastBuild = true;
+	Initializer.bAllowUpdate = false;
+
+	FRayTracingGeometrySegment Segment;
+	Segment.VertexBuffer = RenderData.VertexBufferRHI;
+	Segment.VertexBufferElementType = VET_Float3;
+	Segment.VertexBufferOffset = STRUCT_OFFSET(FVoxelLocalVertex, Position);
+	Segment.VertexBufferStride = RenderData.VertexStride;
+	Segment.MaxVertices = RenderData.VertexCount;
+	Segment.NumPrimitives = Initializer.TotalPrimitiveCount;
+	Initializer.Segments.Add(Segment);
+
+	const uint64 Bytes = RHICalcRayTracingGeometrySize(Initializer).ResultSize;
+	if (!GroupHandle.IsNull())
+	{
+		// The group's build and eviction requests reach the primitive whose cached instance uses the geometry
+		OutGeometry.GroupHandle = GroupHandle;
+		OutGeometry.LODIndex = FRayTracingGeometry::AdditionalGeometryLODIndex;
+	}
+	OutGeometry.SetInitializer(MoveTemp(Initializer));
+	OutGeometry.InitResource(RHICmdList);
+	return Bytes;
+}
+
 void FVoxelSceneProxy::GetDynamicRayTracingInstances(FRayTracingInstanceCollector& Collector)
 {
 	const FMaterialRenderProxy* MaterialProxy = (bRayTracing && Material) ? Material->GetRenderProxy() : nullptr;
@@ -2537,29 +2599,8 @@ void FVoxelSceneProxy::BuildRayTracing_AssumesLocked(FRHICommandListBase& RHICmd
 		return;
 	}
 
-	// Over the buffers just uploaded: the positions, at the vertex stream's offset 0 and stride (12 bytes for the positions
-	// alone, G120; the hit shaders read them from this segment), relative to RenderOrigin. Built once on the GPU (fast build, no updates: a re-mesh uploads new buffers and builds anew).
-	FRayTracingGeometryInitializer Initializer;
-	Initializer.DebugName = FName(DebugName);
-	Initializer.IndexBuffer = RenderData.IndexBufferRHI;
-	Initializer.TotalPrimitiveCount = RenderData.IndexCount / 3;
-	Initializer.GeometryType = RTGT_Triangles;
-	Initializer.bFastBuild = true;
-	Initializer.bAllowUpdate = false;
-
-	FRayTracingGeometrySegment Segment;
-	Segment.VertexBuffer = RenderData.VertexBufferRHI;
-	Segment.VertexBufferElementType = VET_Float3;
-	Segment.VertexBufferOffset = STRUCT_OFFSET(FVoxelLocalVertex, Position);
-	Segment.VertexBufferStride = RenderData.VertexStride;
-	Segment.MaxVertices = RenderData.VertexCount;
-	Segment.NumPrimitives = Initializer.TotalPrimitiveCount;
-	Initializer.Segments.Add(Segment);
-
-	Entry.Bytes = RHICalcRayTracingGeometrySize(Initializer).ResultSize;
 	Entry.Geometry = MakeUnique<FRayTracingGeometry>();
-	Entry.Geometry->SetInitializer(MoveTemp(Initializer));
-	Entry.Geometry->InitResource(RHICmdList);
+	Entry.Bytes = InitVoxelRayTracingGeometry(RHICmdList, RenderData, DebugName, *Entry.Geometry);
 	Entry.WorldBounds = RenderData.WorldBounds;
 
 	// The one segment's material: the batch the instances view every frame (its material proxy is set at the gather)

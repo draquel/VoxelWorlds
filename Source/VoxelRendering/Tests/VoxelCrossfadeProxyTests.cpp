@@ -48,6 +48,161 @@ namespace VoxelCrossfadeProxyTest
 
 	using FScopedCVar = VoxelTesting::FScopedCVar; // the one scoped cvar (code review CR2 row 17)
 
+	/**
+	 * The swaps of FVoxelCrossfadeSwapReachesProxyTest on one drawing path: the region proxy's meshes, or the chunk
+	 * primitives (G116 step 2: a fading primitive draws the dithered halves dynamically, then its cached static batch).
+	 */
+	bool RunSwapReachesProxy(FAutomationTestBase& Test, bool bChunkPrimitives)
+	{
+		if (GUsingNullRHI) { Test.AddInfo(TEXT("Skipped: needs a render scene (run without -nullrhi, where components create no scene proxy)")); return true; }
+
+		UMaterialInterface* Master = LoadObject<UMaterialInterface>(nullptr, TEXT("/VoxelWorlds/Materials/M_VoxelMaster.M_VoxelMaster"));
+		if (!Test.TestNotNull(TEXT("The terrain master loads"), Master))
+		{
+			return false;
+		}
+		const FScopedCVar Primitives(TEXT("voxel.Render.ChunkPrimitives"), bChunkPrimitives ? TEXT("1") : TEXT("0"));
+		const FScopedCVar Fade(TEXT("voxel.MeshFade"), TEXT("1"));
+		const FScopedCVar Duration(TEXT("voxel.MeshFade.Duration"), TEXT("0.35"));
+
+		UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+		Config->AddToRoot();
+		Config->WorldMode = EWorldMode::InfinitePlane;
+		Config->WorldOrigin = FVector::ZeroVector;
+		Config->VoxelSize = 50.0f;
+		Config->ChunkSize = 32;
+		Config->MeshingMode = EMeshingMode::DualContouring;
+
+		UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelCrossfadeProxyTestWorld"));
+		FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
+		WorldContext.SetCurrentWorld(World);
+		{
+			FVoxelMeshRenderer Renderer;
+			Renderer.SetMaterial(Master);
+			Renderer.Initialize(World, Config);
+			UVoxelRegionComponent* Component = Renderer.GetOriginRegionComponent();
+			if (!Test.TestNotNull(TEXT("The renderer has a world component"), Component))
+			{
+				Renderer.Shutdown();
+				GEngine->DestroyWorldContext(World);
+				World->DestroyWorld(false);
+				Config->RemoveFromRoot();
+				return false;
+			}
+			Test.TestNotNull(TEXT("The fade material is derived from the master (M_VoxelMaster_Fade)"), Component->GetFadeMaterial());
+
+			// A chunk of render region (0, 0, 0): the world component's own (since MP2 a heightmap world keeps 16-chunk regions
+			// too, and a chunk of another region is drawn by that region's component).
+			const FIntVector Chunk(2, 1, 0);
+			auto Submit = [&](int32 LOD, int32 Quads)
+			{
+				Renderer.UpdateChunkMeshFromCPU(Chunk, LOD, MakeQuads(Quads, 100.0f + LOD));
+				Renderer.FlushPendingOperations();
+			};
+			// The world's clock and the component's tick (it only ticks while a fade runs; called by hand here)
+			auto Advance = [&](double Seconds)
+			{
+				const int32 Steps = FMath::Max(1, FMath::CeilToInt(Seconds * 60.0));
+				for (int32 i = 0; i < Steps; ++i)
+				{
+					World->RealTimeSeconds += Seconds / Steps;
+					Component->TickComponent(static_cast<float>(Seconds / Steps), LEVELTICK_All, nullptr);
+					Renderer.FlushPendingOperations();
+				}
+			};
+			auto Info = [&]()
+			{
+				FVoxelChunkDrawInfo Out;
+				Component->GetChunkDrawInfo(Chunk, Out);
+				return Out;
+			};
+			int64 Starts = 0, Restarts = 0;
+
+			// A first mesh, near nothing that would fade it in: drawn at once
+			Submit(0, 4);
+			FVoxelChunkDrawInfo I = Info();
+			if (!Test.TestTrue(TEXT("The proxy holds the first mesh"), I.CurrentTriangles == 8))
+			{
+				Renderer.Shutdown();
+				GEngine->DestroyWorldContext(World);
+				World->DestroyWorld(false);
+				Config->RemoveFromRoot();
+				return false;
+			}
+			Test.TestTrue(TEXT("First mesh: drawn alone with the terrain material"), I.DrawsCurrentOnly() && !I.bHasFadeState);
+
+			// An edit's re-mesh (same LOD): crossfades from the mesh it replaces, then draws alone
+			Submit(0, 6);
+			I = Info();
+			Component->GetFadeCounters(false, Starts, Restarts);
+			Test.TestEqual(TEXT("Edit swap: one interior crossfade started"), Starts, int64(1));
+			Test.TestTrue(*FString::Printf(TEXT("Edit swap: crossfades from the old mesh (current %u, previous %u tris)"), I.CurrentTriangles, I.PreviousTriangles),
+				I.bCrossfading && I.CurrentTriangles == 12 && I.PreviousTriangles == 8 && !I.bHeld);
+			Advance(0.2);
+			I = Info();
+			Test.TestTrue(*FString::Printf(TEXT("Edit swap: halfway (alpha %.2f)"), I.FadeAlpha), I.bCrossfading && I.FadeAlpha > 0.3f && I.FadeAlpha < 0.9f);
+			Advance(0.3);
+			I = Info();
+			Test.TestTrue(TEXT("Edit swap: after the fade the new mesh is drawn alone, nothing retained"),
+				I.DrawsCurrentOnly() && I.CurrentTriangles == 12 && I.PreviousTriangles == 0 && !I.bHasFadeState);
+			Test.TestEqual(TEXT("Edit swap: no fade left running"), Component->GetActiveFadeCount(), 0);
+
+			// An LOD swap crossfades the same way
+			Submit(1, 3);
+			I = Info();
+			Test.TestTrue(TEXT("LOD swap: crossfades from LOD 0 to LOD 1"), I.bCrossfading && I.CurrentTriangles == 6 && I.PreviousTriangles == 12 && I.LODLevel == 1);
+			Advance(0.5);
+			I = Info();
+			Test.TestTrue(TEXT("LOD swap: LOD 1 drawn alone after the fade"), I.DrawsCurrentOnly() && I.CurrentTriangles == 6 && I.LODLevel == 1);
+
+			// Two re-meshes before one flush: the second crossfades from a mesh that was never drawn (on the chunk primitives
+			// the first one's primitive never joins the scene, and the fade's primitive uploads its outgoing mesh itself)
+			Renderer.UpdateChunkMeshFromCPU(Chunk, 1, MakeQuads(4, 101.0f));
+			Renderer.UpdateChunkMeshFromCPU(Chunk, 1, MakeQuads(3, 101.0f));
+			Renderer.FlushPendingOperations();
+			I = Info();
+			Test.TestTrue(*FString::Printf(TEXT("Two swaps in one flush: crossfades into the second (current %u, previous %u tris)"), I.CurrentTriangles, I.PreviousTriangles),
+				I.bCrossfading && I.CurrentTriangles == 6 && I.PreviousTriangles > 0);
+			Advance(0.5);
+			I = Info();
+			Test.TestTrue(TEXT("Two swaps in one flush: the second drawn alone after the fade"), I.DrawsCurrentOnly() && I.CurrentTriangles == 6 && I.LODLevel == 1);
+
+			// An LOD transition held for its seams (R24): the old mesh stays on screen until the release, then fades
+			Component->SetChunkFadeHold(Chunk, true);
+			Submit(0, 5);
+			Advance(1.0);
+			I = Info();
+			Test.TestTrue(TEXT("Held swap: the old mesh stays fully shown while held"),
+				I.bCrossfading && I.bHeld && I.FadeAlpha == 0.0f && I.PreviousTriangles == 6 && I.CurrentTriangles == 10);
+			Component->SetChunkFadeHold(Chunk, false);
+			Advance(0.5);
+			I = Info();
+			Test.TestTrue(TEXT("Held swap: released, the new mesh is drawn alone after the fade"), I.DrawsCurrentOnly() && I.CurrentTriangles == 10 && I.PreviousTriangles == 0);
+
+			// A hold nobody releases ends at the renderer's failsafe (3 s) and the swap still lands
+			Component->SetChunkFadeHold(Chunk, true);
+			Submit(1, 2);
+			Advance(2.0);
+			Test.TestTrue(TEXT("Unreleased hold: still held after 2 s"), Info().bHeld);
+			Advance(2.0);
+			I = Info();
+			Test.TestTrue(TEXT("Unreleased hold: the failsafe lands the swap"), I.DrawsCurrentOnly() && I.CurrentTriangles == 4);
+
+			// With the fade off a swap is drawn at once
+			{
+				const FScopedCVar Off(TEXT("voxel.MeshFade"), TEXT("0"));
+				Submit(0, 7);
+				I = Info();
+				Test.TestTrue(TEXT("voxel.MeshFade 0: the new mesh is drawn at once"), I.DrawsCurrentOnly() && I.CurrentTriangles == 14 && I.PreviousTriangles == 0);
+			}
+
+			Renderer.Shutdown();
+		}
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		Config->RemoveFromRoot();
+		return true;
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCrossfadeSwapReachesProxyTest,
@@ -56,142 +211,16 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCrossfadeSwapReachesProxyTest,
 
 bool FVoxelCrossfadeSwapReachesProxyTest::RunTest(const FString& Parameters)
 {
-	using namespace VoxelCrossfadeProxyTest;
-	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: needs a render scene (run without -nullrhi, where components create no scene proxy)")); return true; }
+	return VoxelCrossfadeProxyTest::RunSwapReachesProxy(*this, /*bChunkPrimitives*/ false);
+}
 
-	UMaterialInterface* Master = LoadObject<UMaterialInterface>(nullptr, TEXT("/VoxelWorlds/Materials/M_VoxelMaster.M_VoxelMaster"));
-	if (!TestNotNull(TEXT("The terrain master loads"), Master))
-	{
-		return false;
-	}
-	const FScopedCVar Fade(TEXT("voxel.MeshFade"), TEXT("1"));
-	const FScopedCVar Duration(TEXT("voxel.MeshFade.Duration"), TEXT("0.35"));
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelChunkPrimitiveCrossfadeTest,
+	"VoxelWorlds.Rendering.ChunkPrimitives.Crossfade",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
-	Config->AddToRoot();
-	Config->WorldMode = EWorldMode::InfinitePlane;
-	Config->WorldOrigin = FVector::ZeroVector;
-	Config->VoxelSize = 50.0f;
-	Config->ChunkSize = 32;
-	Config->MeshingMode = EMeshingMode::DualContouring;
-
-	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelCrossfadeProxyTestWorld"));
-	FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
-	WorldContext.SetCurrentWorld(World);
-	{
-		FVoxelMeshRenderer Renderer;
-		Renderer.SetMaterial(Master);
-		Renderer.Initialize(World, Config);
-		UVoxelRegionComponent* Component = Renderer.GetOriginRegionComponent();
-		if (!TestNotNull(TEXT("The renderer has a world component"), Component))
-		{
-			Renderer.Shutdown();
-			GEngine->DestroyWorldContext(World);
-			World->DestroyWorld(false);
-			Config->RemoveFromRoot();
-			return false;
-		}
-		TestNotNull(TEXT("The fade material is derived from the master (M_VoxelMaster_Fade)"), Component->GetFadeMaterial());
-
-		// A chunk of render region (0, 0, 0): the world component's own (since MP2 a heightmap world keeps 16-chunk regions
-		// too, and a chunk of another region is drawn by that region's component).
-		const FIntVector Chunk(2, 1, 0);
-		auto Submit = [&](int32 LOD, int32 Quads)
-		{
-			Renderer.UpdateChunkMeshFromCPU(Chunk, LOD, MakeQuads(Quads, 100.0f + LOD));
-			Renderer.FlushPendingOperations();
-		};
-		// The world's clock and the component's tick (it only ticks while a fade runs; called by hand here)
-		auto Advance = [&](double Seconds)
-		{
-			const int32 Steps = FMath::Max(1, FMath::CeilToInt(Seconds * 60.0));
-			for (int32 i = 0; i < Steps; ++i)
-			{
-				World->RealTimeSeconds += Seconds / Steps;
-				Component->TickComponent(static_cast<float>(Seconds / Steps), LEVELTICK_All, nullptr);
-				Renderer.FlushPendingOperations();
-			}
-		};
-		auto Info = [&]()
-		{
-			FVoxelChunkDrawInfo Out;
-			Component->GetChunkDrawInfo(Chunk, Out);
-			return Out;
-		};
-		int64 Starts = 0, Restarts = 0;
-
-		// A first mesh, near nothing that would fade it in: drawn at once
-		Submit(0, 4);
-		FVoxelChunkDrawInfo I = Info();
-		if (!TestTrue(TEXT("The proxy holds the first mesh"), I.CurrentTriangles == 8))
-		{
-			Renderer.Shutdown();
-			GEngine->DestroyWorldContext(World);
-			World->DestroyWorld(false);
-			Config->RemoveFromRoot();
-			return false;
-		}
-		TestTrue(TEXT("First mesh: drawn alone with the terrain material"), I.DrawsCurrentOnly() && !I.bHasFadeState);
-
-		// An edit's re-mesh (same LOD): crossfades from the mesh it replaces, then draws alone
-		Submit(0, 6);
-		I = Info();
-		Component->GetFadeCounters(false, Starts, Restarts);
-		TestEqual(TEXT("Edit swap: one interior crossfade started"), Starts, int64(1));
-		TestTrue(*FString::Printf(TEXT("Edit swap: crossfades from the old mesh (current %u, previous %u tris)"), I.CurrentTriangles, I.PreviousTriangles),
-			I.bCrossfading && I.CurrentTriangles == 12 && I.PreviousTriangles == 8 && !I.bHeld);
-		Advance(0.2);
-		I = Info();
-		TestTrue(*FString::Printf(TEXT("Edit swap: halfway (alpha %.2f)"), I.FadeAlpha), I.bCrossfading && I.FadeAlpha > 0.3f && I.FadeAlpha < 0.9f);
-		Advance(0.3);
-		I = Info();
-		TestTrue(TEXT("Edit swap: after the fade the new mesh is drawn alone, nothing retained"),
-			I.DrawsCurrentOnly() && I.CurrentTriangles == 12 && I.PreviousTriangles == 0 && !I.bHasFadeState);
-		TestEqual(TEXT("Edit swap: no fade left running"), Component->GetActiveFadeCount(), 0);
-
-		// An LOD swap crossfades the same way
-		Submit(1, 3);
-		I = Info();
-		TestTrue(TEXT("LOD swap: crossfades from LOD 0 to LOD 1"), I.bCrossfading && I.CurrentTriangles == 6 && I.PreviousTriangles == 12 && I.LODLevel == 1);
-		Advance(0.5);
-		I = Info();
-		TestTrue(TEXT("LOD swap: LOD 1 drawn alone after the fade"), I.DrawsCurrentOnly() && I.CurrentTriangles == 6 && I.LODLevel == 1);
-
-		// An LOD transition held for its seams (R24): the old mesh stays on screen until the release, then fades
-		Component->SetChunkFadeHold(Chunk, true);
-		Submit(0, 5);
-		Advance(1.0);
-		I = Info();
-		TestTrue(TEXT("Held swap: the old mesh stays fully shown while held"),
-			I.bCrossfading && I.bHeld && I.FadeAlpha == 0.0f && I.PreviousTriangles == 6 && I.CurrentTriangles == 10);
-		Component->SetChunkFadeHold(Chunk, false);
-		Advance(0.5);
-		I = Info();
-		TestTrue(TEXT("Held swap: released, the new mesh is drawn alone after the fade"), I.DrawsCurrentOnly() && I.CurrentTriangles == 10 && I.PreviousTriangles == 0);
-
-		// A hold nobody releases ends at the renderer's failsafe (3 s) and the swap still lands
-		Component->SetChunkFadeHold(Chunk, true);
-		Submit(1, 2);
-		Advance(2.0);
-		TestTrue(TEXT("Unreleased hold: still held after 2 s"), Info().bHeld);
-		Advance(2.0);
-		I = Info();
-		TestTrue(TEXT("Unreleased hold: the failsafe lands the swap"), I.DrawsCurrentOnly() && I.CurrentTriangles == 4);
-
-		// With the fade off a swap is drawn at once
-		{
-			const FScopedCVar Off(TEXT("voxel.MeshFade"), TEXT("0"));
-			Submit(0, 7);
-			I = Info();
-			TestTrue(TEXT("voxel.MeshFade 0: the new mesh is drawn at once"), I.DrawsCurrentOnly() && I.CurrentTriangles == 14 && I.PreviousTriangles == 0);
-		}
-
-		Renderer.Shutdown();
-	}
-	GEngine->DestroyWorldContext(World);
-	World->DestroyWorld(false);
-	Config->RemoveFromRoot();
-	return true;
+bool FVoxelChunkPrimitiveCrossfadeTest::RunTest(const FString& Parameters)
+{
+	return VoxelCrossfadeProxyTest::RunSwapReachesProxy(*this, /*bChunkPrimitives*/ true);
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS

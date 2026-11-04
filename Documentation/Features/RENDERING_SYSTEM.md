@@ -1,6 +1,6 @@
 ﻿# Rendering System Architecture
 
-> State as of 2026-11-03 (code review CR5; F3.3 ray tracing geometry). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-04 (code review CR5; F3.3 ray tracing geometry; G116 steps 1-3, the chunk primitives). Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelRendering
 **Dependencies**: VoxelCore
@@ -11,15 +11,16 @@
 2. [Architecture](#architecture)
 3. [Key Components](#key-components)
 4. [Render Regions](#render-regions)
-5. [Shadow Culling](#shadow-culling)
-6. [Crossfades](#crossfades)
-7. [Vertex Format and Colour Encoding](#vertex-format-and-colour-encoding)
-8. [Renderer Interface](#renderer-interface)
-9. [Water Tile Rendering](#water-tile-rendering)
-10. [What the Renderer Does Not Draw](#what-the-renderer-does-not-draw)
-11. [Collision](#collision)
-12. [Integration Flow](#integration-flow)
-13. [Debugging](#debugging)
+5. [Chunk Primitives](#chunk-primitives)
+6. [Shadow Culling](#shadow-culling)
+7. [Crossfades](#crossfades)
+8. [Vertex Format and Colour Encoding](#vertex-format-and-colour-encoding)
+9. [Renderer Interface](#renderer-interface)
+10. [Water Tile Rendering](#water-tile-rendering)
+11. [What the Renderer Does Not Draw](#what-the-renderer-does-not-draw)
+12. [Collision](#collision)
+13. [Integration Flow](#integration-flow)
+14. [Debugging](#debugging)
 
 ---
 
@@ -58,8 +59,10 @@ AVoxelWorldActor
         │
         └── FVoxelMeshRenderer
             └── UVoxelRegionComponent (one per render region)
+                ├── FVoxelChunkSceneProxy per chunk mesh and seam bucket (a primitive without a component, G116)
+                │   └── FVoxelChunkMesh: FLocalVertexFactory, buffers, ray tracing geometry
                 └── FVoxelSceneProxy
-                    └── FLocalVertexFactory per chunk, seam and water-tile mesh
+                    └── FLocalVertexFactory per water tile (and per chunk and seam mesh with voxel.Render.ChunkPrimitives 0)
 ```
 
 ---
@@ -91,6 +94,12 @@ AVoxelWorldActor
   (`UVoxelChunkManager::RecoverLostRenderData`; G15, test `Streaming.Cubic.RendererProxyRecreated`), also while
   streaming is paused (`TickWhilePaused`; F3.4, test `Streaming.Cubic.RendererProxyRecreatedWhilePaused`)
 
+**FVoxelChunkSceneProxy** (`VoxelRendering/Public/VoxelChunkSceneProxy.h`)
+- One primitive per chunk interior mesh and seam bucket, registered by its region component without a component of its
+  own; draws on the static path, and on the dynamic one while it fades (below, [Chunk Primitives](#chunk-primitives))
+- Holds `FVoxelChunkMesh`es: the GPU geometry of one mesh (vertex factory, buffers, ray tracing geometry), shared by the
+  primitive that draws it and the one fading out of it
+
 **FVoxelLocalVertex** (`VoxelRendering/Public/VoxelLocalVertexFactory.h`)
 - 40-byte vertex format compatible with `FLocalVertexFactory`, the CPU-side conversion; uploaded whole only where the
   vertex factory has no manual vertex fetch (below, G120)
@@ -119,6 +128,83 @@ spherical Phase 6 (WM-BP7, D23), heightmap worlds since the world modes review's
   a chunk, and every bounds change schedules the tick that sends them to the scene (`RequestRenderBoundsRefresh`).
   Before, a lake under such a region drew its bed without water in a block of chunk columns seen from altitude
   (test `Rendering.WaterTile.ComponentBounds`; `voxel.Water.ResendTiles`).
+
+---
+
+## Chunk Primitives
+
+Every chunk interior mesh and seam bucket is a primitive of its own (G116 steps 1-3, 2026-11-04; the plan is
+[LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md](../Research/LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md)). The engine culls static meshes,
+caches ray tracing instances and captures Lumen's cards per primitive, so a region proxy drawing a thousand meshes got
+none of it; a primitive per mesh gets all three. `voxel.Render.ChunkPrimitives` (1) chooses it; 0 is the region proxy
+drawing every chunk and seam mesh itself, as before (a change re-meshes the terrain).
+
+- **No component per chunk.** `UVoxelRegionComponent` registers each `FVoxelChunkSceneProxy` through
+  `FPrimitiveSceneDesc` (`FSceneInterface::BatchAddPrimitives`, and `BatchRemovePrimitives` by proxy), as the engine's
+  FastGeo streaming does: the spike measured 0.14 ms of game thread per registered component. Submits, re-meshes and
+  removals queue on the game thread and go to the scene in one batch from the renderer's flush. A primitive sits at its
+  chunk's origin (its vertices are float offsets a chunk across) with its mesh's box, padded by two voxels, as bounds.
+- **The region component keeps** the water tiles (its own proxy draws them, re-sent from the component's copies when the
+  engine recreates that proxy), the crossfade driver and G15's recovery: a recreated region proxy no longer loses the
+  chunks, since they are not its own. A primitive's description is the component's (shadow, decals, virtual textures,
+  ray tracing), with `bCastFarShadow` per primitive from its mesh's LOD (D-VP3's far cascades take LOD
+  `voxel.Render.FarShadowMinLOD` and coarser, the region proxy's per-mesh filter).
+- **Static draw.** `DrawStaticElements` gives the terrain batch and its runtime virtual texture clones once; the scene
+  caches their draw commands per pass in GPUScene and culls the primitive per view and shadow cascade. The region proxy's
+  per-mesh loop and its 2,000-batch cap are gone for the terrain.
+- **Fades through dynamic relevance** (step 2). A fading primitive answers dynamic relevance for the fade's length and
+  draws its two dithered halves in `GetDynamicMeshElements` (the crossfade, an appearance, a held swap, a seam bucket
+  fading out), as the region proxy did; its static batches are not drawn meanwhile, and no cached command changes when a
+  fade starts or ends. A new mesh is a new primitive that holds the outgoing one as its Previous, so the swap and the
+  fade's first frame are the same frame; the fade's end clears the Previous on the render thread
+  (`voxel.Render.ChunkPrimitives.Dynamic 1` draws every primitive dynamically, a diagnostic).
+- **Cached ray tracing** (step 3). Each mesh's `FRayTracingGeometry` has a geometry group of its own, and the primitive
+  caches its one instance (`CacheInstances`): a build completing or a mesh released dirties that primitive only. There is
+  no per-frame gather any more, so every chunk is in the ray tracing scene again, not only those within the view's Lumen
+  trace distance; `voxel.Render.RayTracing.TraceDistanceScale` acts on the region proxy's path alone.
+- **Release.** The scene deletes a removed primitive in a task of its update; the primitive's meshes go to a queue the
+  render thread drains each frame, where their vertex factories, buffers and ray tracing geometry are released.
+
+What the engine needs from primitives without components, found the hard way:
+
+- **Material and shader updates find primitives through `IPrimitiveComponent` only** (the renderer's `UpdateStaticDrawListsForMaterials`,
+  the shader compiler's `PropagateMaterialChangesToPrimitives`, `FGlobalComponentRecreateRenderStateContext`). Without
+  it a recompiled material left cached draw commands on freed shaders: a crash in `SetShaderBindings`. The module
+  registers a resolver on `UVoxelRegionComponent` (`IPrimitiveComponent::AddImplementer`, FastGeo's pattern) that gives
+  one interface per primitive; in the editor each add and removal tells the object cache
+  (`FObjectCacheEventSink::NotifyUsedMaterialsChanged_Concurrent`), and the component's `GetUsedMaterials` names its
+  materials (the default returns none).
+- **The scene deletes proxies beside the tasks that cache new ones' draw commands**: releasing render resources in the
+  destructor there gave commands bound to stale uniform buffers, hence the render thread's release queue.
+- **`FSceneInterface::UpdateAllPrimitiveSceneInfos` asserts inside a render command pipe's replay**: nothing calls it
+  from a render command.
+
+Measured 2026-11-04 (the streaming bench, `voxel.Render.ChunkPrimitives` 0 and 1 interleaved, three runs each, noon
+with the clock stopped, the 2,874 x 1,360 PIE viewport, ray tracing on; `RTBusyMs` is the render thread's own CPU time
+in its frame, since the engine's `RTMs` reads 0 in the editor's PIE):
+
+| Route | Path | GPU frame P50 / P95 | Render thread P50 / P95 | Game thread P50 / P95 | Primitives, added a second |
+|---|---|---|---|---|---|
+| `VoxelDemo`'s chord | region proxy | 6.32 / 8.02 | 8.85 / 14.52 | 18.57 / 27.58 | 0 |
+| | chunk primitives | 6.37 / 8.05 | 8.63 / 14.59 | 18.35 / 27.72 | 1,079, 159 |
+| `PlanetTest`'s great circle | region proxy | 6.50 / 8.73 | 12.72 / 23.57 | 23.74 / 35.91 | 0 |
+| | chunk primitives | 6.36 / 8.65 | 12.53 / 23.56 | 24.42 / 37.55 | 1,070, 190 |
+
+The great circle's six runs a side ran while other work loaded the machine: its game thread moved by -1.3 to +4.1 ms
+between adjacent runs of the two paths, and an earlier quieter set (before the review fixes, three runs a side) gave
+20.13 → 19.88 ms game thread and 6.22 → 6.04 ms GPU.
+
+The cost the plan feared, caching every pass's commands at each of 160-190 adds a second, does not show on the render
+thread, and the GPU is unchanged. Ray tracing at rest is the same geometry (`VoxelDemo` 1,098 meshes, 56.7 MB of BLAS;
+`PlanetTest` 865, 45.9 MB), now all of it traced where the region proxy gathered 291-303 a frame. While streaming the
+peak is about 85 geometries and 6 MB higher (1,163 against 1,080, 68 against 62 MB on the chord): a fading primitive's
+outgoing mesh keeps its geometry until the fade ends. `r.RayTracing.Visualize` from 6,000 uu above `VoxelDemo`'s ground shows
+the ridges past the Lumen trace distance in the ray tracing scene, which the gather left out. Lumen's frame is unchanged
+until the cards: F3.3's repro gives the same figures on both paths (under the overhang 0.177 → 0.159, 0.90, the sealed
+cave 0.111 on `VoxelDemo`; 0.433 → 0.378, 0.87, and 0.029 on `PlanetTest`), since a ray past the trace distance still
+ends in screen traces and a terrain hit is still black. Tests `Rendering.ChunkPrimitives.Lifecycle`, `.Crossfade`
+(`Crossfade.SwapReachesProxy` on the chunk primitives) and `.RayTracing` (`Rendering.RayTracing.ChunkGeometry`
+likewise), in the in-editor gate.
 
 ---
 
@@ -185,6 +271,9 @@ keeps darkening the ground under it, and a sealed cave stays dark.
   meshes, and with them its geometry, back through `RecoverLostRenderData` (G15, F3.4).
 - **The current mesh only.** A crossfade's outgoing mesh, a held swap's visible Previous and a seam bucket fading out
   have none: rays see the mesh the fade ends on.
+- **Cached per chunk** on the chunk primitives (the default since G116, [Chunk Primitives](#chunk-primitives)): every
+  chunk and seam mesh whose build has completed is in the ray tracing scene, with no per-frame work. The rest of this
+  bullet is the region proxy's path (`voxel.Render.ChunkPrimitives 0`).
 - **Gathered every frame** (`GetDynamicRayTracingInstances`), one instance per mesh whose build has completed, with the
   terrain material; a mesh still building joins the next frame. Each mesh keeps its mesh batch and the instances view it
   and the proxy's transform, so the gather allocates nothing. Only meshes whose box is within the view's Lumen max
@@ -210,10 +299,9 @@ What it does not give yet:
 - **Bounce light from the terrain.** A ray that hits the terrain finds no Lumen surface cache (the terrain has no mesh
   cards) and returns black: occlusion is right, the bounce off the terrain is lost, so the ground under an overhang
   reads a little darker off screen than on screen (0.90 of it on `VoxelDemo`) and on a planet's shaded ground can go
-  black. Lumen captures cards from a primitive's cached static mesh draw commands, and the engine culls static meshes,
-  caches ray tracing instances and captures cards per primitive, so the fix needs a primitive per chunk mesh rather than
-  this proxy's per-region one (G116 in the project's findings; the plan is
-  [LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md](../Research/LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md)).
+  black. Lumen captures cards from a primitive's cached static mesh draw commands; since G116's steps 1-3 every chunk
+  mesh is such a primitive ([Chunk Primitives](#chunk-primitives)), and step 4 gives each its cards (G116 in the
+  project's findings; the plan is [LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md](../Research/LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md)).
 - **Hit lighting is not the answer.** `r.Lumen.HardwareRayTracing.LightingMode 1` evaluates the terrain's material and
   direct light at a hit, and works with this proxy as it is (hit shaders take positions from the ray tracing geometry,
   not the vertex factory's position view, which the proxy leaves null). Sunlit terrain seen in a ray turns from black to
@@ -282,6 +370,9 @@ interiors and seam buckets share one scheduler so everything released together f
   holds, the proxy's fade states and what the last frame drew of a chunk (tests `Rendering.Crossfade.SwapReachesProxy`,
   `Streaming.EditReachesProxy.*`, which need a real RHI).
 
+On the chunk primitives a fade is a primitive drawing dynamically for its length ([Chunk Primitives](#chunk-primitives));
+the scheduler, the holds and the materials are the same, and so are the tests (`Rendering.ChunkPrimitives.Crossfade`).
+
 The scheduling side (when a swap is held, seam buckets) is in [STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md).
 
 ---
@@ -303,9 +394,12 @@ The scheduling side (when a swap is held, seam buckets) is in [STREAMING_AND_SEA
 // In material:
 AO = floor(VertexColor.B * 4);  // 0-3
 AOFactor = 1.0 - (AO * 0.25);   // 1.0, 0.75, 0.5, 0.25
-FinalColor = BaseColor * AOFactor;
-```
-
+FinalColor = BaseColor * AOFactor;
+
+```
+
+
+
 ### The Mesh Buffers
 
 `FVoxelSceneProxy::CreateMeshBuffers_RenderThread` uploads every chunk, seam and water mesh as five buffers: the vertex
