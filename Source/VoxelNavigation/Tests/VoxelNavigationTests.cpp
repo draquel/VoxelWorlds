@@ -5,6 +5,8 @@
 #include "VoxelSurfacePathfinder.h"
 #include "VoxelWorldModeTypes.h"
 
+#include <limits>
+
 #if WITH_DEV_AUTOMATION_TESTS
 
 #define VOXEL_NAV_TEST_FLAGS (EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -194,6 +196,60 @@ bool FVoxelNavWorldBoundsTest::RunTest(const FString& Parameters)
 	FVoxelSurfacePathfinder Snap(P, Flat, Outside);
 	TestTrue(TEXT("A goal just past the edge snaps inside"), Snap.FindPath(FVector(50, 50, 0), FVector(2150, 50, 0), Points, &Stats) && Stats.bGoalSnapped);
 	TestTrue(TEXT("The snapped goal is inside the world"), Points.Num() > 0 && Island.ContainsXY(Points.Last().X, Points.Last().Y));
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// A goal out of reach (G73): on a pillar three steps high the search stops once the check from the goal's side finds the
+// pillar top enclosed, where it used to spend its whole budget; a goal behind a long wall is not a pocket and is reached.
+// Cells the sampler has no height for (NaN: the subsystem's per-search sampling cap) are left out of the search.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNavPocketTest, "VoxelWorlds.Navigation.PocketAndSampleCap", VOXEL_NAV_TEST_FLAGS)
+bool FVoxelNavPocketTest::RunTest(const FString& Parameters)
+{
+	// A 3 x 3 pillar 300 high at cells x [20, 22], y [0, 2] on flat ground.
+	auto Pillar = [](double X, double Y)
+	{
+		const int32 CX = FMath::FloorToInt(X / 100.0), CY = FMath::FloorToInt(Y / 100.0);
+		return CX >= 20 && CX <= 22 && CY >= 0 && CY <= 2 ? 300.f : 0.f;
+	};
+	FVoxelSurfaceNavParams P = VoxelNavTest::Params();
+	P.MaxSearchRadius = 6000.f;
+	TArray<FVector> Points;
+	FVoxelSurfacePathStats Stats;
+	const FVector From(50, 150, 0), OnPillar(2150, 150, 0);
+
+	FVoxelSurfacePathfinder Nav(P, Pillar);
+	TestTrue(TEXT("Pillar: a partial route"), Nav.FindPath(From, OnPillar, Points, &Stats) && Stats.bPartial);
+	TestTrue(TEXT("Pillar: the goal is in a pocket"), Stats.bGoalInPocket);
+	TestEqual(TEXT("Pillar: the search stops at the check"), Stats.NodesExpanded, P.PocketCheckNodes);
+	TestTrue(TEXT("Pillar: the route ends at the pillar's foot"), Points.Num() > 0 && FVector::Dist2D(Points.Last(), OnPillar) < 300.f);
+
+	FVoxelSurfaceNavParams NoCheck = P;
+	NoCheck.PocketCheckNodes = 0;
+	FVoxelSurfacePathfinder Exhaust(NoCheck, Pillar);
+	FVoxelSurfacePathStats ExhaustStats;
+	Exhaust.FindPath(From, OnPillar, Points, &ExhaustStats);
+	TestTrue(TEXT("Pillar without the check: the search runs on (to its radius or budget)"), ExhaustStats.NodesExpanded > 4 * P.PocketCheckNodes);
+
+	// A wall 100 cells long at x = 10 (y in [-50, 50]): the goal behind it is reached after more nodes than the check's.
+	auto Wall = [](double X, double Y)
+	{
+		const int32 CX = FMath::FloorToInt(X / 100.0), CY = FMath::FloorToInt(Y / 100.0);
+		return CX == 10 && CY >= -50 && CY <= 50 ? 1000.f : 0.f;
+	};
+	FVoxelSurfacePathfinder Around(P, Wall);
+	TestTrue(TEXT("Wall: a complete route"), Around.FindPath(FVector(550, 50, 0), FVector(1550, 50, 0), Points, &Stats) && !Stats.bPartial);
+	TestFalse(TEXT("Wall: the goal is not in a pocket"), Stats.bGoalInPocket);
+	TestTrue(TEXT("Wall: the route took more nodes than the check's threshold"), Stats.NodesExpanded > P.PocketCheckNodes);
+
+	// No height past x = 1500: a goal at x = 3050 gets a partial route, marked capped, never past the line.
+	auto Capped = [](double X, double) { return X > 1500.0 ? std::numeric_limits<float>::quiet_NaN() : 0.f; };
+	FVoxelSurfacePathfinder Cap(P, Capped);
+	TestTrue(TEXT("Cap: short of the line, a complete route"), Cap.FindPath(FVector(50, 50, 0), FVector(1250, 50, 0), Points, &Stats) && !Stats.bPartial);
+	TestTrue(TEXT("Cap: beyond it, partial"), Cap.FindPath(FVector(50, 50, 0), FVector(3050, 50, 0), Points, &Stats) && Stats.bPartial);
+	TestTrue(TEXT("Cap: marked"), Stats.bSamplesCapped);
+	TestFalse(TEXT("Cap: never past the line"), VoxelNavTest::PathTouches(Points, FVector(50, 50, 0), [](const FVector& Pt) { return Pt.X > 1500.f; }));
 	return true;
 }
 

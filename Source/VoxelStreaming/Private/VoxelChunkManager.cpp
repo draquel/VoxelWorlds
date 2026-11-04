@@ -1842,6 +1842,65 @@ FVoxelData UVoxelChunkManager::GetGeneratedVoxelAt(const FVector& WorldPosition)
 	return State->Descriptor.GetVoxelResident(LocalPos);
 }
 
+namespace
+{
+	/**
+	 * The chunk a run of edit-merged point reads resolved last: its state (null when it holds no voxel data) and its edit
+	 * layer (null when it has no edits). A surface query reads a column of about 70 voxels in one or two chunks; with the
+	 * chunk remembered each read costs no map lookup but the first in a chunk, where GetVoxelAt costs three (G73).
+	 */
+	struct FMergedVoxelReadCache
+	{
+		FIntVector Coord = FIntVector(TNumericLimits<int32>::Max());
+		const FVoxelChunkState* State = nullptr;
+		const FChunkEditLayer* Edits = nullptr;
+	};
+
+	/**
+	 * One edit-merged voxel, as GetVoxelAt reads it: the chunk's voxel (lazily expanded) with the chunk's edit applied, air
+	 * where no chunk holds data.
+	 *
+	 * @param ChunkStates   The chunk manager's chunks
+	 * @param EditManager   Its edit manager (may be null)
+	 * @param Config        Its configuration
+	 * @param Cache         The last chunk resolved; reused while the reads stay in it
+	 * @param WorldPosition The point read
+	 * @return The voxel there
+	 */
+	FVoxelData ReadMergedVoxel(const TMap<FIntVector, FVoxelChunkState>& ChunkStates, const UVoxelEditManager* EditManager,
+		const UVoxelWorldConfiguration& Config, FMergedVoxelReadCache& Cache, const FVector& WorldPosition)
+	{
+		const FVector RelativePos = WorldPosition - Config.WorldOrigin;
+		const FIntVector ChunkCoord = FVoxelCoordinates::WorldToChunk(RelativePos, Config.ChunkSize, Config.VoxelSize);
+		if (ChunkCoord != Cache.Coord)
+		{
+			Cache.Coord = ChunkCoord;
+			const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+			Cache.State = State && State->Descriptor.HasVoxelDataAvailable() ? State : nullptr;
+			const FChunkEditLayer* EditLayer = Cache.State && EditManager && EditManager->ChunkHasEdits(ChunkCoord)
+				? EditManager->GetEditLayer(ChunkCoord) : nullptr;
+			Cache.Edits = EditLayer && !EditLayer->IsEmpty() ? EditLayer : nullptr;
+		}
+		if (!Cache.State)
+		{
+			return FVoxelData::Air();
+		}
+
+		const FIntVector LocalPos = FVoxelCoordinates::WorldToLocalVoxel(RelativePos, Config.ChunkSize, Config.VoxelSize);
+		FVoxelData Voxel = Cache.State->Descriptor.GetVoxelResident(LocalPos);
+
+		// Apply the chunk's edit layer (same index convention as the descriptor / collision merge).
+		if (Cache.Edits)
+		{
+			if (const FVoxelEdit* Edit = Cache.Edits->Edits.Find(Cache.State->Descriptor.GetVoxelIndex(LocalPos)))
+			{
+				Voxel = Edit->ApplyToProceduralData(Voxel);
+			}
+		}
+		return Voxel;
+	}
+}
+
 FVoxelData UVoxelChunkManager::GetVoxelAt(const FVector& WorldPosition) const
 {
 	const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("point query"));
@@ -1849,37 +1908,8 @@ FVoxelData UVoxelChunkManager::GetVoxelAt(const FVector& WorldPosition) const
 	{
 		return FVoxelData::Air();
 	}
-
-	const FVector RelativePos = WorldPosition - Configuration->WorldOrigin;
-	const FIntVector ChunkCoord = FVoxelCoordinates::WorldToChunk(
-		RelativePos, Configuration->ChunkSize, Configuration->VoxelSize);
-
-	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
-	if (!State || !State->Descriptor.HasVoxelDataAvailable())
-	{
-		return FVoxelData::Air();
-	}
-
-	const FIntVector LocalPos = FVoxelCoordinates::WorldToLocalVoxel(
-		RelativePos, Configuration->ChunkSize, Configuration->VoxelSize);
-
-	FVoxelData Voxel = State->Descriptor.GetVoxelResident(LocalPos);
-
-	// Apply the chunk's edit layer (same index convention as the descriptor / collision merge).
-	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
-	{
-		const FChunkEditLayer* EditLayer = EditManager->GetEditLayer(ChunkCoord);
-		if (EditLayer && !EditLayer->IsEmpty())
-		{
-			const int32 Index = State->Descriptor.GetVoxelIndex(LocalPos);
-			if (const FVoxelEdit* Edit = EditLayer->Edits.Find(Index))
-			{
-				Voxel = Edit->ApplyToProceduralData(Voxel);
-			}
-		}
-	}
-
-	return Voxel;
+	FMergedVoxelReadCache Cache;
+	return ReadMergedVoxel(ChunkStates, EditManager, *Configuration, Cache, WorldPosition);
 }
 
 TSharedPtr<const TArray<FVoxelData>> UVoxelChunkManager::GetVoxelSnapshot(const FIntVector& ChunkCoord)
@@ -1925,6 +1955,8 @@ bool UVoxelChunkManager::QueryEditMergedBlockSurface(double WorldX, double World
 	{
 		return Voxel.IsSolid() && (LeafMask[Voxel.MaterialID >> 6] & (uint64(1) << (Voxel.MaterialID & 63))) == 0;
 	};
+	FMergedVoxelReadCache ReadCache;
+	auto ReadVoxel = [this, &ReadCache](const FVector& P) { return ReadMergedVoxel(ChunkStates, EditManager, *Configuration, ReadCache, P); };
 
 	// The block column containing (X, Y), read at its cells' centres so the position-to-voxel floor is unambiguous.
 	const double CX = FVoxelBlockSurface::ColumnCorner(WorldX, Origin.X, VoxelSize) + 0.5 * VoxelSize;
@@ -1933,12 +1965,12 @@ bool UVoxelChunkManager::QueryEditMergedBlockSurface(double WorldX, double World
 	auto LayerCentre = [&Origin, VoxelSize](int64 Layer) { return Origin.Z + (static_cast<double>(Layer) + 0.5) * VoxelSize; };
 
 	// Scan down from the top of a +/- one-chunk window around the estimate for the topmost ground voxel with no ground above.
-	bool bAboveGround = IsGround(GetVoxelAt(FVector(CX, CY, LayerCentre(EstLayer + Window + 1))));
+	bool bAboveGround = IsGround(ReadVoxel(FVector(CX, CY, LayerCentre(EstLayer + Window + 1))));
 	int64 TopLayer = TNumericLimits<int64>::Lowest();
 	FVoxelData TopVoxel;
 	for (int64 Layer = EstLayer + Window; Layer >= EstLayer - Window; --Layer)
 	{
-		const FVoxelData Voxel = GetVoxelAt(FVector(CX, CY, LayerCentre(Layer)));
+		const FVoxelData Voxel = ReadVoxel(FVector(CX, CY, LayerCentre(Layer)));
 		const bool bGround = IsGround(Voxel);
 		if (bGround && !bAboveGround)
 		{
@@ -1958,9 +1990,9 @@ bool UVoxelChunkManager::QueryEditMergedBlockSurface(double WorldX, double World
 	OutBiomeID = TopVoxel.BiomeID;
 
 	// The terrain's slope from the edit-merged density gradient, sampled inside the top block (a block's own face is flat).
-	auto Density = [this](double X, double Y, double Z) -> float
+	auto Density = [&ReadVoxel](double X, double Y, double Z) -> float
 	{
-		return static_cast<float>(GetVoxelAt(FVector(X, Y, Z)).Density);
+		return static_cast<float>(ReadVoxel(FVector(X, Y, Z)).Density);
 	};
 	const double Hz = LayerCentre(TopLayer);
 	const float dX = Density(CX + VoxelSize, CY, Hz) - Density(CX - VoxelSize, CY, Hz);
@@ -2026,12 +2058,14 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 			const float BaseZ = EstZ - Window * VoxelSize;
 			const int32 Count = 2 * Window + 1;
 
+			FMergedVoxelReadCache ReadCache;
+			auto ReadVoxel = [this, &ReadCache](const FVector& P) { return ReadMergedVoxel(ChunkStates, EditManager, *Configuration, ReadCache, P); };
 			TArray<FVoxelData> Column;
 			Column.SetNumUninitialized(Count);
 			for (int32 i = 0; i < Count; ++i)
 			{
 				const float Z = BaseZ + i * VoxelSize;
-				Column[i] = GetVoxelAt(FVector(WorldPos.X, WorldPos.Y, Z));
+				Column[i] = ReadVoxel(FVector(WorldPos.X, WorldPos.Y, Z));
 			}
 
 			if (!FVoxelSurfaceQuery::ExtractSurfaceFromColumn(Column, BaseZ, VoxelSize, Height, OutSample.MaterialID, OutSample.BiomeID))
@@ -2040,9 +2074,9 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 			}
 
 			// Surface normal from the edit-merged density gradient (central differences at the surface).
-			auto Density = [this](double X, double Y, double Z) -> float
+			auto Density = [&ReadVoxel](double X, double Y, double Z) -> float
 			{
-				return static_cast<float>(GetVoxelAt(FVector(X, Y, Z)).Density);
+				return static_cast<float>(ReadVoxel(FVector(X, Y, Z)).Density);
 			};
 			const float Step = VoxelSize;
 			const float Hz = Height;
@@ -2093,6 +2127,7 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 	const FVoxelDigitalLine Line = FVoxelDigitalLine::Make(Up);
 	const int32 Window = ChunkSize;
 	const int32 Count = 2 * Window + 1;
+	FMergedVoxelReadCache ReadCache;
 	TArray<FIntVector, TInlineAllocator<160>> Indices;
 	TArray<FVoxelData, TInlineAllocator<160>> Voxels;
 	Indices.SetNumUninitialized(Count);
@@ -2100,7 +2135,7 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 	for (int32 i = 0; i < Count; ++i)
 	{
 		Indices[i] = Line.Step(Start, i - Window);
-		Voxels[i] = GetVoxelAt(Origin + (FVector(Indices[i]) + FVector(0.5)) * VoxelSize);
+		Voxels[i] = ReadMergedVoxel(ChunkStates, EditManager, *Configuration, ReadCache, Origin + (FVector(Indices[i]) + FVector(0.5)) * VoxelSize);
 	}
 
 	// Coarse, from the top down: the highest solid voxel with air above it along the line (ExtractSurfaceFromColumn's
@@ -2121,9 +2156,9 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 
 	// Fine: the trilinear edit-merged density on the true up-line through the queried direction, around the coarse
 	// crossing. The digital line strays up to a voxel sideways, which on a slope moves the crossing; the up-line does not.
-	auto VoxelDensity = [this, &Origin, VoxelSize](const FIntVector& I) -> float
+	auto VoxelDensity = [this, &ReadCache, &Origin, VoxelSize](const FIntVector& I) -> float
 	{
-		return static_cast<float>(GetVoxelAt(Origin + (FVector(I) + FVector(0.5)) * VoxelSize).Density);
+		return static_cast<float>(ReadMergedVoxel(ChunkStates, EditManager, *Configuration, ReadCache, Origin + (FVector(I) + FVector(0.5)) * VoxelSize).Density);
 	};
 	auto Trilinear = [&VoxelDensity, &Origin, VoxelSize](const FVector& P) -> float
 	{

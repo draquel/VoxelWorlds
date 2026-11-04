@@ -1,6 +1,6 @@
 # Surface Navigation (VoxelNavigation module)
 
-> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-04 (G73: the search's cost at scale). Terms: `Documentation/GLOSSARY.md`.
 
 Pathfinding over the voxel terrain without an engine navmesh. Built for surface NPCs (game feature 10), usable by
 anything that needs "how do I walk from A to B over the terrain" — on loaded chunks and beyond them.
@@ -18,7 +18,7 @@ already opt out of navigation. The terrain, however, is a function: the generate
 | Piece | File | Role |
 |-------|------|------|
 | `FVoxelSurfaceNavParams` | `Public/VoxelSurfacePathfinder.h` | Cell size (150 = two demo voxels), `MaxStepRise` (100: ~34° per cell, a wide margin under a capsule's walkable angle because voxel terrain is locally steeper than the cell average), water level + `MaxWadeDepth`, slope cost, `MaxNodes`, `MaxSearchRadius`, goal snapping, partial routes. |
-| `FVoxelSurfacePathfinder` | `Public/VoxelSurfacePathfinder.h` | Pure A* over cells. Height comes from a `TFunction` sampler, blocked cells from an optional query: unit-testable without a world. 8-connected, no corner cutting, octile heuristic, slope-weighted cost, string-pulled output, nearest-walkable goal snap, partial route to the closest cell when the budget runs out. |
+| `FVoxelSurfacePathfinder` | `Public/VoxelSurfacePathfinder.h` | Pure A* over cells. Height comes from a `TFunction` sampler, blocked cells from an optional query: unit-testable without a world. 8-connected, no corner cutting, octile heuristic, slope-weighted cost, string-pulled output, nearest-walkable goal snap, partial route to the closest cell when the budget runs out, an early stop when the goal is in a pocket out of reach (below). |
 | `FVoxelNavFrame` | `Public/VoxelSurfaceNavigationSubsystem.h` | A search's frame: the identity on a heightmap world (one region holds every cell), a region's tangent frame on a planet (below). |
 | `UVoxelSurfaceNavigationSubsystem` | `Public/VoxelSurfaceNavigationSubsystem.h` | World subsystem (Game / PIE). Finds the chunk manager, caches heights per cell in 32 × 32 tiles per region (edit-merged when loaded, analytic otherwise; analytic cells re-sample when their chunk loads, edited cells drop on `OnChunkEdited`), blocked boxes + temporary blocked cells, cvars, stats, debug drawing. Every search, projection and walkability test runs in the frame of its start's region. |
 
@@ -40,14 +40,42 @@ and a diagonal needs both cells beside it walkable and within a step of either e
 node budget grows with the cells per area (`MaxNodes` × (150 / V)²), so a search covers the ground it covers at 150 uu
 cells. With the smooth rule at 150 uu cells, cell centres two blocks apart turned a one-block staircase into a 150 uu
 rise (refused), while the isosurface it sampled made a two-block step a slope it could take, so nav and movement
-disagreed (KC7).
-Searches cost about 1.7-3.5× the smooth rule's on the
-same routes (four times the cells; G73). Test: `Navigation.Cubic.BlockSteps`.
+disagreed (KC7). A route over block cells expands about three times the nodes of the same route over 150 uu cells (four
+times the cells per area); since G73 a block search costs less than a smooth one did before it (Costs, below). Test:
+`Navigation.Cubic.BlockSteps`.
+
+### The search (G73)
+
+- **One record per cell.** A search keeps every cell it touches in `FVoxelSurfacePathfinder::FCellGrid`: pages of
+  32 × 32 records (height, walkable, cost so far, parent, closed) found through a map with the last page remembered, and
+  pooled per thread. A cell is sampled and judged walkable (water, blocked, the world's edge) once per search; a node's
+  eight neighbours are one lookup each. The search it replaced kept heights in a `TMap` and asked the blocked query and
+  the map again for every step test, about 16 lookups per orthogonal neighbour and 40 per diagonal.
+- **Ties to the node nearer the goal.** The open list orders by cost so far plus 1.001 × the octile heuristic: of
+  nodes with the same estimate the one nearer the goal is expanded first (on open ground the whole band of ties between
+  start and goal was expanded), and a route is at most 0.1% longer than the cheapest.
+- **A goal out of reach.** A search that has expanded `PocketCheckNodes` (1,024) nodes without reaching the goal floods
+  from the goal over the cells one can step between by the rise alone (no corner rules, so the flood reaches at least
+  every cell the goal can be reached from); when the flood runs out within `PocketCells` (512) without meeting the start,
+  the goal is in a pocket (a pillar's top, a walled hollow, cells walkers marked blocked about a target) and the search
+  stops with the partial route (`FVoxelSurfacePathStats::bGoalInPocket`). It used to spend its whole budget: 16,384
+  nodes on a block world, 4.4 ms warm and 200 ms with cold cells, every time a wolf that could not reach the player
+  asked again.
+- **A sampling cap.** One search samples at most `voxel.Nav.MaxSamplesPerSearch` (1,024) cells from the chunk manager;
+  the subsystem's sampler returns NaN for the rest and the pathfinder leaves them out of that search
+  (`FVoxelSurfacePathStats::bSamplesCapped`); a later search samples them. A cold cell costs 10-25 µs (a noise
+  evaluation for the column's estimate, a column of about 70 edit-merged voxels, a second noise evaluation for the
+  generated surface where the chunk is not loaded), so the cap bounds a cold search's hitch at about 20-25 ms (at 2,048 one took 45 ms; searches that need more than
+  1,024 fresh cells are rare: none to three in a 20 s bench at up to 96 NPCs).
 
 ### Subsystem API
 
-- `FindPath(From, To, OutPoints)` / `FindPathWithStats(...)`: synchronous, budgeted (`voxel.Nav.MaxNodes`, 4096).
-  Spread requests over frames (an NPC repaths a few times a second at most).
+- `FindPath(From, To, OutPoints)` / `FindPathWithStats(...)`: synchronous, budgeted (`voxel.Nav.MaxNodes`, 4096;
+  `voxel.Nav.MaxSamplesPerSearch`, 1024). Spread requests over frames (an NPC repaths a few times a second at most, and
+  waits after a partial route: `AVCNPCAIController::PartialRepathSeconds`).
+- `GetCounters()`: the searches, nodes, cells sampled and the seconds spent searching, sampling and in
+  `ProjectToSurface` / `IsWalkableAt` since the world began (`FVoxelSurfaceNavCounters`; the game module's
+  `vox.NPCBench` reads them per frame).
 - `ProjectToSurface`, `IsWalkableAt`, `AddBlockedBox` / `RemoveBlockedBox`, `BlockCellsTemporarily` (a stuck walker
   marks where it failed for a few seconds), `InvalidateAll` / `InvalidateBox`.
 - `SetDebugFocus` + `voxel.Nav.Debug 1` draws the grid (green = loaded surface, yellow = analytic, red = water,
@@ -56,14 +84,26 @@ same routes (four times the cells; G73). Test: `Navigation.Cubic.BlockSteps`.
 ### CVars
 
 `voxel.Nav.CellSize` (150), `voxel.Nav.MaxNodes` (4096), `voxel.Nav.MaxStepRise` (100), `voxel.Nav.MaxWadeDepth`
-(60), `voxel.Nav.MaxRadius` (20000), `voxel.Nav.Debug` (0).
+(60), `voxel.Nav.MaxRadius` (20000), `voxel.Nav.MaxSamplesPerSearch` (1024), `voxel.Nav.Debug` (0). Commands:
+`voxel.Nav.Path` (a route from the player, drawn), `voxel.Nav.Bench [routes] [distance] [seed]` (routes from the player,
+each cold then warm, timed; a `[NavBench]` line).
 
 ### Costs
 
-Cached cells make a 150 m search a few thousand `TMap` lookups (well under a millisecond). First-touch sampling of a
-32 × 32 tile is ~1024 height queries; the analytic query is noise evaluation (microseconds each), the edit-merged
-query is a column scan of loaded voxel data. Tiles stay cached until invalidated; the cache is dropped when the cell
-size cvar changes.
+`voxel.Nav.Bench 24 6000 1` (24 routes 15-60 m from the bench site (25000, 12000), each cold then warm; the old
+search and the new one in one build, adjacent runs, 2026-11-04):
+
+| World, rule | Cold mean | Warm mean | Warm P50 | Nodes mean |
+|---|---|---|---|---|
+| VoxelDemo, smooth (150 uu) | 10.05 → 5.35 ms | 0.442 → 0.130 ms | 0.448 → 0.104 ms | 288 → 287 |
+| Review_Cubic, block (75 uu) | 11.97 → 7.10 ms | 1.509 → 0.619 ms | 1.428 → 0.283 ms | 913 → 898 |
+
+Cold is dominated by sampling (375 cells a route on the smooth world, about 1,100 on the block world); a column's voxels
+are read with one chunk lookup per chunk since G73 (`UVoxelChunkManager` surface queries; the same voxels, about 17%
+less per cell), the rest is the terrain's noise. The block world's warm mean includes routes whose cold run hit the
+sampling cap and sampled the rest warm. Tiles stay cached until invalidated; the cache is dropped when the cell size
+cvar changes. The NPCs' game-thread cost at 12 to 96 creatures, and what limits it (movement, not navigation):
+VoxelCharacterPlugin `CHARACTER_SYSTEM.md`, "NPCs at scale".
 
 ### Consumers
 
@@ -98,8 +138,9 @@ tangent plane.
 
 ### Tests
 
-`VoxelWorlds.Navigation.Flat`, `CliffDetour`, `Water`, `BudgetAndBlocks`, `WorldBounds` (`Tests/VoxelNavigationTests.cpp`):
-pure pathfinder over lambda heightfields; `WorldBounds` blocks the cells outside an island footprint over flat dry ground
+`VoxelWorlds.Navigation.Flat`, `CliffDetour`, `Water`, `BudgetAndBlocks`, `WorldBounds`, `PocketAndSampleCap`
+(`Tests/VoxelNavigationTests.cpp`): pure pathfinder over lambda heightfields (`PocketAndSampleCap`: a goal on a pillar
+stops the search at the pocket check, a goal behind a long wall does not, NaN cells are left out); `WorldBounds` blocks the cells outside an island footprint over flat dry ground
 (water off), as the subsystem does. On planets (`Tests/VoxelNavigationPlanetTests.cpp`): `Navigation.Planet.RegionFrames`
 (round trips, cells within 2% of their size 33 km out), `.Path` (at 45° and across a cube-face edge: waypoints on the
 surface, the goal reached, the region cache reused, walkability by the sea sphere), `.Blocks`, `.PathAtScale`;
@@ -116,4 +157,6 @@ through. The sweep now also re-runs periodically while stationary.
 ### Not built
 
 Async searches on a worker (tile sampling must stay on the game thread for the edit-merged query), hierarchical
-search for routes beyond `MaxSearchRadius`, jump / drop links, swimming.
+search for routes beyond `MaxSearchRadius`, jump / drop links, swimming. A coarser block search (150 uu cells with
+block-aware edges sampling the columns between, G73's first idea): not needed once a block search cost less than a smooth
+one had; it would remove the threefold nodes, at the price of a second step rule to keep in agreement with movement.
