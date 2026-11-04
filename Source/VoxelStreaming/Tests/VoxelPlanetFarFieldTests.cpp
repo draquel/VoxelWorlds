@@ -11,6 +11,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Materials/Material.h"
 #include "ProceduralMeshComponent.h"
+#include "VoxelFarFieldPatchComponent.h"
 #include "VoxelChunkManager.h"
 #include "VoxelFarField.h"
 #include "VoxelPlanetOcean.h"
@@ -964,17 +965,17 @@ bool FFarFieldPlanetChunkManagerTest::RunTest(const FString& Parameters)
 					return;
 				}
 				++Built;
-				UProceduralMeshComponent* Component = Manager->GetFarFieldComponent(Patch.Key.Pack());
+				UVoxelFarFieldPatchComponent* Component = Manager->GetFarFieldComponent(Patch.Key.Pack());
 				if (!Component)
 				{
 					++Missing;
 					return;
 				}
 				Drawn += Patch.bDrawTerrain ? 1 : 0;
-				const bool bShown = Component->GetNumSections() > 0 && Component->IsMeshSectionVisible(0);
+				const bool bShown = Component->GetNumSections() > 0 && Component->IsSectionVisible(0);
 				Shown += (Patch.bDrawTerrain && bShown) ? 1 : 0;
 				Hidden += (!Patch.bDrawTerrain && !bShown) ? 1 : 0;
-				SeaShown += (Patch.bDrawSea && Component->GetNumSections() > 1 && Component->IsMeshSectionVisible(1)) ? 1 : 0;
+				SeaShown += (Patch.bDrawSea && Component->GetNumSections() > 1 && Component->IsSectionVisible(1)) ? 1 : 0;
 			});
 			const FVoxelFarFieldStats Stats = Manager->GetFarFieldStats();
 			AddInfo(FString::Printf(TEXT("%s: %d built patches, %d components (%d missing), %d drawn and shown of %d, %d hidden, %d seas shown; stats: %s"),
@@ -1018,6 +1019,9 @@ bool FFarFieldPlanetChunkManagerTest::RunTest(const FString& Parameters)
  * (bRayTracingFarField: Lumen's far-field traces), 2 in the near-field layer, 0 out of the scene, and voxel.Render.RayTracing 0
  * takes them out whatever the mode. A change reaches the components already built at the next update, and the patches
  * built after it (the viewer moved to the other side of the planet) take it too.
+ * G121: a patch traces its terrain section alone (marked for ray tracing, the sea's sections not), and only where its layer
+ * is traced: the near-field layer, or the far-field layer with Lumen's far field on (r.LumenScene.FarField); with it off,
+ * out of the scene or with voxel.Render.RayTracing 0, no section is traced and the proxies build no acceleration structure.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlanetRayTracingLayerTest,
 	"VoxelWorlds.FarField.Planet.RayTracingLayer",
@@ -1079,21 +1083,32 @@ bool FFarFieldPlanetRayTracingLayerTest::RunTest(const FString& Parameters)
 			}
 			Manager->UpdateFarFieldForViewer(Viewer);
 		};
-		// Every built patch's component in the layer a mode gives: the far-field layer, the scene at all.
-		auto Check = [this, Manager, FarField](const TCHAR* What, bool bFarField, bool bVisible)
+		// Every built patch's component in the layer a mode gives (the far-field layer, the scene at all), its terrain section
+		// marked for ray tracing and no other, and traced only where bTraced (G121).
+		auto Check = [this, Manager, FarField](const TCHAR* What, bool bFarField, bool bVisible, bool bTraced)
 		{
-			int32 Components = 0, Matching = 0;
+			int32 Components = 0, Matching = 0, Terrains = 0, Marked = 0, Traced = 0;
 			FarField->ForEachPatch([&](const FVoxelFarField::FPatchState& Patch)
 			{
-				if (const UProceduralMeshComponent* Component = Patch.bResident ? Manager->GetFarFieldComponent(Patch.Key.Pack()) : nullptr)
+				if (const UVoxelFarFieldPatchComponent* Component = Patch.bResident ? Manager->GetFarFieldComponent(Patch.Key.Pack()) : nullptr)
 				{
 					++Components;
 					Matching += (Component->bRayTracingFarField == bFarField && Component->bVisibleInRayTracing == bVisible) ? 1 : 0;
+					for (int32 Section = 0; Section < Component->GetNumSections(); ++Section)
+					{
+						const FVoxelFarFieldPatchSection* S = Component->GetSection(Section);
+						Terrains += (Section == 0 && !S->IsEmpty()) ? 1 : 0;
+						Marked += (S->bRayTracing == (Section == 0)) ? 1 : 0;
+					}
+					Marked -= Component->GetNumSections();
+					Traced += Component->GetRayTracingSectionCount();
 				}
 			});
-			AddInfo(FString::Printf(TEXT("%s: %d of %d components"), What, Matching, Components));
+			AddInfo(FString::Printf(TEXT("%s: %d of %d components, %d of %d terrains traced"), What, Matching, Components, Traced, Terrains));
 			TestTrue(*FString::Printf(TEXT("%s: patch components built"), What), Components > 6);
 			TestEqual(*FString::Printf(TEXT("%s: every component in its layer"), What), Matching, Components);
+			TestEqual(*FString::Printf(TEXT("%s: the terrain sections marked for ray tracing, no other"), What), Marked, 0);
+			TestEqual(*FString::Printf(TEXT("%s: sections traced"), What), Traced, bTraced ? Terrains : 0);
 		};
 
 		const FVector Up = FVector(1, 1, 1).GetSafeNormal();
@@ -1101,28 +1116,34 @@ bool FFarFieldPlanetRayTracingLayerTest::RunTest(const FString& Parameters)
 		{
 			const FScopedCVar TerrainRayTracing(TEXT("voxel.Render.RayTracing"), 1);
 			const FScopedCVar Default(TEXT("voxel.World.FarFieldRayTracing"), 1);
+			const FScopedCVar LumenFarField(TEXT("r.LumenScene.FarField"), 0);
 			Converge(Viewer);
-			Check(TEXT("1, the far-field layer"), true, true);
+			Check(TEXT("1, the far-field layer"), true, true, false);
+			{
+				const FScopedCVar LumenFarFieldOn(TEXT("r.LumenScene.FarField"), 1);
+				Check(TEXT("1, Lumen's far field on"), true, true, true);
+			}
 			{
 				const FScopedCVar NearField(TEXT("voxel.World.FarFieldRayTracing"), 2);
 				Manager->UpdateFarFieldForViewer(Viewer);
-				Check(TEXT("2, the near-field layer"), false, true);
+				Check(TEXT("2, the near-field layer"), false, true, true);
 				// Patches built while the mode holds take it from their creation.
 				Converge(-Viewer);
-				Check(TEXT("2, after a move to the far side"), false, true);
+				Check(TEXT("2, after a move to the far side"), false, true, true);
 			}
 			{
 				const FScopedCVar Out(TEXT("voxel.World.FarFieldRayTracing"), 0);
+				const FScopedCVar LumenFarFieldOn(TEXT("r.LumenScene.FarField"), 1);
 				Manager->UpdateFarFieldForViewer(-Viewer);
-				Check(TEXT("0, out of the scene"), false, false);
+				Check(TEXT("0, out of the scene"), false, false, false);
 			}
 			{
 				const FScopedCVar TerrainOff(TEXT("voxel.Render.RayTracing"), 0);
 				Manager->UpdateFarFieldForViewer(-Viewer);
-				Check(TEXT("voxel.Render.RayTracing 0"), false, false);
+				Check(TEXT("voxel.Render.RayTracing 0"), false, false, false);
 			}
 			Manager->UpdateFarFieldForViewer(-Viewer);
-			Check(TEXT("1 again"), true, true);
+			Check(TEXT("1 again"), true, true, false);
 		}
 	}
 
@@ -1250,9 +1271,9 @@ bool FFarFieldPlanetCameraAfterCutTest::RunTest(const FString& Parameters)
 						const FVector Tangent = East * FMath::Cos(Theta) + North * FMath::Sin(Theta);
 						const FVector Direction = (Up * FMath::Cos(Angle) + Tangent * FMath::Sin(Angle)).GetSafeNormal();
 						const FVoxelFarField::FPatchState* Patch = FarField->FindDrawnPatch(FVoxelFarFieldSample::OfDirection(Direction));
-						const UProceduralMeshComponent* Component = Patch ? Manager->GetFarFieldComponent(Patch->Key.Pack()) : nullptr;
+						const UVoxelFarFieldPatchComponent* Component = Patch ? Manager->GetFarFieldComponent(Patch->Key.Pack()) : nullptr;
 						++OutSamples;
-						Gaps += (!Component || Component->GetNumSections() == 0 || !Component->IsMeshSectionVisible(0)) ? 1 : 0;
+						Gaps += (!Component || Component->GetNumSections() == 0 || !Component->IsSectionVisible(0)) ? 1 : 0;
 					}
 				}
 				return Gaps;

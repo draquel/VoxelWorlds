@@ -11,6 +11,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Materials/Material.h"
 #include "ProceduralMeshComponent.h"
+#include "VoxelFarFieldPatchComponent.h"
 #include "Testing/VoxelTestChunkWorld.h"
 #include "VoxelChunkManager.h"
 #include "VoxelFarField.h"
@@ -978,17 +979,17 @@ bool FFarFieldPlaneChunkManagerTest::RunTest(const FString& Parameters)
 					return;
 				}
 				++Built;
-				UProceduralMeshComponent* Component = W.Manager->GetFarFieldComponent(Patch.Key.Pack());
+				UVoxelFarFieldPatchComponent* Component = W.Manager->GetFarFieldComponent(Patch.Key.Pack());
 				if (!Component)
 				{
 					++Missing;
 					return;
 				}
 				Drawn += Patch.bDrawTerrain ? 1 : 0;
-				const bool bShown = Component->GetNumSections() > 0 && Component->IsMeshSectionVisible(0);
+				const bool bShown = Component->GetNumSections() > 0 && Component->IsSectionVisible(0);
 				Shown += (Patch.bDrawTerrain && bShown) ? 1 : 0;
 				Hidden += (!Patch.bDrawTerrain && !bShown) ? 1 : 0;
-				SeaShown += (Patch.bDrawSea && Component->GetNumSections() > 1 && Component->IsMeshSectionVisible(1)) ? 1 : 0;
+				SeaShown += (Patch.bDrawSea && Component->GetNumSections() > 1 && Component->IsSectionVisible(1)) ? 1 : 0;
 			});
 			const FVoxelFarFieldStats Stats = W.Manager->GetFarFieldStats();
 			AddInfo(FString::Printf(TEXT("Plane: %d chunks loaded; %d built patches, %d components (%d missing), %d drawn and shown of %d, %d hidden, %d edge patches hidden by the window, %d seas shown, %d seas without terrain, %d band seas drawn over a water tile, %d band seas hidden without one; stats: %s"),
@@ -1317,8 +1318,8 @@ bool FFarFieldPlaneCameraAfterCutTest::RunTest(const FString& Parameters)
 				{
 					return -1;
 				}
-				const UProceduralMeshComponent* Component = Manager->GetFarFieldComponent(Patch->Key.Pack());
-				const bool bShown = Component && Component->GetNumSections() > 0 && Component->IsMeshSectionVisible(0);
+				const UVoxelFarFieldPatchComponent* Component = Manager->GetFarFieldComponent(Patch->Key.Pack());
+				const bool bShown = Component && Component->GetNumSections() > 0 && Component->IsSectionVisible(0);
 				return bShown ? Patch->Key.Level : -2;
 			};
 

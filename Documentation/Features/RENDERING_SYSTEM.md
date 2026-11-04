@@ -310,19 +310,35 @@ What it does not give yet:
   for +1.3 ms of GPU frame P50 on the chord (4.91 → 6.20) and +0.85 ms on the great circle (4.83 → 5.68) (the streaming bench, three interleaved runs each) (2026-11-03, G116's work; captures on the parent's `media/g116-surface-cache-plan` branch).
 - **Water.** Water tiles have no ray tracing geometry: the sea is translucent (or Single Layer Water) and is not an
   occluder Lumen needs.
-- **The far field, unless Lumen's far field is on.** Its procedural mesh components build their own ray tracing
-  geometry, a BLAS per section, but the engine culls the near-field layer past `r.RayTracing.Culling.Radius` (30,000
-  uu, culling mode 3, in front of the camera too), and every patch drawn lies past the voxel window: none was ever
-  traced (G117; `r.RayTracing.Culling 0` shows them all). The patches now sit in the engine's far-field layer
+- **The far field, unless Lumen's far field is on.** Its patches are in the ray tracing scene, but the engine culls
+  the near-field layer past `r.RayTracing.Culling.Radius` (30,000 uu, culling mode 3, in front of the camera too), and
+  every patch drawn lies past the voxel window: none was ever traced (G117; `r.RayTracing.Culling 0` shows them all). The patches now sit in the engine's far-field layer
   (`bRayTracingFarField`, `voxel.World.FarFieldRayTracing` 1), which Lumen traces past the near field's reach when
   `r.LumenScene.FarField` is 1, out to `r.LumenScene.FarField.MaxTraceDistance` (10 km); the project leaves it 0, and
   then nothing gathers them. Turned on, it changes nothing visible on `VoxelDemo` from 9,000 uu up or on `PlanetTest`
   at 1.6 R (a hit is black for the same reason as the terrain's, G116) and costs +0.09-0.15 ms GPU P50 (the streaming
   bench, three interleaved runs, noon with the clock stopped: chord 6.34 → 6.46, great circle 5.85 → 5.94, a great
   circle at 1.6 R 4.82 → 4.97), so it stays off (decision D42 in the project's findings). The layer itself costs nothing
-  against the near-field layer: both cull every patch with Lumen's far field off. The BLAS is built whatever the mode:
-  103-110 MB for `VoxelDemo`'s far field (about 5,000 sections, two thirds of the scene's ray tracing geometry), 52 MB
-  for `PlanetTest`'s at 1.6 R and 27 MB on the ground (G121).
+  against the near-field layer: both cull every patch with Lumen's far field off.
+- **The far field's acceleration structures only when something traces them** (G121, 2026-11-04). A patch is a
+  `UVoxelFarFieldPatchComponent`: its proxy draws the sections as `UProceduralMeshComponent`'s did (`FLocalVertexFactory`,
+  a dynamic batch a section, the same vertices) and builds ray tracing geometry for the terrain section alone (the sea and
+  its underside are translucent, and Lumen's rays pass them), only while the patch can be traced: in the far-field layer
+  (mode 1) with `r.LumenScene.FarField` on, whose change recreates every proxy, in the near-field layer (mode 2) always,
+  out of the scene (mode 0) never. A proxy with no geometry is not ray tracing relevant, so the scene skips it. The
+  engine's procedural mesh proxy built a BLAS for every section whenever ray tracing was enabled, whatever the flags, and
+  held it while the component lived (`r.RayTracing.Geometry.ProceduralMeshes` only dropped its instances and no longer
+  reaches the far field). `D3D12.DumpRayTracingGeometries all` on `VoxelDemo` from 9,000 uu up: 4,977 geometries and
+  102.4 MB of the scene's 148.6 MB in every mode before, none now at the defaults (the scene 45.4 MB), 1,875 terrain
+  sections and 82.5 MB with Lumen's far field on or in mode 2; on `PlanetTest` at 1.6 R (no far-field sea): 1,173 and
+  51.6 MB of 56.0 MB before, none now (3.9 MB), the same 1,173 and 51.6 MB with Lumen's far field on. The frame is the same: the ray tracing far-field view
+  (`r.RayTracing.Visualize Barycentrics`, `r.RayTracing.Visualize.FarField 1`) with Lumen's far field on shows every
+  patch and is identical before and after (at most 1 level), the lit frames from those two poses differ within the runs
+  of one build, and the fixed-exposure captures are within their floor. The streaming bench (three runs a route, noon
+  with the clock stopped, adjacent fresh-editor sets): GPU frame P50 8.40 → 8.47 ms on the chord and 6.72 → 6.81 on the
+  great circle, game thread 18.86 → 18.97 and 21.34 → 22.50, whose runs overlap (21.3-22.1 against 22.0-22.7). Tests
+  `FarField.Planet.RayTracingLayer` (the sections each mode traces, headless) and `Rendering.RayTracing.FarFieldGeometry`
+  (the proxy's geometries, the in-editor gate).
 
 | `VoxelDemo`, overhang and sealed cave (D-VP4's repro) | Under the overhang, on screen → off screen | Off / on | Sealed cave |
 |---|---|---|---|

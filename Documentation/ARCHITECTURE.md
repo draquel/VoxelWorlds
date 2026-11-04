@@ -100,7 +100,7 @@ the edit-merged surface of the loaded voxels. Every query runs along local up, s
 
 `FVoxelFarField` draws the conditioned analytic surface past the window: six cube-face quadtrees on a planet, root-tile
 quadtrees on the XY grid on a heightmap, patches split by screen-space error and built on the thread pool, one
-procedural mesh component each. Band patches hide once every chunk they cover is drawn, so the window and the far field
+patch component each (`UVoxelFarFieldPatchComponent`). Band patches hide once every chunk they cover is drawn, so the window and the far field
 neither gap nor overlap. An island keeps its far ocean (open sea and seabed past its edge); a small planet without a far
 field sea draws a sea sphere.
 

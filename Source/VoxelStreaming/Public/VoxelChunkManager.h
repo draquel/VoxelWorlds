@@ -46,6 +46,7 @@ struct FVoxelTreeVoxel;
 class FVoxelFarField;
 class UBoxComponent;
 class UProceduralMeshComponent;
+class UVoxelFarFieldPatchComponent;
 struct FIslandBowlParams;
 enum class EEditSource : uint8;
 
@@ -1612,7 +1613,7 @@ public:
 	int32 GetFarFieldComponentCount() const { return FarFieldPresenter.Num(); }
 
 /** A built patch's component (section 0 terrain, 1 sea, 2 the sea's underside), or null. */
-	UProceduralMeshComponent* GetFarFieldComponent(uint64 PackedPatchKey) const;
+	UVoxelFarFieldPatchComponent* GetFarFieldComponent(uint64 PackedPatchKey) const;
 
 	/** The tick function that runs TickAfterCameraUpdate after the camera managers (tests run it as a world tick would). */
 	FVoxelFarFieldCameraTickFunction& GetFarFieldCameraTickFunction() { return FarFieldCameraTick; }
