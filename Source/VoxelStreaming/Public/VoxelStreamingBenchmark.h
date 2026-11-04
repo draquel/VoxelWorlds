@@ -233,6 +233,9 @@ private:
 		// The terrain's ray tracing geometries alive and their acceleration structures (MB; visual polish F3.3)
 		int32 RTGeomN;
 		float BLASMB;
+		// The chunk primitives in the scene, and the ones added since the last sample (G116, voxel.Render.ChunkPrimitives)
+		int32 PrimN;
+		int32 PrimAddN;
 	};
 
 	void TakeSample(float DeltaTime);
@@ -358,6 +361,8 @@ private:
 
 	// Chunks generated when the last sample was taken (the per-tick GenDone column).
 	int64 LastTotalGenerated = 0;
+	// Chunk primitives added in all when the last sample was taken (the PrimAddN column, G116; -1 before the first)
+	int64 LastPrimitivesAdded = -1;
 	// The far field's stand-ins over the window in all when the last sample was taken (the FarFieldStandInN column, VP4).
 	int64 LastFarFieldStandIns = 0;
 	// The chunk manager's cut-over transition count when the run started (the report lists the run's own; G49).

@@ -164,6 +164,49 @@ struct FVoxelMeshBufferNames
 };
 
 /**
+ * Create a mesh's vertex, colour, tangent, texcoord and index buffers and their SRVs (render thread): the region proxy's
+ * chunk, seam and water meshes and the chunk primitives' meshes share this one body (code review CR4, REND-09; G116).
+ *
+ * @param RHICmdList        The command list
+ * @param Names             The buffers' debug names
+ * @param bPositionOnly     The vertex stream holds the positions alone (manual vertex fetch, G120), else FVoxelLocalVertex
+ * @param ConvertedVertices The converted vertices
+ * @param ColorData         Their colours (the colour SRV)
+ * @param TangentData       Their tangents (the tangent SRV)
+ * @param TexCoordData      UV0 and UV1 (the texcoord SRV)
+ * @param Indices           Triangle indices
+ * @param ByteCounter       The holder's count of its buffer bytes (the mesh's bytes join it and leave with ReleaseResources), or null
+ * @param NewRenderData     Receives the buffers; its counts and bounds are the caller's
+ */
+VOXELRENDERING_API void CreateVoxelMeshBuffers_RenderThread(FRHICommandListBase& RHICmdList, const FVoxelMeshBufferNames& Names, bool bPositionOnly,
+	const TArray<FVoxelLocalVertex>& ConvertedVertices, const TArray<FColor>& ColorData, const TArray<FVoxelPackedTangentPair>& TangentData,
+	const TArray<FVector4f>& TexCoordData, const TArray<uint32>& Indices, std::atomic<int64>* ByteCounter, FVoxelChunkRenderData& NewRenderData);
+
+#if RHI_RAYTRACING
+/**
+ * Build a mesh's ray tracing geometry over its uploaded buffers (visual polish F3.3; render thread): one segment over the
+ * positions, built once on the GPU.
+ *
+ * @param RHICmdList  The command list
+ * @param RenderData  The mesh's buffers and counts
+ * @param DebugName   The geometry's name in GPU captures and stats
+ * @param OutGeometry Receives the initializer and its resource
+ * @return The acceleration structure's bytes
+ */
+VOXELRENDERING_API uint64 InitVoxelRayTracingGeometry(FRHICommandListBase& RHICmdList, const FVoxelChunkRenderData& RenderData, const TCHAR* DebugName,
+	FRayTracingGeometry& OutGeometry);
+#endif
+
+/** @return Whether the terrain's meshes get ray tracing geometry: voxel.Render.RayTracing and the project's ray tracing support (any thread) */
+VOXELRENDERING_API bool IsVoxelRayTracingWanted();
+
+/** @return voxel.Render.FarShadowMinLOD: the finest chunk LOD drawn into the sun's far shadow cascades (any thread) */
+VOXELRENDERING_API int32 GetVoxelFarShadowMinLOD();
+
+/** @return voxel.Render.RayTracing.TraceDistanceScale (render thread) */
+VOXELRENDERING_API float GetVoxelRayTracingTraceDistanceScale();
+
+/**
  * Scene proxy for voxel world rendering.
  *
  * Uses FLocalVertexFactory (Epic's proven implementation) for reliable rendering.
