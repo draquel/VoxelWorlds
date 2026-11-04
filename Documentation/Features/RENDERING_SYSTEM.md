@@ -92,7 +92,8 @@ AVoxelWorldActor
   streaming is paused (`TickWhilePaused`; F3.4, test `Streaming.Cubic.RendererProxyRecreatedWhilePaused`)
 
 **FVoxelLocalVertex** (`VoxelRendering/Public/VoxelLocalVertexFactory.h`)
-- 40-byte vertex format compatible with `FLocalVertexFactory`
+- 40-byte vertex format compatible with `FLocalVertexFactory`, the CPU-side conversion; uploaded whole only where the
+  vertex factory has no manual vertex fetch (below, G120)
 - Converts from `FVoxelVertex` (the mesher's 28-byte output)
 - Encodes MaterialID, face type, BiomeID and AO in UV1 and the vertex colour (below)
 
@@ -286,8 +287,43 @@ The scheduling side (when a swap is held, seam buckets) is in [STREAMING_AND_SEA
 // In material:
 AO = floor(VertexColor.B * 4);  // 0-3
 AOFactor = 1.0 - (AO * 0.25);   // 1.0, 0.75, 0.5, 0.25
-FinalColor = BaseColor * AOFactor;
-```
+FinalColor = BaseColor * AOFactor;
+```
+
+### The Mesh Buffers
+
+`FVoxelSceneProxy::CreateMeshBuffers_RenderThread` uploads every chunk, seam and water mesh as five buffers: the vertex
+stream, the colour (4 bytes a vertex), tangent (8) and texcoord (UV0 and UV1, 16) buffers behind the vertex factory's
+shader resource views, and the 32-bit indices. Where `FLocalVertexFactory` has manual vertex fetch at the proxy's feature
+level (`bPositionOnlyVertexStream`: every desktop RHI the project targets) its shaders read only the position stream
+and fetch the other attributes from the views, so the vertex stream holds the positions alone (12 bytes,
+`FVoxelChunkRenderData::VertexStride`); elsewhere it holds the interleaved `FVoxelLocalVertex` (40). The tangent,
+texcoord and colour stream components name the position buffer flagged `ManualFetch`: no stream binds them, and since
+the position buffer is also the tangent one the vertex factory makes no position-only declarations, so the depth and
+shadow passes draw as before. The ray tracing geometry (F3.3) reads the positions at the stream's stride. A vertex
+costs 40 bytes on the GPU with manual vertex fetch, 68 without, plus the indices.
+
+Each proxy counts the bytes of the mesh buffers it holds (`FVoxelSceneProxy::GetMeshBufferBytes`: added at upload,
+taken off by `FVoxelChunkRenderData::ReleaseResources`), crossfade-retained meshes included; the renderer's
+`GetGPUMemoryUsage`, the streaming bench's `RendGPUMB`, sums its region proxies
+(`UVoxelRegionComponent::GetProxyGPUMemoryUsage`), and `VoxelWorlds.Rendering.RayTracing.ChunkGeometry` checks the
+count and the stride through an upload, a crossfade, a seam and an unload.
+
+Results (2026-11-04, VoxelWorlds `fix/g119-g120-vertex-memory`):
+- **G119.** `FVoxelChunkRenderData::GetGPUMemoryUsage` counted the texcoord buffer at 8 bytes a vertex; it is 16
+  (`CalcGPUMemoryUsage`). And `RendGPUMB` was not the proxies' figure: it was the mesher's vertices (`FVoxelVertex`,
+  28 bytes) and the indices of the chunk meshes alone. It reads what the proxies hold now, about 2.5 times the old
+  figure (chord peak / end 24.3 / 23.2 MB on main, 64.1 / 56.9 counted; great circle 26.6 / 25.8, 66.4 / 61.5).
+  The proxy's memory footprint (`GetGPUMemoryUsage`, memreport) now covers the seam and water meshes it left out.
+- **G120.** Every vertex went up twice, interleaved (40 bytes) and in the views (28), and the shaders read 12 of the
+  interleaved 40. With the positions alone: `RendGPUMB` chord 64.1 / 56.9 → 43.0 / 38.7 MB (-33% / -32%), great
+  circle 66.4 / 61.5 → 45.8 / 41.6 (-31% / -32%), three runs each, the clock fixed; the RHI's own sizes on `VoxelDemo`
+  (settled, streaming frozen): the chunk vertex buffers 16.37 → 4.91 MB (12/40), the other four unchanged. GPU frame
+  and game thread P50 unchanged (two adjacent pairs of fresh-editor sets: chord GPU 6.94 → 6.80 ms, game thread
+  18.36 → 18.60; great circle 6.26 → 6.22 and 21.18 → 21.19; the machine drifted +2 ms of game thread over the session,
+  so sets an hour apart do not compare). Mesh digests
+  (209), the editor gate (20/20, the 111 parity lines) and `voxel.Render.RayTracingStats` on `VoxelDemo` (940
+  geometries, 51.4 MB) unchanged; the captures within the run-to-run floor.
 
 ---
 
