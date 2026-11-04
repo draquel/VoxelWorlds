@@ -2485,7 +2485,8 @@ void FVoxelRayTracingCounters::AddProxy(int32 Delta)
 }
 
 #if RHI_RAYTRACING
-uint64 InitVoxelRayTracingGeometry(FRHICommandListBase& RHICmdList, const FVoxelChunkRenderData& RenderData, const TCHAR* DebugName, FRayTracingGeometry& OutGeometry)
+uint64 InitVoxelRayTracingGeometry(FRHICommandListBase& RHICmdList, const FVoxelChunkRenderData& RenderData, const TCHAR* DebugName, FRayTracingGeometry& OutGeometry,
+	RayTracing::FGeometryGroupHandle GroupHandle)
 {
 	// Over the buffers just uploaded: the positions, at the vertex stream's offset 0 and stride (12 bytes for the positions
 	// alone, G120; the hit shaders read them from this segment), relative to the primitive's origin (a region proxy's
@@ -2509,6 +2510,12 @@ uint64 InitVoxelRayTracingGeometry(FRHICommandListBase& RHICmdList, const FVoxel
 	Initializer.Segments.Add(Segment);
 
 	const uint64 Bytes = RHICalcRayTracingGeometrySize(Initializer).ResultSize;
+	if (!GroupHandle.IsNull())
+	{
+		// The group's build and eviction requests reach the primitive whose cached instance uses the geometry
+		OutGeometry.GroupHandle = GroupHandle;
+		OutGeometry.LODIndex = FRayTracingGeometry::AdditionalGeometryLODIndex;
+	}
 	OutGeometry.SetInitializer(MoveTemp(Initializer));
 	OutGeometry.InitResource(RHICmdList);
 	return Bytes;

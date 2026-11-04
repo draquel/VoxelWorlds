@@ -15,6 +15,7 @@
 #include "Containers/Queue.h"
 #if RHI_RAYTRACING
 #include "RayTracingInstance.h"
+#include "RayTracingGeometryManagerInterface.h"
 #endif
 
 namespace
@@ -80,6 +81,12 @@ FVoxelChunkMesh::~FVoxelChunkMesh()
 		RayTracingGeometry->ReleaseResource();
 		RayTracingGeometry.Reset();
 		FVoxelRayTracingCounters::AddRelease(static_cast<int64>(RayTracingBytes));
+	}
+	if (!RayTracingGroupHandle.IsNull())
+	{
+		// The manager keeps the group until the primitives that cached it are gone too
+		GRayTracingGeometryManager->ReleaseRayTracingGeometryGroup(RayTracingGroupHandle);
+		RayTracingGroupHandle = {};
 	}
 #endif
 	if (VertexFactory.IsValid())
@@ -161,8 +168,11 @@ void FVoxelChunkMesh::InitResources_RenderThread(FRHICommandListBase& RHICmdList
 #if RHI_RAYTRACING
 	if (bRayTracing)
 	{
+		// A group of its own (no LODs, the geometry an additional one): the primitive caching its instance follows the
+		// geometry's build and eviction (step 3)
+		RayTracingGroupHandle = GRayTracingGeometryManager->RegisterRayTracingGeometryGroup(/*NumLODs*/ 0, /*CurrentFirstLODIdx*/ 0);
 		RayTracingGeometry = MakeUnique<FRayTracingGeometry>();
-		RayTracingBytes = InitVoxelRayTracingGeometry(RHICmdList, RenderData, TEXT("VoxelChunkPrimitiveRayTracing"), *RayTracingGeometry);
+		RayTracingBytes = InitVoxelRayTracingGeometry(RHICmdList, RenderData, TEXT("VoxelChunkPrimitiveRayTracing"), *RayTracingGeometry, RayTracingGroupHandle);
 		FVoxelRayTracingCounters::AddBuild(static_cast<int64>(RayTracingBytes));
 	}
 #endif
@@ -304,16 +314,6 @@ void FVoxelChunkSceneProxy::CreateRenderThreadResources(FRHICommandListBase& RHI
 		Mesh->InitResources_RenderThread(RHICmdList, bPositionOnly, bRadialFaceUp, FaceUpCenter, bRayTracing, FeatureLevel);
 	}
 
-#if RHI_RAYTRACING
-	if (bRayTracing && Mesh.IsValid() && Mesh->IsDrawable())
-	{
-		InitMeshBatch(RayTracingMeshBatch, *Mesh, nullptr);
-		// Ray tracing needs no flip for a mirroring transform (and the primitive's transform is a translation)
-		RayTracingMeshBatch.ReverseCulling = false;
-		RayTracingMeshBatch.bCanApplyViewModeOverrides = false;
-		RayTracingMeshBatch.CastRayTracedShadow = true;
-	}
-#endif
 }
 
 void FVoxelChunkSceneProxy::InitMeshBatch(FMeshBatch& MeshBatch, const FVoxelChunkMesh& InMesh, const FMaterialRenderProxy* MaterialProxy) const
@@ -581,54 +581,39 @@ uint64 FVoxelChunkSceneProxy::GetRayTracingBytes_RenderThread() const
 }
 
 #if RHI_RAYTRACING
-void FVoxelChunkSceneProxy::GetDynamicRayTracingInstances(FRayTracingInstanceCollector& Collector)
+ERayTracingPrimitiveFlags FVoxelChunkSceneProxy::GetRayTracingPrimitiveFlags()
 {
-	const FMaterialRenderProxy* MaterialProxy = (bRayTracing && Material) ? Material->GetRenderProxy() : nullptr;
-	FScopeLock Lock(&StateLock);
-	if (!MaterialProxy || !Mesh.IsValid() || !Mesh->IsDrawable())
+	ERayTracingPrimitiveFlags Flags = FPrimitiveSceneProxy::GetRayTracingPrimitiveFlags();
+	if (EnumHasAnyFlags(Flags, ERayTracingPrimitiveFlags::Dynamic))
 	{
-		return;
+		Flags = (Flags & ~ERayTracingPrimitiveFlags::Dynamic) | ERayTracingPrimitiveFlags::CacheInstances;
 	}
-	const FRayTracingGeometry* Geometry = Mesh->RayTracingGeometry.Get();
-	if (!Geometry || !Geometry->IsValid() || Geometry->IsEvicted())
+	return Flags;
+}
+
+void FVoxelChunkSceneProxy::GetStaticRayTracingInstances(FStaticRayTracingInstances& OutRayTracingInstances)
+{
+	FStaticRayTracingInstancesLOD& LOD = OutRayTracingInstances.LODs.AddDefaulted_GetRef();
+	const FRayTracingGeometry* Geometry = Mesh.IsValid() ? Mesh->RayTracingGeometry.Get() : nullptr;
+	const FMaterialRenderProxy* MaterialProxy = Material ? Material->GetRenderProxy() : nullptr;
+	if (!Geometry || !Geometry->IsValid() || Geometry->IsEvicted() || !MaterialProxy || !Mesh->IsDrawable())
 	{
-		return;
-	}
-	// The engine skips (with an ensure) an instance whose acceleration structure is still building: it joins next frame
-	if (Geometry->GetRequiresBuild() || Geometry->HasPendingBuildRequest())
-	{
-		FVoxelRayTracingCounters::AddGathered(0, 1);
 		return;
 	}
 
-	RayTracingTransform = GetLocalToWorld();
-	RayTracingMeshBatch.MaterialRenderProxy = MaterialProxy;
-	FRayTracingInstance Instance;
+	FRayTracingInstance& Instance = LOD.Instances.AddDefaulted_GetRef();
 	Instance.Geometry = Geometry;
-	Instance.MaterialsView = MakeArrayView(&RayTracingMeshBatch, 1);
-	Instance.InstanceTransformsView = MakeArrayView(&RayTracingTransform, 1);
 	Instance.NumTransforms = 1;
+	FMeshBatch& MeshBatch = Instance.Materials.AddDefaulted_GetRef();
+	InitMeshBatch(MeshBatch, *Mesh, MaterialProxy);
+	// Ray tracing needs no flip for a mirroring transform (and the primitive's transform is a translation)
+	MeshBatch.ReverseCulling = false;
+	MeshBatch.bCanApplyViewModeOverrides = false;
+	MeshBatch.CastRayTracedShadow = true;
+}
 
-	// Left out of a view whose Lumen max trace distance (times the scale) does not reach the mesh's box
-	const TConstArrayView<const FSceneView*> Views = Collector.GetViews();
-	const uint32 VisibilityMap = Collector.GetVisibilityMap();
-	const double TraceDistanceScale = GetVoxelRayTracingTraceDistanceScale();
-	const FBox WorldBox = Mesh->LocalBounds.ShiftBy(Mesh->Origin);
-	int64 Emitted = 0;
-	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ++ViewIndex)
-	{
-		if (!(VisibilityMap & (1u << ViewIndex)))
-		{
-			continue;
-		}
-		const double Distance = TraceDistanceScale * Views[ViewIndex]->FinalPostProcessSettings.LumenMaxTraceDistance;
-		if (Distance > 0.0 && WorldBox.ComputeSquaredDistanceToPoint(Views[ViewIndex]->ViewMatrices.GetViewOrigin()) > Distance * Distance)
-		{
-			continue;
-		}
-		Collector.AddRayTracingInstance(ViewIndex, Instance);
-		++Emitted;
-	}
-	FVoxelRayTracingCounters::AddGathered(Emitted, 0);
+RayTracing::FGeometryGroupHandle FVoxelChunkSceneProxy::GetRayTracingGeometryGroupHandle() const
+{
+	return Mesh.IsValid() ? Mesh->RayTracingGroupHandle : RayTracing::FGeometryGroupHandle();
 }
 #endif

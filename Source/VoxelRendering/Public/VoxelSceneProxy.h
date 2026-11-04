@@ -191,10 +191,12 @@ VOXELRENDERING_API void CreateVoxelMeshBuffers_RenderThread(FRHICommandListBase&
  * @param RenderData  The mesh's buffers and counts
  * @param DebugName   The geometry's name in GPU captures and stats
  * @param OutGeometry Receives the initializer and its resource
+ * @param GroupHandle The ray tracing geometry group it joins as an additional geometry (a chunk primitive's own, G116
+ *                    step 3: the scene caches the primitive's instance), or none
  * @return The acceleration structure's bytes
  */
 VOXELRENDERING_API uint64 InitVoxelRayTracingGeometry(FRHICommandListBase& RHICmdList, const FVoxelChunkRenderData& RenderData, const TCHAR* DebugName,
-	FRayTracingGeometry& OutGeometry);
+	FRayTracingGeometry& OutGeometry, RayTracing::FGeometryGroupHandle GroupHandle = {});
 #endif
 
 /** @return Whether the terrain's meshes get ray tracing geometry: voxel.Render.RayTracing and the project's ray tracing support (any thread) */

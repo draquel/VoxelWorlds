@@ -110,9 +110,11 @@ public:
 	TSharedPtr<FLocalVertexFactory> VertexFactory;
 
 #if RHI_RAYTRACING
-	/** Its acceleration structure (null when ray tracing is off for it) and the structure's bytes */
+	/** Its acceleration structure (null when ray tracing is off for it), the structure's bytes, and the geometry group of
+	 *  one geometry it joins (step 3: the primitive's cached instance, released after the geometry) */
 	TUniquePtr<FRayTracingGeometry> RayTracingGeometry;
 	uint64 RayTracingBytes = 0;
+	RayTracing::FGeometryGroupHandle RayTracingGroupHandle;
 #endif
 
 private:
@@ -216,13 +218,20 @@ public:
 	/** @return Whether its mesh has ray tracing geometry (fixed for its life) */
 	virtual bool HasRayTracingRepresentation() const override { return bRayTracing; }
 
+	/** @return The engine's flags with CacheInstances for the dynamic gather (step 3): the scene caches its one instance */
+	virtual ERayTracingPrimitiveFlags GetRayTracingPrimitiveFlags() override;
+
 	/**
-	 * Its mesh's one instance, with the terrain material, for each view whose Lumen max trace distance (times
-	 * voxel.Render.RayTracing.TraceDistanceScale) reaches the mesh's box, once its acceleration structure is built.
+	 * Its mesh's one instance (step 3), with the terrain material, cached by the scene, its transform from GPUScene: the
+	 * per-frame gather and its cull to the Lumen trace distance are gone with it, so every chunk is in the ray tracing
+	 * scene. Nothing while the mesh's geometry is not valid; the geometry's group asks the scene again once it is.
 	 *
-	 * @param Collector Receives the instance
+	 * @param OutRayTracingInstances Receives one LOD with one instance
 	 */
-	virtual void GetDynamicRayTracingInstances(FRayTracingInstanceCollector& Collector) override;
+	virtual void GetStaticRayTracingInstances(FStaticRayTracingInstances& OutRayTracingInstances) override;
+
+	/** @return The ray tracing geometry group of its mesh's geometry (fixed for its life) */
+	virtual RayTracing::FGeometryGroupHandle GetRayTracingGeometryGroupHandle() const override;
 #endif
 
 	// ==================== Render Thread ====================
@@ -282,9 +291,4 @@ private:
 	/** Guards the state the render commands change against the frame's own tasks */
 	mutable FCriticalSection StateLock;
 
-#if RHI_RAYTRACING
-	/** The batch its ray tracing instance views (its material proxy set at the gather) and the transform it views */
-	FMeshBatch RayTracingMeshBatch;
-	FMatrix RayTracingTransform = FMatrix::Identity;
-#endif
 };
