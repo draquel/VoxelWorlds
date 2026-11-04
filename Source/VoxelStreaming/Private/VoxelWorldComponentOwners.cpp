@@ -9,6 +9,7 @@
 #include "GameFramework/Actor.h"
 #include "Materials/MaterialInterface.h"
 #include "VoxelFarField.h"
+#include "VoxelFarFieldPatchComponent.h"
 
 void FVoxelSeaUnderside::Update(bool bBelow, bool& bShown, TFunctionRef<void(bool)> Apply)
 {
@@ -355,8 +356,8 @@ namespace VoxelFarFieldManagerPrivate
 		TEXT("far-field layer (bRayTracingFarField): Lumen's far-field traces (r.LumenScene.FarField 1) see the terrain past the near\n")
 		TEXT("field's reach, out to r.LumenScene.FarField.MaxTraceDistance; with Lumen's far field off nothing gathers them.\n")
 		TEXT("2 = the near-field layer like any primitive, where r.RayTracing.Culling removes everything past its radius (30,000 uu):\n")
-		TEXT("past the voxel window, every patch. 0 = out of the ray tracing scene. The procedural mesh builds an acceleration\n")
-		TEXT("structure per section in every mode."),
+		TEXT("past the voxel window, every patch. 0 = out of the ray tracing scene. A patch builds an acceleration structure for its\n")
+		TEXT("terrain alone, in mode 2, and in mode 1 only while r.LumenScene.FarField is on (G121)."),
 		ECVF_Default);
 
 	/** @return The patches' ray tracing mode: 0 out, 1 the far-field layer, 2 the near-field layer (0 with voxel.Render.RayTracing 0) */
@@ -370,8 +371,11 @@ namespace VoxelFarFieldManagerPrivate
 		return FMath::Clamp(CVarFarFieldRayTracing.GetValueOnGameThread(), 0, 2);
 	}
 
-	/** Put a patch component in the ray tracing layer of Mode (GetPatchRayTracingMode); a registered one recreates its proxy. */
-	void SetPatchRayTracingMode(UProceduralMeshComponent* Component, int32 Mode)
+	/**
+	 * Put a patch component in the ray tracing layer of Mode (GetPatchRayTracingMode); a registered one recreates its proxy,
+	 * which builds its terrain's acceleration structure if the layer is traced (UVoxelFarFieldPatchComponent, G121).
+	 */
+	void SetPatchRayTracingMode(UVoxelFarFieldPatchComponent* Component, int32 Mode)
 	{
 		const bool bFarField = Mode == 1;
 		const bool bVisible = Mode != 0;
@@ -384,10 +388,10 @@ namespace VoxelFarFieldManagerPrivate
 		Component->MarkRenderStateDirty();
 	}
 
-	/** A procedural mesh component for one far-field patch at its origin (no collision, no shadow, nothing to navigate). */
-	UProceduralMeshComponent* MakePatchComponent(AActor* Owner, const FVector& Location, int32 RayTracingMode)
+	/** A component for one far-field patch at its origin (no collision, no shadow, nothing to navigate). */
+	UVoxelFarFieldPatchComponent* MakePatchComponent(AActor* Owner, const FVector& Location, int32 RayTracingMode)
 	{
-		UProceduralMeshComponent* Component = NewObject<UProceduralMeshComponent>(Owner, NAME_None, RF_Transient);
+		UVoxelFarFieldPatchComponent* Component = NewObject<UVoxelFarFieldPatchComponent>(Owner, NAME_None, RF_Transient);
 		Component->SetUsingAbsoluteLocation(true);
 		Component->SetUsingAbsoluteRotation(true);
 		Component->SetUsingAbsoluteScale(true);
@@ -396,67 +400,30 @@ namespace VoxelFarFieldManagerPrivate
 		Component->SetCanEverAffectNavigation(false);
 		Component->SetGenerateOverlapEvents(false);
 		Component->SetCastShadow(false);
-		Component->bUseAsyncCooking = false;
 		SetPatchRayTracingMode(Component, RayTracingMode);
 		Component->SetWorldLocationAndRotation(Location, FRotator::ZeroRotator);
 		Component->RegisterComponent();
 		return Component;
 	}
 
-	/** Hand a far-field section to a procedural mesh section, its triangles reversed for an underside; clears it when empty. */
-	void SetPatchSection(UProceduralMeshComponent* Component, int32 Section, const FVoxelFarFieldSection& Mesh, bool bReverse,
-		UMaterialInterface* Material)
+	/**
+	 * Hand a far-field section to a patch component's section, its triangles reversed for an underside; clears it when
+	 * empty. Only the terrain is traced (bRayTracing): the sea is translucent and Lumen's rays pass it.
+	 */
+	void SetPatchSection(UVoxelFarFieldPatchComponent* Component, int32 Section, const FVoxelFarFieldSection& Mesh, bool bReverse,
+		bool bRayTracing, UMaterialInterface* Material)
 	{
-		if (Mesh.IsEmpty())
-		{
-			Component->ClearMeshSection(Section);
-			return;
-		}
-		const int32 N = Mesh.Positions.Num();
-		TArray<FVector> Vertices;
-		TArray<FVector> Normals;
-		TArray<FVector2D> UV0;
-		TArray<FVector2D> UV1;
-		TArray<FProcMeshTangent> Tangents;
-		Vertices.SetNumUninitialized(N);
-		Normals.SetNumUninitialized(N);
-		UV0.SetNumUninitialized(N);
-		UV1.SetNumUninitialized(N);
-		Tangents.Reserve(N);
-		for (int32 i = 0; i < N; ++i)
-		{
-			Vertices[i] = FVector(Mesh.Positions[i]);
-			Normals[i] = FVector(Mesh.Normals[i]);
-			UV0[i] = FVector2D(Mesh.UV0[i]);
-			UV1[i] = FVector2D(Mesh.UV1[i]);
-			Tangents.Add(FProcMeshTangent(FVector(Mesh.Tangents[i]), false));
-		}
-		TArray<int32> Triangles;
-		if (bReverse)
-		{
-			Triangles.Reserve(Mesh.Triangles.Num());
-			for (int32 i = 0; i + 2 < Mesh.Triangles.Num(); i += 3)
-			{
-				Triangles.Append({ Mesh.Triangles[i], Mesh.Triangles[i + 2], Mesh.Triangles[i + 1] });
-			}
-		}
-		else
-		{
-			Triangles = Mesh.Triangles;
-		}
-		const TArray<FVector2D> NoUV;
-		Component->CreateMeshSection(Section, Vertices, Triangles, Normals, UV0, UV1, NoUV, NoUV, Mesh.Colors, Tangents,
-			/*bCreateCollision=*/false);
-		if (Material)
+		Component->SetSection(Section, Mesh, bReverse, bRayTracing);
+		if (!Mesh.IsEmpty() && Material)
 		{
 			Component->SetMaterial(Section, Material);
 		}
 	}
 
-	/** What a component's sections hold on the CPU and the GPU (an estimate: the proc-mesh vertex and a GPU vertex). */
+	/** What a component's sections hold on the CPU and the GPU (an estimate: the component's vertex and a GPU vertex). */
 	int64 EstimateBytes(int64 Vertices, int64 Indices)
 	{
-		return Vertices * (static_cast<int64>(sizeof(FProcMeshVertex)) + 64) + Indices * 8;
+		return Vertices * (static_cast<int64>(sizeof(FDynamicMeshVertex)) + 64) + Indices * 8;
 	}
 }
 
@@ -469,7 +436,7 @@ void FVoxelFarFieldPresenter::Apply(FVoxelFarField& FarField, const FVoxelFarFie
 	const int32 Mode = GetPatchRayTracingMode();
 	if (Mode != RayTracingMode)
 	{
-		for (const TPair<uint64, TObjectPtr<UProceduralMeshComponent>>& Pair : Components)
+		for (const TPair<uint64, TObjectPtr<UVoxelFarFieldPatchComponent>>& Pair : Components)
 		{
 			if (IsValid(Pair.Value))
 			{
@@ -480,7 +447,7 @@ void FVoxelFarFieldPresenter::Apply(FVoxelFarField& FarField, const FVoxelFarFie
 	}
 	for (const uint64 Key : Changes.Removed)
 	{
-		if (TObjectPtr<UProceduralMeshComponent>* Found = Components.Find(Key))
+		if (TObjectPtr<UVoxelFarFieldPatchComponent>* Found = Components.Find(Key))
 		{
 			if (IsValid(*Found))
 			{
@@ -503,25 +470,25 @@ void FVoxelFarFieldPresenter::Apply(FVoxelFarField& FarField, const FVoxelFarFie
 			continue;
 		}
 		const FVoxelFarFieldPatchMesh& Mesh = *Patch->Mesh;
-		TObjectPtr<UProceduralMeshComponent>& Component = Components.FindOrAdd(Key);
+		TObjectPtr<UVoxelFarFieldPatchComponent>& Component = Components.FindOrAdd(Key);
 		if (!IsValid(Component))
 		{
 			Component = MakePatchComponent(Owner, Mesh.Origin, Mode);
 		}
 		else
 		{
-			Component->ClearAllMeshSections();
+			Component->ClearAllSections();
 			Component->SetWorldLocation(Mesh.Origin);
 		}
-		SetPatchSection(Component, 0, Mesh.Terrain, false, TerrainMaterial);
+		SetPatchSection(Component, 0, Mesh.Terrain, false, /*bRayTracing=*/true, TerrainMaterial);
 		// The sea's underside only near the voxel window: seen from under the water, the surface is only visible close by.
 		const bool bUnderside = Settings.bSea && !Mesh.Sea.IsEmpty() && Patch->Key.Level >= Settings.EdgeLevel - UndersideLevels;
 		if (Settings.bSea && !Mesh.Sea.IsEmpty())
 		{
-			SetPatchSection(Component, 1, Mesh.Sea, false, WaterMaterial);
+			SetPatchSection(Component, 1, Mesh.Sea, false, /*bRayTracing=*/false, WaterMaterial);
 			if (bUnderside)
 			{
-				SetPatchSection(Component, 2, Mesh.Sea, true, WaterMaterial);
+				SetPatchSection(Component, 2, Mesh.Sea, true, /*bRayTracing=*/false, WaterMaterial);
 			}
 			Component->SetTranslucentSortPriority(0);
 		}
@@ -542,24 +509,24 @@ void FVoxelFarFieldPresenter::Apply(FVoxelFarField& FarField, const FVoxelFarFie
 	auto ApplyVisibility = [this, &FarField, bUnderSea](uint64 Key)
 	{
 		const FVoxelFarField::FPatchState* Patch = FarField.FindPatch(Key);
-		const TObjectPtr<UProceduralMeshComponent>* Found = Components.Find(Key);
+		const TObjectPtr<UVoxelFarFieldPatchComponent>* Found = Components.Find(Key);
 		if (!Patch || !Found || !IsValid(*Found))
 		{
 			return;
 		}
-		UProceduralMeshComponent* Component = *Found;
+		UVoxelFarFieldPatchComponent* Component = *Found;
 		const int32 Sections = Component->GetNumSections();
 		if (Sections > 0)
 		{
-			Component->SetMeshSectionVisible(0, Patch->bDrawTerrain);
+			Component->SetSectionVisible(0, Patch->bDrawTerrain);
 		}
 		if (Sections > 1)
 		{
-			Component->SetMeshSectionVisible(1, Patch->bDrawSea);
+			Component->SetSectionVisible(1, Patch->bDrawSea);
 		}
 		if (Sections > 2)
 		{
-			Component->SetMeshSectionVisible(2, Patch->bDrawSea && bUnderSea);
+			Component->SetSectionVisible(2, Patch->bDrawSea && bUnderSea);
 		}
 	};
 	for (const uint64 Key : Changes.Visibility)
@@ -569,7 +536,7 @@ void FVoxelFarFieldPresenter::Apply(FVoxelFarField& FarField, const FVoxelFarFie
 	// The sea's undersides show only while the viewer is inside the sea radius (as the sea sphere's).
 	FVoxelSeaUnderside::Update(bUnderSea, bUndersideShown, [&](bool)
 	{
-		for (const TPair<uint64, TObjectPtr<UProceduralMeshComponent>>& Pair : Components)
+		for (const TPair<uint64, TObjectPtr<UVoxelFarFieldPatchComponent>>& Pair : Components)
 		{
 			ApplyVisibility(Pair.Key);
 		}
@@ -578,7 +545,7 @@ void FVoxelFarFieldPresenter::Apply(FVoxelFarField& FarField, const FVoxelFarFie
 
 void FVoxelFarFieldPresenter::Destroy()
 {
-	for (TPair<uint64, TObjectPtr<UProceduralMeshComponent>>& Pair : Components)
+	for (TPair<uint64, TObjectPtr<UVoxelFarFieldPatchComponent>>& Pair : Components)
 	{
 		if (IsValid(Pair.Value))
 		{
@@ -592,9 +559,9 @@ void FVoxelFarFieldPresenter::Destroy()
 	bUndersideShown = false;
 }
 
-UProceduralMeshComponent* FVoxelFarFieldPresenter::Find(uint64 PackedPatchKey) const
+UVoxelFarFieldPatchComponent* FVoxelFarFieldPresenter::Find(uint64 PackedPatchKey) const
 {
-	const TObjectPtr<UProceduralMeshComponent>* Found = Components.Find(PackedPatchKey);
+	const TObjectPtr<UVoxelFarFieldPatchComponent>* Found = Components.Find(PackedPatchKey);
 	return Found ? Found->Get() : nullptr;
 }
 

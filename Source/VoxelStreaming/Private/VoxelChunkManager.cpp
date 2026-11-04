@@ -58,6 +58,7 @@
 #include "VoxelSurfaceQuery.h"
 #include "VoxelBiomeSnapshot.h"
 #include "ProceduralMeshComponent.h"
+#include "VoxelFarFieldPatchComponent.h"
 #include "UObject/UObjectIterator.h"
 #include "Engine/World.h"
 #include "GameFramework/WorldSettings.h"
@@ -3224,7 +3225,7 @@ bool UVoxelChunkManager::DoesFarFieldDrawSea() const
 	return FarField.IsValid() && FarField->GetSettings().bSea;
 }
 
-UProceduralMeshComponent* UVoxelChunkManager::GetFarFieldComponent(uint64 PackedPatchKey) const
+UVoxelFarFieldPatchComponent* UVoxelChunkManager::GetFarFieldComponent(uint64 PackedPatchKey) const
 {
 	return FarFieldPresenter.Find(PackedPatchKey);
 }
