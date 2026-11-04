@@ -68,10 +68,10 @@ static TAutoConsoleVariable<float> CVarVoxelMeshFadeAppearMinDistance(
 
 static TAutoConsoleVariable<int32> CVarVoxelChunkPrimitives(
 	TEXT("voxel.Render.ChunkPrimitives"),
-	0,
-	TEXT("Draw each chunk interior mesh and seam bucket as a primitive of its own on the static draw path (G116: GPUScene,\n")
-	TEXT("cached draw commands, the engine's per-primitive culling), registered without a component. 0 = the render region's\n")
-	TEXT("scene proxy draws them, culling each mesh itself. A change re-meshes the terrain."),
+	1,
+	TEXT("1 = each chunk interior mesh and seam bucket is a primitive of its own on the static draw path (G116: GPUScene,\n")
+	TEXT("cached draw commands and ray tracing instances, the engine's per-primitive culling), registered without a component.\n")
+	TEXT("0 = the render region's scene proxy draws them, culling each mesh itself (the A/B). A change re-meshes the terrain."),
 	ECVF_Default);
 
 /** Failsafe for a fade hold nobody releases (the chunk manager's own cap, voxel.MeshFade.SeamHoldMs, is 1 s). */

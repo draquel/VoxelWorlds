@@ -1,6 +1,8 @@
 # Lumen's Surface Cache for the Terrain (G116 plan)
 
-> State as of 2026-11-03. Open: planned, not started (steps 1-4 below). Terms:
+> State as of 2026-11-04. Steps 1-3 done (§3: the chunk primitives, their fades, cached ray tracing; the default since
+> 2026-11-04, results in [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "Chunk Primitives"); step 4 (§4, the
+> cards) open, and with it G116. Terms:
 > `Documentation/GLOSSARY.md`. The finding is G116 in the project's `Documentation/FINDINGS.md`; the spike that chose the
 > path is [LUMEN_OFFSCREEN_TERRAIN_SPIKE.md](LUMEN_OFFSCREEN_TERRAIN_SPIKE.md) (frozen); what ships is described in
 > [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "What Lumen Sees".
@@ -48,6 +50,12 @@ engine:
   cached instances, not a step on its own; the chunk primitives (§3) set it on their own proxy type.
 
 ## 3. Steps 1-3: a primitive per chunk mesh
+
+**Done 2026-11-04** as written below, with two things the plan did not foresee: the engine reaches a primitive without a
+component for its material and shader updates only through `IPrimitiveComponent` (a resolver on the region component
+gives one per primitive), and a removed primitive's render resources are released on the render thread, not in its
+destructor. The render thread's cost at the uploads (§6's first risk) did not show; numbers and lessons in
+RENDERING_SYSTEM.md "Chunk Primitives".
 
 **Approach.** Each chunk interior's current mesh and each seam bucket becomes its own primitive, registered without a
 component through `FPrimitiveSceneDesc` (`FSceneInterface::BatchAddPrimitives` / `BatchRemovePrimitives`, the path

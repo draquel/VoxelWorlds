@@ -111,9 +111,13 @@ The CSV adds per-sample memory columns (`VoxelMB`, `EditMB`, `RendCPUMB`, `RendG
 `ScatMB`, `ProcessMB`, `ResidentN`, `UniformN`, `CompressedN`, `EmptyN`), refreshed every 0.25 s, and
 per-tick far-compression columns (`FarCompMs`, `FarCompDispN` encodes started, `FarCompApplyN` async
 results installed). `RTGeomN` and `BLASMB` (every sample) are the terrain's ray tracing geometries alive and their
-acceleration structures (`FVoxelRayTracingCounters`, F3.3); the JSON's `memory` has `peakRayTracingMB` and `endRayTracingMB`.
+acceleration structures (`FVoxelRayTracingCounters`, F3.3); the JSON's `memory` has `peakRayTracingMB` and `endRayTracingMB`.
+`PrimN` and `PrimAddN` are the chunk primitives in the scenes and those added since the last sample (G116, 0 on the region
+proxy's path); `RTBusyMs` is the render thread's own CPU time in its last frame, waits left out (`QueryThreadCycleTime`
+over its frame, Windows), since `RTMs`, the engine's render thread time, reads 0 in the editor's PIE (each Slate window's
+present sets it and resets the idle counters).
 
-`RendGPUMB` (and the JSON's renderer GPU figures) is what the renderer's scene proxies hold on the GPU: every chunk,
+`RendGPUMB` (and the JSON's renderer GPU figures) is what the renderer's scene proxies and chunk primitives hold on the GPU: every chunk,
 seam and water mesh and the ones crossfades retain, at the bytes uploaded (`FVoxelSceneProxy::GetMeshBufferBytes`,
 since 2026-11-04, G119). Before that it was the mesher's vertices (`FVoxelVertex`, 28 bytes) and the indices of the
 chunk meshes alone, a figure no buffer had: records older than G119 read low against newer ones, by about 2.5 times (the chord's peak 24.3 MB on main, 64.1 counted), and G120 (the positions alone in the vertex stream) took a third off the counted figure the same day (43.0); `RENDERING_SYSTEM.md`, "The Mesh Buffers".
