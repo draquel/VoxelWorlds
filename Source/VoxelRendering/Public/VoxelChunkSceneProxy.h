@@ -8,6 +8,7 @@
 #include "VoxelLocalVertexFactory.h"
 #include "VoxelVertex.h"
 #include "VoxelSceneProxy.h"
+#include "VoxelChunkMeshCards.h"
 #if RHI_RAYTRACING
 #include "RayTracingGeometry.h"
 #endif
@@ -67,11 +68,12 @@ public:
 	 * @param InLocalBounds Its box relative to InOrigin
 	 * @param InOrigin     The chunk's (or the seam owner chunk's) world position
 	 * @param InByteCounter The region component's count of its chunk meshes' buffer bytes (outlives the mesh)
-	 * @param InLumenCardSlices Build its Lumen card representation with this many slices per axis (G116 step 4,
-	 *                      BuildVoxelChunkMeshCards); 0 = none (voxel.Render.LumenCards 0)
+	 * @param InCards      Its Lumen card representation (G116): none, axis-aligned over its box (step 4,
+	 *                      BuildVoxelChunkMeshCards) or fitted to its surface (BuildVoxelChunkMeshFittedCards)
 	 */
 	FVoxelChunkMesh(TArray<FVoxelVertex>&& InVertices, TArray<uint32>&& InIndices, int32 InLODLevel, const FBox& InLocalBounds,
-		const FVector& InOrigin, const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe>& InByteCounter, int32 InLumenCardSlices = 0);
+		const FVector& InOrigin, const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe>& InByteCounter,
+		const FVoxelChunkMeshCardSettings& InCards = FVoxelChunkMeshCardSettings());
 
 	/** Render thread: releases the buffers, the vertex factory and the ray tracing geometry. */
 	~FVoxelChunkMesh();
@@ -108,9 +110,10 @@ public:
 	const FVector Origin;
 
 	/**
-	 * Its Lumen card representation (G116 step 4), relative to Origin: axis-aligned cards over LocalBounds, two per slice
-	 * of each axis (BuildVoxelChunkMeshCards), so a ray that hits the mesh reads the surface cache. Built with the mesh,
-	 * fixed for its life (any thread); null when the cards are off or the mesh has no triangles.
+	 * Its Lumen card representation (G116), relative to Origin, so a ray that hits the mesh reads the surface cache:
+	 * axis-aligned cards over LocalBounds, two per slice of each axis (step 4, BuildVoxelChunkMeshCards), or cards fitted to
+	 * its surface, one per layer facing one way (BuildVoxelChunkMeshFittedCards). Built with the mesh, fixed for its life
+	 * (any thread); null when the cards are off or the mesh has no triangles.
 	 */
 	TUniquePtr<FCardRepresentationData> CardRepresentation;
 

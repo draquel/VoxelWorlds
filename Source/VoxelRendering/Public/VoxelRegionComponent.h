@@ -7,6 +7,7 @@
 #include "ChunkRenderData.h"
 #include "VoxelVertex.h"
 #include "VoxelFadeScheduler.h"
+#include "VoxelChunkMeshCards.h"
 #include "Materials/MaterialRelevance.h"
 #include <atomic>
 #include "VoxelRegionComponent.generated.h"
@@ -780,10 +781,10 @@ private:
 	TArray<FPrimitiveSceneProxy*> PendingPrimitiveRemovals;
 
 	/** The mode in use (IsUsingChunkPrimitives), whether its primitives were created with ray tracing geometry, and the
-	 *  slices per axis of their meshes' Lumen cards (G116 step 4, voxel.Render.LumenCards and .Slices; 0 = no cards) */
+	 *  Lumen cards their meshes take (G116, voxel.Render.LumenCards and its tuning) */
 	bool bUseChunkPrimitives = false;
 	bool bChunkPrimitiveRayTracing = false;
-	int32 ChunkPrimitiveCardSlices = 0;
+	FVoxelChunkMeshCardSettings ChunkPrimitiveCards;
 
 	/** The bytes of the chunk meshes' buffers alive now (the meshes add and remove theirs on the render thread) */
 	TSharedPtr<std::atomic<int64>, ESPMode::ThreadSafe> ChunkMeshBytes;

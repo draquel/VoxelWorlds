@@ -77,10 +77,11 @@ static TAutoConsoleVariable<int32> CVarVoxelChunkPrimitives(
 static TAutoConsoleVariable<int32> CVarVoxelLumenCards(
 	TEXT("voxel.Render.LumenCards"),
 	0,
-	TEXT("1 = each chunk primitive has Lumen cards (G116 step 4: six axis-aligned cards over its mesh's box) and is in Lumen's\n")
-	TEXT("scene, so a ray that hits the terrain reads Lumen's surface cache instead of black. 0 = no cards, out of Lumen's scene\n")
-	TEXT("(the default until cards fitted to the surface close the gap under overhangs: the axis cards bring the terrain's bounce\n")
-	TEXT("back but not that, for about +1 ms of render thread). Needs voxel.Render.ChunkPrimitives 1. A change re-meshes the terrain."),
+	TEXT("Each chunk primitive's Lumen cards (G116), which put it in Lumen's scene so a ray that hits the terrain reads Lumen's\n")
+	TEXT("surface cache instead of black: 1 = axis-aligned cards over its mesh's box (step 4, .Slices), 2 = cards fitted to its\n")
+	TEXT("surface, one per layer facing one way (an overhang's underside above a cave's ceiling each get theirs; .Resolution,\n")
+	TEXT(".MaxCards, .MinCells). 0 = no cards, out of Lumen's scene (the default). Needs voxel.Render.ChunkPrimitives 1.\n")
+	TEXT("A change re-meshes the terrain."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarVoxelLumenCardSlices(
@@ -91,11 +92,38 @@ static TAutoConsoleVariable<int32> CVarVoxelLumenCardSlices(
 	TEXT("stacked surfaces (an overhang over a cave) at that many times the cache's texels. A change re-meshes the terrain."),
 	ECVF_Default);
 
-/** The slices per axis the chunk primitives' Lumen cards take now (0 = no cards) */
-static int32 GetWantedChunkPrimitiveCardSlices()
+static TAutoConsoleVariable<int32> CVarVoxelLumenCardResolution(
+	TEXT("voxel.Render.LumenCards.Resolution"),
+	16,
+	TEXT("Tuning (G116, voxel.Render.LumenCards 2): cells along a chunk mesh's longest side of the grid its surface is sampled on\n")
+	TEXT("to fit its cards (4-64): finer tells thinner layers apart, for more cards and build time. A change re-meshes the terrain."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVoxelLumenCardMax(
+	TEXT("voxel.Render.LumenCards.MaxCards"),
+	16,
+	TEXT("Tuning (G116, voxel.Render.LumenCards 2): the most fitted cards a chunk mesh keeps (1-32, Lumen's limit a mesh); the\n")
+	TEXT("clusters covering least go first. A change re-meshes the terrain."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVoxelLumenCardMinCells(
+	TEXT("voxel.Render.LumenCards.MinCells"),
+	4,
+	TEXT("Tuning (G116, voxel.Render.LumenCards 2): the fewest grid cells of surface a fitted card under the outer layer covers;\n")
+	TEXT("a smaller layer has none (its hits read the outer card's, or black). A change re-meshes the terrain."),
+	ECVF_Default);
+
+/** The Lumen cards the chunk primitives' meshes take now (none when off) */
+static FVoxelChunkMeshCardSettings GetWantedChunkPrimitiveCards()
 {
-	return CVarVoxelLumenCards.GetValueOnGameThread() != 0
-		? FMath::Clamp(CVarVoxelLumenCardSlices.GetValueOnGameThread(), 1, MaxVoxelChunkMeshCardSlices) : 0;
+	FVoxelChunkMeshCardSettings Cards;
+	const int32 Mode = CVarVoxelLumenCards.GetValueOnGameThread();
+	Cards.Mode = Mode <= 0 ? EVoxelChunkMeshCards::None : Mode == 1 ? EVoxelChunkMeshCards::Axis : EVoxelChunkMeshCards::Fitted;
+	Cards.Slices = FMath::Clamp(CVarVoxelLumenCardSlices.GetValueOnGameThread(), 1, MaxVoxelChunkMeshCardSlices);
+	Cards.Resolution = FMath::Clamp(CVarVoxelLumenCardResolution.GetValueOnGameThread(), 4, 64);
+	Cards.MaxCards = FMath::Clamp(CVarVoxelLumenCardMax.GetValueOnGameThread(), 1, 32);
+	Cards.MinCells = FMath::Max(CVarVoxelLumenCardMinCells.GetValueOnGameThread(), 1);
+	return Cards;
 }
 
 /** Failsafe for a fade hold nobody releases (the chunk manager's own cap, voxel.MeshFade.SeamHoldMs, is 1 s). */
@@ -2481,7 +2509,7 @@ void UVoxelRegionComponent::OnRegister()
 	{
 		bUseChunkPrimitives = CVarVoxelChunkPrimitives.GetValueOnGameThread() != 0;
 		bChunkPrimitiveRayTracing = IsVoxelRayTracingWanted();
-		ChunkPrimitiveCardSlices = GetWantedChunkPrimitiveCardSlices();
+		ChunkPrimitiveCards = GetWantedChunkPrimitiveCards();
 	}
 }
 
@@ -2509,8 +2537,8 @@ void UVoxelRegionComponent::EnsureChunkPrimitiveMode()
 
 	const bool bWant = CVarVoxelChunkPrimitives.GetValueOnGameThread() != 0;
 	const bool bWantRayTracing = IsVoxelRayTracingWanted();
-	const int32 WantCardSlices = GetWantedChunkPrimitiveCardSlices();
-	if (bWant == bUseChunkPrimitives && (!bWant || (bWantRayTracing == bChunkPrimitiveRayTracing && WantCardSlices == ChunkPrimitiveCardSlices)))
+	const FVoxelChunkMeshCardSettings WantCards = GetWantedChunkPrimitiveCards();
+	if (bWant == bUseChunkPrimitives && (!bWant || (bWantRayTracing == bChunkPrimitiveRayTracing && WantCards == ChunkPrimitiveCards)))
 	{
 		return;
 	}
@@ -2541,11 +2569,14 @@ void UVoxelRegionComponent::EnsureChunkPrimitiveMode()
 		}
 	}
 
-	UE_LOG(LogVoxelRendering, Log, TEXT("%s: chunk primitives %s (ray tracing %s, Lumen card slices %d): the owner sends the meshes again"), *GetName(),
-		bWant ? TEXT("on") : TEXT("off"), bWantRayTracing ? TEXT("on") : TEXT("off"), WantCardSlices);
+	const FString CardsText = WantCards.Mode == EVoxelChunkMeshCards::None ? FString(TEXT("off"))
+		: WantCards.Mode == EVoxelChunkMeshCards::Axis ? FString::Printf(TEXT("axis, %d slices"), WantCards.Slices)
+		: FString::Printf(TEXT("fitted, resolution %d, at most %d, min %d cells"), WantCards.Resolution, WantCards.MaxCards, WantCards.MinCells);
+	UE_LOG(LogVoxelRendering, Log, TEXT("%s: chunk primitives %s (ray tracing %s, Lumen cards %s): the owner sends the meshes again"), *GetName(),
+		bWant ? TEXT("on") : TEXT("off"), bWantRayTracing ? TEXT("on") : TEXT("off"), *CardsText);
 	bUseChunkPrimitives = bWant;
 	bChunkPrimitiveRayTracing = bWantRayTracing;
-	ChunkPrimitiveCardSlices = WantCardSlices;
+	ChunkPrimitiveCards = WantCards;
 	{
 		FScopeLock Lock(&ChunkInfoLock);
 		bRenderDataLost |= ChunkInfoMap.Num() > 0 || SeamBucketSlotMasks.Num() > 0;
@@ -2601,7 +2632,7 @@ FVoxelChunkSceneProxy* UVoxelRegionComponent::CreateChunkPrimitive(const FIntVec
 	Init.bRadialFaceUp = bRadialFaceUp;
 	Init.FaceUpCenter = FaceUpCenter;
 	Init.bSeam = FVoxelFadeScheduler::IsSeamKey(Key);
-	Init.bLumenCards = ChunkPrimitiveCardSlices > 0;
+	Init.bLumenCards = ChunkPrimitiveCards.HasCards();
 	return new FVoxelChunkSceneProxy(Desc, MoveTemp(Init));
 }
 
@@ -2616,7 +2647,7 @@ void UVoxelRegionComponent::SubmitChunkPrimitive(const FIntVector4& Key, TArray<
 		return;
 	}
 	SubmitChunkPrimitiveMesh(Key, MakeShared<FVoxelChunkMesh, ESPMode::ThreadSafe>(MoveTemp(Vertices), MoveTemp(Indices), LODLevel,
-		LocalBounds, Origin, ChunkMeshBytes.ToSharedRef(), ChunkPrimitiveCardSlices), bFade);
+		LocalBounds, Origin, ChunkMeshBytes.ToSharedRef(), ChunkPrimitiveCards), bFade);
 }
 
 void UVoxelRegionComponent::SubmitChunkPrimitiveMesh(const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh, bool bFade)

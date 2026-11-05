@@ -87,6 +87,8 @@ bool FVoxelChunkMeshCardsFromBoundsTest::RunTest(const FString& Parameters)
 	const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe> Bytes = MakeShared<std::atomic<int64>, ESPMode::ThreadSafe>(0);
 	auto MakeMesh = [&](const FBox& LocalBox, int32 NumTriangles, bool bCards)
 	{
+		FVoxelChunkMeshCardSettings CardSettings;
+		CardSettings.Mode = bCards ? EVoxelChunkMeshCards::Axis : EVoxelChunkMeshCards::None;
 		TArray<FVoxelVertex> Vertices;
 		Vertices.SetNum(3);
 		TArray<uint32> Indices;
@@ -94,7 +96,7 @@ bool FVoxelChunkMeshCardsFromBoundsTest::RunTest(const FString& Parameters)
 		{
 			Indices.Append({ 0u, 1u, 2u });
 		}
-		return MakeUnique<FVoxelChunkMesh>(MoveTemp(Vertices), MoveTemp(Indices), 0, LocalBox, FVector(1.0e6, -2.0e6, 3.0e5), Bytes, bCards);
+		return MakeUnique<FVoxelChunkMesh>(MoveTemp(Vertices), MoveTemp(Indices), 0, LocalBox, FVector(1.0e6, -2.0e6, 3.0e5), Bytes, CardSettings);
 	};
 
 	// A chunk's box relative to its origin, flatter than it is wide (a terrain chunk's mesh)
@@ -164,6 +166,183 @@ bool FVoxelChunkMeshCardsFromBoundsTest::RunTest(const FString& Parameters)
 	TestNull(TEXT("No triangles: no card representation"), MakeMesh(Box, 0, true)->CardRepresentation.Get());
 	TestNull(TEXT("No box: no card representation"), MakeMesh(FBox(ForceInit), 4, true)->CardRepresentation.Get());
 	TestEqual(TEXT("Nothing uploaded: no buffer bytes counted"), Bytes->load(), int64(0));
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// G116: cards fitted to a chunk mesh's surface. Stacked layers facing the same way each get a card that captures them:
+// an overhang's underside above a cave's ceiling (two downward layers: the axis cards' -Z card sees only the lower one),
+// and a cave wall behind another; every card's box leaves out the layer in front of the one it captures, the flat
+// ground gets one card fitted to it, and MaxCards keeps the cards covering most. Headless.
+// ---------------------------------------------------------------------------
+
+namespace VoxelChunkMeshCardTest
+{
+	/** A rectangle facing Normal, split into 2 x Splits x Splits triangles: Corner, then the two edges from it */
+	void AddRect(TArray<FVoxelVertex>& Vertices, TArray<uint32>& Indices, const FVector3f& Corner, const FVector3f& EdgeA, const FVector3f& EdgeB,
+		const FVector3f& Normal, int32 Splits = 4)
+	{
+		const uint32 Base = Vertices.Num();
+		for (int32 J = 0; J <= Splits; ++J)
+		{
+			for (int32 I = 0; I <= Splits; ++I)
+			{
+				Vertices.Emplace(Corner + EdgeA * (float(I) / Splits) + EdgeB * (float(J) / Splits), Normal, FVector2f::ZeroVector, 0);
+			}
+		}
+		for (int32 J = 0; J < Splits; ++J)
+		{
+			for (int32 I = 0; I < Splits; ++I)
+			{
+				const uint32 A = Base + J * (Splits + 1) + I;
+				const uint32 B = A + 1;
+				const uint32 C = A + Splits + 1;
+				const uint32 D = C + 1;
+				Indices.Append({ A, B, D, A, D, C });
+			}
+		}
+	}
+
+	/** Whether Point lies inside the card's box (its extent along the card's own axes) */
+	bool CardContains(const FLumenCardBuildData& Card, const FVector3f& Point, float Tolerance = 0.01f)
+	{
+		const FVector3f FromOrigin = Point - FVector3f(Card.OBB.Origin);
+		return FMath::Abs(FromOrigin.Dot(Card.OBB.AxisX)) <= Card.OBB.Extent.X + Tolerance
+			&& FMath::Abs(FromOrigin.Dot(Card.OBB.AxisY)) <= Card.OBB.Extent.Y + Tolerance
+			&& FMath::Abs(FromOrigin.Dot(Card.OBB.AxisZ)) <= Card.OBB.Extent.Z + Tolerance;
+	}
+
+	/** Whether a card facing Direction captures Point: its box holds the point and none of the surface in front of it */
+	bool IsCaptured(const FMeshCardsBuildData& Data, int32 Direction, const FVector3f& Point, TConstArrayView<FVector3f> InFront)
+	{
+		for (const FLumenCardBuildData& Card : Data.CardBuildData)
+		{
+			if (Card.AxisAlignedDirectionIndex == Direction && CardContains(Card, Point)
+				&& !InFront.ContainsByPredicate([&Card](const FVector3f& Front) { return CardContains(Card, Front); }))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	int32 CountDirection(const FMeshCardsBuildData& Data, int32 Direction)
+	{
+		int32 Count = 0;
+		for (const FLumenCardBuildData& Card : Data.CardBuildData)
+		{
+			Count += Card.AxisAlignedDirectionIndex == Direction ? 1 : 0;
+		}
+		return Count;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelChunkMeshFittedCardsTest,
+	"VoxelWorlds.Rendering.ChunkPrimitives.FittedCards",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelChunkMeshFittedCardsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelChunkMeshCardTest;
+	FVoxelChunkMeshCardSettings Settings;
+	Settings.Mode = EVoxelChunkMeshCards::Fitted;
+	const FBox Box(FVector::ZeroVector, FVector(3200.0));
+	const FVector3f Up = FVector3f::UpVector;
+	// Directions: 0 -X, 1 +X, 2 -Y, 3 +Y, 4 -Z, 5 +Z
+	constexpr int32 MinusZ = 4;
+	constexpr int32 PlusZ = 5;
+	constexpr int32 PlusX = 1;
+
+	// An overhang over a cave in one chunk: the ground's top (up, z 3050), the overhang's underside over half the chunk
+	// (down, z 2450), and the cave's ceiling below it over the whole chunk (down, z 850)
+	{
+		TArray<FVoxelVertex> Vertices;
+		TArray<uint32> Indices;
+		AddRect(Vertices, Indices, FVector3f(0, 0, 3050), FVector3f(3200, 0, 0), FVector3f(0, 3200, 0), Up);
+		AddRect(Vertices, Indices, FVector3f(0, 0, 2450), FVector3f(1600, 0, 0), FVector3f(0, 3200, 0), -Up);
+		AddRect(Vertices, Indices, FVector3f(0, 0, 850), FVector3f(3200, 0, 0), FVector3f(0, 3200, 0), -Up);
+		FMeshCardsBuildData Data;
+		FVoxelChunkMeshCardBuildStats Stats;
+		BuildVoxelChunkMeshFittedCards(Vertices, Indices, Box, Settings, Data, &Stats);
+
+		TestEqual(TEXT("Overhang: one card up (the ground's top)"), CountDirection(Data, PlusZ), 1);
+		TestEqual(TEXT("Overhang: two cards down (the overhang's underside and the cave's ceiling)"), CountDirection(Data, MinusZ), 2);
+		TestEqual(TEXT("Overhang: no card sideways"), Data.CardBuildData.Num(), 3);
+		const FVector3f Underside(800, 1600, 2450);
+		const FVector3f Ceiling(800, 1600, 850);
+		const FVector3f Top(800, 1600, 3050);
+		TestTrue(TEXT("Overhang: the underside is captured, the ceiling below it left out of its card"),
+			IsCaptured(Data, MinusZ, Underside, { Ceiling }));
+		TestTrue(TEXT("Overhang: the cave's ceiling is captured, under the overhang and past it"),
+			IsCaptured(Data, MinusZ, Ceiling, {}) && IsCaptured(Data, MinusZ, FVector3f(2400, 1600, 850), {}));
+		TestTrue(TEXT("Overhang: the ground's top is captured"), IsCaptured(Data, PlusZ, Top, {}));
+		TestTrue(*FString::Printf(TEXT("Overhang: the cards capture the whole surface (%d of %d elements)"), Stats.CoveredSurfels, Stats.Surfels),
+			Stats.Surfels > 0 && Stats.CoveredSurfels == Stats.Surfels);
+
+		// What step 4's axis cards miss: the -Z card over the whole box holds the cave's ceiling in front of the underside
+		FMeshCardsBuildData Axis;
+		BuildVoxelChunkMeshCards(Box, 1, Axis);
+		TestFalse(TEXT("Overhang, axis cards: the underside is not captured (the gap fitted cards close)"),
+			IsCaptured(Axis, MinusZ, Underside, { Ceiling }));
+
+		// MaxCards keeps the cards that cover most: the ground's top and the cave's ceiling (a whole face each)
+		FVoxelChunkMeshCardSettings Two = Settings;
+		Two.MaxCards = 2;
+		FMeshCardsBuildData Capped;
+		BuildVoxelChunkMeshFittedCards(Vertices, Indices, Box, Two, Capped, &Stats);
+		TestTrue(*FString::Printf(TEXT("Overhang, MaxCards 2: the top and the ceiling kept (%d cards of %d clusters)"), Capped.CardBuildData.Num(), Stats.Clusters),
+			Capped.CardBuildData.Num() == 2 && Stats.Clusters == 3 && IsCaptured(Capped, PlusZ, Top, {}) && IsCaptured(Capped, MinusZ, Ceiling, {})
+			&& !IsCaptured(Capped, MinusZ, Underside, { Ceiling }));
+
+		// A layer under MinCells gets no card of its own
+		FVoxelChunkMeshCardSettings Large = Settings;
+		Large.MinCells = 10000;
+		FMeshCardsBuildData Coarse;
+		BuildVoxelChunkMeshFittedCards(Vertices, Indices, Box, Large, Coarse);
+		TestEqual(TEXT("Overhang, MinCells 10000: the outer layers' cards only"), Coarse.CardBuildData.Num(), 2);
+	}
+
+	// Cave walls: two walls facing +X, the nearer one (x 2050) over the lower half, the farther one (x 650) over the whole
+	// height; the farther wall's lower half is behind the nearer one
+	{
+		TArray<FVoxelVertex> Vertices;
+		TArray<uint32> Indices;
+		const FVector3f East(1, 0, 0);
+		AddRect(Vertices, Indices, FVector3f(2050, 0, 0), FVector3f(0, 3200, 0), FVector3f(0, 0, 1600), East);
+		AddRect(Vertices, Indices, FVector3f(650, 0, 0), FVector3f(0, 3200, 0), FVector3f(0, 0, 3200), East);
+		FMeshCardsBuildData Data;
+		BuildVoxelChunkMeshFittedCards(Vertices, Indices, Box, Settings, Data);
+		const FVector3f Near(2050, 1600, 800);
+		TestTrue(TEXT("Walls: the nearer wall is captured"), IsCaptured(Data, PlusX, Near, {}));
+		TestTrue(TEXT("Walls: the farther wall is captured behind the nearer one, and above it"),
+			IsCaptured(Data, PlusX, FVector3f(650, 1600, 800), { Near }) && IsCaptured(Data, PlusX, FVector3f(650, 1600, 2400), {}));
+		TestEqual(TEXT("Walls: only +X cards"), CountDirection(Data, PlusX), Data.CardBuildData.Num());
+	}
+
+	// Flat ground over part of a chunk: one card, fitted to the ground's rectangle (not the chunk's face)
+	{
+		TArray<FVoxelVertex> Vertices;
+		TArray<uint32> Indices;
+		AddRect(Vertices, Indices, FVector3f(400, 400, 1000), FVector3f(1200, 0, 0), FVector3f(0, 800, 0), Up);
+		const FBox Ground(FVector(400, 400, 1000), FVector(1600, 1200, 1000));
+		FMeshCardsBuildData Data;
+		BuildVoxelChunkMeshFittedCards(Vertices, Indices, Ground, Settings, Data);
+		if (TestEqual(TEXT("Ground: one card"), Data.CardBuildData.Num(), 1))
+		{
+			const FLumenCardBuildData& Card = Data.CardBuildData[0];
+			TestEqual(TEXT("Ground: it faces up"), int32(Card.AxisAlignedDirectionIndex), PlusZ);
+			TestTrue(*FString::Printf(TEXT("Ground: it covers the rectangle and no more (extent %s)"), *Card.OBB.Extent.ToString()),
+				FMath::IsNearlyEqual(Card.OBB.Extent.X, 600.0f, 1.0f) && FMath::IsNearlyEqual(Card.OBB.Extent.Y, 400.0f, 1.0f)
+				&& CardContains(Card, FVector3f(400, 400, 1000)) && CardContains(Card, FVector3f(1600, 1200, 1000)));
+		}
+	}
+
+	// Nothing to build from: no cards
+	{
+		FMeshCardsBuildData Data;
+		BuildVoxelChunkMeshFittedCards({}, {}, Box, Settings, Data);
+		TestEqual(TEXT("No triangles: no cards"), Data.CardBuildData.Num(), 0);
+	}
 	return true;
 }
 
@@ -359,6 +538,21 @@ bool FVoxelChunkPrimitiveLifecycleTest::RunTest(const FString& Parameters)
 		I = Info();
 		TestTrue(*FString::Printf(TEXT("voxel.Render.LumenCards 1 again: six cards (%d), both primitives (%d)"), I.LumenCards, Component->GetChunkPrimitiveCount()),
 			I.LumenCards == 6 && Component->GetChunkPrimitiveCount() == 2 && (!bLumenTracesScene || I.bVisibleInLumenScene));
+
+		// Fitted cards (voxel.Render.LumenCards 2): the re-sent meshes' cards fit their surface, one for the flat quads' top
+		{
+			const FScopedCVar CardsFitted(TEXT("voxel.Render.LumenCards"), TEXT("2"));
+			Renderer.FlushPendingOperations();
+			TestTrue(TEXT("voxel.Render.LumenCards 2: the owner asked for the chunk again"), Renderer.ConsumeLostRenderData(Lost) && Lost.Contains(Chunk));
+			Renderer.UpdateChunkMeshFromCPU(Chunk, 1, MakeQuads(2, 101.0f));
+			Renderer.UpdateSeamMeshFromCPU(Chunk, 0, 1, MakeQuads(2, 99.0f));
+			Renderer.FlushPendingOperations();
+			I = Info();
+			TestTrue(*FString::Printf(TEXT("voxel.Render.LumenCards 2: one fitted card (%d), both primitives (%d), in Lumen's scene"), I.LumenCards,
+				Component->GetChunkPrimitiveCount()), I.LumenCards == 1 && Component->GetChunkPrimitiveCount() == 2 && (!bLumenTracesScene || I.bVisibleInLumenScene));
+		}
+		Renderer.FlushPendingOperations();
+		Renderer.ConsumeLostRenderData(Lost);
 
 		// The bucket removed, the chunk unloaded: nothing left
 		Renderer.RemoveSeamMesh(Chunk, 0);
