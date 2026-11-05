@@ -1,11 +1,16 @@
 # Lumen's Surface Cache for the Terrain (G116 plan)
 
+> **Frozen 2026-11-05.** This plan is history: G116 is closed as an engine limit (the user's decision). What is
+> left, the overhang's on-screen gap, is Lumen's screen traces reading the visible underside's lit pixels, which no
+> card on the terrain can match. What ships is in [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "Chunk Primitives"
+> and "What Lumen Sees".
+>
 > State as of 2026-11-05. Steps 1-3 done (§3: the chunk primitives, their fades, cached ray tracing; the default since
 > 2026-11-04, results in [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "Chunk Primitives"); step 4 done (§4: axis
 > cards behind `voxel.Render.LumenCards`, off by default; the terrain's bounce is back, the overhang's off-screen gap is
 > not); the fitted cards done (§4, 2026-11-05: `voxel.Render.LumenCards 2`, off by default; they cover stacked layers and
 > match an engine mesh's cards with screen traces off, and the on-screen gap stays at 0.92-0.93; the user kept the default
-> off, 2026-11-05). G116 open for what is left (§4 "Next"). Terms:
+> off, 2026-11-05). G116 closed as an engine limit, 2026-11-05. Terms:
 > `Documentation/GLOSSARY.md`. The finding is G116 in the project's `Documentation/FINDINGS.md`; the spike that chose the
 > path is [LUMEN_OFFSCREEN_TERRAIN_SPIKE.md](LUMEN_OFFSCREEN_TERRAIN_SPIKE.md) (frozen); what ships is described in
 > [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "What Lumen Sees".
