@@ -5,6 +5,9 @@
 #include "CoreMinimal.h"
 #include "ChunkRenderData.generated.h"
 
+/** The Lumen cards a mesh worker fitted to a mesh for the renderer (G116): defined by VoxelRendering, opaque here */
+struct FVoxelPrebuiltChunkMeshCards;
+
 /**
  * A chunk's mesh as the meshers produce it: the chunk manager uploads it to the renderer and
  * cooks collision from it. (FChunkRenderData, the GPU-buffer twin of this struct, went with the
@@ -48,6 +51,10 @@ struct VOXELCORE_API FChunkMeshData
 	 *  Used by renderers to decide whether to create a masked mesh section. */
 	bool bHasMaskedMaterial = false;
 
+	/** The Lumen cards its mesh worker fitted to it (G116, VoxelRendering's PrebuildVoxelChunkMeshCards): the renderer takes
+	 *  them with the mesh; null when the fitted cards are off or the mesh came from elsewhere (the renderer fits them then) */
+	TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> PrebuiltLumenCards;
+
 	/** Clear all mesh data */
 	void Reset()
 	{
@@ -58,6 +65,7 @@ struct VOXELCORE_API FChunkMeshData
 		Colors.Reset();
 		Indices.Reset();
 		bHasMaskedMaterial = false;
+		PrebuiltLumenCards.Reset();
 	}
 
 	/** Check if mesh has valid data */

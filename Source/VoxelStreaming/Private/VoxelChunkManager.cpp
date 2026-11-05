@@ -21,6 +21,7 @@
 #include "IVoxelLODStrategy.h"
 #include "DistanceBandLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
+#include "VoxelChunkMeshCards.h" // PrebuildVoxelChunkMeshCards: the chunks' fitted Lumen cards on their mesh workers (G116)
 #include "IVoxelWorldMode.h"
 #include "VoxelWorldModeFactory.h"
 #include "VoxelSurfaceQuery.h"
@@ -4311,6 +4312,11 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 		TakeDeferredMeshVoxels(DeferredVoxels, DeferredDecode, MeshRequest.VoxelData);
 		const bool bSuccess = MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);
 		const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
+		// The mesh's fitted Lumen cards (G116), here rather than at the upload on the game thread
+		if (bSuccess)
+		{
+			MeshData.PrebuiltLumenCards = PrebuildVoxelChunkMeshCards(MeshData);
+		}
 
 		// Queue result for game thread (thread-safe MPSC queue)
 		if (UVoxelChunkManager* This = WeakThis.Get())
@@ -5365,6 +5371,10 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 			const double WorkerStart = FPlatformTime::Seconds();
 			const bool bSuccess = SeamMesherPtr->GenerateFaceSeamMeshCPU(SeamRequest, MeshData);
 			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
+			if (bSuccess)
+			{
+				MeshData.PrebuiltLumenCards = PrebuildVoxelChunkMeshCards(MeshData); // G116: the seam's fitted cards, merged per bucket
+			}
 			if (UVoxelChunkManager* This = WeakThis.Get())
 			{
 				FCompletedSeamMesh Result;
@@ -5412,6 +5422,10 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 			const double WorkerStart = FPlatformTime::Seconds();
 			const bool bSuccess = SeamMesherPtr->GenerateEdgeSeamMeshCPU(SeamRequest, MeshData);
 			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
+			if (bSuccess)
+			{
+				MeshData.PrebuiltLumenCards = PrebuildVoxelChunkMeshCards(MeshData); // G116: the seam's fitted cards, merged per bucket
+			}
 			if (UVoxelChunkManager* This = WeakThis.Get())
 			{
 				FCompletedSeamMesh Result;
@@ -5458,6 +5472,10 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 			const double WorkerStart = FPlatformTime::Seconds();
 			const bool bSuccess = SeamMesherPtr->GenerateCornerSeamMeshCPU(SeamRequest, MeshData);
 			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
+			if (bSuccess)
+			{
+				MeshData.PrebuiltLumenCards = PrebuildVoxelChunkMeshCards(MeshData); // G116: the seam's fitted cards, merged per bucket
+			}
 			if (UVoxelChunkManager* This = WeakThis.Get())
 			{
 				FCompletedSeamMesh Result;
@@ -5586,7 +5604,7 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 
 void UVoxelChunkManager::SubmitSeamOwnerBucket(const FIntVector& Owner)
 {
-	const FSeamOwnerSlots* OwnerSlots = SeamOwnerSlots.Find(Owner);
+	FSeamOwnerSlots* OwnerSlots = SeamOwnerSlots.Find(Owner);
 	if (!OwnerSlots || !MeshRenderer)
 	{
 		return;
@@ -5594,13 +5612,21 @@ void UVoxelChunkManager::SubmitSeamOwnerBucket(const FIntVector& Owner)
 
 	FChunkMeshData Merged;
 	int32 MinLOD = TNumericLimits<int32>::Max();
+	TArray<TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>, TInlineAllocator<7>> SlotCards;
 	for (int32 s = 0; s < 7; ++s)
 	{
-		const FChunkMeshData& SlotMesh = OwnerSlots->Slots[s];
+		FChunkMeshData& SlotMesh = OwnerSlots->Slots[s];
 		if (!SlotMesh.IsValid())
 		{
 			continue;
 		}
+		// A seam kept from before a Lumen cards change (lost render data re-sends the slots without meshing them again) has
+		// its cards fitted again, once, here
+		if (AreVoxelPrebuiltChunkMeshCardsStale(SlotMesh))
+		{
+			SlotMesh.PrebuiltLumenCards = PrebuildVoxelChunkMeshCards(SlotMesh);
+		}
+		SlotCards.Add(SlotMesh.PrebuiltLumenCards);
 		MinLOD = FMath::Min(MinLOD, FMath::Max(OwnerSlots->SlotLOD[s], 0));
 		const uint32 Base = static_cast<uint32>(Merged.Positions.Num());
 		Merged.Positions.Append(SlotMesh.Positions);
@@ -5618,6 +5644,8 @@ void UVoxelChunkManager::SubmitSeamOwnerBucket(const FIntVector& Owner)
 	{
 		MinLOD = 0; // all slots empty: the submit removes the bucket, the LOD is unused
 	}
+	// The bucket's Lumen cards from its seams' (G116; null when a seam has none: the upload fits the bucket then)
+	Merged.PrebuiltLumenCards = MergeVoxelPrebuiltChunkMeshCards(SlotCards);
 
 	if (SeamHolds.IsSeamOwnerHeld(Owner))
 	{

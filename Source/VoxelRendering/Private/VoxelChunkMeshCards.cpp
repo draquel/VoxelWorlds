@@ -1,0 +1,611 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+#include "VoxelChunkMeshCards.h"
+#include "VoxelChunkMeshCardsPrivate.h"
+#include "VoxelRendering.h"
+#include "ChunkRenderData.h"
+#include "MeshCardBuild.h"
+#include "MeshCardRepresentation.h"
+
+#include <atomic>
+
+namespace
+{
+	constexpr int32 NumCardDirections = 6;
+	constexpr int32 MaxCardsPerMesh = 32;
+	constexpr int32 MaxFittedResolution = 64;
+	/** A grid cell holds surface (bit 7) and which of the six directions some of it faces (bits 0-5) */
+	constexpr uint8 OccupiedBit = 0x80;
+	/** How far a card's box may reach past the mesh's box along its depth, as the engine's builder leaves (LOD, displacement) */
+	constexpr double CardDepthMargin = 10.0;
+
+	/** A direction's card space, as the engine's builder lays it out (InitClusteringParams): U and V across, depth from the
+	 *  box's face on the direction's side into the mesh */
+	struct FCardBasis
+	{
+		int32 Axis = 0;
+		int32 U = 0;
+		int32 V = 0;
+		bool bPositive = false;
+
+		explicit FCardBasis(int32 Direction)
+			: Axis(Direction / 2)
+			, U(Axis == 0 ? 1 : 0)
+			, V(Axis == 2 ? 1 : 2)
+			, bPositive((Direction & 1) != 0)
+		{
+		}
+	};
+
+	/** A surface element: a column's cell (U, V, depth Z) where surface facing the direction follows empty space, and the
+	 *  nearest near plane a card may take to capture it (one past the last surface in front of it) */
+	struct FCardSurfel
+	{
+		uint8 U = 0;
+		uint8 V = 0;
+		uint8 Z = 0;
+		uint8 MinZ = 0;
+	};
+
+	/** A cluster of surface elements one card captures: its near plane and its cells' bounds (U, V, depth) */
+	struct FCardCluster
+	{
+		int32 Direction = 0;
+		int32 NearPlane = 0;
+		int32 Coverage = 0;
+		FIntVector Min = FIntVector(MAX_int32);
+		FIntVector Max = FIntVector(MIN_int32);
+
+		void Add(const FCardSurfel& Surfel)
+		{
+			++Coverage;
+			Min = FIntVector(FMath::Min<int32>(Min.X, Surfel.U), FMath::Min<int32>(Min.Y, Surfel.V), FMath::Min<int32>(Min.Z, Surfel.Z));
+			Max = FIntVector(FMath::Max<int32>(Max.X, Surfel.U), FMath::Max<int32>(Max.Y, Surfel.V), FMath::Max<int32>(Max.Z, Surfel.Z));
+		}
+
+		int32 GetFaceArea() const
+		{
+			return Coverage > 0 ? (Max.X - Min.X + 1) * (Max.Y - Min.Y + 1) : 0;
+		}
+	};
+
+	TAutoConsoleVariable<int32> CVarVoxelLumenCards(
+		TEXT("voxel.Render.LumenCards"),
+		0,
+		TEXT("Each chunk primitive's Lumen cards (G116), which put it in Lumen's scene so a ray that hits the terrain reads Lumen's\n")
+		TEXT("surface cache instead of black: 1 = axis-aligned cards over its mesh's box (step 4, .Slices), 2 = cards fitted to its\n")
+		TEXT("surface, one per layer facing one way (an overhang's underside above a cave's ceiling each get theirs; .Resolution,\n")
+		TEXT(".MaxCards, .MinCells; a chunk's are fitted on its mesh worker). 0 = no cards, out of Lumen's scene (the default).\n")
+		TEXT("Needs voxel.Render.ChunkPrimitives 1. A change re-meshes the terrain."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarVoxelLumenCardSlices(
+		TEXT("voxel.Render.LumenCards.Slices"),
+		1,
+		TEXT("Tuning (G116 step 4, voxel.Render.LumenCards 1): each chunk mesh's box is cut into this many parts along each axis,\n")
+		TEXT("with two cards per part (6 x this many cards, 1-5): a card captures one layer of surface, so more slices let Lumen's\n")
+		TEXT("surface cache see stacked surfaces (an overhang over a cave) at that many times the cache's texels. A change re-meshes\n")
+		TEXT("the terrain."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarVoxelLumenCardResolution(
+		TEXT("voxel.Render.LumenCards.Resolution"),
+		16,
+		TEXT("Tuning (G116, voxel.Render.LumenCards 2): cells along a chunk mesh's longest side of the grid its surface is sampled on\n")
+		TEXT("to fit its cards (4-64): finer tells thinner layers apart, for more cards and build time. A change re-meshes the terrain."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarVoxelLumenCardMax(
+		TEXT("voxel.Render.LumenCards.MaxCards"),
+		16,
+		TEXT("Tuning (G116, voxel.Render.LumenCards 2): the most fitted cards a chunk mesh keeps (1-32, Lumen's limit a mesh); the\n")
+		TEXT("clusters covering least go first. A change re-meshes the terrain."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarVoxelLumenCardMinCells(
+		TEXT("voxel.Render.LumenCards.MinCells"),
+		4,
+		TEXT("Tuning (G116, voxel.Render.LumenCards 2): the fewest grid cells of surface a fitted card under the outer layer covers;\n")
+		TEXT("a smaller layer has none (its hits read the outer card's, or black). A change re-meshes the terrain."),
+		ECVF_Default);
+
+	std::atomic<int64> GCardMeshes{ 0 };
+	std::atomic<int64> GCards{ 0 };
+	std::atomic<int64> GFittedMeshes{ 0 };
+	std::atomic<int64> GSurfels{ 0 };
+	std::atomic<int64> GCoveredSurfels{ 0 };
+	std::atomic<int64> GCapped{ 0 };
+	/** Build times in microseconds: on the game thread (the uploads), and on the mesh workers */
+	std::atomic<int64> GBuildMicros{ 0 };
+	std::atomic<int64> GMaxBuildMicros{ 0 };
+	std::atomic<int64> GWorkerMeshes{ 0 };
+	std::atomic<int64> GWorkerBuilds{ 0 };
+	std::atomic<int64> GWorkerMicros{ 0 };
+
+	FAutoConsoleCommand CmdVoxelLumenCardStats(
+		TEXT("voxel.Render.LumenCardStats"),
+		TEXT("The chunk meshes' Lumen cards (G116) since the start or the last reset: meshes built with cards, cards a mesh, and ")
+		TEXT("for the fitted cards (voxel.Render.LumenCards 2) the share of the sampled surface the cards capture, the meshes ")
+		TEXT("whose clusters MaxCards cut, and the build's time on the game thread (meshes whose worker did not fit their cards: a ")
+		TEXT("settings change, the tests) and on the mesh and seam workers (a seam bucket merges its seams' cards). 'reset' clears the counts."),
+		FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+		{
+			const FVoxelChunkMeshCardCounters::FCounts C = FVoxelChunkMeshCardCounters::Get();
+			const int64 GameThreadMeshes = C.Meshes - C.WorkerMeshes;
+			UE_LOG(LogVoxelRendering, Display,
+				TEXT("voxel.Render.LumenCardStats: %lld meshes with cards, %.2f cards a mesh; fitted %lld meshes, surface covered %.1f %% (%lld of %lld elements), %lld capped; game thread %lld meshes, %.1f us a mesh, longest %.1f us, %.1f ms in all; workers' cards %lld meshes, %lld builds, %.1f us a build"),
+				C.Meshes, C.Meshes > 0 ? double(C.Cards) / C.Meshes : 0.0, C.FittedMeshes,
+				C.Surfels > 0 ? 100.0 * C.CoveredSurfels / C.Surfels : 0.0, C.CoveredSurfels, C.Surfels, C.Capped,
+				GameThreadMeshes, GameThreadMeshes > 0 ? 1.0e6 * C.Seconds / GameThreadMeshes : 0.0, 1.0e6 * C.MaxSeconds, 1.0e3 * C.Seconds,
+				C.WorkerMeshes, C.WorkerBuilds, C.WorkerBuilds > 0 ? 1.0e6 * C.WorkerSeconds / C.WorkerBuilds : 0.0);
+			if (Args.Num() > 0 && Args[0].Equals(TEXT("reset"), ESearchCase::IgnoreCase))
+			{
+				FVoxelChunkMeshCardCounters::Reset();
+			}
+		}));
+}
+
+// ==================== BuildVoxelChunkMeshFittedCards ====================
+
+/** The fitted build over any vertex source: GetPosition(Index) and GetNormal(Index) for Index < NumVertices */
+template<typename FGetPosition, typename FGetNormal>
+static void BuildFittedCards(int32 NumVertices, FGetPosition GetPosition, FGetNormal GetNormal, TConstArrayView<uint32> Indices,
+	const FBox& LocalBounds, const FVoxelChunkMeshCardSettings& Settings, FMeshCardsBuildData& OutCardData, FVoxelChunkMeshCardBuildStats* OutStats,
+	TArray<int32>* OutCardCoverage = nullptr, TArray<float>* OutCardArea = nullptr)
+{
+	OutCardData.CardBuildData.Reset();
+	FVoxelChunkMeshCardBuildStats Stats;
+	if (!LocalBounds.IsValid || Indices.Num() < 3)
+	{
+		if (OutStats)
+		{
+			*OutStats = Stats;
+		}
+		return;
+	}
+
+	// The grid: cubic cells, Resolution of them along the box's longest side (the engine's builder takes 10 uu cells up to
+	// 64 a side; with the default 16 a 64-voxel chunk's cell is about four of its voxels, and a layer is told from the one in
+	// front of it when a whole empty cell lies between them, 4-8 voxels). The grid starts a quarter cell before the box and
+	// ends half a cell past it: with uneven margins no cell boundary, where a card's near plane goes, sits on the box's
+	// centre or on the voxel faces of a 64-voxel side (a cubic mesh's faces)
+	const int32 Resolution = FMath::Clamp(Settings.Resolution, 4, MaxFittedResolution);
+	const FVector BoxSize = LocalBounds.GetSize();
+	const double CellSize = FMath::Max(BoxSize.GetMax(), 1.0) / (Resolution - 0.75);
+	const float InvCellSize = static_cast<float>(1.0 / CellSize);
+	FIntVector Dims;
+	for (int32 Axis = 0; Axis < 3; ++Axis)
+	{
+		Dims[Axis] = FMath::Clamp(FMath::CeilToInt32((BoxSize[Axis] + 0.75 * CellSize) / CellSize - 1.0e-3), 1, Resolution);
+	}
+	const FVector3f GridMin(LocalBounds.Min - FVector(0.25 * CellSize));
+	TArray<uint8> Cells;
+	Cells.SetNumZeroed(Dims.X * Dims.Y * Dims.Z);
+	auto CellIndex = [&Dims](int32 X, int32 Y, int32 Z) { return X + Dims.X * (Y + Dims.Y * Z); };
+	auto MarkCell = [&](const FVector3f& Point, uint8 Bits)
+	{
+		const FVector3f Local = (Point - GridMin) * InvCellSize;
+		const int32 X = FMath::Clamp(FMath::FloorToInt32(Local.X), 0, Dims.X - 1);
+		const int32 Y = FMath::Clamp(FMath::FloorToInt32(Local.Y), 0, Dims.Y - 1);
+		const int32 Z = FMath::Clamp(FMath::FloorToInt32(Local.Z), 0, Dims.Z - 1);
+		Cells[CellIndex(X, Y, Z)] |= Bits;
+	};
+
+	// Sample every triangle into the grid at half a cell's spacing: each cell it touches holds surface, and faces the
+	// directions the triangle faces by at least the engine's normal threshold (a slope counts for two directions, as there).
+	// The facing comes from the triangle's own normal, turned to agree with its vertices' (whatever the winding)
+	const float NormalThreshold = MeshCardRepresentation::GetNormalTreshold();
+	for (int32 Index = 0; Index + 2 < Indices.Num(); Index += 3)
+	{
+		const uint32 I0 = Indices[Index];
+		const uint32 I1 = Indices[Index + 1];
+		const uint32 I2 = Indices[Index + 2];
+		if (I0 >= static_cast<uint32>(NumVertices) || I1 >= static_cast<uint32>(NumVertices) || I2 >= static_cast<uint32>(NumVertices))
+		{
+			continue;
+		}
+		const FVector3f P0 = GetPosition(I0);
+		const FVector3f E1 = GetPosition(I1) - P0;
+		const FVector3f E2 = GetPosition(I2) - P0;
+		FVector3f Normal = FVector3f::CrossProduct(E1, E2);
+		const float Length = Normal.Size();
+		if (Length < UE_KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+		Normal /= Length;
+		const FVector3f VertexNormals = GetNormal(I0) + GetNormal(I1) + GetNormal(I2);
+		if (FVector3f::DotProduct(Normal, VertexNormals) < 0.0f)
+		{
+			Normal = -Normal;
+		}
+
+		uint8 Bits = OccupiedBit;
+		for (int32 Direction = 0; Direction < NumCardDirections; ++Direction)
+		{
+			const float Along = (Direction & 1) ? Normal[Direction / 2] : -Normal[Direction / 2];
+			if (Along >= NormalThreshold)
+			{
+				Bits |= 1 << Direction;
+			}
+		}
+
+		const float LongestEdge = FMath::Sqrt(FMath::Max3(E1.SizeSquared(), E2.SizeSquared(), (E2 - E1).SizeSquared()));
+		const int32 Steps = FMath::Clamp(FMath::CeilToInt32(2.0f * LongestEdge * InvCellSize), 1, 4 * MaxFittedResolution);
+		const float InvSteps = 1.0f / Steps;
+		for (int32 I = 0; I <= Steps; ++I)
+		{
+			for (int32 J = 0; I + J <= Steps; ++J)
+			{
+				MarkCell(P0 + E1 * (I * InvSteps) + E2 * (J * InvSteps), Bits);
+			}
+		}
+		MarkCell(P0 + (E1 + E2) * (1.0f / 3.0f), Bits);
+	}
+
+	// Per direction: the surface elements, walking each column from the box's face on that side (the engine's rays: a hit
+	// facing the direction that follows empty space starts an element; one right behind the last surface is the same
+	// surface's thickness, not a new layer)
+	const float MinDensity = MeshCardRepresentation::GetMinDensity() / 3.0f;
+	TArray<FCardCluster> Clusters;
+	TArray<FCardSurfel> Surfels;
+	TBitArray<> Assigned;
+	for (int32 Direction = 0; Direction < NumCardDirections; ++Direction)
+	{
+		const FCardBasis Basis(Direction);
+		const int32 DimU = Dims[Basis.U];
+		const int32 DimV = Dims[Basis.V];
+		const int32 DimZ = Dims[Basis.Axis];
+		const uint8 FacingBit = 1 << Direction;
+
+		Surfels.Reset();
+		for (int32 V = 0; V < DimV; ++V)
+		{
+			for (int32 U = 0; U < DimU; ++U)
+			{
+				int32 LastHit = -2;
+				FIntVector Coord;
+				Coord[Basis.U] = U;
+				Coord[Basis.V] = V;
+				for (int32 Z = 0; Z < DimZ; ++Z)
+				{
+					Coord[Basis.Axis] = Basis.bPositive ? DimZ - 1 - Z : Z;
+					const uint8 Cell = Cells[CellIndex(Coord.X, Coord.Y, Coord.Z)];
+					if (!(Cell & OccupiedBit))
+					{
+						continue;
+					}
+					if ((Cell & FacingBit) && Z > LastHit + 1)
+					{
+						FCardSurfel& Surfel = Surfels.AddDefaulted_GetRef();
+						Surfel.U = static_cast<uint8>(U);
+						Surfel.V = static_cast<uint8>(V);
+						Surfel.Z = static_cast<uint8>(Z);
+						Surfel.MinZ = static_cast<uint8>(LastHit >= 0 ? LastHit + 1 : 0);
+					}
+					LastHit = Z;
+				}
+			}
+		}
+		Stats.Surfels += Surfels.Num();
+		if (Surfels.Num() == 0)
+		{
+			continue;
+		}
+
+		// Clusters, greedily: the outer layer first (near plane 0, as the engine's builder), then each round the near plane
+		// that captures most of what is left, while a cluster covers enough cells (MinCells; the outer one half a face's at
+		// most) densely enough (the engine's minimum density over three)
+		const int32 FaceCells = (DimU * DimV + DimU * DimZ + DimV * DimZ) / 3;
+		const int32 MinInnerCoverage = FMath::Max(Settings.MinCells, 1);
+		const int32 MinOuterCoverage = FMath::Clamp(FaceCells / 2, 1, MinInnerCoverage);
+		Assigned.Init(false, Surfels.Num());
+		FCardCluster PlaneClusters[MaxFittedResolution];
+		bool bOuter = true;
+		while (true)
+		{
+			for (int32 Plane = 0; Plane < DimZ; ++Plane)
+			{
+				PlaneClusters[Plane] = FCardCluster();
+				PlaneClusters[Plane].Direction = Direction;
+				PlaneClusters[Plane].NearPlane = Plane;
+			}
+			for (int32 SurfelIndex = 0; SurfelIndex < Surfels.Num(); ++SurfelIndex)
+			{
+				if (!Assigned[SurfelIndex])
+				{
+					const FCardSurfel& Surfel = Surfels[SurfelIndex];
+					for (int32 Plane = Surfel.MinZ; Plane <= Surfel.Z; ++Plane)
+					{
+						PlaneClusters[Plane].Add(Surfel);
+					}
+				}
+			}
+
+			auto IsValid = [&](const FCardCluster& Cluster)
+			{
+				return Cluster.Coverage >= (Cluster.NearPlane == 0 ? MinOuterCoverage : MinInnerCoverage)
+					&& Cluster.Coverage >= MinDensity * Cluster.GetFaceArea();
+			};
+			int32 BestPlane = INDEX_NONE;
+			for (int32 Plane = bOuter ? 0 : 1; Plane < (bOuter ? 1 : DimZ); ++Plane)
+			{
+				if (IsValid(PlaneClusters[Plane]) && (BestPlane == INDEX_NONE || PlaneClusters[Plane].Coverage > PlaneClusters[BestPlane].Coverage))
+				{
+					BestPlane = Plane;
+				}
+			}
+			if (BestPlane == INDEX_NONE)
+			{
+				if (bOuter)
+				{
+					bOuter = false;
+					continue;
+				}
+				break;
+			}
+			bOuter = false;
+
+			for (int32 SurfelIndex = 0; SurfelIndex < Surfels.Num(); ++SurfelIndex)
+			{
+				const FCardSurfel& Surfel = Surfels[SurfelIndex];
+				if (!Assigned[SurfelIndex] && Surfel.MinZ <= BestPlane && BestPlane <= Surfel.Z)
+				{
+					Assigned[SurfelIndex] = true;
+				}
+			}
+			Clusters.Add(PlaneClusters[BestPlane]);
+		}
+	}
+	Stats.Clusters = Clusters.Num();
+
+	// Lumen takes 32 cards a mesh: keep the MaxCards that cover most
+	const int32 MaxCards = FMath::Clamp(Settings.MaxCards, 1, MaxCardsPerMesh);
+	if (Clusters.Num() > MaxCards)
+	{
+		Clusters.StableSort([](const FCardCluster& A, const FCardCluster& B) { return A.Coverage > B.Coverage; });
+		Clusters.SetNum(MaxCards);
+	}
+
+	// A card over each cluster's cells: across, clamped to the mesh's box; along its depth from the box's face (the outer
+	// card) or the cluster's shallowest element (an inner one: behind the surface in front in every column of the cluster,
+	// and as little as it can be of the other columns its rectangle spans) to half a cell past the deepest element, as the
+	// engine's builder
+	OutCardData.CardBuildData.Reserve(Clusters.Num());
+	if (OutCardCoverage)
+	{
+		OutCardCoverage->Reset(Clusters.Num());
+	}
+	if (OutCardArea)
+	{
+		OutCardArea->Reset(Clusters.Num());
+	}
+	for (const FCardCluster& Cluster : Clusters)
+	{
+		if (OutCardCoverage)
+		{
+			OutCardCoverage->Add(Cluster.Coverage);
+		}
+		if (OutCardArea)
+		{
+			OutCardArea->Add(static_cast<float>(Cluster.Coverage * CellSize * CellSize));
+		}
+		const FCardBasis Basis(Cluster.Direction);
+		const double Face = Basis.bPositive ? GridMin[Basis.Axis] + Dims[Basis.Axis] * CellSize : GridMin[Basis.Axis];
+		const double Sign = Basis.bPositive ? -1.0 : 1.0;
+
+		FVector Min;
+		FVector Max;
+		Min[Basis.U] = FMath::Max(GridMin[Basis.U] + Cluster.Min.X * CellSize, LocalBounds.Min[Basis.U]);
+		Max[Basis.U] = FMath::Min(GridMin[Basis.U] + (Cluster.Max.X + 1) * CellSize, LocalBounds.Max[Basis.U]);
+		Min[Basis.V] = FMath::Max(GridMin[Basis.V] + Cluster.Min.Y * CellSize, LocalBounds.Min[Basis.V]);
+		Max[Basis.V] = FMath::Min(GridMin[Basis.V] + (Cluster.Max.Y + 1) * CellSize, LocalBounds.Max[Basis.V]);
+		const double Near = Face + Sign * (Cluster.NearPlane == 0 ? 0 : Cluster.Min.Z) * CellSize;
+		const double Far = Face + Sign * (Cluster.Max.Z + 1.5) * CellSize;
+		Min[Basis.Axis] = FMath::Max(FMath::Min(Near, Far), LocalBounds.Min[Basis.Axis] - CardDepthMargin);
+		Max[Basis.Axis] = FMath::Min(FMath::Max(Near, Far), LocalBounds.Max[Basis.Axis] + CardDepthMargin);
+
+		FVector3f AxisX = FVector3f::ZeroVector;
+		FVector3f AxisY = FVector3f::ZeroVector;
+		FVector3f AxisZ = FVector3f::ZeroVector;
+		AxisX[Basis.U] = 1.0f;
+		AxisY[Basis.V] = 1.0f;
+		AxisZ[Basis.Axis] = Basis.bPositive ? 1.0f : -1.0f;
+		const FVector Extent = (Max - Min) * 0.5;
+
+		FLumenCardBuildData& Card = OutCardData.CardBuildData.AddDefaulted_GetRef();
+		Card.OBB.Origin = FVector3f((Min + Max) * 0.5);
+		Card.OBB.AxisX = AxisX;
+		Card.OBB.AxisY = AxisY;
+		Card.OBB.AxisZ = AxisZ;
+		Card.OBB.Extent = FVector3f(Extent[Basis.U], Extent[Basis.V], Extent[Basis.Axis]);
+		Card.AxisAlignedDirectionIndex = static_cast<uint8>(Cluster.Direction);
+		Card.DilationMode = ELumenCardDilationMode::Disabled;
+		Stats.CoveredSurfels += Cluster.Coverage;
+	}
+
+	if (OutStats)
+	{
+		*OutStats = Stats;
+	}
+}
+
+void BuildVoxelChunkMeshFittedCards(TConstArrayView<FVoxelVertex> Vertices, TConstArrayView<uint32> Indices, const FBox& LocalBounds,
+	const FVoxelChunkMeshCardSettings& Settings, FMeshCardsBuildData& OutCardData, FVoxelChunkMeshCardBuildStats* OutStats)
+{
+	BuildFittedCards(Vertices.Num(), [&Vertices](uint32 Index) { return Vertices[Index].Position; },
+		[&Vertices](uint32 Index) { return Vertices[Index].GetNormal(); }, Indices, LocalBounds, Settings, OutCardData, OutStats);
+}
+
+// ==================== The settings and the mesh workers' cards ====================
+
+FVoxelChunkMeshCardSettings GetVoxelChunkMeshCardSettings()
+{
+	FVoxelChunkMeshCardSettings Cards;
+	const int32 Mode = CVarVoxelLumenCards.GetValueOnAnyThread();
+	Cards.Mode = Mode <= 0 ? EVoxelChunkMeshCards::None : Mode == 1 ? EVoxelChunkMeshCards::Axis : EVoxelChunkMeshCards::Fitted;
+	Cards.Slices = FMath::Clamp(CVarVoxelLumenCardSlices.GetValueOnAnyThread(), 1, MaxVoxelChunkMeshCardSlices);
+	Cards.Resolution = FMath::Clamp(CVarVoxelLumenCardResolution.GetValueOnAnyThread(), 4, MaxFittedResolution);
+	Cards.MaxCards = FMath::Clamp(CVarVoxelLumenCardMax.GetValueOnAnyThread(), 1, MaxCardsPerMesh);
+	Cards.MinCells = FMath::Max(CVarVoxelLumenCardMinCells.GetValueOnAnyThread(), 1);
+	return Cards;
+}
+
+TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> PrebuildVoxelChunkMeshCards(const FChunkMeshData& MeshData)
+{
+	// Only the fitted cards are worth a worker's time (the axis cards need the box alone); the chunk primitives alone take
+	// cards (the region proxy has none)
+	static const TConsoleVariableData<int32>* ChunkPrimitives =
+		IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("voxel.Render.ChunkPrimitives"));
+	const FVoxelChunkMeshCardSettings Settings = GetVoxelChunkMeshCardSettings();
+	if (Settings.Mode != EVoxelChunkMeshCards::Fitted || !MeshData.IsValid() || (ChunkPrimitives && ChunkPrimitives->GetValueOnAnyThread() == 0))
+	{
+		return nullptr;
+	}
+
+	const double StartTime = FPlatformTime::Seconds();
+	// The box the renderer takes for the mesh (FVoxelMeshRenderer::ConvertToVoxelVertices): its positions' bounds
+	FBox LocalBounds(ForceInit);
+	for (const FVector3f& Position : MeshData.Positions)
+	{
+		LocalBounds += FVector(Position);
+	}
+	TSharedRef<FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> Prebuilt = MakeShared<FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>();
+	Prebuilt->Settings = Settings;
+	Prebuilt->LocalBounds = LocalBounds;
+	const bool bHasNormals = MeshData.Normals.Num() >= MeshData.Positions.Num();
+	FMeshCardsBuildData CardData;
+	BuildFittedCards(MeshData.Positions.Num(), [&MeshData](uint32 Index) { return MeshData.Positions[Index]; },
+		[&MeshData, bHasNormals](uint32 Index) { return bHasNormals ? MeshData.Normals[Index] : FVector3f::UpVector; },
+		MeshData.Indices, LocalBounds, Settings, CardData, &Prebuilt->Stats, &Prebuilt->CardCoverage, &Prebuilt->CardArea);
+	Prebuilt->Cards = MoveTemp(CardData.CardBuildData);
+	FVoxelChunkMeshCardCounters::AddWorkerBuild(FPlatformTime::Seconds() - StartTime);
+	return Prebuilt;
+}
+
+bool AreVoxelPrebuiltChunkMeshCardsStale(const FChunkMeshData& MeshData)
+{
+	static const TConsoleVariableData<int32>* ChunkPrimitives =
+		IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("voxel.Render.ChunkPrimitives"));
+	const FVoxelChunkMeshCardSettings Settings = GetVoxelChunkMeshCardSettings();
+	if (Settings.Mode != EVoxelChunkMeshCards::Fitted || !MeshData.IsValid() || (ChunkPrimitives && ChunkPrimitives->GetValueOnAnyThread() == 0))
+	{
+		return false;
+	}
+	return !MeshData.PrebuiltLumenCards.IsValid() || MeshData.PrebuiltLumenCards->Settings != Settings;
+}
+
+TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> MergeVoxelPrebuiltChunkMeshCards(
+	TConstArrayView<TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>> Parts)
+{
+	if (Parts.Num() == 0)
+	{
+		return nullptr;
+	}
+	TSharedRef<FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> Merged = MakeShared<FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>();
+	Merged->Settings = Parts[0].IsValid() ? Parts[0]->Settings : FVoxelChunkMeshCardSettings();
+	struct FRankedCard
+	{
+		const FLumenCardBuildData* Card;
+		int32 Coverage;
+		float Area;
+	};
+	TArray<FRankedCard> Ranked;
+	for (const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& Part : Parts)
+	{
+		// Every part fitted with the same settings, or the bucket is fitted whole at the upload
+		if (!Part.IsValid() || Part->Settings != Merged->Settings || Part->CardCoverage.Num() != Part->Cards.Num()
+			|| Part->CardArea.Num() != Part->Cards.Num())
+		{
+			return nullptr;
+		}
+		Merged->LocalBounds += Part->LocalBounds;
+		Merged->Stats.Surfels += Part->Stats.Surfels;
+		Merged->Stats.Clusters += Part->Cards.Num();
+		for (int32 Index = 0; Index < Part->Cards.Num(); ++Index)
+		{
+			Ranked.Add({ &Part->Cards[Index], Part->CardCoverage[Index], Part->CardArea[Index] });
+		}
+	}
+	// The parts' cards together, the MaxCards whose surface is largest (by area: each part's grid has its own cell size, a
+	// corner seam's far finer than a face seam's; a part's cards never see another part's surface in front of them, the
+	// seams of a bucket lie along different faces of the owner)
+	Ranked.StableSort([](const FRankedCard& A, const FRankedCard& B) { return A.Area > B.Area; });
+	Ranked.SetNum(FMath::Min(Ranked.Num(), FMath::Clamp(Merged->Settings.MaxCards, 1, MaxCardsPerMesh)));
+	for (const FRankedCard& Entry : Ranked)
+	{
+		Merged->Cards.Add(*Entry.Card);
+		Merged->CardCoverage.Add(Entry.Coverage);
+		Merged->CardArea.Add(Entry.Area);
+		Merged->Stats.CoveredSurfels += Entry.Coverage;
+	}
+	return Merged;
+}
+
+// ==================== FVoxelChunkMeshCardCounters ====================
+
+FVoxelChunkMeshCardCounters::FCounts FVoxelChunkMeshCardCounters::Get()
+{
+	FCounts Counts;
+	Counts.Meshes = GCardMeshes.load(std::memory_order_relaxed);
+	Counts.Cards = GCards.load(std::memory_order_relaxed);
+	Counts.FittedMeshes = GFittedMeshes.load(std::memory_order_relaxed);
+	Counts.Surfels = GSurfels.load(std::memory_order_relaxed);
+	Counts.CoveredSurfels = GCoveredSurfels.load(std::memory_order_relaxed);
+	Counts.Capped = GCapped.load(std::memory_order_relaxed);
+	Counts.Seconds = GBuildMicros.load(std::memory_order_relaxed) * 1.0e-6;
+	Counts.MaxSeconds = GMaxBuildMicros.load(std::memory_order_relaxed) * 1.0e-6;
+	Counts.WorkerMeshes = GWorkerMeshes.load(std::memory_order_relaxed);
+	Counts.WorkerBuilds = GWorkerBuilds.load(std::memory_order_relaxed);
+	Counts.WorkerSeconds = GWorkerMicros.load(std::memory_order_relaxed) * 1.0e-6;
+	return Counts;
+}
+
+void FVoxelChunkMeshCardCounters::Reset()
+{
+	GCardMeshes = 0;
+	GCards = 0;
+	GFittedMeshes = 0;
+	GSurfels = 0;
+	GCoveredSurfels = 0;
+	GCapped = 0;
+	GBuildMicros = 0;
+	GMaxBuildMicros = 0;
+	GWorkerMeshes = 0;
+	GWorkerBuilds = 0;
+	GWorkerMicros = 0;
+}
+
+void FVoxelChunkMeshCardCounters::AddWorkerBuild(double Seconds)
+{
+	GWorkerBuilds.fetch_add(1, std::memory_order_relaxed);
+	GWorkerMicros.fetch_add(static_cast<int64>(Seconds * 1.0e6), std::memory_order_relaxed);
+}
+
+void FVoxelChunkMeshCardCounters::AddBuild(int32 NumCards, double Seconds, const FVoxelChunkMeshCardBuildStats* Stats, int32 MaxCards, bool bOnWorker)
+{
+	GCardMeshes.fetch_add(1, std::memory_order_relaxed);
+	GCards.fetch_add(NumCards, std::memory_order_relaxed);
+	if (Stats)
+	{
+		GFittedMeshes.fetch_add(1, std::memory_order_relaxed);
+		GSurfels.fetch_add(Stats->Surfels, std::memory_order_relaxed);
+		GCoveredSurfels.fetch_add(Stats->CoveredSurfels, std::memory_order_relaxed);
+		if (Stats->Clusters > MaxCards)
+		{
+			GCapped.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+	if (bOnWorker)
+	{
+		// The worker's time was counted where it was spent (AddWorkerBuild)
+		GWorkerMeshes.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	const int64 Micros = static_cast<int64>(Seconds * 1.0e6);
+	GBuildMicros.fetch_add(Micros, std::memory_order_relaxed);
+	int64 Longest = GMaxBuildMicros.load(std::memory_order_relaxed);
+	while (Micros > Longest && !GMaxBuildMicros.compare_exchange_weak(Longest, Micros, std::memory_order_relaxed))
+	{
+	}
+}

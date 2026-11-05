@@ -74,28 +74,10 @@ static TAutoConsoleVariable<int32> CVarVoxelChunkPrimitives(
 	TEXT("0 = the render region's scene proxy draws them, culling each mesh itself (the A/B). A change re-meshes the terrain."),
 	ECVF_Default);
 
-static TAutoConsoleVariable<int32> CVarVoxelLumenCards(
-	TEXT("voxel.Render.LumenCards"),
-	0,
-	TEXT("1 = each chunk primitive has Lumen cards (G116 step 4: six axis-aligned cards over its mesh's box) and is in Lumen's\n")
-	TEXT("scene, so a ray that hits the terrain reads Lumen's surface cache instead of black. 0 = no cards, out of Lumen's scene\n")
-	TEXT("(the default until cards fitted to the surface close the gap under overhangs: the axis cards bring the terrain's bounce\n")
-	TEXT("back but not that, for about +1 ms of render thread). Needs voxel.Render.ChunkPrimitives 1. A change re-meshes the terrain."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<int32> CVarVoxelLumenCardSlices(
-	TEXT("voxel.Render.LumenCards.Slices"),
-	1,
-	TEXT("Tuning (G116 step 4): each chunk mesh's box is cut into this many parts along each axis, with two cards per part\n")
-	TEXT("(6 x this many cards, 1-5): a card captures one layer of surface, so more slices let Lumen's surface cache see\n")
-	TEXT("stacked surfaces (an overhang over a cave) at that many times the cache's texels. A change re-meshes the terrain."),
-	ECVF_Default);
-
-/** The slices per axis the chunk primitives' Lumen cards take now (0 = no cards) */
-static int32 GetWantedChunkPrimitiveCardSlices()
+/** The Lumen cards the chunk primitives' meshes take now (none when off; the cvars are VoxelChunkMeshCards.cpp's) */
+static FVoxelChunkMeshCardSettings GetWantedChunkPrimitiveCards()
 {
-	return CVarVoxelLumenCards.GetValueOnGameThread() != 0
-		? FMath::Clamp(CVarVoxelLumenCardSlices.GetValueOnGameThread(), 1, MaxVoxelChunkMeshCardSlices) : 0;
+	return GetVoxelChunkMeshCardSettings();
 }
 
 /** Failsafe for a fade hold nobody releases (the chunk manager's own cap, voxel.MeshFade.SeamHoldMs, is 1 s). */
@@ -449,7 +431,8 @@ void UVoxelRegionComponent::UpdateChunkBuffersFromCPUData(
 	TArray<FVoxelVertex>&& Vertices,
 	TArray<uint32>&& Indices,
 	int32 LODLevel,
-	const FBox& LocalBounds)
+	const FBox& LocalBounds,
+	const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& PrebuiltCards)
 {
 	check(IsInGameThread());
 	EnsureChunkPrimitiveMode();
@@ -490,7 +473,7 @@ void UVoxelRegionComponent::UpdateChunkBuffersFromCPUData(
 	if (bUseChunkPrimitives)
 	{
 		// The chunk's own primitive (G116), replacing the one it had
-		SubmitChunkPrimitive(FadeKey, MoveTemp(Vertices), MoveTemp(Indices), LODLevel, LocalBounds, ChunkWorldPos, bCrossfade);
+		SubmitChunkPrimitive(FadeKey, MoveTemp(Vertices), MoveTemp(Indices), LODLevel, LocalBounds, ChunkWorldPos, bCrossfade, PrebuiltCards);
 		if (!bCrossfade && ActiveFades.Contains(FadeKey))
 		{
 			CancelFade(FadeKey, /*bClearRenderState=*/true);
@@ -761,7 +744,8 @@ void UVoxelRegionComponent::UpdateSeamMeshFromCPUData(
 	TArray<FVoxelVertex>&& Vertices,
 	TArray<uint32>&& Indices,
 	const FVector& OwnerWorldPosition,
-	bool bCrossfade)
+	bool bCrossfade,
+	const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& PrebuiltCards)
 {
 	check(IsInGameThread());
 	EnsureChunkPrimitiveMode();
@@ -815,7 +799,7 @@ void UVoxelRegionComponent::UpdateSeamMeshFromCPUData(
 		{
 			SeamBounds += FVector(Vertex.Position);
 		}
-		SubmitChunkPrimitive(FadeKey, MoveTemp(Vertices), MoveTemp(Indices), LODLevel, SeamBounds, OwnerWorldPosition, bFade);
+		SubmitChunkPrimitive(FadeKey, MoveTemp(Vertices), MoveTemp(Indices), LODLevel, SeamBounds, OwnerWorldPosition, bFade, PrebuiltCards);
 		return;
 	}
 
@@ -2481,7 +2465,7 @@ void UVoxelRegionComponent::OnRegister()
 	{
 		bUseChunkPrimitives = CVarVoxelChunkPrimitives.GetValueOnGameThread() != 0;
 		bChunkPrimitiveRayTracing = IsVoxelRayTracingWanted();
-		ChunkPrimitiveCardSlices = GetWantedChunkPrimitiveCardSlices();
+		ChunkPrimitiveCards = GetWantedChunkPrimitiveCards();
 	}
 }
 
@@ -2509,8 +2493,8 @@ void UVoxelRegionComponent::EnsureChunkPrimitiveMode()
 
 	const bool bWant = CVarVoxelChunkPrimitives.GetValueOnGameThread() != 0;
 	const bool bWantRayTracing = IsVoxelRayTracingWanted();
-	const int32 WantCardSlices = GetWantedChunkPrimitiveCardSlices();
-	if (bWant == bUseChunkPrimitives && (!bWant || (bWantRayTracing == bChunkPrimitiveRayTracing && WantCardSlices == ChunkPrimitiveCardSlices)))
+	const FVoxelChunkMeshCardSettings WantCards = GetWantedChunkPrimitiveCards();
+	if (bWant == bUseChunkPrimitives && (!bWant || (bWantRayTracing == bChunkPrimitiveRayTracing && WantCards == ChunkPrimitiveCards)))
 	{
 		return;
 	}
@@ -2541,11 +2525,14 @@ void UVoxelRegionComponent::EnsureChunkPrimitiveMode()
 		}
 	}
 
-	UE_LOG(LogVoxelRendering, Log, TEXT("%s: chunk primitives %s (ray tracing %s, Lumen card slices %d): the owner sends the meshes again"), *GetName(),
-		bWant ? TEXT("on") : TEXT("off"), bWantRayTracing ? TEXT("on") : TEXT("off"), WantCardSlices);
+	const FString CardsText = WantCards.Mode == EVoxelChunkMeshCards::None ? FString(TEXT("off"))
+		: WantCards.Mode == EVoxelChunkMeshCards::Axis ? FString::Printf(TEXT("axis, %d slices"), WantCards.Slices)
+		: FString::Printf(TEXT("fitted, resolution %d, at most %d, min %d cells"), WantCards.Resolution, WantCards.MaxCards, WantCards.MinCells);
+	UE_LOG(LogVoxelRendering, Log, TEXT("%s: chunk primitives %s (ray tracing %s, Lumen cards %s): the owner sends the meshes again"), *GetName(),
+		bWant ? TEXT("on") : TEXT("off"), bWantRayTracing ? TEXT("on") : TEXT("off"), *CardsText);
 	bUseChunkPrimitives = bWant;
 	bChunkPrimitiveRayTracing = bWantRayTracing;
-	ChunkPrimitiveCardSlices = WantCardSlices;
+	ChunkPrimitiveCards = WantCards;
 	{
 		FScopeLock Lock(&ChunkInfoLock);
 		bRenderDataLost |= ChunkInfoMap.Num() > 0 || SeamBucketSlotMasks.Num() > 0;
@@ -2601,12 +2588,12 @@ FVoxelChunkSceneProxy* UVoxelRegionComponent::CreateChunkPrimitive(const FIntVec
 	Init.bRadialFaceUp = bRadialFaceUp;
 	Init.FaceUpCenter = FaceUpCenter;
 	Init.bSeam = FVoxelFadeScheduler::IsSeamKey(Key);
-	Init.bLumenCards = ChunkPrimitiveCardSlices > 0;
+	Init.bLumenCards = ChunkPrimitiveCards.HasCards();
 	return new FVoxelChunkSceneProxy(Desc, MoveTemp(Init));
 }
 
 void UVoxelRegionComponent::SubmitChunkPrimitive(const FIntVector4& Key, TArray<FVoxelVertex>&& Vertices, TArray<uint32>&& Indices,
-	int32 LODLevel, const FBox& LocalBounds, const FVector& Origin, bool bFade)
+	int32 LODLevel, const FBox& LocalBounds, const FVector& Origin, bool bFade, const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& PrebuiltCards)
 {
 	check(IsInGameThread());
 
@@ -2616,7 +2603,7 @@ void UVoxelRegionComponent::SubmitChunkPrimitive(const FIntVector4& Key, TArray<
 		return;
 	}
 	SubmitChunkPrimitiveMesh(Key, MakeShared<FVoxelChunkMesh, ESPMode::ThreadSafe>(MoveTemp(Vertices), MoveTemp(Indices), LODLevel,
-		LocalBounds, Origin, ChunkMeshBytes.ToSharedRef(), ChunkPrimitiveCardSlices), bFade);
+		LocalBounds, Origin, ChunkMeshBytes.ToSharedRef(), ChunkPrimitiveCards, PrebuiltCards), bFade);
 }
 
 void UVoxelRegionComponent::SubmitChunkPrimitiveMesh(const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh, bool bFade)

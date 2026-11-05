@@ -1,9 +1,11 @@
 # Lumen's Surface Cache for the Terrain (G116 plan)
 
-> State as of 2026-11-04. Steps 1-3 done (§3: the chunk primitives, their fades, cached ray tracing; the default since
+> State as of 2026-11-05. Steps 1-3 done (§3: the chunk primitives, their fades, cached ray tracing; the default since
 > 2026-11-04, results in [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "Chunk Primitives"); step 4 done (§4: axis
 > cards behind `voxel.Render.LumenCards`, off by default; the terrain's bounce is back, the overhang's off-screen gap is
-> not); G116 open for cards fitted to the surface, which turn them on. Terms:
+> not); the fitted cards done (§4, 2026-11-05: `voxel.Render.LumenCards 2`, off by default; they cover stacked layers and
+> match an engine mesh's cards with screen traces off, and the on-screen gap stays at 0.92-0.93; the user kept the default
+> off, 2026-11-05). G116 open for what is left (§4 "Next"). Terms:
 > `Documentation/GLOSSARY.md`. The finding is G116 in the project's `Documentation/FINDINGS.md`; the spike that chose the
 > path is [LUMEN_OFFSCREEN_TERRAIN_SPIKE.md](LUMEN_OFFSCREEN_TERRAIN_SPIKE.md) (frozen); what ships is described in
 > [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "What Lumen Sees".
@@ -127,9 +129,47 @@ Lumen.
 - **Lumen's far field** (D42), measured once with the cards: still no frame changes, as the far field's patches have no
   cards of their own.
 
-**Next (G116):** cards fitted to the surface (the mesh's facing clusters on the mesh worker, so stacked surfaces each get
-theirs, bounded by Lumen's 32 cards a mesh), measured against the slices and the render thread's cost at the uploads;
-cards for the far field's patches before D42 is asked again.
+**Fitted cards (2026-11-05).** `voxel.Render.LumenCards 2`: cards fitted to the mesh's surface
+(`BuildVoxelChunkMeshFittedCards`, VoxelRendering `VoxelChunkMeshCards.cpp`). The engine's builder for static meshes
+(`MeshCardRepresentationUtilities`) is editor-only and traces Embree rays; its method is redone over the mesh's own
+triangles: they are sampled into a grid over the box (16 cells along the longest side, a quarter cell off the box), each
+column of each direction is walked from the box's face for surface elements (a cell facing the direction after empty
+space, with the nearest near plane that leaves the surface in front out), and clusters grow greedily, the outer layer
+first, then the near plane that captures most of the rest (at least 4 cells, the engine's density bound), at most 16 a
+mesh. They are fitted on the chunk's mesh worker and each seam's seam worker (a seam bucket keeps its seams' best by
+coverage), so the game thread builds nothing; a first version on the game thread cost 110-140 us a mesh, 1.1-1.5 s a
+bench run, almost all in the seam buckets.
+
+| `VoxelDemo` (one PIE a block, 1,280 x 722) | On screen → off screen | Off/on | Cave |
+|---|---|---|---|
+| cards 0 / 1 / 2 | 0.175 → 0.158 / 0.190 → 0.173 / 0.192-0.193 → 0.177-0.180 | 0.90 / 0.91 / 0.92-0.93 | 0.098 |
+| cards 2, `.Resolution 32` / 4 x texel density / hit lighting | 0.194 → 0.178-0.179 / 0.190 → 0.174 / 0.192 → 0.177 | 0.92 / 0.91 / 0.92 | 0.098 |
+| screen traces off, cards 0 / 1 / 2 | 0.179 → 0.169 / 0.182 → 0.173 / 0.185 → 0.178 | 0.94 / 0.95 / 0.96 | 0.097 |
+| the engine cube slab, cards 0 / 2 | 0.162 → 0.153 / 0.202 → 0.198 | 0.94 / 0.98 | 0.098 |
+| the cube slab, screen traces off, cards 0 / 2 | 0.156 → 0.150 / 0.180 → 0.175 | 0.96 / 0.97 | 0.097 |
+| `PlanetTest`, cards 0 / 1 / 2 | 0.414-0.416 → 0.367-0.370 | 0.88-0.89 | 0.024 |
+
+- **The coverage is closed.** Lumen's coverage view shows the overhang's underside covered (magenta with the axis cards),
+  and the cards keep 93 % of a chunk mesh's sampled surface (84 % of a seam bucket's, whose seams' cards share one
+  bucket's 16). A finer grid, 4 times the cards' texel density and hit lighting change nothing.
+- **The on-screen gap is not the cards'.** With Lumen's screen traces off, both frames on world traces, the voxel
+  overhang reads 0.96 with the fitted cards against 0.97 under the engine cube with its own: the terrain's cards are as
+  good as the engine's. On screen the rounded voxel underside is in view and the screen traces read its final lit
+  pixels; the cube's flat underside is edge-on from the camera and lit by world traces in both frames, so the cube's 0.98
+  was not a like-for-like reference. The planet's site is unchanged by any cards (0.88-0.89).
+- **Cost** (the streaming bench, cards 0, 1 and 2 interleaved, three runs each, noon with the clock stopped, 1,280 x 722):
+  GPU P50 5.40 → 5.53 → 5.63 ms on the chord and 5.43 → 5.54 (fitted) on the great circle; render thread busy
+  9.14 → 9.37 → 9.69 and 11.39 → 12.27 → 12.82; game thread 18.48 → 18.24 → 18.47 and 21.76 → 22.92 → 23.45 (one side's
+  runs span 3.8 ms on the great circle). Lumen captures 37-40 card pages a frame streaming (axis 24, none 10; P95
+  103-120), with at most 2 mesh cards waiting, and the cache's pages peak at 348-366 of 1,024 (axis 442-825): fitted
+  cards span the surface, not the box. The workers spend about 100-125 us a build (400 us a 64-voxel interior).
+- **Lumen's far field (D42)** with cards on the far field's patches: see the project's findings, D42 (a spike on
+  VoxelWorlds `spike/g116-farfield-cards`, not to merge, draws the patches statically with fitted cards).
+
+**Next (G116):** the default stays off (the user's decision, 2026-11-05: `voxel.Render.LumenCards` 2 costs about +0.2 ms
+GPU and +0.5-1.4 ms of render thread P50 for the bounce off the terrain and an off-screen gap of 0.92-0.93 under an
+overhang in view, against 0.90 without cards); closing what is left needs the on-screen frame's screen traces matched off
+screen, which is Lumen's, not the terrain's.
 
 ## 5. Hit lighting today
 

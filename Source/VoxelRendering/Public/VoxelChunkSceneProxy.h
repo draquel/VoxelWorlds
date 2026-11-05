@@ -8,6 +8,7 @@
 #include "VoxelLocalVertexFactory.h"
 #include "VoxelVertex.h"
 #include "VoxelSceneProxy.h"
+#include "VoxelChunkMeshCards.h"
 #if RHI_RAYTRACING
 #include "RayTracingGeometry.h"
 #endif
@@ -67,11 +68,15 @@ public:
 	 * @param InLocalBounds Its box relative to InOrigin
 	 * @param InOrigin     The chunk's (or the seam owner chunk's) world position
 	 * @param InByteCounter The region component's count of its chunk meshes' buffer bytes (outlives the mesh)
-	 * @param InLumenCardSlices Build its Lumen card representation with this many slices per axis (G116 step 4,
-	 *                      BuildVoxelChunkMeshCards); 0 = none (voxel.Render.LumenCards 0)
+	 * @param InCards      Its Lumen card representation (G116): none, axis-aligned over its box (step 4,
+	 *                      BuildVoxelChunkMeshCards) or fitted to its surface (BuildVoxelChunkMeshFittedCards)
+	 * @param InPrebuiltCards The fitted cards its mesh worker built (PrebuildVoxelChunkMeshCards), taken when they were
+	 *                      fitted with InCards in the same box; null = build them here
 	 */
 	FVoxelChunkMesh(TArray<FVoxelVertex>&& InVertices, TArray<uint32>&& InIndices, int32 InLODLevel, const FBox& InLocalBounds,
-		const FVector& InOrigin, const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe>& InByteCounter, int32 InLumenCardSlices = 0);
+		const FVector& InOrigin, const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe>& InByteCounter,
+		const FVoxelChunkMeshCardSettings& InCards = FVoxelChunkMeshCardSettings(),
+		const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& InPrebuiltCards = nullptr);
 
 	/** Render thread: releases the buffers, the vertex factory and the ray tracing geometry. */
 	~FVoxelChunkMesh();
@@ -108,9 +113,10 @@ public:
 	const FVector Origin;
 
 	/**
-	 * Its Lumen card representation (G116 step 4), relative to Origin: axis-aligned cards over LocalBounds, two per slice
-	 * of each axis (BuildVoxelChunkMeshCards), so a ray that hits the mesh reads the surface cache. Built with the mesh,
-	 * fixed for its life (any thread); null when the cards are off or the mesh has no triangles.
+	 * Its Lumen card representation (G116), relative to Origin, so a ray that hits the mesh reads the surface cache:
+	 * axis-aligned cards over LocalBounds, two per slice of each axis (step 4, BuildVoxelChunkMeshCards), or cards fitted to
+	 * its surface, one per layer facing one way (BuildVoxelChunkMeshFittedCards). Built with the mesh, fixed for its life
+	 * (any thread); null when the cards are off or the mesh has no triangles.
 	 */
 	TUniquePtr<FCardRepresentationData> CardRepresentation;
 
@@ -134,9 +140,6 @@ private:
 	uint32 NumTriangles = 0;
 	TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe> ByteCounter;
 };
-
-/** The most slices per axis a chunk mesh's cards take: Lumen looks up at most 32 cards per mesh (6 a slice) */
-constexpr int32 MaxVoxelChunkMeshCardSlices = 5;
 
 /**
  * A chunk mesh's Lumen cards (G116 step 4): the box cut into Slices equal parts along each axis, and for each part the two

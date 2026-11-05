@@ -7,6 +7,7 @@
 #include "ChunkRenderData.h"
 #include "VoxelVertex.h"
 #include "VoxelFadeScheduler.h"
+#include "VoxelChunkMeshCards.h"
 #include "Materials/MaterialRelevance.h"
 #include <atomic>
 #include "VoxelRegionComponent.generated.h"
@@ -75,13 +76,15 @@ public:
 	 * @param Indices CPU index array (will be moved)
 	 * @param LODLevel LOD level of the mesh
 	 * @param LocalBounds Local bounds of the mesh
+	 * @param PrebuiltCards The Lumen cards its mesh worker fitted (G116, PrebuildVoxelChunkMeshCards); null = fit them here
 	 */
 	void UpdateChunkBuffersFromCPUData(
 		const FIntVector& ChunkCoord,
 		TArray<FVoxelVertex>&& Vertices,
 		TArray<uint32>&& Indices,
 		int32 LODLevel,
-		const FBox& LocalBounds);
+		const FBox& LocalBounds,
+		const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& PrebuiltCards = nullptr);
 
 	/**
 	 * Remove a chunk.
@@ -180,6 +183,7 @@ public:
 	 * @param bCrossfade Crossfade from the bucket it replaces (R24). Also fades a NEW bucket in from
 	 *        nothing: when its owner is held by a transition (it stays hidden until the release), or
 	 *        when the owner lies beyond voxel.MeshFade.AppearMinDistance (R24 P3).
+	 * @param PrebuiltCards The Lumen cards its seams' workers fitted (G116, MergeVoxelPrebuiltChunkMeshCards); null = fit them here
 	 */
 	void UpdateSeamMeshFromCPUData(
 		const FIntVector& OwnerChunkCoord,
@@ -188,7 +192,8 @@ public:
 		TArray<FVoxelVertex>&& Vertices,
 		TArray<uint32>&& Indices,
 		const FVector& OwnerWorldPosition,
-		bool bCrossfade = false);
+		bool bCrossfade = false,
+		const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& PrebuiltCards = nullptr);
 
 	/**
 	 * Remove one seam bucket. Enqueues render command.
@@ -780,10 +785,10 @@ private:
 	TArray<FPrimitiveSceneProxy*> PendingPrimitiveRemovals;
 
 	/** The mode in use (IsUsingChunkPrimitives), whether its primitives were created with ray tracing geometry, and the
-	 *  slices per axis of their meshes' Lumen cards (G116 step 4, voxel.Render.LumenCards and .Slices; 0 = no cards) */
+	 *  Lumen cards their meshes take (G116, voxel.Render.LumenCards and its tuning) */
 	bool bUseChunkPrimitives = false;
 	bool bChunkPrimitiveRayTracing = false;
-	int32 ChunkPrimitiveCardSlices = 0;
+	FVoxelChunkMeshCardSettings ChunkPrimitiveCards;
 
 	/** The bytes of the chunk meshes' buffers alive now (the meshes add and remove theirs on the render thread) */
 	TSharedPtr<std::atomic<int64>, ESPMode::ThreadSafe> ChunkMeshBytes;
@@ -819,9 +824,10 @@ private:
 	 * @param LocalBounds Its box relative to Origin
 	 * @param Origin      The chunk's (the seam owner chunk's) world position
 	 * @param bFade       The submit carries the fade FadeScheduler and ActiveFades hold for Key (step 2)
+	 * @param PrebuiltCards The Lumen cards its mesh worker fitted (null = fit them here)
 	 */
 	void SubmitChunkPrimitive(const FIntVector4& Key, TArray<FVoxelVertex>&& Vertices, TArray<uint32>&& Indices, int32 LODLevel,
-		const FBox& LocalBounds, const FVector& Origin, bool bFade);
+		const FBox& LocalBounds, const FVector& Origin, bool bFade, const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& PrebuiltCards = nullptr);
 
 	/**
 	 * Replace Key's primitive with one drawing Mesh (step 2). With bFade the new primitive starts with Key's fade and draws

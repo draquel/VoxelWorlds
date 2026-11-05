@@ -15,6 +15,7 @@
 #include "Containers/Queue.h"
 #include "MeshCardBuild.h"
 #include "MeshCardRepresentation.h"
+#include "VoxelChunkMeshCardsPrivate.h"
 #if RHI_RAYTRACING
 #include "RayTracingInstance.h"
 #include "RayTracingGeometryManagerInterface.h"
@@ -72,7 +73,8 @@ void FVoxelChunkPrimitiveCounters::AddRemoved(int64 Count)
 // ==================== FVoxelChunkMesh ====================
 
 FVoxelChunkMesh::FVoxelChunkMesh(TArray<FVoxelVertex>&& InVertices, TArray<uint32>&& InIndices, int32 InLODLevel, const FBox& InLocalBounds,
-	const FVector& InOrigin, const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe>& InByteCounter, int32 InLumenCardSlices)
+	const FVector& InOrigin, const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe>& InByteCounter, const FVoxelChunkMeshCardSettings& InCards,
+	const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& InPrebuiltCards)
 	: LODLevel(InLODLevel)
 	, LocalBounds(InLocalBounds)
 	, Origin(InOrigin)
@@ -81,15 +83,41 @@ FVoxelChunkMesh::FVoxelChunkMesh(TArray<FVoxelVertex>&& InVertices, TArray<uint3
 	, NumTriangles(static_cast<uint32>(PendingIndices.Num() / 3))
 	, ByteCounter(InByteCounter)
 {
-	if (InLumenCardSlices > 0 && NumTriangles > 0 && LocalBounds.IsValid)
+	if (InCards.HasCards() && NumTriangles > 0 && LocalBounds.IsValid)
 	{
+		const double StartTime = FPlatformTime::Seconds();
 		CardRepresentation = MakeUnique<FCardRepresentationData>();
 		FMeshCardsBuildData& CardData = CardRepresentation->MeshCardsBuildData;
 		CardData.Bounds = LocalBounds;
 		// One-sided (the terrain is closed from the outside) and undilated: a two-sided mesh's card bias of 50 uu would let
 		// a cave's hit take the lit ground's card above it
 		CardData.bMostlyTwoSided = false;
-		BuildVoxelChunkMeshCards(LocalBounds, InLumenCardSlices, CardData);
+		FVoxelChunkMeshCardBuildStats Stats;
+		const bool bFitted = InCards.Mode == EVoxelChunkMeshCards::Fitted;
+		// The mesh worker's cards, when it fitted them as this mesh wants in the box the mesh has (a settings change between
+		// the mesher and the upload, or another box, has them fitted again here)
+		const bool bPrebuilt = bFitted && InPrebuiltCards.IsValid() && InPrebuiltCards->Settings == InCards
+			&& InPrebuiltCards->LocalBounds.Equals(LocalBounds, 0.01);
+		if (bPrebuilt)
+		{
+			CardData.CardBuildData = InPrebuiltCards->Cards;
+			Stats = InPrebuiltCards->Stats;
+		}
+		else if (bFitted)
+		{
+			BuildVoxelChunkMeshFittedCards(PendingVertices, PendingIndices, LocalBounds, InCards, CardData, &Stats);
+		}
+		else
+		{
+			BuildVoxelChunkMeshCards(LocalBounds, InCards.Slices, CardData);
+		}
+		const int32 NumCards = CardData.CardBuildData.Num();
+		if (NumCards == 0)
+		{
+			// Nothing a card captures (a sliver below the cluster minimum): no cards, out of Lumen's scene as without them
+			CardRepresentation.Reset();
+		}
+		FVoxelChunkMeshCardCounters::AddBuild(NumCards, FPlatformTime::Seconds() - StartTime, bFitted ? &Stats : nullptr, InCards.MaxCards, bPrebuilt);
 	}
 }
 
