@@ -5370,11 +5370,11 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
 			const bool bSuccess = SeamMesherPtr->GenerateFaceSeamMeshCPU(SeamRequest, MeshData);
+			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 			if (bSuccess)
 			{
 				MeshData.PrebuiltLumenCards = PrebuildVoxelChunkMeshCards(MeshData); // G116: the seam's fitted cards, merged per bucket
 			}
-			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 			if (UVoxelChunkManager* This = WeakThis.Get())
 			{
 				FCompletedSeamMesh Result;
@@ -5421,11 +5421,11 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
 			const bool bSuccess = SeamMesherPtr->GenerateEdgeSeamMeshCPU(SeamRequest, MeshData);
+			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 			if (bSuccess)
 			{
 				MeshData.PrebuiltLumenCards = PrebuildVoxelChunkMeshCards(MeshData); // G116: the seam's fitted cards, merged per bucket
 			}
-			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 			if (UVoxelChunkManager* This = WeakThis.Get())
 			{
 				FCompletedSeamMesh Result;
@@ -5471,11 +5471,11 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
 			const bool bSuccess = SeamMesherPtr->GenerateCornerSeamMeshCPU(SeamRequest, MeshData);
+			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 			if (bSuccess)
 			{
 				MeshData.PrebuiltLumenCards = PrebuildVoxelChunkMeshCards(MeshData); // G116: the seam's fitted cards, merged per bucket
 			}
-			const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
 			if (UVoxelChunkManager* This = WeakThis.Get())
 			{
 				FCompletedSeamMesh Result;
@@ -5604,7 +5604,7 @@ void UVoxelChunkManager::ProcessCompletedSeamMeshes()
 
 void UVoxelChunkManager::SubmitSeamOwnerBucket(const FIntVector& Owner)
 {
-	const FSeamOwnerSlots* OwnerSlots = SeamOwnerSlots.Find(Owner);
+	FSeamOwnerSlots* OwnerSlots = SeamOwnerSlots.Find(Owner);
 	if (!OwnerSlots || !MeshRenderer)
 	{
 		return;
@@ -5615,10 +5615,16 @@ void UVoxelChunkManager::SubmitSeamOwnerBucket(const FIntVector& Owner)
 	TArray<TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>, TInlineAllocator<7>> SlotCards;
 	for (int32 s = 0; s < 7; ++s)
 	{
-		const FChunkMeshData& SlotMesh = OwnerSlots->Slots[s];
+		FChunkMeshData& SlotMesh = OwnerSlots->Slots[s];
 		if (!SlotMesh.IsValid())
 		{
 			continue;
+		}
+		// A seam kept from before a Lumen cards change (lost render data re-sends the slots without meshing them again) has
+		// its cards fitted again, once, here
+		if (AreVoxelPrebuiltChunkMeshCardsStale(SlotMesh))
+		{
+			SlotMesh.PrebuiltLumenCards = PrebuildVoxelChunkMeshCards(SlotMesh);
 		}
 		SlotCards.Add(SlotMesh.PrebuiltLumenCards);
 		MinLOD = FMath::Min(MinLOD, FMath::Max(OwnerSlots->SlotLOD[s], 0));

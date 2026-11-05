@@ -103,8 +103,17 @@ VOXELRENDERING_API FVoxelChunkMeshCardSettings GetVoxelChunkMeshCardSettings();
 VOXELRENDERING_API TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> PrebuildVoxelChunkMeshCards(const FChunkMeshData& MeshData);
 
 /**
+ * Whether a kept mesh's worker-fitted cards no longer fit the settings (a voxel.Render.LumenCards change since), so its
+ * owner fits them again before merging (a seam bucket re-sends its seams' meshes without meshing them again). Any thread.
+ *
+ * @param MeshData The kept mesh
+ * @return True when the fitted cards are on and the mesh has none or cards fitted with other settings
+ */
+VOXELRENDERING_API bool AreVoxelPrebuiltChunkMeshCardsStale(const FChunkMeshData& MeshData);
+
+/**
  * A mesh made of parts that each had their cards fitted (a seam bucket's seams, each on its seam worker), any thread: the
- * parts' cards together, the MaxCards that cover most, in the union of their boxes.
+ * parts' cards together, the MaxCards whose surface is largest, in the union of their boxes.
  *
  * @param Parts The parts' cards (in the merged mesh's space)
  * @return The merged cards; null when a part has none or the parts were fitted with different settings (the upload fits

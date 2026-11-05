@@ -151,7 +151,7 @@ namespace
 template<typename FGetPosition, typename FGetNormal>
 static void BuildFittedCards(int32 NumVertices, FGetPosition GetPosition, FGetNormal GetNormal, TConstArrayView<uint32> Indices,
 	const FBox& LocalBounds, const FVoxelChunkMeshCardSettings& Settings, FMeshCardsBuildData& OutCardData, FVoxelChunkMeshCardBuildStats* OutStats,
-	TArray<int32>* OutCardCoverage = nullptr)
+	TArray<int32>* OutCardCoverage = nullptr, TArray<float>* OutCardArea = nullptr)
 {
 	OutCardData.CardBuildData.Reset();
 	FVoxelChunkMeshCardBuildStats Stats;
@@ -165,17 +165,18 @@ static void BuildFittedCards(int32 NumVertices, FGetPosition GetPosition, FGetNo
 	}
 
 	// The grid: cubic cells, Resolution of them along the box's longest side (the engine's builder takes 10 uu cells up to
-	// 64 a side; a chunk mesh's grid sits at about two of its voxels a cell with the default 16, so a layer two voxels below
-	// another is told apart). The grid starts a quarter cell before the box, so that faces on the box's own grid (a cubic
-	// mesh's, two voxels a cell) lie inside cells, never on the boundary a card's near plane takes
+	// 64 a side; with the default 16 a 64-voxel chunk's cell is about four of its voxels, and a layer is told from the one in
+	// front of it when a whole empty cell lies between them, 4-8 voxels). The grid starts a quarter cell before the box and
+	// ends half a cell past it: with uneven margins no cell boundary, where a card's near plane goes, sits on the box's
+	// centre or on the voxel faces of a 64-voxel side (a cubic mesh's faces)
 	const int32 Resolution = FMath::Clamp(Settings.Resolution, 4, MaxFittedResolution);
 	const FVector BoxSize = LocalBounds.GetSize();
-	const double CellSize = FMath::Max(BoxSize.GetMax(), 1.0) / (Resolution - 0.5);
+	const double CellSize = FMath::Max(BoxSize.GetMax(), 1.0) / (Resolution - 0.75);
 	const float InvCellSize = static_cast<float>(1.0 / CellSize);
 	FIntVector Dims;
 	for (int32 Axis = 0; Axis < 3; ++Axis)
 	{
-		Dims[Axis] = FMath::Clamp(FMath::CeilToInt32((BoxSize[Axis] + 0.5 * CellSize) / CellSize - 1.0e-3), 1, Resolution);
+		Dims[Axis] = FMath::Clamp(FMath::CeilToInt32((BoxSize[Axis] + 0.75 * CellSize) / CellSize - 1.0e-3), 1, Resolution);
 	}
 	const FVector3f GridMin(LocalBounds.Min - FVector(0.25 * CellSize));
 	TArray<uint8> Cells;
@@ -366,19 +367,28 @@ static void BuildFittedCards(int32 NumVertices, FGetPosition GetPosition, FGetNo
 		Clusters.SetNum(MaxCards);
 	}
 
-	// A card over each cluster's cells: across, clamped to the mesh's box; along its depth from the near plane (the cell
-	// boundary behind the last surface in front, so that surface stays out of the box) to half a cell past the deepest
-	// element, as the engine's builder
+	// A card over each cluster's cells: across, clamped to the mesh's box; along its depth from the box's face (the outer
+	// card) or the cluster's shallowest element (an inner one: behind the surface in front in every column of the cluster,
+	// and as little as it can be of the other columns its rectangle spans) to half a cell past the deepest element, as the
+	// engine's builder
 	OutCardData.CardBuildData.Reserve(Clusters.Num());
 	if (OutCardCoverage)
 	{
 		OutCardCoverage->Reset(Clusters.Num());
+	}
+	if (OutCardArea)
+	{
+		OutCardArea->Reset(Clusters.Num());
 	}
 	for (const FCardCluster& Cluster : Clusters)
 	{
 		if (OutCardCoverage)
 		{
 			OutCardCoverage->Add(Cluster.Coverage);
+		}
+		if (OutCardArea)
+		{
+			OutCardArea->Add(static_cast<float>(Cluster.Coverage * CellSize * CellSize));
 		}
 		const FCardBasis Basis(Cluster.Direction);
 		const double Face = Basis.bPositive ? GridMin[Basis.Axis] + Dims[Basis.Axis] * CellSize : GridMin[Basis.Axis];
@@ -390,7 +400,7 @@ static void BuildFittedCards(int32 NumVertices, FGetPosition GetPosition, FGetNo
 		Max[Basis.U] = FMath::Min(GridMin[Basis.U] + (Cluster.Max.X + 1) * CellSize, LocalBounds.Max[Basis.U]);
 		Min[Basis.V] = FMath::Max(GridMin[Basis.V] + Cluster.Min.Y * CellSize, LocalBounds.Min[Basis.V]);
 		Max[Basis.V] = FMath::Min(GridMin[Basis.V] + (Cluster.Max.Y + 1) * CellSize, LocalBounds.Max[Basis.V]);
-		const double Near = Face + Sign * Cluster.NearPlane * CellSize;
+		const double Near = Face + Sign * (Cluster.NearPlane == 0 ? 0 : Cluster.Min.Z) * CellSize;
 		const double Far = Face + Sign * (Cluster.Max.Z + 1.5) * CellSize;
 		Min[Basis.Axis] = FMath::Max(FMath::Min(Near, Far), LocalBounds.Min[Basis.Axis] - CardDepthMargin);
 		Max[Basis.Axis] = FMath::Min(FMath::Max(Near, Far), LocalBounds.Max[Basis.Axis] + CardDepthMargin);
@@ -467,10 +477,22 @@ TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> PrebuildVoxe
 	FMeshCardsBuildData CardData;
 	BuildFittedCards(MeshData.Positions.Num(), [&MeshData](uint32 Index) { return MeshData.Positions[Index]; },
 		[&MeshData, bHasNormals](uint32 Index) { return bHasNormals ? MeshData.Normals[Index] : FVector3f::UpVector; },
-		MeshData.Indices, LocalBounds, Settings, CardData, &Prebuilt->Stats, &Prebuilt->CardCoverage);
+		MeshData.Indices, LocalBounds, Settings, CardData, &Prebuilt->Stats, &Prebuilt->CardCoverage, &Prebuilt->CardArea);
 	Prebuilt->Cards = MoveTemp(CardData.CardBuildData);
 	FVoxelChunkMeshCardCounters::AddWorkerBuild(FPlatformTime::Seconds() - StartTime);
 	return Prebuilt;
+}
+
+bool AreVoxelPrebuiltChunkMeshCardsStale(const FChunkMeshData& MeshData)
+{
+	static const TConsoleVariableData<int32>* ChunkPrimitives =
+		IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("voxel.Render.ChunkPrimitives"));
+	const FVoxelChunkMeshCardSettings Settings = GetVoxelChunkMeshCardSettings();
+	if (Settings.Mode != EVoxelChunkMeshCards::Fitted || !MeshData.IsValid() || (ChunkPrimitives && ChunkPrimitives->GetValueOnAnyThread() == 0))
+	{
+		return false;
+	}
+	return !MeshData.PrebuiltLumenCards.IsValid() || MeshData.PrebuiltLumenCards->Settings != Settings;
 }
 
 TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> MergeVoxelPrebuiltChunkMeshCards(
@@ -486,12 +508,14 @@ TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> MergeVoxelPr
 	{
 		const FLumenCardBuildData* Card;
 		int32 Coverage;
+		float Area;
 	};
 	TArray<FRankedCard> Ranked;
 	for (const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& Part : Parts)
 	{
 		// Every part fitted with the same settings, or the bucket is fitted whole at the upload
-		if (!Part.IsValid() || Part->Settings != Merged->Settings || Part->CardCoverage.Num() != Part->Cards.Num())
+		if (!Part.IsValid() || Part->Settings != Merged->Settings || Part->CardCoverage.Num() != Part->Cards.Num()
+			|| Part->CardArea.Num() != Part->Cards.Num())
 		{
 			return nullptr;
 		}
@@ -500,17 +524,19 @@ TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> MergeVoxelPr
 		Merged->Stats.Clusters += Part->Cards.Num();
 		for (int32 Index = 0; Index < Part->Cards.Num(); ++Index)
 		{
-			Ranked.Add({ &Part->Cards[Index], Part->CardCoverage[Index] });
+			Ranked.Add({ &Part->Cards[Index], Part->CardCoverage[Index], Part->CardArea[Index] });
 		}
 	}
-	// The parts' cards together, the MaxCards that cover most (a part's cards never see another part's surface in front of
-	// them: the seams of a bucket lie along different faces of the owner)
-	Ranked.StableSort([](const FRankedCard& A, const FRankedCard& B) { return A.Coverage > B.Coverage; });
+	// The parts' cards together, the MaxCards whose surface is largest (by area: each part's grid has its own cell size, a
+	// corner seam's far finer than a face seam's; a part's cards never see another part's surface in front of them, the
+	// seams of a bucket lie along different faces of the owner)
+	Ranked.StableSort([](const FRankedCard& A, const FRankedCard& B) { return A.Area > B.Area; });
 	Ranked.SetNum(FMath::Min(Ranked.Num(), FMath::Clamp(Merged->Settings.MaxCards, 1, MaxCardsPerMesh)));
 	for (const FRankedCard& Entry : Ranked)
 	{
 		Merged->Cards.Add(*Entry.Card);
 		Merged->CardCoverage.Add(Entry.Coverage);
+		Merged->CardArea.Add(Entry.Area);
 		Merged->Stats.CoveredSurfels += Entry.Coverage;
 	}
 	return Merged;

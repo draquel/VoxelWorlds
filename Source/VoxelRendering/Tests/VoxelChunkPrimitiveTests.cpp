@@ -405,7 +405,7 @@ bool FVoxelChunkMeshFittedCardsTest::RunTest(const FString& Parameters)
 		{
 			TestEqual(TEXT("Merge: every card of both"), Merged->Cards.Num(), Small->Cards.Num() + Prebuilt->Cards.Num());
 			TestTrue(TEXT("Merge: the boxes' union"), Merged->LocalBounds.IsInsideOrOn(FVector(4050.0, 50.0, 500.0)) && Merged->LocalBounds.IsInsideOrOn(FVector(100.0, 100.0, 3050.0)));
-			TestTrue(TEXT("Merge: the most covering first"), Merged->CardCoverage.Num() == Merged->Cards.Num() && Merged->CardCoverage[0] >= Merged->CardCoverage.Last());
+			TestTrue(TEXT("Merge: the largest first"), Merged->CardArea.Num() == Merged->Cards.Num() && Merged->CardArea[0] >= Merged->CardArea.Last());
 		}
 		const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> WithMissing[] = { Prebuilt, nullptr };
 		TestFalse(TEXT("Merge: a part without cards leaves the bucket to the upload"), MergeVoxelPrebuiltChunkMeshCards(WithMissing).IsValid());
