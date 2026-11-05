@@ -78,4 +78,4 @@ system you work on. The project root holds the vocabulary (`Documentation/GLOSSA
 ## Other
 
 - `Images/R22`, `Images/R23`, `Images/R24`: before and after shots for the voxel QA follow-ups.
-- `Presentation/`: two HTML pages (an architecture explainer and slides) from 2026-07, before the world modes review.
+- `Presentation/`: two HTML pages, an architecture explainer and a seven-slide 16:9 deck (it prints to PDF through headless Edge), brought up to date 2026-11-05.
