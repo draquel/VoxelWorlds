@@ -129,9 +129,9 @@ GPU against the CPU:
    main checkout's editor on 8080) and turns off its background throttle (`disable_bg_throttle.py`: an unfocused
    editor pins itself to 3 FPS and a run stalls).
 2. It runs `Automation RunTests VoxelWorlds.Generation.GPUvsCPU+VoxelWorlds.Generation.GPUNoiseGeneratorAsync+VoxelWorlds.Rendering.Crossfade+VoxelWorlds.Rendering.RayTracing+VoxelWorlds.Rendering.ChunkPrimitives+VoxelWorlds.Streaming.EditReachesProxy+VoxelEngine.Replication.Framework`:
-   the 17 GPU and proxy tests, the six crossfade tests and G116 step 4's `Rendering.ChunkPrimitives.CardsFromBounds` that
-   also run headless, and the replication test, **25 results**
-   (19 before F3.3's `Rendering.RayTracing.ChunkGeometry`, 20 before G121's `Rendering.RayTracing.FarFieldGeometry`, 21 before G116's three `Rendering.ChunkPrimitives` tests, 24 before step 4's),
+   the 17 GPU and proxy tests, the six crossfade tests and G116's `Rendering.ChunkPrimitives.CardsFromBounds` and
+   `Rendering.ChunkPrimitives.FittedCards` that also run headless, and the replication test, **26 results**
+   (19 before F3.3's `Rendering.RayTracing.ChunkGeometry`, 20 before G121's `Rendering.RayTracing.FarFieldGeometry`, 21 before G116's three `Rendering.ChunkPrimitives` tests, 24 before step 4's, 25 before the fitted cards'),
    each expected to be a single `Success`.
 3. It extracts the **parity lines** (the parity tests' `[N voxels]: density~` lines, one per case and LOD: density,
    material, biome and metadata agreement and the GPU's CRC) and compares all **111** with the record,

@@ -294,12 +294,13 @@ keeps darkening the ground under it, and a sealed cave stays dark.
   project or the RHI does not allow ray tracing. `voxel.Render.RayTracingStats` gives the geometries alive, their BLAS
   megabytes and the instances the last frame gathered; test `Rendering.RayTracing.ChunkGeometry` (the in-editor gate).
 
-**Lumen's surface cache** (G116 step 4, 2026-11-04; the plan is
+**Lumen's surface cache** (G116 step 4, 2026-11-04, and the fitted cards, 2026-11-05; the plan is
 [LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md](../Research/LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md) §4). With
-`voxel.Render.LumenCards 1` every chunk primitive's mesh has Lumen cards and the primitive is in Lumen's scene, so a ray
-that hits the terrain reads the surface cache: the bounce off the terrain is back. **Off by default** (0) until cards
-fitted to the surface close the gap under overhangs (below): the axis cards bring the bounce back but not that, for
-about +1 ms of render thread.
+`voxel.Render.LumenCards` 1 (axis cards) or 2 (cards fitted to the surface) every chunk primitive's mesh has Lumen cards
+and the primitive is in Lumen's scene, so a ray that hits the terrain reads the surface cache: the bounce off the terrain
+is back. **Off by default** (0), the user's choice until the cards close the gap under overhangs: the fitted cards cover
+the overhang's underside and bring the voxel terrain to the level of an engine mesh with its own cards when only world
+traces count, but on screen Lumen's screen traces read the visible underside's lit pixels, which no card matches (below).
 
 - **Six axis-aligned cards over the mesh's box** (`BuildVoxelChunkMeshCards`, `MeshCardRepresentation::SetCardsFromBounds`,
   as the engine gives dynamic and spline meshes), built with the mesh when the region component takes it (the box is all
@@ -314,7 +315,26 @@ about +1 ms of render thread.
   the overhang's underside has no coverage (Lumen's coverage view, `r.Lumen.Visualize 5`, shows it magenta), and a ray
   that hits it reads black as before. `voxel.Render.LumenCards.Slices` cuts the box into parts along each axis with two
   cards per part, which peels the layers (3 slices cover the repro's underside) at that many times the surface cache's
-  texels. Cards fitted to the surface (the mesh's own facing clusters) are the next step (G116).
+  texels.
+- **Cards fitted to the surface** (`voxel.Render.LumenCards 2`, `BuildVoxelChunkMeshFittedCards` in
+  `VoxelChunkMeshCards.cpp`): the engine's mesh card build for static meshes (`MeshCardRepresentationUtilities`,
+  editor-only and ray traced with Embree) redone over the mesh's own triangles. The triangles are sampled into a grid of
+  cells over the mesh's box (`.Resolution`, 16 along the longest side: four of a 64-voxel chunk's voxels a cell, the grid
+  a quarter cell off the box so voxel-aligned faces never sit on a cell boundary); for each of the six directions every
+  column is walked from the box's face on that side, and a cell of surface facing that way (by the engine's normal
+  threshold) that follows empty space is a surface element, capturable from any near plane between the last surface in
+  front of it and itself. Clusters grow greedily as the engine's do: the outer layer first, then the near plane that
+  captures most of what is left, while a cluster covers `.MinCells` (4) densely enough; a card over each cluster's cells,
+  its near face on the cell boundary behind the surface in front. `.MaxCards` (16 of Lumen's 32) keeps the ones covering
+  most. So the overhang's underside above a cave's ceiling, a cave's floor under the ground and a wall behind another
+  each get a card; Lumen's coverage view shows the repro's underside covered (the axis cards leave it magenta). A chunk's
+  cards are fitted on its mesh worker (`PrebuildVoxelChunkMeshCards`, about 400 us a 64-voxel interior) and a seam's on
+  its seam worker, the bucket keeping its seams' best by coverage (`MergeVoxelPrebuiltChunkMeshCards`): nothing on the game
+  thread (a settings change between the worker and the upload, or the tests, fit them at the upload instead). About 9.7
+  cards a chunk mesh and 12 a seam bucket; the kept cards capture 93 % of the sampled surface elements of a chunk mesh
+  and 84 % of a bucket's (`voxel.Render.LumenCardStats`). The surface cache holds them in fewer pages than the axis cards
+  (438-447 of 1,024 at rest on `VoxelDemo` against 471; at most 348-366 while streaming against 442-825), as fitted cards
+  span the surface, not the box.
 - **Cost** (2026-11-04, the streaming bench, `voxel.Render.LumenCards` 0 and 1 interleaved, three runs each, noon with the
   clock stopped, 2,874 x 1,360): GPU frame P50 +0.25 ms on `VoxelDemo`'s chord (6.94 → 7.19) and +0.22 ms on
   `PlanetTest`'s great circle (6.25 → 6.47); the render thread's busy time +1.0 and +0.7 ms (9.48 → 10.47,
@@ -322,16 +342,32 @@ about +1 ms of render thread.
   about 26 card pages a frame while streaming against 8.5 without the terrain's cards (P95 78, at most 235 of its 300 a
   frame), with at most 8 mesh cards waiting; the surface cache's atlas (a fixed allocation) holds the terrain's cards in
   31-66 % of its pages at rest and at most 825 of 1,024 on the great circle, plus about 1.5 MB on the CPU.
-- **On** with `voxel.Render.LumenCards 1`, off (the default) with 0: a change recreates the primitives from re-sent meshes,
-  in or out of Lumen's scene.
-  Test `Rendering.ChunkPrimitives.CardsFromBounds` (the cards' boxes, headless) and `Rendering.ChunkPrimitives.Lifecycle`
-  (cards and scene membership, the in-editor gate).
+- **Cost of the fitted cards** (2026-11-05, the streaming bench, `voxel.Render.LumenCards` 0, 1 and 2 interleaved, three
+  runs each, noon with the clock stopped, this worktree's 1,280 x 722 PIE viewport): GPU frame P50 off → axis → fitted
+  5.40 → 5.53 → 5.63 ms on the chord and 5.43 → 5.54 (fitted) on the great circle (an axis run there reads 8.42, an
+  outlier); the render thread's busy time 9.14 → 9.37 → 9.69 and 11.39 → 12.27 → 12.82 ms; the game thread 18.48 →
+  18.24 → 18.47 on the chord and 21.76 → 22.92 → 23.45 on the great circle, where the runs of one side span 3.8 ms
+  (19.94-23.70 off). Lumen captures about 37-40 card pages a frame while streaming with the fitted cards against 24 with
+  the axis cards and 10 without (P95 103-120, under its 300), with at most 2 mesh cards waiting. Fitting on the game
+  thread instead (a first version) cost the chord's game thread +1.0 ms P50: seam buckets are most of the uploads.
+- **On** with `voxel.Render.LumenCards 1` or 2, off (the default) with 0: a change recreates the primitives from re-sent
+  meshes, in or out of Lumen's scene.
+  Tests `Rendering.ChunkPrimitives.CardsFromBounds` (the axis cards' boxes, headless), `Rendering.ChunkPrimitives.FittedCards`
+  (stacked layers, walls, the cap, the workers' cards and the bucket merge, headless) and `Rendering.ChunkPrimitives.Lifecycle`
+  (cards and scene membership in both modes, the in-editor gate).
 
 What it does not give yet:
 
-- **Bounce light everywhere.** The axis cards above miss stacked surfaces: the ground under a voxel overhang reads 0.91
-  of its on-screen brightness off screen (0.93 with 3 slices), where under an engine cube with its own cards it reads
-  0.98 (the table below).
+- **The on-screen brightness off screen.** The ground under a voxel overhang reads 0.91 of its on-screen brightness off
+  screen with the axis cards and 0.92-0.93 with the fitted cards (and with 3 slices), where under an engine cube with its
+  own cards it reads 0.98 (the table below). The cards are not what is left: the fitted cards cover the underside (the
+  coverage view), and a finer grid (`.Resolution 32`), 4 times the cards' texel density or hit lighting change nothing
+  (0.91-0.92). With Lumen's screen traces off (`r.Lumen.ScreenProbeGather.ScreenTraces 0`, both frames on world traces)
+  the voxel overhang reads 0.94 without cards, 0.95 with the axis cards and **0.96** with the fitted ones, against
+  0.96 → 0.97 under the engine cube: the fitted cards give the terrain what the engine's own cards give its meshes. On
+  screen the voxel overhang's rounded underside is in view, and screen traces read its final lit pixels; the cube's flat
+  underside is edge-on from the camera, so its ground is lit by world traces in both frames and the cube is not a like
+  for like reference. On `PlanetTest` the site reads 0.88-0.89 whatever the cards.
 - **Hit lighting is not the answer.** `r.Lumen.HardwareRayTracing.LightingMode 1` evaluates the terrain's material and
   direct light at a hit, and works with this proxy as it is (hit shaders take positions from the ray tracing geometry,
   not the vertex factory's position view, which the proxy leaves null). Sunlit terrain seen in a ray turns from black to
@@ -383,13 +419,23 @@ What it does not give yet:
 | `VoxelDemo`, the cube slab, cards 1 | 0.203-0.204 → 0.199-0.200 | 0.98 | 0.111 |
 | `PlanetTest`, cards 0 | 0.433 → 0.378 | 0.87 | 0.029 |
 | `PlanetTest`, cards 1 (1, 2 or 3 slices) | 0.437 → 0.383 | 0.88 | 0.029 |
+| `VoxelDemo`, cards 0 / 1 / 2 (fitted, 2026-11-05) | 0.175 → 0.158 / 0.190 → 0.173 / 0.192-0.193 → 0.177-0.180 | 0.90 / 0.91 / 0.92-0.93 | 0.098 |
+| `VoxelDemo`, cards 2 with `.Resolution 32`, 4 x the texel density, hit lighting | 0.190-0.194 → 0.174-0.179 | 0.91-0.92 | 0.098 |
+| `VoxelDemo`, screen traces off: cards 0 / 1 / 2 | 0.179 → 0.169 / 0.182 → 0.173 / 0.185 → 0.178 | 0.94 / 0.95 / 0.96 | 0.097 |
+| `VoxelDemo`, the cube slab, cards 2 / screen traces off: 0 / 2 | 0.202 → 0.198 / 0.156 → 0.150 / 0.180 → 0.175 | 0.98 / 0.96 / 0.97 | 0.098 |
+| `PlanetTest`, cards 0 / 1 / 2 (2026-11-05) | 0.414-0.416 → 0.367-0.370 | 0.88-0.89 | 0.024 |
 
 Mean luminance of the inner 60 % of the compared regions, noon with the clock stopped, exposure and anti-aliasing off;
 the spike's numbers for its prototype were 0.176 → 0.159 (0.91) on the demo and a planet cave of 0.039. The cards' rows
 are one PIE each, the settings switched in turn (ranges: the same setting twice). With the cards the ground under the
 overhang is 10 % brighter on and off screen (the overhang's lit top and the ground around it bounce light again) and the
 sealed caves are unchanged (no leak); under an engine cube with its own cards the off-screen ground is within 2 % of the
-on-screen one, so the remaining gap under the voxel overhang is its cards' coverage, not Lumen's.
+on-screen one, so the remaining gap under the voxel overhang was its cards' coverage. The 2026-11-05 rows are one PIE
+each on a later build (main with G73 and G125) in a 1,280 x 722 PIE window (step 4's: 2,874 x 1,360); the sealed cave
+reads 0.098 there in every mode against step 4's 0.111, the cause not looked into, and every mode was measured on the
+same build and window: the
+fitted cards cover the underside and take the ratio to 0.92-0.93; with screen traces off they reach the engine cube's
+level (0.96 against 0.97), so what is left on screen is the screen traces' view of the underside, not the cards.
 
 ---
 
