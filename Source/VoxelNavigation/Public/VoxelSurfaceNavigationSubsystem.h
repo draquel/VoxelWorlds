@@ -82,6 +82,34 @@ struct VOXELNAVIGATION_API FVoxelNavFrame
 };
 
 /**
+ * The surface navigation's cumulative work and game-thread time since the world began (G73, the NPC budget): a bench reads
+ * their change over a frame (the game module's vox.NPCBench). Game thread.
+ */
+struct VOXELNAVIGATION_API FVoxelSurfaceNavCounters
+{
+	/** Searches run (FindPath, FindPathWithStats). */
+	int64 Searches = 0;
+
+	/** Nodes the searches expanded. */
+	int64 NodesExpanded = 0;
+
+	/** Cells sampled from the chunk manager (a cell's first touch, and its re-sample after an invalidation). */
+	int64 CellsSampled = 0;
+
+	/** Seconds in the searches, their cell sampling included. */
+	double SearchSeconds = 0.0;
+
+	/** Seconds sampling cells from the chunk manager (part of SearchSeconds, or of QuerySeconds). */
+	double SampleSeconds = 0.0;
+
+	/** ProjectToSurface and IsWalkableAt calls. */
+	int64 Queries = 0;
+
+	/** Seconds in them. */
+	double QuerySeconds = 0.0;
+};
+
+/**
  * World-level surface navigation over the voxel terrain (feature 10): the pathfinder plus everything it
  * needs from a live world.
  *
@@ -179,6 +207,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Voxel|Navigation")
 	int32 GetSearchCount() const { return SearchCount; }
 
+	/**
+	 * The navigation's work and time since the world began.
+	 *
+	 * @return The cumulative counters
+	 */
+	const FVoxelSurfaceNavCounters& GetCounters() const { return Counters; }
+
 	/** Keep drawing the walkability grid around a point while voxel.Nav.Debug is on (0 radius = off). */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Navigation")
 	void SetDebugFocus(const FVector& Location, float Radius);
@@ -250,6 +285,9 @@ private:
 	/** A cell's surface height in a region's frame (its altitude on a planet), cached: edit-merged when its chunk is loaded, analytic otherwise. */
 	float HeightForCell(FRegionCache& Region, const FIntPoint& Cell);
 
+	/** A cell's cached height, without sampling. @return False when the cell is not cached */
+	bool CachedHeightForCell(const FRegionCache& Region, const FIntPoint& Cell, float& OutHeight) const;
+
 	/** Temporary blocks, blocked boxes and the world's edge against a cell: its footprint on a heightmap world, its surface point on a planet. */
 	bool IsCellBlocked(FRegionCache& Region, const FIntPoint& Cell);
 
@@ -297,6 +335,7 @@ private:
 
 	FVoxelSurfacePathStats LastStats;
 	int32 SearchCount = 0;
+	FVoxelSurfaceNavCounters Counters;
 
 	FVector DebugFocus = FVector::ZeroVector;
 	float DebugFocusRadius = 0.f;

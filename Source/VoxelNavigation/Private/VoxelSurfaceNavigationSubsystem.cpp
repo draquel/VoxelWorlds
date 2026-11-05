@@ -8,12 +8,15 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "HAL/IConsoleManager.h"
+#include "Misc/ScopeExit.h"
 #include "VoxelChunkManager.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelCoordinates.h"
 #include "VoxelEditManager.h"
 #include "VoxelSurfaceQuery.h"
 #include "VoxelWorldConfiguration.h"
+
+#include <limits>
 
 // ---------------------------------------------------------------------------
 // CVars
@@ -29,6 +32,8 @@ static TAutoConsoleVariable<float> CVarNavMaxWadeDepth(TEXT("voxel.Nav.MaxWadeDe
 	TEXT("Cells this far below the water surface are still walkable."));
 static TAutoConsoleVariable<float> CVarNavMaxRadius(TEXT("voxel.Nav.MaxRadius"), 20000.f,
 	TEXT("Cells farther than this from the start are never expanded."));
+static TAutoConsoleVariable<int32> CVarNavMaxSamplesPerSearch(TEXT("voxel.Nav.MaxSamplesPerSearch"), 1024,
+	TEXT("Cells one path search may sample from the chunk manager (the rest it has no height for are left out of it, and a later search samples them); 0 = no cap. Bounds a cold search's hitch (G73)."));
 static TAutoConsoleVariable<int32> CVarNavDebug(TEXT("voxel.Nav.Debug"), 0,
 	TEXT("1 = draw the walkability grid around the debug focus and recent routes."));
 
@@ -294,6 +299,7 @@ bool UVoxelSurfaceNavigationSubsystem::FindPathWithStats(const FVector& From, co
 	{
 		return false;
 	}
+	const uint64 StartCycles = FPlatformTime::Cycles64();
 	ApplyCVars();
 	bool bOk = false;
 	// The search runs in the frame of the region its start lies in (the identity on a heightmap world; on a planet the
@@ -303,8 +309,27 @@ bool UVoxelSurfaceNavigationSubsystem::FindPathWithStats(const FVector& From, co
 	FVector FrameFrom, FrameTo;
 	if (Region.Frame.ToFrame(From, FrameFrom) && Region.Frame.ToFrame(To, FrameTo))
 	{
+		// A cold search samples at most MaxSamplesPerSearch cells (a few microseconds to tens each); the cells past the cap
+		// get no height (NaN) and are left out of this search, and the next one samples them (G73: one search to a goal out
+		// of reach sampled 14,760 block columns, 200 ms).
+		const int32 MaxSamples = CVarNavMaxSamplesPerSearch.GetValueOnGameThread();
+		int32 SamplesLeft = MaxSamples > 0 ? MaxSamples : TNumericLimits<int32>::Max();
 		FVoxelSurfacePathfinder Pathfinder(ParamsIn(Region),
-			[this, &Region](double X, double Y) { return HeightForCell(Region, CellOf(FVector(X, Y, 0.0))); },
+			[this, &Region, &SamplesLeft](double X, double Y)
+			{
+				const FIntPoint Cell = CellOf(FVector(X, Y, 0.0));
+				float Height;
+				if (CachedHeightForCell(Region, Cell, Height))
+				{
+					return Height;
+				}
+				if (SamplesLeft <= 0)
+				{
+					return std::numeric_limits<float>::quiet_NaN();
+				}
+				--SamplesLeft;
+				return HeightForCell(Region, Cell);
+			},
 			[this, &Region](const FIntPoint& Cell) { return IsCellBlocked(Region, Cell); });
 		TArray<FVector> FramePoints;
 		bOk = Pathfinder.FindPath(FrameFrom, FrameTo, FramePoints, &OutStats);
@@ -315,6 +340,9 @@ bool UVoxelSurfaceNavigationSubsystem::FindPathWithStats(const FVector& From, co
 	}
 	LastStats = OutStats;
 	++SearchCount;
+	++Counters.Searches;
+	Counters.NodesExpanded += OutStats.NodesExpanded;
+	Counters.SearchSeconds += FPlatformTime::ToSeconds64(FPlatformTime::Cycles64() - StartCycles);
 	if (CVarNavDebug.GetValueOnGameThread() > 0)
 	{
 		if (bOk)
@@ -343,11 +371,14 @@ bool UVoxelSurfaceNavigationSubsystem::ProjectToSurface(const FVector& Location,
 		OutOnSurface = Location;
 		return false;
 	}
+	const uint64 StartCycles = FPlatformTime::Cycles64();
 	ApplyCVars();
 	// Along local up: the edit-merged surface when loaded, the analytic one otherwise.
 	UVoxelChunkManager* ChunkMgr = ChunkManager.Get();
 	FVoxelSurfaceSample Sample;
 	OutOnSurface = ChunkMgr->QueryEditMergedSurfacePoint(Location, Sample) ? Sample.Position : ChunkMgr->GetGeneratedSurfacePoint(Location);
+	++Counters.Queries;
+	Counters.QuerySeconds += FPlatformTime::ToSeconds64(FPlatformTime::Cycles64() - StartCycles);
 	return true;
 }
 
@@ -357,6 +388,12 @@ bool UVoxelSurfaceNavigationSubsystem::IsWalkableAt(const FVector& Location)
 	{
 		return false;
 	}
+	const uint64 StartCycles = FPlatformTime::Cycles64();
+	ON_SCOPE_EXIT
+	{
+		++Counters.Queries;
+		Counters.QuerySeconds += FPlatformTime::ToSeconds64(FPlatformTime::Cycles64() - StartCycles);
+	};
 	ApplyCVars();
 	FRegionCache& Region = RegionFor(Location);
 	FVector FramePoint;
@@ -672,6 +709,23 @@ bool UVoxelSurfaceNavigationSubsystem::IsUnderwaterIn(const FRegionCache& Region
 	return PlanetSea.bEnabled && PlanetSea.bRadial && PlanetRadius + Height < PlanetSea.Radius - Params.MaxWadeDepth;
 }
 
+bool UVoxelSurfaceNavigationSubsystem::CachedHeightForCell(const FRegionCache& Region, const FIntPoint& Cell, float& OutHeight) const
+{
+	const FIntPoint TileKey(FloorDiv(Cell.X, TileSize), FloorDiv(Cell.Y, TileSize));
+	const TUniquePtr<FNavTile>* Tile = Region.Tiles.Find(TileKey);
+	if (!Tile || !*Tile)
+	{
+		return false;
+	}
+	const int32 Index = (Cell.Y - TileKey.Y * TileSize) * TileSize + (Cell.X - TileKey.X * TileSize);
+	if (!(*Tile)->Sampled[Index])
+	{
+		return false;
+	}
+	OutHeight = (*Tile)->Heights[Index];
+	return true;
+}
+
 float UVoxelSurfaceNavigationSubsystem::HeightForCell(FRegionCache& Region, const FIntPoint& Cell)
 {
 	const FIntPoint TileKey(FloorDiv(Cell.X, TileSize), FloorDiv(Cell.Y, TileSize));
@@ -687,6 +741,7 @@ float UVoxelSurfaceNavigationSubsystem::HeightForCell(FRegionCache& Region, cons
 	}
 	// The surface on the cell centre's up-line (its direction on a planet): edit-merged when its chunk is loaded, analytic
 	// otherwise. On a heightmap world the frame's height is the world Z, on a planet the altitude.
+	const uint64 StartCycles = FPlatformTime::Cycles64();
 	const FVector2D Centre = CellCentre(Cell);
 	const FVector Probe = Region.Frame.ToWorld(FVector(Centre.X, Centre.Y, 0.0));
 	float Height = 0.f;
@@ -709,6 +764,8 @@ float UVoxelSurfaceNavigationSubsystem::HeightForCell(FRegionCache& Region, cons
 	Tile->FromLoaded[Index] = bLoaded;
 	++Region.Cells;
 	++CachedCells;
+	++Counters.CellsSampled;
+	Counters.SampleSeconds += FPlatformTime::ToSeconds64(FPlatformTime::Cycles64() - StartCycles);
 	return Height;
 }
 
