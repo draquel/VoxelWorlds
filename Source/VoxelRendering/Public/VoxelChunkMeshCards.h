@@ -6,6 +6,8 @@
 #include "VoxelVertex.h"
 
 class FMeshCardsBuildData;
+struct FChunkMeshData;
+struct FVoxelPrebuiltChunkMeshCards;
 
 /** How a chunk mesh's Lumen cards are built (G116, voxel.Render.LumenCards) */
 enum class EVoxelChunkMeshCards : uint8
@@ -49,6 +51,9 @@ struct FVoxelChunkMeshCardSettings
 	bool operator!=(const FVoxelChunkMeshCardSettings& Other) const { return !(*this == Other); }
 };
 
+/** The most slices per axis a chunk mesh's axis cards take: Lumen looks up at most 32 cards per mesh (6 a slice) */
+constexpr int32 MaxVoxelChunkMeshCardSlices = 5;
+
 /** What one fitted build found (BuildVoxelChunkMeshFittedCards): the surface it sampled and how much of it the cards cover */
 struct FVoxelChunkMeshCardBuildStats
 {
@@ -81,6 +86,23 @@ VOXELRENDERING_API void BuildVoxelChunkMeshFittedCards(TConstArrayView<FVoxelVer
 	const FVoxelChunkMeshCardSettings& Settings, FMeshCardsBuildData& OutCardData, FVoxelChunkMeshCardBuildStats* OutStats = nullptr);
 
 /**
+ * The Lumen cards the chunk meshes take now (the voxel.Render.LumenCards cvars), any thread.
+ *
+ * @return The mode and its tuning (none when off)
+ */
+VOXELRENDERING_API FVoxelChunkMeshCardSettings GetVoxelChunkMeshCardSettings();
+
+/**
+ * A chunk mesh's fitted cards, built on its mesh worker (any thread) so the upload takes them as they are; the region
+ * component uses them when they were fitted with the settings it creates meshes with, and builds anew otherwise.
+ *
+ * @param MeshData The mesher's mesh (its positions' bounds are the renderer's LocalBounds)
+ * @return The cards and the settings they were fitted with; null unless the fitted cards are on (voxel.Render.LumenCards 2,
+ *         chunk primitives) and the mesh has triangles
+ */
+VOXELRENDERING_API TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> PrebuildVoxelChunkMeshCards(const FChunkMeshData& MeshData);
+
+/**
  * The chunk meshes' Lumen cards (G116), summed over every mesh built since the start or the last reset
  * (voxel.Render.LumenCardStats): any thread adds, any thread reads.
  */
@@ -96,9 +118,12 @@ struct VOXELRENDERING_API FVoxelChunkMeshCardCounters
 		int64 CoveredSurfels = 0;
 		/** Fitted meshes whose clusters MaxCards cut */
 		int64 Capped = 0;
-		/** Time spent building the cards, and the longest one build took */
+		/** Time spent building the cards on the game thread, and the longest one build took there */
 		double Seconds = 0.0;
 		double MaxSeconds = 0.0;
+		/** Of the meshes, those whose cards a mesh worker fitted, and the workers' time */
+		int64 WorkerMeshes = 0;
+		double WorkerSeconds = 0.0;
 	};
 
 	/** @return The counts now */
@@ -114,6 +139,7 @@ struct VOXELRENDERING_API FVoxelChunkMeshCardCounters
 	 * @param Seconds  The build's time
 	 * @param Stats    The fitted build's stats (null for axis cards)
 	 * @param MaxCards The fitted build's card limit
+	 * @param bOnWorker Built on a mesh worker (PrebuildVoxelChunkMeshCards), not on the game thread
 	 */
-	static void AddBuild(int32 NumCards, double Seconds, const FVoxelChunkMeshCardBuildStats* Stats, int32 MaxCards);
+	static void AddBuild(int32 NumCards, double Seconds, const FVoxelChunkMeshCardBuildStats* Stats, int32 MaxCards, bool bOnWorker = false);
 };

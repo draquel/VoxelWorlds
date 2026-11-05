@@ -70,10 +70,13 @@ public:
 	 * @param InByteCounter The region component's count of its chunk meshes' buffer bytes (outlives the mesh)
 	 * @param InCards      Its Lumen card representation (G116): none, axis-aligned over its box (step 4,
 	 *                      BuildVoxelChunkMeshCards) or fitted to its surface (BuildVoxelChunkMeshFittedCards)
+	 * @param InPrebuiltCards The fitted cards its mesh worker built (PrebuildVoxelChunkMeshCards), taken when they were
+	 *                      fitted with InCards in the same box; null = build them here
 	 */
 	FVoxelChunkMesh(TArray<FVoxelVertex>&& InVertices, TArray<uint32>&& InIndices, int32 InLODLevel, const FBox& InLocalBounds,
 		const FVector& InOrigin, const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe>& InByteCounter,
-		const FVoxelChunkMeshCardSettings& InCards = FVoxelChunkMeshCardSettings());
+		const FVoxelChunkMeshCardSettings& InCards = FVoxelChunkMeshCardSettings(),
+		const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& InPrebuiltCards = nullptr);
 
 	/** Render thread: releases the buffers, the vertex factory and the ray tracing geometry. */
 	~FVoxelChunkMesh();
@@ -137,9 +140,6 @@ private:
 	uint32 NumTriangles = 0;
 	TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe> ByteCounter;
 };
-
-/** The most slices per axis a chunk mesh's cards take: Lumen looks up at most 32 cards per mesh (6 a slice) */
-constexpr int32 MaxVoxelChunkMeshCardSlices = 5;
 
 /**
  * A chunk mesh's Lumen cards (G116 step 4): the box cut into Slices equal parts along each axis, and for each part the two

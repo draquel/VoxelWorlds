@@ -20,6 +20,7 @@
 #include "Components/ComponentInterfaces.h"
 #include "MeshCardBuild.h"
 #include "MeshCardRepresentation.h"
+#include "VoxelChunkMeshCardsPrivate.h"
 #include "HAL/IConsoleManager.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -342,6 +343,59 @@ bool FVoxelChunkMeshFittedCardsTest::RunTest(const FString& Parameters)
 		FMeshCardsBuildData Data;
 		BuildVoxelChunkMeshFittedCards({}, {}, Box, Settings, Data);
 		TestEqual(TEXT("No triangles: no cards"), Data.CardBuildData.Num(), 0);
+	}
+
+	// The mesh worker's cards (PrebuildVoxelChunkMeshCards, voxel.Render.LumenCards 2) are the upload's own, and the chunk mesh
+	// takes them without fitting them again; with other settings it fits its own
+	{
+		const VoxelTesting::FScopedCVar Fitted(TEXT("voxel.Render.LumenCards"), TEXT("2"));
+		TArray<FVoxelVertex> Vertices;
+		TArray<uint32> Indices;
+		AddRect(Vertices, Indices, FVector3f(0, 0, 3050), FVector3f(3200, 0, 0), FVector3f(0, 3200, 0), Up);
+		AddRect(Vertices, Indices, FVector3f(0, 0, 850), FVector3f(3200, 0, 0), FVector3f(0, 3200, 0), -Up);
+		FChunkMeshData MeshData;
+		FBox MeshBox(ForceInit);
+		for (const FVoxelVertex& Vertex : Vertices)
+		{
+			MeshData.Positions.Add(Vertex.Position);
+			MeshData.Normals.Add(Vertex.GetNormal());
+			MeshBox += FVector(Vertex.Position);
+		}
+		MeshData.Indices = Indices;
+		const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> Prebuilt = PrebuildVoxelChunkMeshCards(MeshData);
+		if (TestTrue(TEXT("Worker: fitted cards built"), Prebuilt.IsValid()))
+		{
+			FMeshCardsBuildData Direct;
+			BuildVoxelChunkMeshFittedCards(Vertices, Indices, MeshBox, GetVoxelChunkMeshCardSettings(), Direct);
+			TestEqual(TEXT("Worker: the cards the upload would fit"), Prebuilt->Cards.Num(), Direct.CardBuildData.Num());
+
+			const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe> Bytes = MakeShared<std::atomic<int64>, ESPMode::ThreadSafe>(0);
+			const FVoxelChunkMeshCardCounters::FCounts Before = FVoxelChunkMeshCardCounters::Get();
+			{
+				FVoxelChunkMesh Mesh(TArray<FVoxelVertex>(Vertices), TArray<uint32>(Indices), 0, MeshBox, FVector::ZeroVector, Bytes,
+					GetVoxelChunkMeshCardSettings(), Prebuilt);
+				TestTrue(TEXT("Worker: the mesh takes the worker's cards"), Mesh.CardRepresentation.IsValid()
+					&& Mesh.CardRepresentation->MeshCardsBuildData.CardBuildData.Num() == Prebuilt->Cards.Num());
+			}
+			const FVoxelChunkMeshCardCounters::FCounts After = FVoxelChunkMeshCardCounters::Get();
+			TestEqual(TEXT("Worker: counted as the worker's"), After.WorkerMeshes - Before.WorkerMeshes, int64(1));
+
+			FVoxelChunkMeshCardSettings Other = GetVoxelChunkMeshCardSettings();
+			Other.MaxCards = 1;
+			{
+				FVoxelChunkMesh Mesh(TArray<FVoxelVertex>(Vertices), TArray<uint32>(Indices), 0, MeshBox, FVector::ZeroVector, Bytes, Other, Prebuilt);
+				TestTrue(TEXT("Worker, other settings: the mesh fits its own (one card)"), Mesh.CardRepresentation.IsValid()
+					&& Mesh.CardRepresentation->MeshCardsBuildData.CardBuildData.Num() == 1);
+			}
+			TestEqual(TEXT("Worker, other settings: not the worker's"), FVoxelChunkMeshCardCounters::Get().WorkerMeshes, After.WorkerMeshes);
+		}
+	}
+	{
+		const VoxelTesting::FScopedCVar Axis(TEXT("voxel.Render.LumenCards"), TEXT("1"));
+		FChunkMeshData MeshData;
+		MeshData.Positions = { FVector3f(0, 0, 0), FVector3f(100, 0, 0), FVector3f(0, 100, 0) };
+		MeshData.Indices = { 0, 1, 2 };
+		TestFalse(TEXT("Worker, axis cards: nothing built on the worker"), PrebuildVoxelChunkMeshCards(MeshData).IsValid());
 	}
 	return true;
 }

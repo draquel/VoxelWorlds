@@ -353,7 +353,8 @@ void FVoxelMeshRenderer::SubmitChunkMeshInternal(
 			MoveTemp(Vertices),
 			MoveTemp(Indices),
 			LODLevel,
-			LocalBounds
+			LocalBounds,
+			MeshData.PrebuiltLumenCards
 		);
 	}
 

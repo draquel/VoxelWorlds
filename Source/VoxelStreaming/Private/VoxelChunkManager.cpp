@@ -21,6 +21,7 @@
 #include "IVoxelLODStrategy.h"
 #include "DistanceBandLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
+#include "VoxelChunkMeshCards.h" // PrebuildVoxelChunkMeshCards: the chunks' fitted Lumen cards on their mesh workers (G116)
 #include "IVoxelWorldMode.h"
 #include "VoxelWorldModeFactory.h"
 #include "VoxelSurfaceQuery.h"
@@ -4311,6 +4312,11 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 		TakeDeferredMeshVoxels(DeferredVoxels, DeferredDecode, MeshRequest.VoxelData);
 		const bool bSuccess = MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);
 		const double WorkerMs = (FPlatformTime::Seconds() - WorkerStart) * 1000.0;
+		// The mesh's fitted Lumen cards (G116), here rather than at the upload on the game thread
+		if (bSuccess)
+		{
+			MeshData.PrebuiltLumenCards = PrebuildVoxelChunkMeshCards(MeshData);
+		}
 
 		// Queue result for game thread (thread-safe MPSC queue)
 		if (UVoxelChunkManager* This = WeakThis.Get())

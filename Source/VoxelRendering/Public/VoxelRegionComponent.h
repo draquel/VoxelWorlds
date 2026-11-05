@@ -76,13 +76,15 @@ public:
 	 * @param Indices CPU index array (will be moved)
 	 * @param LODLevel LOD level of the mesh
 	 * @param LocalBounds Local bounds of the mesh
+	 * @param PrebuiltCards The Lumen cards its mesh worker fitted (G116, PrebuildVoxelChunkMeshCards); null = fit them here
 	 */
 	void UpdateChunkBuffersFromCPUData(
 		const FIntVector& ChunkCoord,
 		TArray<FVoxelVertex>&& Vertices,
 		TArray<uint32>&& Indices,
 		int32 LODLevel,
-		const FBox& LocalBounds);
+		const FBox& LocalBounds,
+		const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& PrebuiltCards = nullptr);
 
 	/**
 	 * Remove a chunk.
@@ -820,9 +822,10 @@ private:
 	 * @param LocalBounds Its box relative to Origin
 	 * @param Origin      The chunk's (the seam owner chunk's) world position
 	 * @param bFade       The submit carries the fade FadeScheduler and ActiveFades hold for Key (step 2)
+	 * @param PrebuiltCards The Lumen cards its mesh worker fitted (null = fit them here)
 	 */
 	void SubmitChunkPrimitive(const FIntVector4& Key, TArray<FVoxelVertex>&& Vertices, TArray<uint32>&& Indices, int32 LODLevel,
-		const FBox& LocalBounds, const FVector& Origin, bool bFade);
+		const FBox& LocalBounds, const FVector& Origin, bool bFade, const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& PrebuiltCards = nullptr);
 
 	/**
 	 * Replace Key's primitive with one drawing Mesh (step 2). With bFade the new primitive starts with Key's fade and draws

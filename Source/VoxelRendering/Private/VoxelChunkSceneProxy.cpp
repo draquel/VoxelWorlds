@@ -15,6 +15,7 @@
 #include "Containers/Queue.h"
 #include "MeshCardBuild.h"
 #include "MeshCardRepresentation.h"
+#include "VoxelChunkMeshCardsPrivate.h"
 #if RHI_RAYTRACING
 #include "RayTracingInstance.h"
 #include "RayTracingGeometryManagerInterface.h"
@@ -72,7 +73,8 @@ void FVoxelChunkPrimitiveCounters::AddRemoved(int64 Count)
 // ==================== FVoxelChunkMesh ====================
 
 FVoxelChunkMesh::FVoxelChunkMesh(TArray<FVoxelVertex>&& InVertices, TArray<uint32>&& InIndices, int32 InLODLevel, const FBox& InLocalBounds,
-	const FVector& InOrigin, const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe>& InByteCounter, const FVoxelChunkMeshCardSettings& InCards)
+	const FVector& InOrigin, const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe>& InByteCounter, const FVoxelChunkMeshCardSettings& InCards,
+	const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& InPrebuiltCards)
 	: LODLevel(InLODLevel)
 	, LocalBounds(InLocalBounds)
 	, Origin(InOrigin)
@@ -92,7 +94,16 @@ FVoxelChunkMesh::FVoxelChunkMesh(TArray<FVoxelVertex>&& InVertices, TArray<uint3
 		CardData.bMostlyTwoSided = false;
 		FVoxelChunkMeshCardBuildStats Stats;
 		const bool bFitted = InCards.Mode == EVoxelChunkMeshCards::Fitted;
-		if (bFitted)
+		// The mesh worker's cards, when it fitted them as this mesh wants in the box the mesh has (a settings change between
+		// the mesher and the upload, or another box, has them fitted again here)
+		const bool bPrebuilt = bFitted && InPrebuiltCards.IsValid() && InPrebuiltCards->Settings == InCards
+			&& InPrebuiltCards->LocalBounds.Equals(LocalBounds, 0.01);
+		if (bPrebuilt)
+		{
+			CardData.CardBuildData = InPrebuiltCards->Cards;
+			Stats = InPrebuiltCards->Stats;
+		}
+		else if (bFitted)
 		{
 			BuildVoxelChunkMeshFittedCards(PendingVertices, PendingIndices, LocalBounds, InCards, CardData, &Stats);
 		}
@@ -106,7 +117,8 @@ FVoxelChunkMesh::FVoxelChunkMesh(TArray<FVoxelVertex>&& InVertices, TArray<uint3
 			// Nothing a card captures (a sliver below the cluster minimum): no cards, out of Lumen's scene as without them
 			CardRepresentation.Reset();
 		}
-		FVoxelChunkMeshCardCounters::AddBuild(NumCards, FPlatformTime::Seconds() - StartTime, bFitted ? &Stats : nullptr, InCards.MaxCards);
+		FVoxelChunkMeshCardCounters::AddBuild(NumCards, bPrebuilt ? InPrebuiltCards->Seconds : FPlatformTime::Seconds() - StartTime,
+			bFitted ? &Stats : nullptr, InCards.MaxCards, bPrebuilt);
 	}
 }
 
