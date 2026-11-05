@@ -18,6 +18,9 @@
 #include "ObjectCacheContext.h"
 #include "ComponentRecreateRenderStateContext.h"
 #include "Components/ComponentInterfaces.h"
+#include "MeshCardBuild.h"
+#include "MeshCardRepresentation.h"
+#include "HAL/IConsoleManager.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -28,6 +31,8 @@
 // second; a recreated region proxy keeps them (nothing lost, nothing re-sent) and gets the water tiles back from the
 // component; an unloaded chunk and a removed bucket leave none, and no mesh bytes; voxel.Render.ChunkPrimitives 0 drops
 // them and asks the owner for the meshes again. Needs a render scene: runs in the editor, skips under -nullrhi.
+// G116 step 4 on the same primitives: each mesh has six Lumen cards and the primitive is in Lumen's scene where Lumen
+// traces the ray tracing scene; voxel.Render.LumenCards 0 re-sends the meshes without cards, out of Lumen's scene.
 // ---------------------------------------------------------------------------
 
 namespace VoxelChunkPrimitiveTest
@@ -58,6 +63,108 @@ namespace VoxelChunkPrimitiveTest
 	}
 
 	using FScopedCVar = VoxelTesting::FScopedCVar;
+
+	/** Whether Lumen traces the ray tracing scene (a primitive with cards and ray tracing geometry joins Lumen's scene) */
+	bool IsLumenHardwareRayTracing()
+	{
+		const IConsoleVariable* LumenHardwareRayTracing = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Lumen.HardwareRayTracing"));
+		return IsRayTracingAllowed() && (GRHISupportsRayTracingShaders || GRHISupportsInlineRayTracing)
+			&& LumenHardwareRayTracing && LumenHardwareRayTracing->GetInt() != 0;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// G116 step 4: a chunk mesh's Lumen cards are six axis-aligned cards over its box, one per face direction, one-sided, built
+// with the mesh (no render thread, no neighbour); none when the cards are off or the mesh has no triangles. Headless.
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelChunkMeshCardsFromBoundsTest,
+	"VoxelWorlds.Rendering.ChunkPrimitives.CardsFromBounds",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelChunkMeshCardsFromBoundsTest::RunTest(const FString& Parameters)
+{
+	const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe> Bytes = MakeShared<std::atomic<int64>, ESPMode::ThreadSafe>(0);
+	auto MakeMesh = [&](const FBox& LocalBox, int32 NumTriangles, bool bCards)
+	{
+		TArray<FVoxelVertex> Vertices;
+		Vertices.SetNum(3);
+		TArray<uint32> Indices;
+		for (int32 T = 0; T < NumTriangles; ++T)
+		{
+			Indices.Append({ 0u, 1u, 2u });
+		}
+		return MakeUnique<FVoxelChunkMesh>(MoveTemp(Vertices), MoveTemp(Indices), 0, LocalBox, FVector(1.0e6, -2.0e6, 3.0e5), Bytes, bCards);
+	};
+
+	// A chunk's box relative to its origin, flatter than it is wide (a terrain chunk's mesh)
+	const FBox Box(FVector(0.0, 0.0, 700.0), FVector(1600.0, 1600.0, 1100.0));
+	const TUniquePtr<FVoxelChunkMesh> Mesh = MakeMesh(Box, 4, true);
+	const FCardRepresentationData* Cards = Mesh->CardRepresentation.Get();
+	if (!TestNotNull(TEXT("Cards on: the mesh has a card representation"), Cards))
+	{
+		return false;
+	}
+	const FMeshCardsBuildData& Data = Cards->MeshCardsBuildData;
+	TestTrue(TEXT("Cards on: the cards' box is the mesh's"), Data.Bounds.Min.Equals(Box.Min) && Data.Bounds.Max.Equals(Box.Max));
+	TestFalse(TEXT("Cards on: one-sided"), Data.bMostlyTwoSided);
+	if (!TestEqual(TEXT("Cards on: six cards"), Data.CardBuildData.Num(), 6))
+	{
+		return false;
+	}
+	uint32 DirectionsSeen = 0;
+	for (const FLumenCardBuildData& Card : Data.CardBuildData)
+	{
+		DirectionsSeen |= 1u << Card.AxisAlignedDirectionIndex;
+		const FVector3f Direction = MeshCardRepresentation::GetAxisAlignedDirection(Card.AxisAlignedDirectionIndex);
+		TestTrue(*FString::Printf(TEXT("Card %u faces its direction"), Card.AxisAlignedDirectionIndex), Card.OBB.AxisZ.Equals(Direction, 1.0e-4f));
+		// Every corner of the box lies inside the card's box (its extent along the card's own axes)
+		bool bCovers = true;
+		for (int32 Corner = 0; Corner < 8; ++Corner)
+		{
+			const FVector3f Point(Corner & 1 ? Box.Max.X : Box.Min.X, Corner & 2 ? Box.Max.Y : Box.Min.Y, Corner & 4 ? Box.Max.Z : Box.Min.Z);
+			const FVector3f FromOrigin = Point - FVector3f(Card.OBB.Origin);
+			bCovers &= FMath::Abs(FromOrigin.Dot(Card.OBB.AxisX)) <= Card.OBB.Extent.X + 0.01f
+				&& FMath::Abs(FromOrigin.Dot(Card.OBB.AxisY)) <= Card.OBB.Extent.Y + 0.01f
+				&& FMath::Abs(FromOrigin.Dot(Card.OBB.AxisZ)) <= Card.OBB.Extent.Z + 0.01f;
+		}
+		TestTrue(*FString::Printf(TEXT("Card %u covers the mesh's box"), Card.AxisAlignedDirectionIndex), bCovers);
+	}
+	TestEqual(TEXT("Cards on: one card per face direction"), DirectionsSeen, 0x3Fu);
+
+	// Slices: two cards per slice of each axis, each over its slice's depth along the axis and the whole box across
+	{
+		FMeshCardsBuildData Sliced;
+		BuildVoxelChunkMeshCards(Box, 3, Sliced);
+		TestEqual(TEXT("3 slices: 18 cards"), Sliced.CardBuildData.Num(), 18);
+		int32 PerDirection[6] = {};
+		double DepthCovered[6] = {};
+		for (const FLumenCardBuildData& Card : Sliced.CardBuildData)
+		{
+			const int32 Axis = Card.AxisAlignedDirectionIndex / 2;
+			++PerDirection[Card.AxisAlignedDirectionIndex];
+			// Each slice's card box spans a third of the box along its axis, plus the engine's 5 uu card offset
+			DepthCovered[Card.AxisAlignedDirectionIndex] += 2.0 * Card.OBB.Extent.Z - 10.0;
+			const FVector3f Center = FVector3f(Card.OBB.Origin) - 5.0f * Card.OBB.AxisZ;
+			TestTrue(*FString::Printf(TEXT("3 slices: card %u's slice lies inside the box along its axis"), Card.AxisAlignedDirectionIndex),
+				Center[Axis] - (Card.OBB.Extent.Z - 5.0f) >= Box.Min[Axis] - 0.01 && Center[Axis] + (Card.OBB.Extent.Z - 5.0f) <= Box.Max[Axis] + 0.01);
+		}
+		for (int32 Direction = 0; Direction < 6; ++Direction)
+		{
+			TestTrue(*FString::Printf(TEXT("3 slices: direction %d has 3 cards (%d) whose slices fill the box along it (%.1f of %.1f)"), Direction,
+				PerDirection[Direction], DepthCovered[Direction], Box.GetSize()[Direction / 2]),
+				PerDirection[Direction] == 3 && FMath::IsNearlyEqual(DepthCovered[Direction], Box.GetSize()[Direction / 2], 0.1));
+		}
+		FMeshCardsBuildData Clamped;
+		BuildVoxelChunkMeshCards(Box, 9, Clamped);
+		TestEqual(TEXT("9 slices: clamped to 5 (30 cards, under Lumen's 32 a mesh)"), Clamped.CardBuildData.Num(), 6 * MaxVoxelChunkMeshCardSlices);
+	}
+
+	TestNull(TEXT("Cards off: no card representation"), MakeMesh(Box, 4, false)->CardRepresentation.Get());
+	TestNull(TEXT("No triangles: no card representation"), MakeMesh(Box, 0, true)->CardRepresentation.Get());
+	TestNull(TEXT("No box: no card representation"), MakeMesh(FBox(ForceInit), 4, true)->CardRepresentation.Get());
+	TestEqual(TEXT("Nothing uploaded: no buffer bytes counted"), Bytes->load(), int64(0));
+	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelChunkPrimitiveLifecycleTest,
@@ -77,7 +184,9 @@ bool FVoxelChunkPrimitiveLifecycleTest::RunTest(const FString& Parameters)
 	const FScopedCVar Primitives(TEXT("voxel.Render.ChunkPrimitives"), TEXT("1"));
 	const FScopedCVar RayTracing(TEXT("voxel.Render.RayTracing"), TEXT("1"));
 	const FScopedCVar Fade(TEXT("voxel.MeshFade"), TEXT("0"));
+	const FScopedCVar Cards(TEXT("voxel.Render.LumenCards"), TEXT("1"));
 	const bool bRayTracing = IsRayTracingAllowed();
+	const bool bLumenTracesScene = IsLumenHardwareRayTracing();
 
 	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
 	Config->AddToRoot();
@@ -131,6 +240,15 @@ bool FVoxelChunkPrimitiveLifecycleTest::RunTest(const FString& Parameters)
 		{
 			TestTrue(*FString::Printf(TEXT("First mesh: traced with its 8 triangles (%u), one chunk geometry (%d)"), I.RayTracingTriangles, I.ProxyRayTracingChunks),
 				I.bRayTracing && I.RayTracingTriangles == 8 && I.ProxyRayTracingChunks == 1 && I.ProxyRayTracingBytes > 0);
+		}
+		TestEqual(TEXT("First mesh: six Lumen cards (step 4)"), I.LumenCards, 6);
+		if (bLumenTracesScene)
+		{
+			TestTrue(TEXT("First mesh: in Lumen's scene"), I.bVisibleInLumenScene);
+		}
+		else
+		{
+			AddInfo(TEXT("Lumen does not trace the ray tracing scene here: the scene membership is not checked"));
 		}
 
 		// A re-mesh: a new primitive replaces it in the same flush
@@ -219,6 +337,28 @@ bool FVoxelChunkPrimitiveLifecycleTest::RunTest(const FString& Parameters)
 				AfterRecreate.Removed - Before.Removed, AfterRecreate.Added - Before.Added),
 				AfterRecreate.Removed - Before.Removed == 2 && AfterRecreate.Added - Before.Added == 2 && Info().CurrentTriangles == 4);
 		}
+
+		// Lumen cards off: the primitives are recreated without cards, out of Lumen's scene, from meshes the owner sends again
+		{
+			const FScopedCVar CardsOff(TEXT("voxel.Render.LumenCards"), TEXT("0"));
+			Renderer.FlushPendingOperations();
+			TestTrue(TEXT("voxel.Render.LumenCards 0: still chunk primitives, none left, the owner asked for the chunk again"),
+				Component->IsUsingChunkPrimitives() && Component->GetChunkPrimitiveCount() == 0 && Renderer.ConsumeLostRenderData(Lost) && Lost.Contains(Chunk));
+			Renderer.UpdateChunkMeshFromCPU(Chunk, 1, MakeQuads(2, 101.0f));
+			Renderer.UpdateSeamMeshFromCPU(Chunk, 0, 1, MakeQuads(2, 99.0f));
+			Renderer.FlushPendingOperations();
+			I = Info();
+			TestTrue(*FString::Printf(TEXT("voxel.Render.LumenCards 0: the re-sent chunk drawn (%u tris) with no cards (%d), out of Lumen's scene"),
+				I.CurrentTriangles, I.LumenCards), I.CurrentTriangles == 4 && I.LumenCards == 0 && !I.bVisibleInLumenScene);
+		}
+		Renderer.FlushPendingOperations();
+		TestTrue(TEXT("voxel.Render.LumenCards 1 again: the owner asked for the chunk again"), Renderer.ConsumeLostRenderData(Lost) && Lost.Contains(Chunk));
+		Renderer.UpdateChunkMeshFromCPU(Chunk, 1, MakeQuads(2, 101.0f));
+		Renderer.UpdateSeamMeshFromCPU(Chunk, 0, 1, MakeQuads(2, 99.0f));
+		Renderer.FlushPendingOperations();
+		I = Info();
+		TestTrue(*FString::Printf(TEXT("voxel.Render.LumenCards 1 again: six cards (%d), both primitives (%d)"), I.LumenCards, Component->GetChunkPrimitiveCount()),
+			I.LumenCards == 6 && Component->GetChunkPrimitiveCount() == 2 && (!bLumenTracesScene || I.bVisibleInLumenScene));
 
 		// The bucket removed, the chunk unloaded: nothing left
 		Renderer.RemoveSeamMesh(Chunk, 0);

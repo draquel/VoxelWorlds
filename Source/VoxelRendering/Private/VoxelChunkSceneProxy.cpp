@@ -13,6 +13,8 @@
 #include "MeshBatch.h"
 #include "RenderingThread.h"
 #include "Containers/Queue.h"
+#include "MeshCardBuild.h"
+#include "MeshCardRepresentation.h"
 #if RHI_RAYTRACING
 #include "RayTracingInstance.h"
 #include "RayTracingGeometryManagerInterface.h"
@@ -70,7 +72,7 @@ void FVoxelChunkPrimitiveCounters::AddRemoved(int64 Count)
 // ==================== FVoxelChunkMesh ====================
 
 FVoxelChunkMesh::FVoxelChunkMesh(TArray<FVoxelVertex>&& InVertices, TArray<uint32>&& InIndices, int32 InLODLevel, const FBox& InLocalBounds,
-	const FVector& InOrigin, const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe>& InByteCounter)
+	const FVector& InOrigin, const TSharedRef<std::atomic<int64>, ESPMode::ThreadSafe>& InByteCounter, int32 InLumenCardSlices)
 	: LODLevel(InLODLevel)
 	, LocalBounds(InLocalBounds)
 	, Origin(InOrigin)
@@ -79,6 +81,47 @@ FVoxelChunkMesh::FVoxelChunkMesh(TArray<FVoxelVertex>&& InVertices, TArray<uint3
 	, NumTriangles(static_cast<uint32>(PendingIndices.Num() / 3))
 	, ByteCounter(InByteCounter)
 {
+	if (InLumenCardSlices > 0 && NumTriangles > 0 && LocalBounds.IsValid)
+	{
+		CardRepresentation = MakeUnique<FCardRepresentationData>();
+		FMeshCardsBuildData& CardData = CardRepresentation->MeshCardsBuildData;
+		CardData.Bounds = LocalBounds;
+		// One-sided (the terrain is closed from the outside) and undilated: a two-sided mesh's card bias of 50 uu would let
+		// a cave's hit take the lit ground's card above it
+		CardData.bMostlyTwoSided = false;
+		BuildVoxelChunkMeshCards(LocalBounds, InLumenCardSlices, CardData);
+	}
+}
+
+void BuildVoxelChunkMeshCards(const FBox& LocalBounds, int32 Slices, FMeshCardsBuildData& OutCardData)
+{
+	// Axis-aligned cards, as the engine gives a mesh without built cards (dynamic and spline meshes): the box is all they
+	// need, so nothing reads a neighbour. A card captures the first surface facing it inside its own box, so one card per
+	// direction over the whole box sees one layer: the ground over a cave hides the cave's floor from the box's +Z card,
+	// and a cave's ceiling below an overhang hides the overhang's underside from the -Z card. Slices along each axis peel
+	// the layers: slice i's two cards on that axis cover the box's i-th part along it, and all of it across.
+	Slices = FMath::Clamp(Slices, 1, MaxVoxelChunkMeshCardSlices);
+	OutCardData.CardBuildData.Reset(6 * Slices);
+	const FVector Size = LocalBounds.GetSize();
+	for (int32 Axis = 0; Axis < 3; ++Axis)
+	{
+		for (int32 Slice = 0; Slice < Slices; ++Slice)
+		{
+			FMeshCardsBuildData SliceData;
+			SliceData.Bounds = LocalBounds;
+			SliceData.Bounds.Min[Axis] = LocalBounds.Min[Axis] + Size[Axis] * Slice / Slices;
+			SliceData.Bounds.Max[Axis] = LocalBounds.Min[Axis] + Size[Axis] * (Slice + 1) / Slices;
+			MeshCardRepresentation::SetCardsFromBounds(SliceData);
+			// The slice's two cards facing along this axis (directions 2 * Axis and 2 * Axis + 1: -X +X, -Y +Y, -Z +Z)
+			for (const FLumenCardBuildData& Card : SliceData.CardBuildData)
+			{
+				if (Card.AxisAlignedDirectionIndex / 2 == Axis)
+				{
+					OutCardData.CardBuildData.Add(Card);
+				}
+			}
+		}
+	}
 }
 
 FVoxelChunkMesh::~FVoxelChunkMesh()
@@ -243,6 +286,7 @@ FVoxelChunkSceneProxy::FVoxelChunkSceneProxy(const FPrimitiveSceneProxyDesc& Des
 	, bRadialFaceUp(Init.bRadialFaceUp)
 	, FaceUpCenter(Init.FaceUpCenter)
 	, bSeam(Init.bSeam)
+	, bLumenCards(Init.bLumenCards && Mesh.IsValid() && Mesh->CardRepresentation.IsValid())
 {
 	// The scene's record of this primitive carries the id the description gave it (FPrimitiveSceneInfo's ComponentId)
 	SceneData.PrimitiveSceneId = Desc.ComponentId;
@@ -259,9 +303,14 @@ FVoxelChunkSceneProxy::FVoxelChunkSceneProxy(const FPrimitiveSceneProxyDesc& Des
 	// the description named are written by the static batch's clones
 	bVerifyUsedMaterials = false;
 	bCastStaticShadow = false;
-	bAffectDynamicIndirectLighting = false;
 	bAffectDistanceFieldLighting = false;
 	bSupportsRuntimeVirtualTexture = true;
+
+	// Lumen's scene takes it with its mesh's cards (step 4): the flag has Lumen cache a card capture command for the static
+	// batch and capture the cards; without cards it stays out (a hit on it then reads black, as before step 4). The base
+	// constructor decided the scene membership before this one set the flag and the ray tracing representation.
+	bAffectDynamicIndirectLighting = bLumenCards;
+	UpdateVisibleInLumenScene();
 
 	// GPUScene: the static batches take the primitive's data from it (no primitive uniform buffer), and the cached ray
 	// tracing instances their transform
@@ -568,12 +617,20 @@ void FVoxelChunkSceneProxy::GetDrawInfo_RenderThread(FVoxelChunkDrawInfo& OutInf
 		OutInfo.bAppearing = !OutInfo.bCrossfading && bCurrent && Fade.bAppear && Fade.FadeInProxy;
 	}
 	OutInfo.bRayTracing = bRayTracing;
+	const FCardRepresentationData* Cards = GetMeshCardRepresentation();
+	OutInfo.LumenCards = Cards ? Cards->MeshCardsBuildData.CardBuildData.Num() : 0;
+	OutInfo.bVisibleInLumenScene = IsVisibleInLumenScene();
 #if RHI_RAYTRACING
 	if (Mesh.IsValid() && Mesh->RayTracingGeometry.IsValid())
 	{
 		OutInfo.RayTracingTriangles = Mesh->RayTracingGeometry->GetInitializer().TotalPrimitiveCount;
 	}
 #endif
+}
+
+const FCardRepresentationData* FVoxelChunkSceneProxy::GetMeshCardRepresentation() const
+{
+	return bLumenCards ? Mesh->CardRepresentation.Get() : nullptr;
 }
 
 int64 FVoxelChunkSceneProxy::GetMeshBufferBytes_RenderThread() const

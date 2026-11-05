@@ -779,9 +779,11 @@ private:
 	TArray<FPendingChunkPrimitive> PendingPrimitiveAdds;
 	TArray<FPrimitiveSceneProxy*> PendingPrimitiveRemovals;
 
-	/** The mode in use (IsUsingChunkPrimitives) and whether its primitives were created with ray tracing geometry */
+	/** The mode in use (IsUsingChunkPrimitives), whether its primitives were created with ray tracing geometry, and the
+	 *  slices per axis of their meshes' Lumen cards (G116 step 4, voxel.Render.LumenCards and .Slices; 0 = no cards) */
 	bool bUseChunkPrimitives = false;
 	bool bChunkPrimitiveRayTracing = false;
+	int32 ChunkPrimitiveCardSlices = 0;
 
 	/** The bytes of the chunk meshes' buffers alive now (the meshes add and remove theirs on the render thread) */
 	TSharedPtr<std::atomic<int64>, ESPMode::ThreadSafe> ChunkMeshBytes;
