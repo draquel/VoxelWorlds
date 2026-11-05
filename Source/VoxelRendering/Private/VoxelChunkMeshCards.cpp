@@ -119,24 +119,25 @@ namespace
 	std::atomic<int64> GBuildMicros{ 0 };
 	std::atomic<int64> GMaxBuildMicros{ 0 };
 	std::atomic<int64> GWorkerMeshes{ 0 };
+	std::atomic<int64> GWorkerBuilds{ 0 };
 	std::atomic<int64> GWorkerMicros{ 0 };
 
 	FAutoConsoleCommand CmdVoxelLumenCardStats(
 		TEXT("voxel.Render.LumenCardStats"),
 		TEXT("The chunk meshes' Lumen cards (G116) since the start or the last reset: meshes built with cards, cards a mesh, and ")
 		TEXT("for the fitted cards (voxel.Render.LumenCards 2) the share of the sampled surface the cards capture, the meshes ")
-		TEXT("whose clusters MaxCards cut, and the build's time on the game thread (the meshes built there: seam buckets, and chunks ")
-		TEXT("whose worker did not fit them) and on the mesh workers. 'reset' clears the counts."),
+		TEXT("whose clusters MaxCards cut, and the build's time on the game thread (meshes whose worker did not fit their cards: a ")
+		TEXT("settings change, the tests) and on the mesh and seam workers (a seam bucket merges its seams' cards). 'reset' clears the counts."),
 		FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
 		{
 			const FVoxelChunkMeshCardCounters::FCounts C = FVoxelChunkMeshCardCounters::Get();
 			const int64 GameThreadMeshes = C.Meshes - C.WorkerMeshes;
 			UE_LOG(LogVoxelRendering, Display,
-				TEXT("voxel.Render.LumenCardStats: %lld meshes with cards, %.2f cards a mesh; fitted %lld meshes, surface covered %.1f %% (%lld of %lld elements), %lld capped; game thread %lld meshes, %.1f us a mesh, longest %.1f us, %.1f ms in all; workers %lld meshes, %.1f us a mesh"),
+				TEXT("voxel.Render.LumenCardStats: %lld meshes with cards, %.2f cards a mesh; fitted %lld meshes, surface covered %.1f %% (%lld of %lld elements), %lld capped; game thread %lld meshes, %.1f us a mesh, longest %.1f us, %.1f ms in all; workers' cards %lld meshes, %lld builds, %.1f us a build"),
 				C.Meshes, C.Meshes > 0 ? double(C.Cards) / C.Meshes : 0.0, C.FittedMeshes,
 				C.Surfels > 0 ? 100.0 * C.CoveredSurfels / C.Surfels : 0.0, C.CoveredSurfels, C.Surfels, C.Capped,
 				GameThreadMeshes, GameThreadMeshes > 0 ? 1.0e6 * C.Seconds / GameThreadMeshes : 0.0, 1.0e6 * C.MaxSeconds, 1.0e3 * C.Seconds,
-				C.WorkerMeshes, C.WorkerMeshes > 0 ? 1.0e6 * C.WorkerSeconds / C.WorkerMeshes : 0.0);
+				C.WorkerMeshes, C.WorkerBuilds, C.WorkerBuilds > 0 ? 1.0e6 * C.WorkerSeconds / C.WorkerBuilds : 0.0);
 			if (Args.Num() > 0 && Args[0].Equals(TEXT("reset"), ESearchCase::IgnoreCase))
 			{
 				FVoxelChunkMeshCardCounters::Reset();
@@ -149,7 +150,8 @@ namespace
 /** The fitted build over any vertex source: GetPosition(Index) and GetNormal(Index) for Index < NumVertices */
 template<typename FGetPosition, typename FGetNormal>
 static void BuildFittedCards(int32 NumVertices, FGetPosition GetPosition, FGetNormal GetNormal, TConstArrayView<uint32> Indices,
-	const FBox& LocalBounds, const FVoxelChunkMeshCardSettings& Settings, FMeshCardsBuildData& OutCardData, FVoxelChunkMeshCardBuildStats* OutStats)
+	const FBox& LocalBounds, const FVoxelChunkMeshCardSettings& Settings, FMeshCardsBuildData& OutCardData, FVoxelChunkMeshCardBuildStats* OutStats,
+	TArray<int32>* OutCardCoverage = nullptr)
 {
 	OutCardData.CardBuildData.Reset();
 	FVoxelChunkMeshCardBuildStats Stats;
@@ -368,8 +370,16 @@ static void BuildFittedCards(int32 NumVertices, FGetPosition GetPosition, FGetNo
 	// boundary behind the last surface in front, so that surface stays out of the box) to half a cell past the deepest
 	// element, as the engine's builder
 	OutCardData.CardBuildData.Reserve(Clusters.Num());
+	if (OutCardCoverage)
+	{
+		OutCardCoverage->Reset(Clusters.Num());
+	}
 	for (const FCardCluster& Cluster : Clusters)
 	{
+		if (OutCardCoverage)
+		{
+			OutCardCoverage->Add(Cluster.Coverage);
+		}
 		const FCardBasis Basis(Cluster.Direction);
 		const double Face = Basis.bPositive ? GridMin[Basis.Axis] + Dims[Basis.Axis] * CellSize : GridMin[Basis.Axis];
 		const double Sign = Basis.bPositive ? -1.0 : 1.0;
@@ -457,10 +467,53 @@ TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> PrebuildVoxe
 	FMeshCardsBuildData CardData;
 	BuildFittedCards(MeshData.Positions.Num(), [&MeshData](uint32 Index) { return MeshData.Positions[Index]; },
 		[&MeshData, bHasNormals](uint32 Index) { return bHasNormals ? MeshData.Normals[Index] : FVector3f::UpVector; },
-		MeshData.Indices, LocalBounds, Settings, CardData, &Prebuilt->Stats);
+		MeshData.Indices, LocalBounds, Settings, CardData, &Prebuilt->Stats, &Prebuilt->CardCoverage);
 	Prebuilt->Cards = MoveTemp(CardData.CardBuildData);
-	Prebuilt->Seconds = FPlatformTime::Seconds() - StartTime;
+	FVoxelChunkMeshCardCounters::AddWorkerBuild(FPlatformTime::Seconds() - StartTime);
 	return Prebuilt;
+}
+
+TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> MergeVoxelPrebuiltChunkMeshCards(
+	TConstArrayView<TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>> Parts)
+{
+	if (Parts.Num() == 0)
+	{
+		return nullptr;
+	}
+	TSharedRef<FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> Merged = MakeShared<FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>();
+	Merged->Settings = Parts[0].IsValid() ? Parts[0]->Settings : FVoxelChunkMeshCardSettings();
+	struct FRankedCard
+	{
+		const FLumenCardBuildData* Card;
+		int32 Coverage;
+	};
+	TArray<FRankedCard> Ranked;
+	for (const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& Part : Parts)
+	{
+		// Every part fitted with the same settings, or the bucket is fitted whole at the upload
+		if (!Part.IsValid() || Part->Settings != Merged->Settings || Part->CardCoverage.Num() != Part->Cards.Num())
+		{
+			return nullptr;
+		}
+		Merged->LocalBounds += Part->LocalBounds;
+		Merged->Stats.Surfels += Part->Stats.Surfels;
+		Merged->Stats.Clusters += Part->Cards.Num();
+		for (int32 Index = 0; Index < Part->Cards.Num(); ++Index)
+		{
+			Ranked.Add({ &Part->Cards[Index], Part->CardCoverage[Index] });
+		}
+	}
+	// The parts' cards together, the MaxCards that cover most (a part's cards never see another part's surface in front of
+	// them: the seams of a bucket lie along different faces of the owner)
+	Ranked.StableSort([](const FRankedCard& A, const FRankedCard& B) { return A.Coverage > B.Coverage; });
+	Ranked.SetNum(FMath::Min(Ranked.Num(), FMath::Clamp(Merged->Settings.MaxCards, 1, MaxCardsPerMesh)));
+	for (const FRankedCard& Entry : Ranked)
+	{
+		Merged->Cards.Add(*Entry.Card);
+		Merged->CardCoverage.Add(Entry.Coverage);
+		Merged->Stats.CoveredSurfels += Entry.Coverage;
+	}
+	return Merged;
 }
 
 // ==================== FVoxelChunkMeshCardCounters ====================
@@ -477,6 +530,7 @@ FVoxelChunkMeshCardCounters::FCounts FVoxelChunkMeshCardCounters::Get()
 	Counts.Seconds = GBuildMicros.load(std::memory_order_relaxed) * 1.0e-6;
 	Counts.MaxSeconds = GMaxBuildMicros.load(std::memory_order_relaxed) * 1.0e-6;
 	Counts.WorkerMeshes = GWorkerMeshes.load(std::memory_order_relaxed);
+	Counts.WorkerBuilds = GWorkerBuilds.load(std::memory_order_relaxed);
 	Counts.WorkerSeconds = GWorkerMicros.load(std::memory_order_relaxed) * 1.0e-6;
 	return Counts;
 }
@@ -492,7 +546,14 @@ void FVoxelChunkMeshCardCounters::Reset()
 	GBuildMicros = 0;
 	GMaxBuildMicros = 0;
 	GWorkerMeshes = 0;
+	GWorkerBuilds = 0;
 	GWorkerMicros = 0;
+}
+
+void FVoxelChunkMeshCardCounters::AddWorkerBuild(double Seconds)
+{
+	GWorkerBuilds.fetch_add(1, std::memory_order_relaxed);
+	GWorkerMicros.fetch_add(static_cast<int64>(Seconds * 1.0e6), std::memory_order_relaxed);
 }
 
 void FVoxelChunkMeshCardCounters::AddBuild(int32 NumCards, double Seconds, const FVoxelChunkMeshCardBuildStats* Stats, int32 MaxCards, bool bOnWorker)
@@ -509,13 +570,13 @@ void FVoxelChunkMeshCardCounters::AddBuild(int32 NumCards, double Seconds, const
 			GCapped.fetch_add(1, std::memory_order_relaxed);
 		}
 	}
-	const int64 Micros = static_cast<int64>(Seconds * 1.0e6);
 	if (bOnWorker)
 	{
+		// The worker's time was counted where it was spent (AddWorkerBuild)
 		GWorkerMeshes.fetch_add(1, std::memory_order_relaxed);
-		GWorkerMicros.fetch_add(Micros, std::memory_order_relaxed);
 		return;
 	}
+	const int64 Micros = static_cast<int64>(Seconds * 1.0e6);
 	GBuildMicros.fetch_add(Micros, std::memory_order_relaxed);
 	int64 Longest = GMaxBuildMicros.load(std::memory_order_relaxed);
 	while (Micros > Longest && !GMaxBuildMicros.compare_exchange_weak(Longest, Micros, std::memory_order_relaxed))

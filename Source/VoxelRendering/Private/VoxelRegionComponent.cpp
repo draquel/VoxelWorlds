@@ -744,7 +744,8 @@ void UVoxelRegionComponent::UpdateSeamMeshFromCPUData(
 	TArray<FVoxelVertex>&& Vertices,
 	TArray<uint32>&& Indices,
 	const FVector& OwnerWorldPosition,
-	bool bCrossfade)
+	bool bCrossfade,
+	const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& PrebuiltCards)
 {
 	check(IsInGameThread());
 	EnsureChunkPrimitiveMode();
@@ -798,7 +799,7 @@ void UVoxelRegionComponent::UpdateSeamMeshFromCPUData(
 		{
 			SeamBounds += FVector(Vertex.Position);
 		}
-		SubmitChunkPrimitive(FadeKey, MoveTemp(Vertices), MoveTemp(Indices), LODLevel, SeamBounds, OwnerWorldPosition, bFade);
+		SubmitChunkPrimitive(FadeKey, MoveTemp(Vertices), MoveTemp(Indices), LODLevel, SeamBounds, OwnerWorldPosition, bFade, PrebuiltCards);
 		return;
 	}
 

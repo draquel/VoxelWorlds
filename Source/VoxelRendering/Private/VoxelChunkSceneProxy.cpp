@@ -117,8 +117,7 @@ FVoxelChunkMesh::FVoxelChunkMesh(TArray<FVoxelVertex>&& InVertices, TArray<uint3
 			// Nothing a card captures (a sliver below the cluster minimum): no cards, out of Lumen's scene as without them
 			CardRepresentation.Reset();
 		}
-		FVoxelChunkMeshCardCounters::AddBuild(NumCards, bPrebuilt ? InPrebuiltCards->Seconds : FPlatformTime::Seconds() - StartTime,
-			bFitted ? &Stats : nullptr, InCards.MaxCards, bPrebuilt);
+		FVoxelChunkMeshCardCounters::AddBuild(NumCards, FPlatformTime::Seconds() - StartTime, bFitted ? &Stats : nullptr, InCards.MaxCards, bPrebuilt);
 	}
 }
 

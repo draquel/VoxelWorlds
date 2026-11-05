@@ -183,6 +183,7 @@ public:
 	 * @param bCrossfade Crossfade from the bucket it replaces (R24). Also fades a NEW bucket in from
 	 *        nothing: when its owner is held by a transition (it stays hidden until the release), or
 	 *        when the owner lies beyond voxel.MeshFade.AppearMinDistance (R24 P3).
+	 * @param PrebuiltCards The Lumen cards its seams' workers fitted (G116, MergeVoxelPrebuiltChunkMeshCards); null = fit them here
 	 */
 	void UpdateSeamMeshFromCPUData(
 		const FIntVector& OwnerChunkCoord,
@@ -191,7 +192,8 @@ public:
 		TArray<FVoxelVertex>&& Vertices,
 		TArray<uint32>&& Indices,
 		const FVector& OwnerWorldPosition,
-		bool bCrossfade = false);
+		bool bCrossfade = false,
+		const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& PrebuiltCards = nullptr);
 
 	/**
 	 * Remove one seam bucket. Enqueues render command.

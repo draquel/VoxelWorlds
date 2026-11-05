@@ -13,9 +13,9 @@ struct FVoxelPrebuiltChunkMeshCards
 	FVoxelChunkMeshCardSettings Settings;
 	/** The box they were fitted in (the mesh's positions' bounds) */
 	FBox LocalBounds = FBox(ForceInit);
-	/** The cards, relative to the mesh's space */
+	/** The cards, relative to the mesh's space, and the surface elements each captures */
 	TArray<FLumenCardBuildData> Cards;
-	/** What the build found, and its time on the worker */
+	TArray<int32> CardCoverage;
+	/** What the build found */
 	FVoxelChunkMeshCardBuildStats Stats;
-	double Seconds = 0.0;
 };

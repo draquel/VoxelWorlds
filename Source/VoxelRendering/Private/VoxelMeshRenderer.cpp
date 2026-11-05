@@ -614,7 +614,7 @@ void FVoxelMeshRenderer::UpdateSeamMeshFromCPU(
 	{
 		Component->UpdateSeamMeshFromCPUData(
 			OwnerChunkCoord, Axis, LODLevel,
-			MoveTemp(Vertices), MoveTemp(MeshData.Indices), OwnerWorldPos, bCrossfade);
+			MoveTemp(Vertices), MoveTemp(MeshData.Indices), OwnerWorldPos, bCrossfade, MeshData.PrebuiltLumenCards);
 	}
 
 	UE_LOG(LogVoxelRendering, Verbose, TEXT("FVoxelMeshRenderer: Updated seam mesh %s axis=%d - %d verts"),

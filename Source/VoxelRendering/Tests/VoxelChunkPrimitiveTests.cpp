@@ -389,6 +389,26 @@ bool FVoxelChunkMeshFittedCardsTest::RunTest(const FString& Parameters)
 			}
 			TestEqual(TEXT("Worker, other settings: not the worker's"), FVoxelChunkMeshCardCounters::Get().WorkerMeshes, After.WorkerMeshes);
 		}
+
+		// A seam bucket's seams fitted apart: their cards together, the most covering first, in their boxes' union
+		FChunkMeshData Other;
+		for (int32 Index = 0; Index < 4; ++Index)
+		{
+			Other.Positions.Add(FVector3f(4000.0f + 100.0f * (Index & 1), 100.0f * (Index >> 1), 500.0f));
+			Other.Normals.Add(FVector3f::UpVector);
+		}
+		Other.Indices = { 0, 1, 3, 0, 3, 2 };
+		const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> Small = PrebuildVoxelChunkMeshCards(Other);
+		const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> Parts[] = { Small, Prebuilt };
+		const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> Merged = MergeVoxelPrebuiltChunkMeshCards(Parts);
+		if (TestTrue(TEXT("Merge: cards from both parts"), Merged.IsValid() && Small.IsValid() && Prebuilt.IsValid()))
+		{
+			TestEqual(TEXT("Merge: every card of both"), Merged->Cards.Num(), Small->Cards.Num() + Prebuilt->Cards.Num());
+			TestTrue(TEXT("Merge: the boxes' union"), Merged->LocalBounds.IsInsideOrOn(FVector(4050.0, 50.0, 500.0)) && Merged->LocalBounds.IsInsideOrOn(FVector(100.0, 100.0, 3050.0)));
+			TestTrue(TEXT("Merge: the most covering first"), Merged->CardCoverage.Num() == Merged->Cards.Num() && Merged->CardCoverage[0] >= Merged->CardCoverage.Last());
+		}
+		const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> WithMissing[] = { Prebuilt, nullptr };
+		TestFalse(TEXT("Merge: a part without cards leaves the bucket to the upload"), MergeVoxelPrebuiltChunkMeshCards(WithMissing).IsValid());
 	}
 	{
 		const VoxelTesting::FScopedCVar Axis(TEXT("voxel.Render.LumenCards"), TEXT("1"));

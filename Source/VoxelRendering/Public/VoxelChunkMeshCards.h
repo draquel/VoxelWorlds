@@ -103,6 +103,17 @@ VOXELRENDERING_API FVoxelChunkMeshCardSettings GetVoxelChunkMeshCardSettings();
 VOXELRENDERING_API TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> PrebuildVoxelChunkMeshCards(const FChunkMeshData& MeshData);
 
 /**
+ * A mesh made of parts that each had their cards fitted (a seam bucket's seams, each on its seam worker), any thread: the
+ * parts' cards together, the MaxCards that cover most, in the union of their boxes.
+ *
+ * @param Parts The parts' cards (in the merged mesh's space)
+ * @return The merged cards; null when a part has none or the parts were fitted with different settings (the upload fits
+ *         the merged mesh then)
+ */
+VOXELRENDERING_API TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> MergeVoxelPrebuiltChunkMeshCards(
+	TConstArrayView<TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>> Parts);
+
+/**
  * The chunk meshes' Lumen cards (G116), summed over every mesh built since the start or the last reset
  * (voxel.Render.LumenCardStats): any thread adds, any thread reads.
  */
@@ -121,8 +132,9 @@ struct VOXELRENDERING_API FVoxelChunkMeshCardCounters
 		/** Time spent building the cards on the game thread, and the longest one build took there */
 		double Seconds = 0.0;
 		double MaxSeconds = 0.0;
-		/** Of the meshes, those whose cards a mesh worker fitted, and the workers' time */
+		/** Of the meshes, those that took cards a worker fitted; the workers' builds and their time */
 		int64 WorkerMeshes = 0;
+		int64 WorkerBuilds = 0;
 		double WorkerSeconds = 0.0;
 	};
 
@@ -139,7 +151,14 @@ struct VOXELRENDERING_API FVoxelChunkMeshCardCounters
 	 * @param Seconds  The build's time
 	 * @param Stats    The fitted build's stats (null for axis cards)
 	 * @param MaxCards The fitted build's card limit
-	 * @param bOnWorker Built on a mesh worker (PrebuildVoxelChunkMeshCards), not on the game thread
+	 * @param bOnWorker A worker built them (PrebuildVoxelChunkMeshCards, counted by AddWorkerBuild): Seconds is unused
 	 */
 	static void AddBuild(int32 NumCards, double Seconds, const FVoxelChunkMeshCardBuildStats* Stats, int32 MaxCards, bool bOnWorker = false);
+
+	/**
+	 * A worker fitted a mesh's cards (PrebuildVoxelChunkMeshCards).
+	 *
+	 * @param Seconds The build's time
+	 */
+	static void AddWorkerBuild(double Seconds);
 };
