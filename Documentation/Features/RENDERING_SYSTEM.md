@@ -301,6 +301,7 @@ and the primitive is in Lumen's scene, so a ray that hits the terrain reads the 
 is back. **Off by default** (0), the user's choice until the cards close the gap under overhangs: the fitted cards cover
 the overhang's underside and bring the voxel terrain to the level of an engine mesh with its own cards when only world
 traces count, but on screen Lumen's screen traces read the visible underside's lit pixels, which no card matches (below).
+G116 is closed as an engine limit (2026-11-05): that residual is the screen traces', not the terrain's cards.
 
 - **Six axis-aligned cards over the mesh's box** (`BuildVoxelChunkMeshCards`, `MeshCardRepresentation::SetCardsFromBounds`,
   as the engine gives dynamic and spline meshes), built with the mesh when the region component takes it (the box is all
