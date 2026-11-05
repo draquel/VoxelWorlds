@@ -295,9 +295,11 @@ keeps darkening the ground under it, and a sealed cave stays dark.
   megabytes and the instances the last frame gathered; test `Rendering.RayTracing.ChunkGeometry` (the in-editor gate).
 
 **Lumen's surface cache** (G116 step 4, 2026-11-04; the plan is
-[LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md](../Research/LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md) §4). Every chunk primitive's mesh
-has Lumen cards and the primitive is in Lumen's scene, so a ray that hits the terrain reads the surface cache: the bounce
-off the terrain is back.
+[LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md](../Research/LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md) §4). With
+`voxel.Render.LumenCards 1` every chunk primitive's mesh has Lumen cards and the primitive is in Lumen's scene, so a ray
+that hits the terrain reads the surface cache: the bounce off the terrain is back. **Off by default** (0) until cards
+fitted to the surface close the gap under overhangs (below): the axis cards bring the bounce back but not that, for
+about +1 ms of render thread.
 
 - **Six axis-aligned cards over the mesh's box** (`BuildVoxelChunkMeshCards`, `MeshCardRepresentation::SetCardsFromBounds`,
   as the engine gives dynamic and spline meshes), built with the mesh when the region component takes it (the box is all
@@ -320,7 +322,8 @@ off the terrain is back.
   about 26 card pages a frame while streaming against 8.5 without the terrain's cards (P95 78, at most 235 of its 300 a
   frame), with at most 8 mesh cards waiting; the surface cache's atlas (a fixed allocation) holds the terrain's cards in
   31-66 % of its pages at rest and at most 825 of 1,024 on the great circle, plus about 1.5 MB on the CPU.
-- **Off** with `voxel.Render.LumenCards 0` (the primitives are recreated from re-sent meshes, out of Lumen's scene).
+- **On** with `voxel.Render.LumenCards 1`, off (the default) with 0: a change recreates the primitives from re-sent meshes,
+  in or out of Lumen's scene.
   Test `Rendering.ChunkPrimitives.CardsFromBounds` (the cards' boxes, headless) and `Rendering.ChunkPrimitives.Lifecycle`
   (cards and scene membership, the in-editor gate).
 

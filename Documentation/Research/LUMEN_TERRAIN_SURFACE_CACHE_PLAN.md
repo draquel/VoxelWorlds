@@ -2,8 +2,8 @@
 
 > State as of 2026-11-04. Steps 1-3 done (§3: the chunk primitives, their fades, cached ray tracing; the default since
 > 2026-11-04, results in [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "Chunk Primitives"); step 4 done (§4: axis
-> cards, the default; the terrain's bounce is back, the overhang's off-screen gap is not); G116 open for cards fitted to
-> the surface. Terms:
+> cards behind `voxel.Render.LumenCards`, off by default; the terrain's bounce is back, the overhang's off-screen gap is
+> not); G116 open for cards fitted to the surface, which turn them on. Terms:
 > `Documentation/GLOSSARY.md`. The finding is G116 in the project's `Documentation/FINDINGS.md`; the spike that chose the
 > path is [LUMEN_OFFSCREEN_TERRAIN_SPIKE.md](LUMEN_OFFSCREEN_TERRAIN_SPIKE.md) (frozen); what ships is described in
 > [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "What Lumen Sees".
@@ -89,7 +89,8 @@ walls, an overhang's underside) is a refinement once the axis cards are measured
 | Size | M on top of steps 1-3 |
 | Measure | the off/on screen luminance under the overhang (F3.3's repro: 0.90 today) and the sealed cave; Lumen's card captures per frame (its surface cache capture budget) against the uploads; surface cache memory |
 
-**Results (2026-11-04).** Done as written, behind `voxel.Render.LumenCards` (1, the default; 0 = without), with two
+**Results (2026-11-04).** Done as written, behind `voxel.Render.LumenCards` (0, the default; 1 = the cards: off until
+cards fitted to the surface close the overhang's gap, since the axis cards bring the bounce back but not that), with two
 differences: the cards are built when the region component takes the mesh (`FVoxelChunkMesh`'s constructor, on the game
 thread), not on the mesh worker, since six boxes from the mesh's box cost nothing measurable and the meshing modules then
 need no engine card types; and `voxel.Render.LumenCards.Slices` (1) cuts the box into layers. What a componentless

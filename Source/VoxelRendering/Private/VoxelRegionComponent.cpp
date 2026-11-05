@@ -76,10 +76,11 @@ static TAutoConsoleVariable<int32> CVarVoxelChunkPrimitives(
 
 static TAutoConsoleVariable<int32> CVarVoxelLumenCards(
 	TEXT("voxel.Render.LumenCards"),
-	1,
+	0,
 	TEXT("1 = each chunk primitive has Lumen cards (G116 step 4: six axis-aligned cards over its mesh's box) and is in Lumen's\n")
 	TEXT("scene, so a ray that hits the terrain reads Lumen's surface cache instead of black. 0 = no cards, out of Lumen's scene\n")
-	TEXT("(the A/B). Needs voxel.Render.ChunkPrimitives 1. A change re-meshes the terrain."),
+	TEXT("(the default until cards fitted to the surface close the gap under overhangs: the axis cards bring the terrain's bounce\n")
+	TEXT("back but not that, for about +1 ms of render thread). Needs voxel.Render.ChunkPrimitives 1. A change re-meshes the terrain."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarVoxelLumenCardSlices(
