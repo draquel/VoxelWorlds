@@ -4,8 +4,8 @@
 > 2026-11-04, results in [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "Chunk Primitives"); step 4 done (§4: axis
 > cards behind `voxel.Render.LumenCards`, off by default; the terrain's bounce is back, the overhang's off-screen gap is
 > not); the fitted cards done (§4, 2026-11-05: `voxel.Render.LumenCards 2`, off by default; they cover stacked layers and
-> match an engine mesh's cards with screen traces off, and the on-screen gap stays at 0.92-0.93). G116 open for the user's
-> call on the default and what is left (§4 "Next"). Terms:
+> match an engine mesh's cards with screen traces off, and the on-screen gap stays at 0.92-0.93; the user kept the default
+> off, 2026-11-05). G116 open for what is left (§4 "Next"). Terms:
 > `Documentation/GLOSSARY.md`. The finding is G116 in the project's `Documentation/FINDINGS.md`; the spike that chose the
 > path is [LUMEN_OFFSCREEN_TERRAIN_SPIKE.md](LUMEN_OFFSCREEN_TERRAIN_SPIKE.md) (frozen); what ships is described in
 > [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "What Lumen Sees".
@@ -166,10 +166,10 @@ bench run, almost all in the seam buckets.
 - **Lumen's far field (D42)** with cards on the far field's patches: see the project's findings, D42 (a spike on
   VoxelWorlds `spike/g116-farfield-cards`, not to merge, draws the patches statically with fitted cards).
 
-**Next (G116):** the user's call on the default (`voxel.Render.LumenCards` 2 costs about +0.2 ms GPU and +0.5-1.4 ms of
-render thread P50 for the bounce off the terrain and an off-screen gap of 0.92-0.93 under an overhang in view, against
-0.90 without cards); closing what is left needs the on-screen frame's screen traces matched off screen, which is
-Lumen's, not the terrain's.
+**Next (G116):** the default stays off (the user's decision, 2026-11-05: `voxel.Render.LumenCards` 2 costs about +0.2 ms
+GPU and +0.5-1.4 ms of render thread P50 for the bounce off the terrain and an off-screen gap of 0.92-0.93 under an
+overhang in view, against 0.90 without cards); closing what is left needs the on-screen frame's screen traces matched off
+screen, which is Lumen's, not the terrain's.
 
 ## 5. Hit lighting today
 
