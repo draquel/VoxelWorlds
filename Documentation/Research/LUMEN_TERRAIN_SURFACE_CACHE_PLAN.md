@@ -1,8 +1,9 @@
 # Lumen's Surface Cache for the Terrain (G116 plan)
 
 > State as of 2026-11-04. Steps 1-3 done (§3: the chunk primitives, their fades, cached ray tracing; the default since
-> 2026-11-04, results in [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "Chunk Primitives"); step 4 (§4, the
-> cards) open, and with it G116. Terms:
+> 2026-11-04, results in [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "Chunk Primitives"); step 4 done (§4: axis
+> cards, the default; the terrain's bounce is back, the overhang's off-screen gap is not); G116 open for cards fitted to
+> the surface. Terms:
 > `Documentation/GLOSSARY.md`. The finding is G116 in the project's `Documentation/FINDINGS.md`; the spike that chose the
 > path is [LUMEN_OFFSCREEN_TERRAIN_SPIKE.md](LUMEN_OFFSCREEN_TERRAIN_SPIKE.md) (frozen); what ships is described in
 > [RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md) "What Lumen Sees".
@@ -87,6 +88,47 @@ walls, an overhang's underside) is a refinement once the axis cards are measured
 |---|---|
 | Size | M on top of steps 1-3 |
 | Measure | the off/on screen luminance under the overhang (F3.3's repro: 0.90 today) and the sealed cave; Lumen's card captures per frame (its surface cache capture budget) against the uploads; surface cache memory |
+
+**Results (2026-11-04).** Done as written, behind `voxel.Render.LumenCards` (1, the default; 0 = without), with two
+differences: the cards are built when the region component takes the mesh (`FVoxelChunkMesh`'s constructor, on the game
+thread), not on the mesh worker, since six boxes from the mesh's box cost nothing measurable and the meshing modules then
+need no engine card types; and `voxel.Render.LumenCards.Slices` (1) cuts the box into layers. What a componentless
+primitive needs to reach Lumen: `GetMeshCardRepresentation`, `bAffectDynamicIndirectLighting` (the chunk primitives had
+it off) and `UpdateVisibleInLumenScene()` after the derived constructor sets it (the base constructor decides the scene
+membership before the derived one runs); with the flag the scene caches the static batch's `LumenCardCapture` command,
+from which Lumen captures the cards. Its ray tracing representation (step 3) is what makes it traceable for hardware
+Lumen.
+
+| `VoxelDemo` | On screen → off screen | Off/on | Cave |
+|---|---|---|---|
+| cards 0 | 0.174-0.177 → 0.160-0.162 | 0.91-0.92 | 0.111 |
+| cards 1 | 0.192-0.193 → 0.175-0.177 | 0.91-0.92 | 0.111 |
+| 2 / 3 slices | 0.191 → 0.178 / 0.194 → 0.181 | 0.93 / 0.93 | 0.111 |
+| an engine cube slab in the overhang's place, cards 0 / 1 | 0.162 → 0.153 / 0.203 → 0.199 | 0.94 / 0.98 | 0.111 |
+| `PlanetTest` cards 0 / 1 | 0.433 → 0.378 / 0.437 → 0.383 | 0.87 / 0.88 | 0.029 |
+
+- **The bounce is back, the gap under the voxel overhang is not.** With the cards the overhang's top and the ground
+  around it bounce light again (10 % on the demo, 1 % on the planet, where the site's ground is mostly in the overhang's
+  shadow), and the sealed caves are unchanged (no leak). The off/on ratio stays where it was. The engine's own cube in
+  the overhang's place reads 0.98, so the gap is the voxel overhang's coverage: Lumen's coverage view
+  (`r.Lumen.Visualize 5`) shows its underside without a card where a generator cave's ceiling lies below it in the same
+  chunk (the -Z card over the whole box captures the lower surface). Three slices cover the underside but reach only 0.93,
+  and take 82 % of the surface cache's pages (52 % with one slice on the demo, 66 % on the planet).
+- **The capture budget keeps up.** Streaming at the bench's speed, Lumen captures about 26 card pages a frame against
+  8.5 without the terrain's cards (P95 78, at most 235: under its cap of 300, `r.LumenScene.SurfaceCache.CardCapturesPerFrame`),
+  mesh cards waiting to be added at most 8, the cache's pages at most 441 (chord) and 825 (great circle) of 1,024, the
+  odd frame dropping resolution levels.
+- **Cost** (the streaming bench, cards 0 and 1 interleaved, three runs each, noon with the clock stopped, 2,874 x 1,360):
+  GPU P50 +0.25 ms on the chord (6.94 → 7.19) and +0.22 ms on the great circle (6.25 → 6.47); the render thread's busy
+  time +1.0 and +0.7 ms (9.48 → 10.47, 11.63 → 12.30): the card capture passes' setup and the commands cached per upload;
+  game thread +1.6 ms on the chord (19.43 → 21.03) and none on the great circle. Memory: the surface cache's atlas is a
+  fixed allocation the cards fill, plus about 1.5 MB on the CPU and 0.6 MB of GPU buffers.
+- **Lumen's far field** (D42), measured once with the cards: still no frame changes, as the far field's patches have no
+  cards of their own.
+
+**Next (G116):** cards fitted to the surface (the mesh's facing clusters on the mesh worker, so stacked surfaces each get
+theirs, bounded by Lumen's 32 cards a mesh), measured against the slices and the render thread's cost at the uploads;
+cards for the far field's patches before D42 is asked again.
 
 ## 5. Hit lighting today
 

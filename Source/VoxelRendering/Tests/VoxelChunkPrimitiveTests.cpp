@@ -132,6 +132,34 @@ bool FVoxelChunkMeshCardsFromBoundsTest::RunTest(const FString& Parameters)
 	}
 	TestEqual(TEXT("Cards on: one card per face direction"), DirectionsSeen, 0x3Fu);
 
+	// Slices: two cards per slice of each axis, each over its slice's depth along the axis and the whole box across
+	{
+		FMeshCardsBuildData Sliced;
+		BuildVoxelChunkMeshCards(Box, 3, Sliced);
+		TestEqual(TEXT("3 slices: 18 cards"), Sliced.CardBuildData.Num(), 18);
+		int32 PerDirection[6] = {};
+		double DepthCovered[6] = {};
+		for (const FLumenCardBuildData& Card : Sliced.CardBuildData)
+		{
+			const int32 Axis = Card.AxisAlignedDirectionIndex / 2;
+			++PerDirection[Card.AxisAlignedDirectionIndex];
+			// Each slice's card box spans a third of the box along its axis, plus the engine's 5 uu card offset
+			DepthCovered[Card.AxisAlignedDirectionIndex] += 2.0 * Card.OBB.Extent.Z - 10.0;
+			const FVector3f Center = FVector3f(Card.OBB.Origin) - 5.0f * Card.OBB.AxisZ;
+			TestTrue(*FString::Printf(TEXT("3 slices: card %u's slice lies inside the box along its axis"), Card.AxisAlignedDirectionIndex),
+				Center[Axis] - (Card.OBB.Extent.Z - 5.0f) >= Box.Min[Axis] - 0.01 && Center[Axis] + (Card.OBB.Extent.Z - 5.0f) <= Box.Max[Axis] + 0.01);
+		}
+		for (int32 Direction = 0; Direction < 6; ++Direction)
+		{
+			TestTrue(*FString::Printf(TEXT("3 slices: direction %d has 3 cards (%d) whose slices fill the box along it (%.1f of %.1f)"), Direction,
+				PerDirection[Direction], DepthCovered[Direction], Box.GetSize()[Direction / 2]),
+				PerDirection[Direction] == 3 && FMath::IsNearlyEqual(DepthCovered[Direction], Box.GetSize()[Direction / 2], 0.1));
+		}
+		FMeshCardsBuildData Clamped;
+		BuildVoxelChunkMeshCards(Box, 9, Clamped);
+		TestEqual(TEXT("9 slices: clamped to 5 (30 cards, under Lumen's 32 a mesh)"), Clamped.CardBuildData.Num(), 6 * MaxVoxelChunkMeshCardSlices);
+	}
+
 	TestNull(TEXT("Cards off: no card representation"), MakeMesh(Box, 4, false)->CardRepresentation.Get());
 	TestNull(TEXT("No triangles: no card representation"), MakeMesh(Box, 0, true)->CardRepresentation.Get());
 	TestNull(TEXT("No box: no card representation"), MakeMesh(FBox(ForceInit), 4, true)->CardRepresentation.Get());

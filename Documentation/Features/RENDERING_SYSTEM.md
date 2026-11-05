@@ -294,14 +294,41 @@ keeps darkening the ground under it, and a sealed cave stays dark.
   project or the RHI does not allow ray tracing. `voxel.Render.RayTracingStats` gives the geometries alive, their BLAS
   megabytes and the instances the last frame gathered; test `Rendering.RayTracing.ChunkGeometry` (the in-editor gate).
 
+**Lumen's surface cache** (G116 step 4, 2026-11-04; the plan is
+[LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md](../Research/LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md) §4). Every chunk primitive's mesh
+has Lumen cards and the primitive is in Lumen's scene, so a ray that hits the terrain reads the surface cache: the bounce
+off the terrain is back.
+
+- **Six axis-aligned cards over the mesh's box** (`BuildVoxelChunkMeshCards`, `MeshCardRepresentation::SetCardsFromBounds`,
+  as the engine gives dynamic and spline meshes), built with the mesh when the region component takes it (the box is all
+  they need: nothing on the workers, no neighbour read) and released with it. One-sided: a two-sided mesh's 50 uu
+  sampling bias would let a cave's hit take the lit ground's card above it.
+- **The primitive joins Lumen's scene** through `GetMeshCardRepresentation` and `bAffectDynamicIndirectLighting` (off
+  without cards; `UpdateVisibleInLumenScene` after the proxy's constructor sets it), which also has the scene cache a
+  `LumenCardCapture` draw command for its static batch: Lumen captures each card page from it, at the resolution the
+  page's distance asks for. A crossfading primitive keeps its cached commands, so its cards are captured as usual.
+- **One layer per direction.** A card captures the first surface facing it inside its box, so one card per direction over
+  a whole chunk sees one layer: where a chunk holds an overhang above a cave, the -Z card captures the cave's ceiling and
+  the overhang's underside has no coverage (Lumen's coverage view, `r.Lumen.Visualize 5`, shows it magenta), and a ray
+  that hits it reads black as before. `voxel.Render.LumenCards.Slices` cuts the box into parts along each axis with two
+  cards per part, which peels the layers (3 slices cover the repro's underside) at that many times the surface cache's
+  texels. Cards fitted to the surface (the mesh's own facing clusters) are the next step (G116).
+- **Cost** (2026-11-04, the streaming bench, `voxel.Render.LumenCards` 0 and 1 interleaved, three runs each, noon with the
+  clock stopped, 2,874 x 1,360): GPU frame P50 +0.25 ms on `VoxelDemo`'s chord (6.94 → 7.19) and +0.22 ms on
+  `PlanetTest`'s great circle (6.25 → 6.47); the render thread's busy time +1.0 and +0.7 ms (9.48 → 10.47,
+  11.63 → 12.30); the game thread +1.6 ms on the chord (19.43 → 21.03) and none on the great circle. Lumen captures
+  about 26 card pages a frame while streaming against 8.5 without the terrain's cards (P95 78, at most 235 of its 300 a
+  frame), with at most 8 mesh cards waiting; the surface cache's atlas (a fixed allocation) holds the terrain's cards in
+  31-66 % of its pages at rest and at most 825 of 1,024 on the great circle, plus about 1.5 MB on the CPU.
+- **Off** with `voxel.Render.LumenCards 0` (the primitives are recreated from re-sent meshes, out of Lumen's scene).
+  Test `Rendering.ChunkPrimitives.CardsFromBounds` (the cards' boxes, headless) and `Rendering.ChunkPrimitives.Lifecycle`
+  (cards and scene membership, the in-editor gate).
+
 What it does not give yet:
 
-- **Bounce light from the terrain.** A ray that hits the terrain finds no Lumen surface cache (the terrain has no mesh
-  cards) and returns black: occlusion is right, the bounce off the terrain is lost, so the ground under an overhang
-  reads a little darker off screen than on screen (0.90 of it on `VoxelDemo`) and on a planet's shaded ground can go
-  black. Lumen captures cards from a primitive's cached static mesh draw commands; since G116's steps 1-3 every chunk
-  mesh is such a primitive ([Chunk Primitives](#chunk-primitives)), and step 4 gives each its cards (G116 in the
-  project's findings; the plan is [LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md](../Research/LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md)).
+- **Bounce light everywhere.** The axis cards above miss stacked surfaces: the ground under a voxel overhang reads 0.91
+  of its on-screen brightness off screen (0.93 with 3 slices), where under an engine cube with its own cards it reads
+  0.98 (the table below).
 - **Hit lighting is not the answer.** `r.Lumen.HardwareRayTracing.LightingMode 1` evaluates the terrain's material and
   direct light at a hit, and works with this proxy as it is (hit shaders take positions from the ray tracing geometry,
   not the vertex factory's position view, which the proxy leaves null). Sunlit terrain seen in a ray turns from black to
@@ -346,9 +373,20 @@ What it does not give yet:
 | `voxel.Render.RayTracing 1` | 0.177 → 0.159 | 0.90 | 0.111 |
 | `PlanetTest` (30N 20E), 0 | 0.443 → 0.398 | 0.90 | 0.090 |
 | `PlanetTest`, 1 | 0.433 → 0.378 | 0.87 | 0.029 |
+| `VoxelDemo`, chunk primitives, `voxel.Render.LumenCards 0` (2026-11-04) | 0.174-0.177 → 0.160-0.162 | 0.91-0.92 | 0.111 |
+| `VoxelDemo`, `voxel.Render.LumenCards 1` | 0.192-0.193 → 0.175-0.177 | 0.91-0.92 | 0.111 |
+| `VoxelDemo`, cards, 2 slices / 3 slices | 0.191 → 0.178 / 0.194 → 0.181 | 0.93 / 0.93 | 0.111 |
+| `VoxelDemo`, an engine cube slab in the overhang's place, cards 0 | 0.162 → 0.153 | 0.94 | 0.111 |
+| `VoxelDemo`, the cube slab, cards 1 | 0.203-0.204 → 0.199-0.200 | 0.98 | 0.111 |
+| `PlanetTest`, cards 0 | 0.433 → 0.378 | 0.87 | 0.029 |
+| `PlanetTest`, cards 1 (1, 2 or 3 slices) | 0.437 → 0.383 | 0.88 | 0.029 |
 
 Mean luminance of the inner 60 % of the compared regions, noon with the clock stopped, exposure and anti-aliasing off;
-the spike's numbers for its prototype were 0.176 → 0.159 (0.91) on the demo and a planet cave of 0.039.
+the spike's numbers for its prototype were 0.176 → 0.159 (0.91) on the demo and a planet cave of 0.039. The cards' rows
+are one PIE each, the settings switched in turn (ranges: the same setting twice). With the cards the ground under the
+overhang is 10 % brighter on and off screen (the overhang's lit top and the ground around it bounce light again) and the
+sealed caves are unchanged (no leak); under an engine cube with its own cards the off-screen ground is within 2 % of the
+on-screen one, so the remaining gap under the voxel overhang is its cards' coverage, not Lumen's.
 
 ---
 
