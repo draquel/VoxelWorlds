@@ -85,6 +85,10 @@ struct FVoxelChunkMeshCardBuildStats
 VOXELRENDERING_API void BuildVoxelChunkMeshFittedCards(TConstArrayView<FVoxelVertex> Vertices, TConstArrayView<uint32> Indices, const FBox& LocalBounds,
 	const FVoxelChunkMeshCardSettings& Settings, FMeshCardsBuildData& OutCardData, FVoxelChunkMeshCardBuildStats* OutStats = nullptr);
 
+/** Spike (D42): the fitted build over plain position and normal arrays (any thread). */
+VOXELRENDERING_API void BuildVoxelMeshFittedCards(TConstArrayView<FVector3f> Positions, TConstArrayView<FVector3f> Normals, TConstArrayView<uint32> Indices,
+	const FBox& LocalBounds, const FVoxelChunkMeshCardSettings& Settings, FMeshCardsBuildData& OutCardData);
+
 /**
  * The Lumen cards the chunk meshes take now (the voxel.Render.LumenCards cvars), any thread.
  *

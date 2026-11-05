@@ -427,6 +427,14 @@ void BuildVoxelChunkMeshFittedCards(TConstArrayView<FVoxelVertex> Vertices, TCon
 		[&Vertices](uint32 Index) { return Vertices[Index].GetNormal(); }, Indices, LocalBounds, Settings, OutCardData, OutStats);
 }
 
+void BuildVoxelMeshFittedCards(TConstArrayView<FVector3f> Positions, TConstArrayView<FVector3f> Normals, TConstArrayView<uint32> Indices,
+	const FBox& LocalBounds, const FVoxelChunkMeshCardSettings& Settings, FMeshCardsBuildData& OutCardData)
+{
+	const bool bHasNormals = Normals.Num() >= Positions.Num();
+	BuildFittedCards(Positions.Num(), [&Positions](uint32 Index) { return Positions[Index]; },
+		[&Normals, bHasNormals](uint32 Index) { return bHasNormals ? Normals[Index] : FVector3f::UpVector; }, Indices, LocalBounds, Settings, OutCardData, nullptr);
+}
+
 // ==================== The settings and the mesh workers' cards ====================
 
 FVoxelChunkMeshCardSettings GetVoxelChunkMeshCardSettings()

@@ -16,6 +16,16 @@
 #include "RenderUtils.h"
 #include "HAL/IConsoleManager.h"
 #include "RayTracingInstance.h"
+#include "MeshCardBuild.h"
+#include "MeshCardRepresentation.h"
+#include "VoxelChunkMeshCards.h"
+
+static TAutoConsoleVariable<int32> CVarVoxelFarFieldLumenCardsSpike(
+	TEXT("voxel.World.FarFieldLumenCards"),
+	0,
+	TEXT("Spike (D42, not for merge): far-field patches drawn statically with fitted Lumen cards over their terrain section, in\n")
+	TEXT("Lumen's scene. Read when a patch's proxy is created: set it before PIE."),
+	ECVF_Default);
 
 namespace VoxelFarFieldPatchPrivate
 {
@@ -65,6 +75,7 @@ public:
 	FVoxelFarFieldPatchSceneProxy(UVoxelFarFieldPatchComponent* Component, bool bCanBeRayTraced)
 		: FPrimitiveSceneProxy(Component)
 		, MaterialRelevance(Component->GetMaterialRelevance(GetScene().GetShaderPlatform()))
+		, bSpikeCards(CVarVoxelFarFieldLumenCardsSpike.GetValueOnGameThread() != 0)
 	{
 		using namespace VoxelFarFieldPatchPrivate;
 		const int32 NumSections = Component->GetNumSections();
@@ -92,6 +103,32 @@ public:
 			}
 			Section->bVisible = Source.bVisible;
 			Sections[SectionIndex] = Section;
+
+			// D42 spike: cards over the terrain section (the one traced)
+			if (bSpikeCards && Source.bRayTracing && !CardRepresentation.IsValid())
+			{
+				TArray<FVector3f> Positions;
+				TArray<FVector3f> Normals;
+				Positions.Reserve(Source.Vertices.Num());
+				Normals.Reserve(Source.Vertices.Num());
+				FBox Box(ForceInit);
+				for (const FDynamicMeshVertex& Vertex : Source.Vertices)
+				{
+					Positions.Add(Vertex.Position);
+					Normals.Add(Vertex.TangentZ.ToFVector3f());
+					Box += FVector(Vertex.Position);
+				}
+				FVoxelChunkMeshCardSettings Settings = GetVoxelChunkMeshCardSettings();
+				Settings.Mode = EVoxelChunkMeshCards::Fitted;
+				CardRepresentation = MakeUnique<FCardRepresentationData>();
+				CardRepresentation->MeshCardsBuildData.Bounds = Box;
+				CardRepresentation->MeshCardsBuildData.bMostlyTwoSided = false;
+				BuildVoxelMeshFittedCards(Positions, Normals, Source.Indices, Box, Settings, CardRepresentation->MeshCardsBuildData);
+				if (CardRepresentation->MeshCardsBuildData.CardBuildData.Num() == 0)
+				{
+					CardRepresentation.Reset();
+				}
+			}
 
 #if RHI_RAYTRACING
 			// G121: geometry for the marked sections of a component something can trace, none for the rest.
@@ -121,6 +158,53 @@ public:
 				});
 			}
 #endif
+		}
+
+		if (bSpikeCards)
+		{
+			bAffectDynamicIndirectLighting = CardRepresentation.IsValid();
+			UpdateVisibleInLumenScene();
+			bStaticElementsAlwaysUseProxyPrimitiveUniformBuffer = true;
+			EnableGPUSceneSupportFlags();
+		}
+	}
+
+	virtual const FCardRepresentationData* GetMeshCardRepresentation() const override
+	{
+		return CardRepresentation.Get();
+	}
+
+	virtual void DrawStaticElements(FStaticPrimitiveDrawInterface* PDI) override
+	{
+		if (!bSpikeCards)
+		{
+			return;
+		}
+		for (const VoxelFarFieldPatchPrivate::FProxySection* Section : Sections)
+		{
+			if (!Section || !Section->bVisible)
+			{
+				continue;
+			}
+			FMeshBatch Mesh;
+			Mesh.VertexFactory = &Section->VertexFactory;
+			Mesh.MaterialRenderProxy = Section->Material->GetRenderProxy();
+			Mesh.ReverseCulling = IsLocalToWorldDeterminantNegative();
+			Mesh.Type = PT_TriangleList;
+			Mesh.DepthPriorityGroup = SDPG_World;
+			Mesh.LODIndex = 0;
+			Mesh.SegmentIndex = 0;
+			Mesh.CastShadow = true;
+			Mesh.bUseAsOccluder = true;
+			Mesh.bUseForMaterial = true;
+			Mesh.bUseForDepthPass = true;
+			FMeshBatchElement& Element = Mesh.Elements[0];
+			Element.IndexBuffer = &Section->IndexBuffer;
+			Element.FirstIndex = 0;
+			Element.NumPrimitives = Section->IndexBuffer.Indices.Num() / 3;
+			Element.MinVertexIndex = 0;
+			Element.MaxVertexIndex = Section->VertexBuffers.PositionVertexBuffer.GetNumVertices() - 1;
+			PDI->DrawMesh(Mesh, FLT_MAX);
 		}
 	}
 
@@ -219,7 +303,9 @@ public:
 		FPrimitiveViewRelevance Result;
 		Result.bDrawRelevance = IsShown(View);
 		Result.bShadowRelevance = IsShadowCast(View);
-		Result.bDynamicRelevance = true;
+		const bool bStatic = bSpikeCards && !(AllowDebugViewmodes() && View->Family->EngineShowFlags.Wireframe);
+		Result.bStaticRelevance = bStatic;
+		Result.bDynamicRelevance = !bStatic;
 		Result.bRenderInMainPass = ShouldRenderInMainPass();
 		Result.bUsesLightingChannels = GetLightingChannelMask() != GetDefaultLightingChannelMask();
 		Result.bRenderCustomDepth = ShouldRenderCustomDepth();
@@ -310,6 +396,9 @@ private:
 
 	TArray<VoxelFarFieldPatchPrivate::FProxySection*> Sections;
 	FMaterialRelevance MaterialRelevance;
+	/** D42 spike: static draws and the terrain section's cards */
+	bool bSpikeCards = false;
+	TUniquePtr<FCardRepresentationData> CardRepresentation;
 	/** The sections given ray tracing geometry */
 	int32 NumRayTracingSections = 0;
 };
