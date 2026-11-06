@@ -150,8 +150,8 @@ void WaterColumnSeedCS(uint3 ThreadId : SV_DispatchThreadID)
 // One thread per digital line along the chunk's local down (FVoxelDownLines). Mirrors ApplyRadialWaterFillPass phase
 // 1: walking the line from where it enters the chunk, the first solid or cave voxel blocks the rest of the line; until
 // then, air inside the sea sphere takes the water flag. Each voxel is on exactly one line and a line reads and writes
-// only its own voxels, so the threads are independent and the result is the CPU's. Dispatched only when the sea
-// surface crosses the chunk's voxel box (the CPU's gate, evaluated in C++).
+// only its own voxels, so the threads are independent and the result is the CPU's. Dispatched when the sea surface
+// crosses the chunk's voxel box or the box lies wholly under it (G132; the CPU's gate, evaluated in C++).
 [numthreads(64, 1, 1)]
 void WaterLineSeedCS(uint3 ThreadId : SV_DispatchThreadID)
 {
