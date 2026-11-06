@@ -913,6 +913,7 @@ void FVoxelMeshRenderer::ConvertToVoxelVertices(
 	const bool bHasNormals = MeshData.Normals.Num() >= VertexCount;
 	const bool bHasUVs = MeshData.UVs.Num() >= VertexCount;
 	const bool bHasColors = MeshData.Colors.Num() >= VertexCount;
+	const bool bHasBlends = MeshData.MaterialBlends.Num() >= VertexCount;
 
 	FVector3f BoundsMin(FLT_MAX, FLT_MAX, FLT_MAX);
 	FVector3f BoundsMax(-FLT_MAX, -FLT_MAX, -FLT_MAX);
@@ -944,6 +945,9 @@ void FVoxelMeshRenderer::ConvertToVoxelVertices(
 			Vertex.SetBiomeID(0);
 			Vertex.SetAO(0);
 		}
+		// The soft material border's blend (VP2-O4; 0 = none). Set on every vertex: the array is uninitialized, and
+		// the setters above leave these bits alone
+		Vertex.SetMaterialBlend(bHasBlends ? MeshData.MaterialBlends[i] : 0);
 	}
 
 	if (VertexCount > 0)

@@ -4,10 +4,11 @@
 
 #include "CoreMinimal.h"
 #include "VoxelCrossingGradient.h"
+#include "ChunkRenderData.h"
 
 // What the Dual Contouring mesher's interior pass (VoxelCPUDualContourMesher.cpp) and its seam meshers
-// (VoxelCPUDualContourSeams.cpp) share: the gradient and shading normals and the cell's edge table. Private to
-// VoxelMeshing.
+// (VoxelCPUDualContourSeams.cpp) share: the gradient and shading normals, the cell's edge table, and the soft material
+// borders (each cell's own material, a quad's blend and the vertex emission that carries it). Private to VoxelMeshing.
 
 namespace VoxelDCTables
 {
@@ -90,5 +91,165 @@ namespace VoxelDCGradient
 		const VoxelCrossingGradient::FBoxHeld IsHeld{ { Lo[0], Lo[1], Lo[2] }, { Hi[0], Hi[1], Hi[2] } };
 		return VoxelCrossingGradient::ShadingNormal(Density, IsHeld, X, Y, Z,
 			[&]() { return ClampedGradientNormal(Density, Lo, Hi, FMath::FloorToInt(X), FMath::FloorToInt(Y), FMath::FloorToInt(Z), 1); });
+	}
+}
+
+namespace VoxelDCMaterialBlend
+{
+	/** The most cells one quad or fan of the meshers emits */
+	inline constexpr int32 MaxQuadCells = 4;
+
+	/** A cube cell's corner (0-7) from its offset from the cell's min corner: X in bit 0, Y in bit 1, Z in bit 2 */
+	FORCEINLINE int32 CornerIndex(int32 DX, int32 DY, int32 DZ)
+	{
+		return DX | (DY << 1) | (DZ << 2);
+	}
+
+	/**
+	 * A cell's own material: the most common material among the solid endpoints of its sign-change edges, each corner
+	 * counted once, a tie to the corner added first (the edges go in VoxelDCTables::CellEdges order). These are the voxels
+	 * the cell's surface bounds, the ones a quad takes its material from (its edge's solid endpoint), so a cell inside one
+	 * material gets that material.
+	 */
+	struct FCellMaterialVote
+	{
+		uint8 CornerMask = 0;
+		uint8 Materials[8] = {};
+		int32 Count = 0;
+
+		/** Count a solid corner's material (a corner already counted is skipped) */
+		void Add(int32 Corner, uint8 Material)
+		{
+			const uint8 Bit = static_cast<uint8>(1 << Corner);
+			if ((CornerMask & Bit) == 0)
+			{
+				CornerMask |= Bit;
+				Materials[Count++] = Material;
+			}
+		}
+
+		/** @return The cell's material (0 when no corner was added: a cell without a crossing has no vertex) */
+		uint8 Result() const
+		{
+			uint8 Best = Count > 0 ? Materials[0] : 0;
+			int32 BestVotes = 0;
+			for (int32 i = 0; i < Count; ++i)
+			{
+				int32 Votes = 0;
+				for (int32 j = 0; j < Count; ++j)
+				{
+					Votes += Materials[j] == Materials[i] ? 1 : 0;
+				}
+				if (Votes > BestVotes)
+				{
+					Best = Materials[i];
+					BestVotes = Votes;
+				}
+			}
+			return Best;
+		}
+	};
+
+	/**
+	 * The blend codes (VoxelMaterialBlend) of one quad or fan's vertices. The second material is the most common cell
+	 * material that differs from the quad's (a tie to the first such cell); a vertex whose cell has it shows it, the
+	 * others the quad's own, and the weight between them interpolates across the triangles. Every vertex of the quad gets
+	 * the same second material, so both IDs stay flat per triangle. A vertex then shows its cell's material whichever
+	 * quad it is emitted for, so the material changes smoothly from cell to cell across quads. A quad whose cells all
+	 * have its material gets no blend (code 0); a third material in one quad shows the quad's.
+	 *
+	 * @param QuadMaterial The quad's material (its edge's solid endpoint)
+	 * @param CellMaterials Each cell's own material
+	 * @param N The cells (at most MaxQuadCells)
+	 * @param OutCodes Each cell's blend code
+	 */
+	inline void QuadBlendCodes(uint8 QuadMaterial, const uint8* CellMaterials, int32 N, uint16* OutCodes)
+	{
+		int32 BestVotes = 0;
+		uint8 Secondary = QuadMaterial;
+		for (int32 i = 0; i < N; ++i)
+		{
+			if (CellMaterials[i] == QuadMaterial)
+			{
+				continue;
+			}
+			int32 Votes = 0;
+			for (int32 j = 0; j < N; ++j)
+			{
+				Votes += CellMaterials[j] == CellMaterials[i] ? 1 : 0;
+			}
+			if (Votes > BestVotes)
+			{
+				Secondary = CellMaterials[i];
+				BestVotes = Votes;
+			}
+		}
+		for (int32 i = 0; i < N; ++i)
+		{
+			OutCodes[i] = BestVotes > 0 ? VoxelMaterialBlend::Encode(Secondary, CellMaterials[i] == Secondary) : 0;
+		}
+	}
+
+	/**
+	 * Emit one quad or fan's cell vertices with the quad's material and their blend codes, reusing a cell's vertex where
+	 * it was emitted with the same material, biome and code, and otherwise a duplicate kept per (cell key, code, material,
+	 * biome): the duplicate has the same position and normal, so a border cannot crack. The interior pass and every seam
+	 * path share this, so a ring recompute emits the vertices the interior pass would.
+	 *
+	 * @param Cells The cells (FDCCellVertex or a seam cell: MeshVertexIndex, EmittedMaterialID, EmittedBiomeID,
+	 *              EmittedBlend, CellMaterial)
+	 * @param Keys A key per cell, unique within the cache's mesh
+	 * @param N The cells (at most MaxQuadCells)
+	 * @param QuadMaterial, QuadBiome The quad's material and biome
+	 * @param Cache The mesh's duplicate vertices
+	 * @param Emit (Cell, MaterialID, BiomeID, BlendCode) -> the new vertex's index
+	 * @param OutIndices Each cell's vertex index
+	 */
+	template <typename TCell, typename TEmitFn>
+	void EmitQuadCells(TCell* const* Cells, const int32* Keys, int32 N, uint8 QuadMaterial, uint8 QuadBiome,
+		TMap<uint64, int32>& Cache, const TEmitFn& Emit, int32* OutIndices)
+	{
+		uint8 CellMaterials[MaxQuadCells];
+		for (int32 i = 0; i < N; ++i)
+		{
+			CellMaterials[i] = Cells[i]->CellMaterial;
+		}
+		uint16 Codes[MaxQuadCells];
+		QuadBlendCodes(QuadMaterial, CellMaterials, N, Codes);
+
+		for (int32 i = 0; i < N; ++i)
+		{
+			TCell& Cell = *Cells[i];
+			const uint16 Code = Codes[i];
+			if (Cell.MeshVertexIndex >= 0 && Cell.EmittedMaterialID == QuadMaterial && Cell.EmittedBiomeID == QuadBiome
+				&& Cell.EmittedBlend == Code)
+			{
+				OutIndices[i] = Cell.MeshVertexIndex;
+			}
+			else if (Cell.MeshVertexIndex < 0)
+			{
+				OutIndices[i] = Emit(Cell, QuadMaterial, QuadBiome, Code);
+				Cell.MeshVertexIndex = OutIndices[i];
+				Cell.EmittedMaterialID = QuadMaterial;
+				Cell.EmittedBiomeID = QuadBiome;
+				Cell.EmittedBlend = Code;
+			}
+			else
+			{
+				const uint64 DupKey = (static_cast<uint64>(Keys[i]) << 32)
+					| (static_cast<uint64>(Code) << 16)
+					| (static_cast<uint64>(QuadMaterial) << 8)
+					| static_cast<uint64>(QuadBiome);
+				if (const int32* Found = Cache.Find(DupKey))
+				{
+					OutIndices[i] = *Found;
+				}
+				else
+				{
+					OutIndices[i] = Emit(Cell, QuadMaterial, QuadBiome, Code);
+					Cache.Add(DupKey, OutIndices[i]);
+				}
+			}
+		}
 	}
 }

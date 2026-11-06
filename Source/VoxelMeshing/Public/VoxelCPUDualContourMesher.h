@@ -129,6 +129,8 @@ private:
 		FVector3f Position;  // World-space crossing point on edge
 		FVector3f Normal;    // Surface gradient normal at crossing (at the cell's stride: the QEF's plane normal)
 		FVector3f ShadingNormal; // At stride 1: the fitted gradient's normal (G62), summed into the vertex normal
+		uint8 SolidMaterial = 0; // The material of the edge's solid endpoint (the cell's material vote, VP2-O4)
+		bool bSolidAtStart = false; // Whether the solid endpoint is the edge's start (else its +Axis end)
 		bool bValid = false; // Whether this edge has a crossing
 	};
 
@@ -139,6 +141,8 @@ private:
 		FVector3f Normal;       // Averaged normal of the edge crossings (their fitted gradients, G62)
 		uint8 EmittedMaterialID = 0; // Material of the primary emission (valid when MeshVertexIndex >= 0)
 		uint8 EmittedBiomeID = 0;    // Biome of the primary emission (valid when MeshVertexIndex >= 0)
+		uint16 EmittedBlend = 0;     // Material blend code of the primary emission (VoxelMaterialBlend, VP2-O4)
+		uint8 CellMaterial = 0;      // The cell's own material (VoxelDCMaterialBlend::FCellMaterialVote; valid when bValid)
 		int32 MeshVertexIndex = -1;  // Primary emission index in output FChunkMeshData (-1 = not emitted yet)
 		bool bValid = false;         // Whether this cell has a QEF vertex
 	};
@@ -241,15 +245,23 @@ private:
 	 * UV1.x back to an integer atlas index — a triangle with mixed IDs sweeps
 	 * through every intermediate index, rendering stripes of unrelated materials
 	 * at borders. GenerateQuads owns the caching, and duplicates a cell vertex
-	 * (same position/normal) when quads of different materials share it.
+	 * (same position/normal) when quads of different materials or blends share it.
 	 *
 	 * Always appends; returns the new vertex index in the output mesh.
+	 *
+	 * @param Request The meshing request (voxel size)
+	 * @param Vertex The cell's vertex
+	 * @param MaterialID, BiomeID The quad's material and biome
+	 * @param BlendCode The vertex's material blend (VoxelMaterialBlend; 0 = none, VP2-O4)
+	 * @param OutMeshData The mesh appended to
+	 * @return The new vertex's index
 	 */
 	int32 EmitVertex(
 		const FVoxelMeshingRequest& Request,
 		const FDCCellVertex& Vertex,
 		uint8 MaterialID,
 		uint8 BiomeID,
+		uint16 BlendCode,
 		FChunkMeshData& OutMeshData) const;
 
 	// ============================================================================

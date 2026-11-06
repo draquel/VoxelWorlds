@@ -149,11 +149,16 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 		Result.TexCoord1 = FVector2f(static_cast<float>(MaterialID), static_cast<float>(FaceType));
 
 		// Encode data for the material graph:
-		// R = MaterialID (0-255)
+		// R = MaterialID (0-255), or a material blend's second material
 		// G = BiomeID (0-255)
 		// B = AO << 6 (top 2 bits: 0, 64, 128, 192 for AO 0-3)
-		// A = 255
-		Result.Color = FColor(MaterialID, BiomeID, AOValue << 6, 255);
+		// A = 255, or in a material blend 255 less the second material's weight (0 where the vertex shows it)
+		// A blend is the far field's (M_VoxelMaster's FarFieldMaterialPick): the weight interpolates across the triangle and
+		// each pixel takes one of the two materials against a temporal dither, so a border fades over a cell (VP2-O4).
+		const uint16 Blend = VoxelVert.GetMaterialBlend();
+		Result.Color = VoxelMaterialBlend::IsBlend(Blend)
+			? FColor(VoxelMaterialBlend::Secondary(Blend), BiomeID, AOValue << 6, VoxelMaterialBlend::ShowsSecondary(Blend) ? 0 : 255)
+			: FColor(MaterialID, BiomeID, AOValue << 6, 255);
 
 		return Result;
 	}

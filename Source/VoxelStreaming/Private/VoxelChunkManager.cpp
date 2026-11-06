@@ -5634,6 +5634,14 @@ void UVoxelChunkManager::SubmitSeamOwnerBucket(const FIntVector& Owner)
 		Merged.UVs.Append(SlotMesh.UVs);
 		Merged.UV1s.Append(SlotMesh.UV1s);
 		Merged.Colors.Append(SlotMesh.Colors);
+		// The material blends (VP2-O4): a slot without them (not Dual Contouring) has none, so the merged array is padded
+		// to stay one entry per vertex
+		if (SlotMesh.MaterialBlends.Num() > 0 || Merged.MaterialBlends.Num() > 0)
+		{
+			Merged.MaterialBlends.SetNumZeroed(Base);
+			Merged.MaterialBlends.Append(SlotMesh.MaterialBlends);
+			Merged.MaterialBlends.SetNumZeroed(Merged.Positions.Num());
+		}
 		Merged.Indices.Reserve(Merged.Indices.Num() + SlotMesh.Indices.Num());
 		for (const uint32 Idx : SlotMesh.Indices)
 		{

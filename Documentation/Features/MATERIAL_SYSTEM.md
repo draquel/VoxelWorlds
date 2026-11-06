@@ -536,7 +536,7 @@ local up at 1 km from the centre. Tests `VoxelWorlds.Rendering.SlopeRock.Assets`
 `Scripts/setup_slope_rock.py` (parent repository; idempotent, run headless) writes the nodes, the parameter and the
 atlases' slope materials, and resaves `M_VoxelMaster` and `M_VoxelMaster_Fade` with no node changed (their cached
 parameter list then holds `LocalUpCenter`, which a cooked game reads). Smooth terrain only: the cubic path
-(`MF_CubicAtlasSample`) is unchanged. Soft material borders (VP2-O4) wait for the user's look at this.
+(`MF_CubicAtlasSample`) is unchanged. Soft material borders (VP2-O4) are below.
 
 Result (2026-11-02, before and after at fixed poses): on `VoxelDemo` the steepest hill flanks take rock in patches with
 irregular borders and the gentle ground keeps its grass, at eye level and from 50-150 m up (the main build against the
@@ -691,11 +691,37 @@ return MaterialID;
 Each pixel takes one of the two materials against interleaved gradient noise moved every frame, which TSR averages into a
 gradient across the quad: no texture sample is added. Before, a far-field quad drew one material, the most common of
 its corners' picks, so every material border was a staircase of quads (a few km a step at a planet's horizon) (tests
-`FarField.Planet.MaterialMix`, `.MaterialBlend`, `FarField.Plane.MaterialMix`). Every voxel chunk vertex has alpha 255 (weight 0) and keeps
-`MaterialID`. Vertex colour reaches the shader as UNORM (`VET_Color`, no sRGB decode), so R carries an ID exactly; IDs stay
+`FarField.Planet.MaterialMix`, `.MaterialBlend`, `FarField.Plane.MaterialMix`). The Dual Contouring chunk meshes blend
+their material borders through the same node ("Soft Material Borders" below); every other voxel chunk vertex has alpha
+255 (weight 0) and keeps `MaterialID`. Vertex colour reaches the shader as UNORM (`VET_Color`, no sRGB decode), so R carries an ID exactly; IDs stay
 out of interpolation because both are flat per triangle. The node is added by `Scripts/setup_farfield_material_blend.py`
 (parent repository; idempotent, run headless). The VertexColor node's default output is RGB only, so R and A go in as their own
 inputs: a `.a` on that output fails the material's compile and every mesh using it draws the default material.
+
+### Soft Material Borders (VP2-O4)
+
+The Dual Contouring meshers give each quad on a material border a second material and a weight per vertex
+([DUAL_CONTOURING.md](DUAL_CONTOURING.md) "Materials and soft borders"), and the vertex factory writes them as the far
+field does: colour R the second material, A 255 less its weight. `FarFieldMaterialPick` then picks per pixel. No
+material graph changed. A border between two materials (grass and dirt, beach sand and rock, two biomes' ground) is a
+ramp one cell wide (75 cm at LOD 0), and the blend zone's mosaic (G39's dither, a lattice 4 voxels apart) has soft
+edges. The pick adds no texture sample. Up close each pixel shows one material, and TSR averages them over frames into
+the ramp; in PIE close-ups (2 m from the ground, SmoothTerrain_Island's forest and desert borders) no grain shows, so the
+two-sample blend the plan kept as a fallback was not needed. Marching Cubes and the cubic meshes keep hard borders:
+their vertices carry no blend.
+
+- **Three materials in one quad.** Only two blend: the third's corner shows the quad's own material, so an edge stays
+  hard there. That happens where a blend zone has three ground materials close together, such as the island's desert,
+  savanna and dune-flank sand: a few straight edges among the soft ones.
+- **The colour view (fixed with VP2-O4).** The chunk meshes' colour buffer is read through a typed view
+  (`CreateVoxelMeshBuffers_RenderThread`, `VoxelSceneProxy.cpp`). The local vertex factory's manual fetch swizzles
+  `.bgra` (`FMANUALFETCH_COLOR_COMPONENT_SWIZZLE`) and expects an `R8G8B8A8` view over `FColor`'s bytes, the engine's
+  `FColorVertexBuffer` view. The view was `B8G8R8A8`, which swapped R and B for every chunk vertex. Nothing read R
+  while alpha stayed 255, so it went unnoticed. With the blend, the second material read as AO (0): a band of
+  material 0 along every border.
+- **Vertices.** Border vertices are duplicated per blend as they are per material. The suite's mesh digests: the same
+  triangles, and 4% more vertices at LOD 0 and up to 24% at LOD 2 on the two-material test terrain (wider cells reach
+  more borders).
 
 ### Material Assets
 

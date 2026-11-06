@@ -592,7 +592,10 @@ underside with the water material.
   tangent cross(Z, N), UV0 the position on the normal's dominant plane in voxels (relative to the patch).
 - Both materials are flat per triangle (vertices duplicated where quads' pairs differ) and the terrain material picks
   between them per pixel by the interpolated weight ([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Far-Field Material
-  Blend"); every voxel chunk vertex has alpha 255, weight 0.
+  Blend"). A voxel chunk vertex has alpha 255 (weight 0) except on a Dual Contouring material border, which blends
+  the same way since VP2-O4 ([DUAL_CONTOURING.md](DUAL_CONTOURING.md) "Materials and soft borders"). The chunk meshes'
+  colour view is `R8G8B8A8` over `FColor`'s bytes, as the engine's `FColorVertexBuffer` uses: the manual fetch swizzles
+  `.bgra` itself ([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Soft Material Borders").
 - Sections are shown and hidden with `SetMeshSectionVisible` (a render command), so the window's hole moving costs no
   proxy rebuild; a component is created when its patch is built and goes when the patch is released or pruned. They
   are about 200 bytes a vertex (the component's CPU copy and the GPU one): 29-56 MB at the surveyed sites of the three

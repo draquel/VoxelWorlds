@@ -40,8 +40,8 @@ struct VOXELCORE_API FVoxelVertex
 	 * Packed material data:
 	 * - Bits 0-7: MaterialID
 	 * - Bits 8-15: BiomeID
-	 * - Bits 16-23: Reserved
-	 * - Bits 24-31: Vertex flags
+	 * - Bits 16-23: The material blend's second material (VP2-O4; valid with the blend flag)
+	 * - Bits 24-31: Vertex flags (bit 24 the material blend, bit 25 its weight: VoxelMaterialBlend's flags)
 	 */
 	uint32 PackedMaterialData;
 
@@ -149,6 +149,25 @@ struct VOXELCORE_API FVoxelVertex
 	uint8 GetFlags() const
 	{
 		return static_cast<uint8>((PackedMaterialData >> 24) & 0xFF);
+	}
+
+	/**
+	 * Set the material blend (soft material borders, VP2-O4): the second material in bits 16-23, the blend and weight
+	 * flags in the low bits of the flags byte.
+	 *
+	 * @param Code A VoxelMaterialBlend code (FChunkMeshData::MaterialBlends; 0 = no blend)
+	 */
+	void SetMaterialBlend(uint16 Code)
+	{
+		PackedMaterialData = (PackedMaterialData & 0xFC00FFFF)
+			| (static_cast<uint32>(Code >> 8) << 16)
+			| (static_cast<uint32>(Code & 0x3) << 24);
+	}
+
+	/** @return The material blend as a VoxelMaterialBlend code (0 = no blend) */
+	uint16 GetMaterialBlend() const
+	{
+		return static_cast<uint16>((((PackedMaterialData >> 16) & 0xFF) << 8) | ((PackedMaterialData >> 24) & 0x3));
 	}
 };
 

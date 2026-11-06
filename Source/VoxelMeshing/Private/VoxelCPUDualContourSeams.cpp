@@ -106,6 +106,10 @@ namespace VoxelDCFaceSeam
 		FVector3f Normal;
 		uint8 EmittedMaterialID = 0;
 		uint8 EmittedBiomeID = 0;
+		/** The material blend code of the primary emission (VoxelMaterialBlend, VP2-O4) */
+		uint16 EmittedBlend = 0;
+		/** The cell's own material (VoxelDCMaterialBlend::FCellMaterialVote; valid when bValid) */
+		uint8 CellMaterial = 0;
 		int32 MeshVertexIndex = -1;
 		bool bValid = false;
 		/** The mixed meshers tried ComputeBoundaryFallbackVertex on this invalid cell (G17); never retried. */
@@ -280,6 +284,7 @@ namespace VoxelDCFaceSeam
 		const bool bCrossingShading = Stride == 1;
 		FVector3f ShadingSum = FVector3f::ZeroVector;
 		auto DensityFn = [&S](int32 X, int32 Y, int32 Z) { return S.GetDensity(X, Y, Z); };
+		VoxelDCMaterialBlend::FCellMaterialVote MaterialVote;
 
 		for (const FEdgeRef& Edge : GCellEdges)
 		{
@@ -301,6 +306,17 @@ namespace VoxelDCFaceSeam
 			if (bSolid0 == bSolid1)
 			{
 				continue;
+			}
+
+			// The cell's material vote: the solid endpoint's material (soft borders, VP2-O4; the interior pass's rule)
+			if (bSolid0)
+			{
+				MaterialVote.Add(VoxelDCMaterialBlend::CornerIndex(Edge.DX, Edge.DY, Edge.DZ), S.GetVoxel(VX, VY, VZ).MaterialID);
+			}
+			else
+			{
+				MaterialVote.Add(VoxelDCMaterialBlend::CornerIndex(Edge.DX + (Edge.Axis == 0 ? 1 : 0),
+					Edge.DY + (Edge.Axis == 1 ? 1 : 0), Edge.DZ + (Edge.Axis == 2 ? 1 : 0)), S.GetVoxel(NX, NY, NZ).MaterialID);
 			}
 
 			float t = (IsoLevel - D0) / (D1 - D0);
@@ -345,6 +361,7 @@ namespace VoxelDCFaceSeam
 		Out.bValid = true;
 		Out.MeshVertexIndex = -1;
 		Out.Position = QEF.Solve(SVDThreshold, CellBounds, BiasStrength);
+		Out.CellMaterial = MaterialVote.Result();
 
 		if (!AvgNormal.Normalize())
 		{
@@ -389,6 +406,8 @@ namespace VoxelDCFaceSeam
 		FVector3f AvgNormal = FVector3f::ZeroVector;
 		// The QEF's planes and the vertex normal from the crossings' shading normals (G62, G81).
 		FVector3f ShadingSum = FVector3f::ZeroVector;
+		uint8 FallbackMaterial = 0;
+		bool bHaveMaterial = false;
 
 		for (int32 Z = Lo[2]; Z <= Hi[2]; ++Z)
 		{
@@ -421,6 +440,13 @@ namespace VoxelDCFaceSeam
 						{
 							continue;
 						}
+						if (!bHaveMaterial)
+						{
+							// The cell's material: its first fine crossing's solid endpoint (VP2-O4; the cell has no
+							// crossing at its own stride to vote)
+							FallbackMaterial = (D0 >= IsoLevel) ? S.GetVoxel(X, Y, Z).MaterialID : S.GetVoxel(N[0], N[1], N[2]).MaterialID;
+							bHaveMaterial = true;
+						}
 
 						float t = (IsoLevel - D0) / (D1 - D0);
 						t = FMath::Clamp(t, 0.0f, 1.0f);
@@ -448,6 +474,7 @@ namespace VoxelDCFaceSeam
 		Out.bValid = true;
 		Out.MeshVertexIndex = -1;
 		Out.Position = QEF.Solve(SVDThreshold, CellBounds, BiasStrength);
+		Out.CellMaterial = FallbackMaterial;
 		if (!AvgNormal.Normalize())
 		{
 			AvgNormal = FVector3f(0.0f, 0.0f, 1.0f);
@@ -548,7 +575,7 @@ namespace VoxelDCFaceSeam
 
 		// ---- Vertex emission (identical projection/material carry to the other seam paths) --
 		const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
-		auto EmitSeamVertex = [&Out, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID) -> int32
+		auto EmitSeamVertex = [&Out, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint16 BlendCode) -> int32
 		{
 			const int32 Index = Out.Positions.Num();
 			Out.Positions.Add(Vertex.Position);
@@ -573,6 +600,7 @@ namespace VoxelDCFaceSeam
 			Out.UVs.Add(UV);
 			Out.UV1s.Add(FVector2f(static_cast<float>(MaterialID), 0.0f));
 			Out.Colors.Add(FColor(MaterialID, BiomeID, 0, 255));
+			Out.MaterialBlends.Add(BlendCode);
 			return Index;
 		};
 
@@ -606,36 +634,20 @@ namespace VoxelDCFaceSeam
 			}
 
 			int32 Indices[4];
+			FSeamCellVertex* QuadCells[4];
+			int32 QuadKeys[4];
 			for (int32 i = 0; i < N; ++i)
 			{
-				FSeamCellVertex& Cell = *Uniq[i].Cell;
-				if (Cell.MeshVertexIndex >= 0 && Cell.EmittedMaterialID == QuadMaterial && Cell.EmittedBiomeID == QuadBiome)
-				{
-					Indices[i] = Cell.MeshVertexIndex;
-				}
-				else if (Cell.MeshVertexIndex < 0)
-				{
-					Indices[i] = EmitSeamVertex(Cell, QuadMaterial, QuadBiome);
-					Cell.MeshVertexIndex = Indices[i];
-					Cell.EmittedMaterialID = QuadMaterial;
-					Cell.EmittedBiomeID = QuadBiome;
-				}
-				else
-				{
-					const uint64 DupKey = (static_cast<uint64>(Uniq[i].Key) << 16)
-						| (static_cast<uint64>(QuadMaterial) << 8)
-						| static_cast<uint64>(QuadBiome);
-					if (const int32* Found = DuplicateVertexCache.Find(DupKey))
-					{
-						Indices[i] = *Found;
-					}
-					else
-					{
-						Indices[i] = EmitSeamVertex(Cell, QuadMaterial, QuadBiome);
-						DuplicateVertexCache.Add(DupKey, Indices[i]);
-					}
-				}
+				QuadCells[i] = Uniq[i].Cell;
+				QuadKeys[i] = Uniq[i].Key;
 			}
+			// The quad's material and its blend toward a neighbouring cell's material (VP2-O4); the interior pass's emission
+			VoxelDCMaterialBlend::EmitQuadCells(QuadCells, QuadKeys, N, QuadMaterial, QuadBiome, DuplicateVertexCache,
+				[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint16 EmitBlend)
+				{
+					return EmitSeamVertex(EmitCell, EmitMaterial, EmitBiome, EmitBlend);
+				},
+				Indices);
 
 			auto AddTri = [&](int32 a, int32 b, int32 c)
 			{
@@ -905,7 +917,7 @@ namespace VoxelDCFaceSeam
 		{
 		}
 
-		int32 EmitVertex(const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID)
+		int32 EmitVertex(const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint16 BlendCode)
 		{
 			const int32 Index = Out.Positions.Num();
 			Out.Positions.Add(Vertex.Position);
@@ -930,6 +942,7 @@ namespace VoxelDCFaceSeam
 			Out.UVs.Add(UV);
 			Out.UV1s.Add(FVector2f(static_cast<float>(MaterialID), 0.0f));
 			Out.Colors.Add(FColor(MaterialID, BiomeID, 0, 255));
+			Out.MaterialBlends.Add(BlendCode);
 			return Index;
 		}
 
@@ -955,36 +968,20 @@ namespace VoxelDCFaceSeam
 			}
 
 			int32 Indices[4];
+			FSeamCellVertex* QuadCells[4];
+			int32 QuadKeys[4];
 			for (int32 i = 0; i < N; ++i)
 			{
-				FSeamCellVertex& Cell = *Uniq[i].Cell;
-				if (Cell.MeshVertexIndex >= 0 && Cell.EmittedMaterialID == QuadMaterial && Cell.EmittedBiomeID == QuadBiome)
-				{
-					Indices[i] = Cell.MeshVertexIndex;
-				}
-				else if (Cell.MeshVertexIndex < 0)
-				{
-					Indices[i] = EmitVertex(Cell, QuadMaterial, QuadBiome);
-					Cell.MeshVertexIndex = Indices[i];
-					Cell.EmittedMaterialID = QuadMaterial;
-					Cell.EmittedBiomeID = QuadBiome;
-				}
-				else
-				{
-					const uint64 DupKey = (static_cast<uint64>(Uniq[i].Key) << 16)
-						| (static_cast<uint64>(QuadMaterial) << 8)
-						| static_cast<uint64>(QuadBiome);
-					if (const int32* Found = DuplicateVertexCache.Find(DupKey))
-					{
-						Indices[i] = *Found;
-					}
-					else
-					{
-						Indices[i] = EmitVertex(Cell, QuadMaterial, QuadBiome);
-						DuplicateVertexCache.Add(DupKey, Indices[i]);
-					}
-				}
+				QuadCells[i] = Uniq[i].Cell;
+				QuadKeys[i] = Uniq[i].Key;
 			}
+			// The quad's material and its blend toward a neighbouring cell's material (VP2-O4); the interior pass's emission
+			VoxelDCMaterialBlend::EmitQuadCells(QuadCells, QuadKeys, N, QuadMaterial, QuadBiome, DuplicateVertexCache,
+				[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint16 EmitBlend)
+				{
+					return EmitVertex(EmitCell, EmitMaterial, EmitBiome, EmitBlend);
+				},
+				Indices);
 
 			auto AddTri = [&](int32 a, int32 b, int32 c)
 			{
@@ -1666,7 +1663,7 @@ bool FVoxelCPUDualContourMesher::GenerateFaceSeamMeshCPU(
 
 	// ---- Vertex emission (replicates EmitVertex: triplanar UV + UV1/color material carry) -----
 	const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
-	auto EmitSeamVertex = [&OutMeshData, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID) -> int32
+	auto EmitSeamVertex = [&OutMeshData, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint16 BlendCode) -> int32
 	{
 		const int32 Index = OutMeshData.Positions.Num();
 		OutMeshData.Positions.Add(Vertex.Position);
@@ -1691,6 +1688,7 @@ bool FVoxelCPUDualContourMesher::GenerateFaceSeamMeshCPU(
 		OutMeshData.UVs.Add(UV);
 		OutMeshData.UV1s.Add(FVector2f(static_cast<float>(MaterialID), 0.0f));
 		OutMeshData.Colors.Add(FColor(MaterialID, BiomeID, 0, 255));
+		OutMeshData.MaterialBlends.Add(BlendCode);
 		return Index;
 	};
 
@@ -1764,36 +1762,13 @@ bool FVoxelCPUDualContourMesher::GenerateFaceSeamMeshCPU(
 		const uint8 QuadBiome = SolidVoxel.BiomeID;
 
 		int32 Indices[4];
-		for (int32 i = 0; i < 4; ++i)
-		{
-			FSeamCellVertex& Cell = *Verts[i];
-			if (Cell.MeshVertexIndex >= 0 && Cell.EmittedMaterialID == QuadMaterial && Cell.EmittedBiomeID == QuadBiome)
+		// The quad's material and its blend toward a neighbouring cell's material (VP2-O4); the interior pass's emission
+		VoxelDCMaterialBlend::EmitQuadCells(Verts, CellKeys, 4, QuadMaterial, QuadBiome, DuplicateVertexCache,
+			[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint16 EmitBlend)
 			{
-				Indices[i] = Cell.MeshVertexIndex;
-			}
-			else if (Cell.MeshVertexIndex < 0)
-			{
-				Indices[i] = EmitSeamVertex(Cell, QuadMaterial, QuadBiome);
-				Cell.MeshVertexIndex = Indices[i];
-				Cell.EmittedMaterialID = QuadMaterial;
-				Cell.EmittedBiomeID = QuadBiome;
-			}
-			else
-			{
-				const uint64 DupKey = (static_cast<uint64>(CellKeys[i]) << 16)
-					| (static_cast<uint64>(QuadMaterial) << 8)
-					| static_cast<uint64>(QuadBiome);
-				if (const int32* Found = DuplicateVertexCache.Find(DupKey))
-				{
-					Indices[i] = *Found;
-				}
-				else
-				{
-					Indices[i] = EmitSeamVertex(Cell, QuadMaterial, QuadBiome);
-					DuplicateVertexCache.Add(DupKey, Indices[i]);
-				}
-			}
-		}
+				return EmitSeamVertex(EmitCell, EmitMaterial, EmitBiome, EmitBlend);
+			},
+			Indices);
 
 		// Adaptive max-min-area diagonal (mirrors GenerateQuads; preserves the DT7 sliver fix).
 		auto TriArea = [](const FVector3f& A, const FVector3f& B, const FVector3f& C) -> float
@@ -2012,7 +1987,7 @@ bool FVoxelCPUDualContourMesher::GenerateEdgeSeamMeshCPU(
 
 	// ---- Vertex emission (identical to the face-seam path) ---------------------------------
 	const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
-	auto EmitSeamVertex = [&OutMeshData, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID) -> int32
+	auto EmitSeamVertex = [&OutMeshData, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint16 BlendCode) -> int32
 	{
 		const int32 Index = OutMeshData.Positions.Num();
 		OutMeshData.Positions.Add(Vertex.Position);
@@ -2037,6 +2012,7 @@ bool FVoxelCPUDualContourMesher::GenerateEdgeSeamMeshCPU(
 		OutMeshData.UVs.Add(UV);
 		OutMeshData.UV1s.Add(FVector2f(static_cast<float>(MaterialID), 0.0f));
 		OutMeshData.Colors.Add(FColor(MaterialID, BiomeID, 0, 255));
+		OutMeshData.MaterialBlends.Add(BlendCode);
 		return Index;
 	};
 
@@ -2103,36 +2079,13 @@ bool FVoxelCPUDualContourMesher::GenerateEdgeSeamMeshCPU(
 		const uint8 QuadBiome = SolidVoxel.BiomeID;
 
 		int32 Indices[4];
-		for (int32 i = 0; i < 4; ++i)
-		{
-			FSeamCellVertex& Cell = *Verts[i];
-			if (Cell.MeshVertexIndex >= 0 && Cell.EmittedMaterialID == QuadMaterial && Cell.EmittedBiomeID == QuadBiome)
+		// The quad's material and its blend toward a neighbouring cell's material (VP2-O4); the interior pass's emission
+		VoxelDCMaterialBlend::EmitQuadCells(Verts, CellKeys, 4, QuadMaterial, QuadBiome, DuplicateVertexCache,
+			[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint16 EmitBlend)
 			{
-				Indices[i] = Cell.MeshVertexIndex;
-			}
-			else if (Cell.MeshVertexIndex < 0)
-			{
-				Indices[i] = EmitSeamVertex(Cell, QuadMaterial, QuadBiome);
-				Cell.MeshVertexIndex = Indices[i];
-				Cell.EmittedMaterialID = QuadMaterial;
-				Cell.EmittedBiomeID = QuadBiome;
-			}
-			else
-			{
-				const uint64 DupKey = (static_cast<uint64>(CellKeys[i]) << 16)
-					| (static_cast<uint64>(QuadMaterial) << 8)
-					| static_cast<uint64>(QuadBiome);
-				if (const int32* Found = DuplicateVertexCache.Find(DupKey))
-				{
-					Indices[i] = *Found;
-				}
-				else
-				{
-					Indices[i] = EmitSeamVertex(Cell, QuadMaterial, QuadBiome);
-					DuplicateVertexCache.Add(DupKey, Indices[i]);
-				}
-			}
-		}
+				return EmitSeamVertex(EmitCell, EmitMaterial, EmitBiome, EmitBlend);
+			},
+			Indices);
 
 		auto TriArea = [](const FVector3f& A, const FVector3f& B, const FVector3f& C) -> float
 		{
@@ -2320,7 +2273,7 @@ bool FVoxelCPUDualContourMesher::GenerateCornerSeamMeshCPU(
 
 	// ---- Vertex emission (identical to the face/edge seam paths) ---------------------------
 	const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
-	auto EmitSeamVertex = [&OutMeshData, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID) -> int32
+	auto EmitSeamVertex = [&OutMeshData, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint16 BlendCode) -> int32
 	{
 		const int32 Index = OutMeshData.Positions.Num();
 		OutMeshData.Positions.Add(Vertex.Position);
@@ -2345,6 +2298,7 @@ bool FVoxelCPUDualContourMesher::GenerateCornerSeamMeshCPU(
 		OutMeshData.UVs.Add(UV);
 		OutMeshData.UV1s.Add(FVector2f(static_cast<float>(MaterialID), 0.0f));
 		OutMeshData.Colors.Add(FColor(MaterialID, BiomeID, 0, 255));
+		OutMeshData.MaterialBlends.Add(BlendCode);
 		return Index;
 	};
 
@@ -2409,36 +2363,13 @@ bool FVoxelCPUDualContourMesher::GenerateCornerSeamMeshCPU(
 		const uint8 QuadBiome = SolidVoxel.BiomeID;
 
 		int32 Indices[4];
-		for (int32 i = 0; i < 4; ++i)
-		{
-			FSeamCellVertex& Cell = *Verts[i];
-			if (Cell.MeshVertexIndex >= 0 && Cell.EmittedMaterialID == QuadMaterial && Cell.EmittedBiomeID == QuadBiome)
+		// The quad's material and its blend toward a neighbouring cell's material (VP2-O4); the interior pass's emission
+		VoxelDCMaterialBlend::EmitQuadCells(Verts, CellKeys, 4, QuadMaterial, QuadBiome, DuplicateVertexCache,
+			[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint16 EmitBlend)
 			{
-				Indices[i] = Cell.MeshVertexIndex;
-			}
-			else if (Cell.MeshVertexIndex < 0)
-			{
-				Indices[i] = EmitSeamVertex(Cell, QuadMaterial, QuadBiome);
-				Cell.MeshVertexIndex = Indices[i];
-				Cell.EmittedMaterialID = QuadMaterial;
-				Cell.EmittedBiomeID = QuadBiome;
-			}
-			else
-			{
-				const uint64 DupKey = (static_cast<uint64>(CellKeys[i]) << 16)
-					| (static_cast<uint64>(QuadMaterial) << 8)
-					| static_cast<uint64>(QuadBiome);
-				if (const int32* Found = DuplicateVertexCache.Find(DupKey))
-				{
-					Indices[i] = *Found;
-				}
-				else
-				{
-					Indices[i] = EmitSeamVertex(Cell, QuadMaterial, QuadBiome);
-					DuplicateVertexCache.Add(DupKey, Indices[i]);
-				}
-			}
-		}
+				return EmitSeamVertex(EmitCell, EmitMaterial, EmitBiome, EmitBlend);
+			},
+			Indices);
 
 		auto TriArea = [](const FVector3f& A, const FVector3f& B, const FVector3f& C) -> float
 		{
