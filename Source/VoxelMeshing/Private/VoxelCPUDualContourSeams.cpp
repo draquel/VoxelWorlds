@@ -107,7 +107,7 @@ namespace VoxelDCFaceSeam
 		uint8 EmittedMaterialID = 0;
 		uint8 EmittedBiomeID = 0;
 		/** The material blend code of the primary emission (VoxelMaterialBlend, VP2-O4) */
-		uint16 EmittedBlend = 0;
+		uint32 EmittedBlend = 0;
 		/** The cell's own material (VoxelDCMaterialBlend::FCellMaterialVote; valid when bValid) */
 		uint8 CellMaterial = 0;
 		int32 MeshVertexIndex = -1;
@@ -575,7 +575,7 @@ namespace VoxelDCFaceSeam
 
 		// ---- Vertex emission (identical projection/material carry to the other seam paths) --
 		const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
-		auto EmitSeamVertex = [&Out, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint16 BlendCode) -> int32
+		auto EmitSeamVertex = [&Out, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint32 BlendCode) -> int32
 		{
 			const int32 Index = Out.Positions.Num();
 			Out.Positions.Add(Vertex.Position);
@@ -643,7 +643,7 @@ namespace VoxelDCFaceSeam
 			}
 			// The quad's material and its blend toward a neighbouring cell's material (VP2-O4); the interior pass's emission
 			VoxelDCMaterialBlend::EmitQuadCells(QuadCells, QuadKeys, N, QuadMaterial, QuadBiome, DuplicateVertexCache,
-				[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint16 EmitBlend)
+				[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint32 EmitBlend)
 				{
 					return EmitSeamVertex(EmitCell, EmitMaterial, EmitBiome, EmitBlend);
 				},
@@ -917,7 +917,7 @@ namespace VoxelDCFaceSeam
 		{
 		}
 
-		int32 EmitVertex(const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint16 BlendCode)
+		int32 EmitVertex(const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint32 BlendCode)
 		{
 			const int32 Index = Out.Positions.Num();
 			Out.Positions.Add(Vertex.Position);
@@ -977,7 +977,7 @@ namespace VoxelDCFaceSeam
 			}
 			// The quad's material and its blend toward a neighbouring cell's material (VP2-O4); the interior pass's emission
 			VoxelDCMaterialBlend::EmitQuadCells(QuadCells, QuadKeys, N, QuadMaterial, QuadBiome, DuplicateVertexCache,
-				[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint16 EmitBlend)
+				[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint32 EmitBlend)
 				{
 					return EmitVertex(EmitCell, EmitMaterial, EmitBiome, EmitBlend);
 				},
@@ -1663,7 +1663,7 @@ bool FVoxelCPUDualContourMesher::GenerateFaceSeamMeshCPU(
 
 	// ---- Vertex emission (replicates EmitVertex: triplanar UV + UV1/color material carry) -----
 	const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
-	auto EmitSeamVertex = [&OutMeshData, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint16 BlendCode) -> int32
+	auto EmitSeamVertex = [&OutMeshData, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint32 BlendCode) -> int32
 	{
 		const int32 Index = OutMeshData.Positions.Num();
 		OutMeshData.Positions.Add(Vertex.Position);
@@ -1764,7 +1764,7 @@ bool FVoxelCPUDualContourMesher::GenerateFaceSeamMeshCPU(
 		int32 Indices[4];
 		// The quad's material and its blend toward a neighbouring cell's material (VP2-O4); the interior pass's emission
 		VoxelDCMaterialBlend::EmitQuadCells(Verts, CellKeys, 4, QuadMaterial, QuadBiome, DuplicateVertexCache,
-			[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint16 EmitBlend)
+			[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint32 EmitBlend)
 			{
 				return EmitSeamVertex(EmitCell, EmitMaterial, EmitBiome, EmitBlend);
 			},
@@ -1987,7 +1987,7 @@ bool FVoxelCPUDualContourMesher::GenerateEdgeSeamMeshCPU(
 
 	// ---- Vertex emission (identical to the face-seam path) ---------------------------------
 	const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
-	auto EmitSeamVertex = [&OutMeshData, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint16 BlendCode) -> int32
+	auto EmitSeamVertex = [&OutMeshData, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint32 BlendCode) -> int32
 	{
 		const int32 Index = OutMeshData.Positions.Num();
 		OutMeshData.Positions.Add(Vertex.Position);
@@ -2081,7 +2081,7 @@ bool FVoxelCPUDualContourMesher::GenerateEdgeSeamMeshCPU(
 		int32 Indices[4];
 		// The quad's material and its blend toward a neighbouring cell's material (VP2-O4); the interior pass's emission
 		VoxelDCMaterialBlend::EmitQuadCells(Verts, CellKeys, 4, QuadMaterial, QuadBiome, DuplicateVertexCache,
-			[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint16 EmitBlend)
+			[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint32 EmitBlend)
 			{
 				return EmitSeamVertex(EmitCell, EmitMaterial, EmitBiome, EmitBlend);
 			},
@@ -2273,7 +2273,7 @@ bool FVoxelCPUDualContourMesher::GenerateCornerSeamMeshCPU(
 
 	// ---- Vertex emission (identical to the face/edge seam paths) ---------------------------
 	const float UVScale = Config.bGenerateUVs ? Config.UVScale : 0.0f;
-	auto EmitSeamVertex = [&OutMeshData, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint16 BlendCode) -> int32
+	auto EmitSeamVertex = [&OutMeshData, VoxelSize, UVScale](const FSeamCellVertex& Vertex, uint8 MaterialID, uint8 BiomeID, uint32 BlendCode) -> int32
 	{
 		const int32 Index = OutMeshData.Positions.Num();
 		OutMeshData.Positions.Add(Vertex.Position);
@@ -2365,7 +2365,7 @@ bool FVoxelCPUDualContourMesher::GenerateCornerSeamMeshCPU(
 		int32 Indices[4];
 		// The quad's material and its blend toward a neighbouring cell's material (VP2-O4); the interior pass's emission
 		VoxelDCMaterialBlend::EmitQuadCells(Verts, CellKeys, 4, QuadMaterial, QuadBiome, DuplicateVertexCache,
-			[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint16 EmitBlend)
+			[&](const FSeamCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint32 EmitBlend)
 			{
 				return EmitSeamVertex(EmitCell, EmitMaterial, EmitBiome, EmitBlend);
 			},

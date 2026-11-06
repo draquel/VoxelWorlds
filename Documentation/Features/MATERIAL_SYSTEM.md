@@ -681,18 +681,26 @@ every voxel vertex, vertex colour R its second, and vertex colour A 255 less the
 `MaterialID` named reroute, so everything that reads the reroute sees the picked material:
 
 ```hlsl
-// Inputs: MaterialID (MF_GetMaterialID), SecondaryR (VertexColor R), VertexAlpha (VertexColor A)
+// Inputs: MaterialID (MF_GetMaterialID), SecondaryR, VertexAlpha, VertexG, VertexB (VertexColor R, A, G, B)
 #if PIXELSHADER
-float W = saturate(1.0 - VertexAlpha);
-if (W > 0.002)
+if (VertexAlpha < 254.5 / 255.0)                     // alpha below 255 marks a blend
 {
-    float2 P = Parameters.SvPosition.xy + 5.588238 * (float)View.StateFrameIndexMod8;
-    float Noise = frac(52.9829189 * frac(dot(P, float2(0.06711056, 0.00583715))));
-    if (Noise < W) { return floor(SecondaryR * 255.0 + 0.5); }
+    float W2 = saturate((254.0 / 255.0 - VertexAlpha) * (255.0 / 254.0));
+    float W3 = saturate(VertexB * (255.0 / 63.0));   // a Dual Contouring border's third material (0 elsewhere)
+    if (W2 + W3 > 0.002)
+    {
+        float2 P = Parameters.SvPosition.xy + 5.588238 * (float)View.StateFrameIndexMod8;
+        float Noise = frac(52.9829189 * frac(dot(P, float2(0.06711056, 0.00583715))));
+        if (Noise < W2) { return floor(SecondaryR * 255.0 + 0.5); }
+        if (Noise < W2 + W3) { return floor(VertexG * 255.0 + 0.5); }
+    }
 }
 #endif
 return MaterialID;
 ```
+
+The second's weight is (254 - alpha) / 254, so a far-field vertex's 255 less its weight reads 1/255 lower than it
+did before the third was added (2026-11-06); the far field has no third (its B is 0, its G the biome).
 
 Each pixel takes one of the two materials against interleaved gradient noise moved every frame, which TSR averages into a
 gradient across the quad: no texture sample is added. Before, a far-field quad drew one material, the most common of
@@ -706,19 +714,22 @@ inputs: a `.a` on that output fails the material's compile and every mesh using 
 
 ### Soft Material Borders (VP2-O4)
 
-The Dual Contouring meshers give each quad on a material border a second material and a weight per vertex
-([DUAL_CONTOURING.md](DUAL_CONTOURING.md) "Materials and soft borders"), and the vertex factory writes them as the far
-field does: colour R the second material, A 255 less its weight. `FarFieldMaterialPick` then picks per pixel. No
-material graph changed. A border between two materials (grass and dirt, beach sand and rock, two biomes' ground) is a
+The Dual Contouring meshers give each quad on a material border a second material, where three meet a third, and a
+weight for each per vertex ([DUAL_CONTOURING.md](DUAL_CONTOURING.md) "Materials and soft borders"). The vertex factory
+writes them as colour: R the second material and A its weight (254 at none, 0 at full: alpha below 255 marks a blend),
+G the third and B its weight (0-63). On a border vertex G and B therefore hold the third material, not the biome and
+the AO; no material reads either, and the Dual Contouring meshes compute no AO. `FarFieldMaterialPick` then picks per
+pixel. A border between two materials (grass and dirt, beach sand and rock, two biomes' ground) is a
 ramp one cell wide (75 cm at LOD 0), and the blend zone's mosaic (G39's dither, a lattice 4 voxels apart) has soft
 edges. The pick adds no texture sample. Up close each pixel shows one material, and TSR averages them over frames into
 the ramp; in PIE close-ups (2 m from the ground, SmoothTerrain_Island's forest and desert borders) no grain shows, so the
 two-sample blend the plan kept as a fallback was not needed. Marching Cubes and the cubic meshes keep hard borders:
 their vertices carry no blend.
 
-- **Three materials in one quad.** Only two blend: the third's corner shows the quad's own material, so an edge stays
-  hard there. That happens where a blend zone has three ground materials close together, such as the island's desert,
-  savanna and dune-flank sand: a few straight edges among the soft ones.
+- **Three materials in one quad.** They blend too (2026-11-06). With two only, the third's corner showed the quad's
+  own material and an edge stayed hard: a few straight edges among the soft ones where a blend zone has three ground
+  materials close together, such as the island's desert, savanna and dune-flank sand. PIE at that border before and
+  after: the edges are gone. Only a fourth material in one quad still keeps a hard corner.
 - **The colour view (fixed with VP2-O4).** The chunk meshes' colour buffer is read through a typed view
   (`CreateVoxelMeshBuffers_RenderThread`, `VoxelSceneProxy.cpp`). The local vertex factory's manual fetch swizzles
   `.bgra` (`FMANUALFETCH_COLOR_COMPONENT_SWIZZLE`) and expects an `R8G8B8A8` view over `FColor`'s bytes, the engine's

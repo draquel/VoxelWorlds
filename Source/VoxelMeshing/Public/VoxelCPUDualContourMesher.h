@@ -141,7 +141,7 @@ private:
 		FVector3f Normal;       // Averaged normal of the edge crossings (their fitted gradients, G62)
 		uint8 EmittedMaterialID = 0; // Material of the primary emission (valid when MeshVertexIndex >= 0)
 		uint8 EmittedBiomeID = 0;    // Biome of the primary emission (valid when MeshVertexIndex >= 0)
-		uint16 EmittedBlend = 0;     // Material blend code of the primary emission (VoxelMaterialBlend, VP2-O4)
+		uint32 EmittedBlend = 0;     // Material blend code of the primary emission (VoxelMaterialBlend, VP2-O4)
 		uint8 CellMaterial = 0;      // The cell's own material (VoxelDCMaterialBlend::FCellMaterialVote; valid when bValid)
 		int32 MeshVertexIndex = -1;  // Primary emission index in output FChunkMeshData (-1 = not emitted yet)
 		bool bValid = false;         // Whether this cell has a QEF vertex
@@ -261,7 +261,7 @@ private:
 		const FDCCellVertex& Vertex,
 		uint8 MaterialID,
 		uint8 BiomeID,
-		uint16 BlendCode,
+		uint32 BlendCode,
 		FChunkMeshData& OutMeshData) const;
 
 	// ============================================================================

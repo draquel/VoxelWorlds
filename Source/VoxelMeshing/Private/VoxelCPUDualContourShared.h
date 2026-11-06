@@ -152,53 +152,67 @@ namespace VoxelDCMaterialBlend
 
 	/**
 	 * The blend codes (VoxelMaterialBlend) of one quad or fan's vertices. The second material is the most common cell
-	 * material that differs from the quad's (a tie to the first such cell); a vertex whose cell has it shows it, the
-	 * others the quad's own, and the weight between them interpolates across the triangles. Every vertex of the quad gets
-	 * the same second material, so both IDs stay flat per triangle. A vertex then shows its cell's material whichever
-	 * quad it is emitted for, so the material changes smoothly from cell to cell across quads. A quad whose cells all
-	 * have its material gets no blend (code 0); a third material in one quad shows the quad's.
+	 * material that differs from the quad's, the third the most common of the rest (ties to the first such cell); a vertex
+	 * whose cell has one of them shows it, the others the quad's own, and the weights interpolate across the triangles.
+	 * Every vertex of the quad gets the same second and third materials, so the IDs stay flat per triangle. A vertex then
+	 * shows its cell's material whichever quad it is emitted for, so the material changes smoothly from cell to cell
+	 * across quads. A quad whose cells all have its material gets no blend (code 0); a fourth material (all four cells
+	 * different from each other and from the quad's) shows the quad's.
 	 *
 	 * @param QuadMaterial The quad's material (its edge's solid endpoint)
 	 * @param CellMaterials Each cell's own material
 	 * @param N The cells (at most MaxQuadCells)
 	 * @param OutCodes Each cell's blend code
 	 */
-	inline void QuadBlendCodes(uint8 QuadMaterial, const uint8* CellMaterials, int32 N, uint16* OutCodes)
+	inline void QuadBlendCodes(uint8 QuadMaterial, const uint8* CellMaterials, int32 N, uint32* OutCodes)
 	{
-		int32 BestVotes = 0;
-		uint8 Secondary = QuadMaterial;
+		// The most common cell material other than the quad's and Excluded (BestVotes 0: none)
+		auto MostCommon = [&](int32 Excluded, int32& OutVotes) -> uint8
+		{
+			OutVotes = 0;
+			uint8 Best = QuadMaterial;
+			for (int32 i = 0; i < N; ++i)
+			{
+				if (CellMaterials[i] == QuadMaterial || CellMaterials[i] == Excluded)
+				{
+					continue;
+				}
+				int32 Votes = 0;
+				for (int32 j = 0; j < N; ++j)
+				{
+					Votes += CellMaterials[j] == CellMaterials[i] ? 1 : 0;
+				}
+				if (Votes > OutVotes)
+				{
+					Best = CellMaterials[i];
+					OutVotes = Votes;
+				}
+			}
+			return Best;
+		};
+		int32 SecondVotes = 0;
+		int32 ThirdVotes = 0;
+		const uint8 Secondary = MostCommon(-1, SecondVotes);
+		const uint8 Third = SecondVotes > 0 ? MostCommon(Secondary, ThirdVotes) : 0;
 		for (int32 i = 0; i < N; ++i)
 		{
-			if (CellMaterials[i] == QuadMaterial)
-			{
-				continue;
-			}
-			int32 Votes = 0;
-			for (int32 j = 0; j < N; ++j)
-			{
-				Votes += CellMaterials[j] == CellMaterials[i] ? 1 : 0;
-			}
-			if (Votes > BestVotes)
-			{
-				Secondary = CellMaterials[i];
-				BestVotes = Votes;
-			}
-		}
-		for (int32 i = 0; i < N; ++i)
-		{
-			OutCodes[i] = BestVotes > 0 ? VoxelMaterialBlend::Encode(Secondary, CellMaterials[i] == Secondary) : 0;
+			OutCodes[i] = SecondVotes > 0
+				? VoxelMaterialBlend::Encode(Secondary, CellMaterials[i] == Secondary,
+					ThirdVotes > 0, Third, ThirdVotes > 0 && CellMaterials[i] == Third)
+				: 0;
 		}
 	}
 
 	/**
 	 * Emit one quad or fan's cell vertices with the quad's material and their blend codes, reusing a cell's vertex where
 	 * it was emitted with the same material, biome and code, and otherwise a duplicate kept per (cell key, code, material,
-	 * biome): the duplicate has the same position and normal, so a border cannot crack. The interior pass and every seam
+	 * biome): the duplicate has the same position and normal, so a border cannot crack. The cache key packs the cell key
+	 * (below 2^24), the code (24 bits), the material and the biome into 64 bits. The interior pass and every seam
 	 * path share this, so a ring recompute emits the vertices the interior pass would.
 	 *
 	 * @param Cells The cells (FDCCellVertex or a seam cell: MeshVertexIndex, EmittedMaterialID, EmittedBiomeID,
 	 *              EmittedBlend, CellMaterial)
-	 * @param Keys A key per cell, unique within the cache's mesh
+	 * @param Keys A key per cell, unique within the cache's mesh (below 2^24)
 	 * @param N The cells (at most MaxQuadCells)
 	 * @param QuadMaterial, QuadBiome The quad's material and biome
 	 * @param Cache The mesh's duplicate vertices
@@ -214,13 +228,13 @@ namespace VoxelDCMaterialBlend
 		{
 			CellMaterials[i] = Cells[i]->CellMaterial;
 		}
-		uint16 Codes[MaxQuadCells];
+		uint32 Codes[MaxQuadCells];
 		QuadBlendCodes(QuadMaterial, CellMaterials, N, Codes);
 
 		for (int32 i = 0; i < N; ++i)
 		{
 			TCell& Cell = *Cells[i];
-			const uint16 Code = Codes[i];
+			const uint32 Code = Codes[i];
 			if (Cell.MeshVertexIndex >= 0 && Cell.EmittedMaterialID == QuadMaterial && Cell.EmittedBiomeID == QuadBiome
 				&& Cell.EmittedBlend == Code)
 			{
@@ -236,8 +250,9 @@ namespace VoxelDCMaterialBlend
 			}
 			else
 			{
-				const uint64 DupKey = (static_cast<uint64>(Keys[i]) << 32)
-					| (static_cast<uint64>(Code) << 16)
+				checkSlow(Keys[i] >= 0 && Keys[i] < (1 << 24));
+				const uint64 DupKey = (static_cast<uint64>(Keys[i]) << 40)
+					| (static_cast<uint64>(Code & 0xFFFFFF) << 16)
 					| (static_cast<uint64>(QuadMaterial) << 8)
 					| static_cast<uint64>(QuadBiome);
 				if (const int32* Found = Cache.Find(DupKey))

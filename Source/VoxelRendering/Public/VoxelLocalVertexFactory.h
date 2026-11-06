@@ -151,15 +151,23 @@ struct VOXELRENDERING_API FVoxelLocalVertex
 
 		// Encode data for the material graph:
 		// R = MaterialID (0-255), or a material blend's second material
-		// G = BiomeID (0-255)
-		// B = AO << 6 (top 2 bits: 0, 64, 128, 192 for AO 0-3)
-		// A = 255, or in a material blend 255 less the second material's weight (0 where the vertex shows it)
-		// A blend is the far field's (M_VoxelMaster's FarFieldMaterialPick): the weight interpolates across the triangle and
-		// each pixel takes one of the two materials against a temporal dither, so a border fades over a cell (VP2-O4).
-		const uint16 Blend = VoxelVert.GetMaterialBlend();
-		Result.Color = VoxelMaterialBlend::IsBlend(Blend)
-			? FColor(VoxelMaterialBlend::Secondary(Blend), BiomeID, AOValue << 6, VoxelMaterialBlend::ShowsSecondary(Blend) ? 0 : 255)
-			: FColor(MaterialID, BiomeID, AOValue << 6, 255);
+		// G = BiomeID (0-255), or a material blend's third material
+		// B = AO << 6 (top 2 bits: 0, 64, 128, 192 for AO 0-3), or in a material blend the third's weight (0-63)
+		// A = 255, or in a material blend 254 less 254 x the second material's weight (0 where the vertex shows it)
+		// A blend is the far field's (M_VoxelMaster's FarFieldMaterialPick): alpha below 255 marks it, the weights
+		// interpolate across the triangle and each pixel takes one material against a temporal dither, so a border fades
+		// over a cell (VP2-O4). A border vertex's AO is 0 (the Dual Contouring meshers compute none).
+		const uint32 Blend = VoxelVert.GetMaterialBlend();
+		if (VoxelMaterialBlend::IsBlend(Blend))
+		{
+			const bool bThird = VoxelMaterialBlend::HasThird(Blend);
+			Result.Color = FColor(VoxelMaterialBlend::Secondary(Blend), bThird ? VoxelMaterialBlend::Third(Blend) : BiomeID,
+				bThird && VoxelMaterialBlend::ShowsThird(Blend) ? 63 : 0, VoxelMaterialBlend::ShowsSecondary(Blend) ? 0 : 254);
+		}
+		else
+		{
+			Result.Color = FColor(MaterialID, BiomeID, AOValue << 6, 255);
+		}
 
 		return Result;
 	}

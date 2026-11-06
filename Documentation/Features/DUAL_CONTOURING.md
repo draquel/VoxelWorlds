@@ -201,24 +201,27 @@ quads' edges:
   solid material in Pass 1; the seams' `ComputeCellVertex` reads it with the cell's own sampler, so a ring recompute
   agrees with the interior pass. A coarse cell solved by the boundary fallback (G17) takes its first fine crossing's.
 - **The quad's blend.** The second material is the most common cell material among the quad's cells that differs from
-  the quad's own. Each vertex gets a blend code (`VoxelMaterialBlend`, `ChunkRenderData.h`): the second material, and
-  the weight flag where its cell has the second material. Both materials are flat per quad, so only the weight
-  interpolates. A quad whose cells all have its material has no blend.
-- **Why it is continuous.** A vertex then shows its cell's material in every quad it is emitted for: with the weight
-  where the cell has the second material, without it where it has the first. So the material changes from cell to
-  cell, across the quads, and a border is a ramp one cell wide (75 cm at LOD 0, the stride's width further out).
-  A third material inside one quad shows the quad's own material at its corner.
+  the quad's own, the third the most common of the rest. Each vertex gets a blend code (`VoxelMaterialBlend`,
+  `ChunkRenderData.h`): the second and third materials, and a weight flag for the one its cell has, if either. The
+  materials are flat per quad, so only the weights interpolate. A quad whose cells all have its material has no blend.
+- **Why it is continuous.** A vertex then shows its cell's material in every quad it is emitted for: the second's or
+  the third's weight where the cell has one of them, neither where it has the quad's own. So the material changes from
+  cell to cell, across the quads, and a border is a ramp one cell wide (75 cm at LOD 0, the stride's width further
+  out), where three materials meet too. Only a fourth material in one quad (four cells, each different from the others
+  and from the quad's) shows the quad's own material at its corner.
 - **Emission.** `VoxelDCMaterialBlend::EmitQuadCells` (`VoxelCPUDualContourShared.h`) emits a quad or fan's cells for
   the interior pass and every seam path: it reuses a vertex emitted with the same material, biome and blend code, and
   otherwise keeps a duplicate per (cell, code, material, biome).
 - **Transport.** `FChunkMeshData::MaterialBlends` (one code per vertex; the other meshers leave it empty), then
-  `FVoxelVertex`'s bits 16-23 and flag bits 24-25, then the vertex colour the far field uses: R the second material, A
-  255 less its weight. `M_VoxelMaster`'s `FarFieldMaterialPick` picks one of the two per pixel
+  `FVoxelVertex`'s bits 16-23 (the second), flag bits 24-27 and, with a third, the biome's bits 8-15 (the third: nothing
+  reads a border vertex's biome), then the vertex colour: R the second material, A its weight (254 at none, 0 at
+  full), G the third and B its weight (0-63). `M_VoxelMaster`'s `FarFieldMaterialPick` picks one per pixel
   ([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Soft Material Borders").
 
-Tests `VoxelWorlds.Meshing.DualContour.MaterialBorder.MB5_LOD0_SoftBorder`, `.MB6_LOD1_SoftBorder` and
-`.MB7_OneMaterialNoBlend`. They check that a triangle's blend is flat, that blends occur only near the border, and that
-every vertex at one position shows one material.
+Tests `VoxelWorlds.Meshing.DualContour.MaterialBorder.MB5_LOD0_SoftBorder`, `.MB6_LOD1_SoftBorder`,
+`.MB7_OneMaterialNoBlend`, `.MB8_LOD0_ThreeMaterials` and `.MB9_LOD1_ThreeMaterials`. They check that a triangle's blend
+is flat, that blends occur only near a border, that a third material blends only where three meet, and that every
+vertex at one position shows one material.
 
 ---
 

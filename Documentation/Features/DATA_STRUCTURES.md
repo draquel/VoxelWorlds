@@ -73,8 +73,9 @@ struct FVoxelVertex {
     FVector3f Position;          // 12 bytes, relative to the render region's origin
     uint32 PackedNormalAndAO;    // 4 bytes
     FVector2f UV;                // 8 bytes
-    uint32 PackedMaterialData;   // 4 bytes: material 0-7, biome 8-15, a material blend's second material 16-23,
-                                 // flags 24-31 (24 the blend, 25 its weight; VP2-O4)
+    uint32 PackedMaterialData;   // 4 bytes: material 0-7, biome 8-15 (a blend's third material with flag 27),
+                                 // a material blend's second material 16-23, flags 24-31 (24 the blend, 25 the
+                                 // second's weight, 26 the third's, 27 the third; VP2-O4)
 };
 ```
 
