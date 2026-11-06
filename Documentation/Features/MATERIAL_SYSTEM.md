@@ -258,6 +258,12 @@ A-Channel Encoding" below). A config with `bUseFaceVariants` gives each face its
 `BottomTile`), else every face uses `AtlasColumn` / `AtlasRow`. `MF_CubicAtlasSample` reads the LUT by texel with the
 vertex's MaterialID (UV1.x) and face type (UV1.y) and samples the tile with UV0.
 
+The sample is the view's bilinear sampler (`View.MaterialTextureBilinearWrapedSampler`, whatever the atlas texture's own
+filter), so the in-tile UV, frac(UV0), is clamped to half a texel inside the tile, from each atlas's own size
+(`GetDimensions`). At a tile's edge an unclamped tap read half a texel of the neighbouring slot: a one-pixel line of the
+next tile's colour along block edges (G127, plain on an atlas without gutters). `Scripts/setup_cubic_atlas_inset.py`
+(parent repository; idempotent, run headless) writes the clamp into the two Custom nodes.
+
 The normal atlas is imported as plain linear RGB: compression `TC_Default`, sRGB off, not as a normal map.
 `MF_CubicAtlasSample` decodes the atlas's rgb as rgb x 2 - 1. A BC5 normal map stores only red and green, and its blue
 of 0 decodes to a normal lying in the face, which draws the top faces black. The Smooth Terrain block world's atlas
