@@ -680,6 +680,15 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 
 // ==================== FVoxelGPUNoiseGenerator Implementation ====================
 
+FVoxelGPUNoiseGenerator::FGenerationResult::~FGenerationResult()
+{
+	if (DensityReadback)
+	{
+		delete DensityReadback;
+		DensityReadback = nullptr;
+	}
+}
+
 FVoxelGPUNoiseGenerator::FVoxelGPUNoiseGenerator()
 {
 }
