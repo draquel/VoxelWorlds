@@ -1,12 +1,15 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
-// The voxel world's console commands: the world, far-field and far-ocean reports, the residency audit and the
-// in-place re-mesh. Each reads a chunk manager through its public API; none holds state of its own.
+// The voxel world's console commands: the world, far-field and far-ocean reports, the biome coverage, the residency
+// audit and the in-place re-mesh. Each reads a chunk manager through its public API; none holds state of its own.
 
 #include "VoxelChunkManager.h"
 #include "VoxelStreaming.h"
 #include "Diagnostics/VoxelConsoleHelpers.h"
 #include "VoxelTreeInjector.h"
+#include "VoxelSurfaceQuery.h"
+#include "VoxelBiomeConfiguration.h"
+#include "VoxelWorldConfiguration.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
 #include "UObject/UObjectIterator.h"
@@ -57,6 +60,158 @@ static FAutoConsoleCommandWithWorld GVoxelFarOceanStatsCmd(
 			if (It->GetWorld() && It->GetWorld()->IsGameWorld())
 			{
 				UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.FarOceanStats: %s"), *It->GetFarOceanDebugString());
+			}
+		}
+	}));
+
+// Console: voxel.World.BiomeCoverage
+// Each biome's share of the land: the natural surface (QuerySurfacePoint, the analytic rung, nothing loaded needed) at
+// samples x samples points over the world (an island's footprint box, the points inside it; a plane's square of the
+// radius around the streaming viewer; a planet's sphere on a Fibonacci lattice, equal areas), above the sea counted as
+// land. One line per biome: its share of the land and of the samples, its mean and highest surface. The tool the biome
+// boxes and the climate options are tuned with (SMOOTH_TERRAIN_BIOMES_PLAN.md: every biome 5-20 % of the land).
+static FAutoConsoleCommandWithWorldAndArgs GVoxelBiomeCoverageCmd(
+	TEXT("voxel.World.BiomeCoverage"),
+	TEXT("Log each biome's share of the land over the world: voxel.World.BiomeCoverage [samples=160] [radius=200000 (a plane's square around the viewer)]."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = VoxelEditAuditHelpers::FindGameWorld(World);
+		if (!TargetWorld)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.World.BiomeCoverage: no PIE/Game world found (start PIE first)"));
+			return;
+		}
+		const int32 Samples = FMath::Clamp(Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 160, 8, 1024);
+		const double PlaneRadius = Args.Num() > 1 ? FCString::Atod(*Args[1]) : 200000.0;
+		for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
+		{
+			const UVoxelWorldConfiguration* Config = CM ? CM->GetConfiguration() : nullptr;
+			if (!Config || !CM->GetWorldMode())
+			{
+				continue;
+			}
+			const FVoxelWorldBounds Bounds = CM->GetWorldBounds();
+			const FVoxelSeaSurface Sea = CM->GetSeaSurface();
+			const bool bPlanet = Bounds.Shape == EVoxelWorldBoundsShape::Shell;
+
+			// The sample points on the up-lines: the lattice on the sphere, else a grid over the footprint's box
+			TArray<FVector> Points;
+			Points.Reserve(Samples * Samples);
+			if (bPlanet)
+			{
+				const int32 Count = Samples * Samples;
+				const double Golden = UE_DOUBLE_PI * (3.0 - FMath::Sqrt(5.0));
+				const double Radius = Config->WorldRadius;
+				for (int32 i = 0; i < Count; ++i)
+				{
+					const double Z = 1.0 - (2.0 * i + 1.0) / Count;
+					const double R = FMath::Sqrt(FMath::Max(0.0, 1.0 - Z * Z));
+					Points.Add(Bounds.Center + FVector(FMath::Cos(Golden * i) * R, FMath::Sin(Golden * i) * R, Z) * Radius);
+				}
+			}
+			else
+			{
+				const FVector Viewer = CM->GetStreamingViewerPosition();
+				const FVector2D Centre = Bounds.IsBounded() ? FVector2D(Bounds.Center) : FVector2D(Viewer);
+				const FVector2D Half = Bounds.IsBounded() ? Bounds.HalfExtent : FVector2D(PlaneRadius, PlaneRadius);
+				for (int32 j = 0; j < Samples; ++j)
+				{
+					for (int32 i = 0; i < Samples; ++i)
+					{
+						const double X = Centre.X - Half.X + (i + 0.5) * 2.0 * Half.X / Samples;
+						const double Y = Centre.Y - Half.Y + (j + 0.5) * 2.0 * Half.Y / Samples;
+						if (Bounds.ContainsXY(X, Y))
+						{
+							Points.Add(FVector(X, Y, 0.0));
+						}
+					}
+				}
+			}
+
+			struct FBiomeCount { int32 Land = 0; int32 All = 0; double AltitudeSum = 0.0; float AltitudeMax = -MAX_FLT; };
+			TMap<int32, FBiomeCount> Counts;
+			int32 Land = 0;
+			int32 Sampled = 0;
+			for (const FVector& Point : Points)
+			{
+				FVoxelSurfaceSample Surface;
+				if (!CM->QuerySurfacePoint(Point, EVoxelSurfaceLayer::Natural, Surface))
+				{
+					continue;
+				}
+				++Sampled;
+				FBiomeCount& C = Counts.FindOrAdd(Surface.BiomeID);
+				++C.All;
+				if (Sea.bEnabled && Sea.IsBelow(Surface.Position))
+				{
+					continue;
+				}
+				++Land;
+				++C.Land;
+				const float Altitude = bPlanet ? Surface.Altitude : static_cast<float>(Surface.Position.Z);
+				C.AltitudeSum += Altitude;
+				C.AltitudeMax = FMath::Max(C.AltitudeMax, Altitude);
+			}
+
+			const UVoxelBiomeConfiguration* Biomes = Config->BiomeConfiguration;
+			UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.BiomeCoverage: %s, %d samples, land %.1f%%"), *Config->GetName(), Sampled,
+				Sampled > 0 ? 100.0 * Land / Sampled : 0.0);
+			Counts.KeySort(TLess<int32>());
+			for (const TPair<int32, FBiomeCount>& Pair : Counts)
+			{
+				FString Name = TEXT("?");
+				if (Biomes)
+				{
+					for (const FBiomeDefinition& Biome : Biomes->Biomes)
+					{
+						if (Biome.BiomeID == Pair.Key)
+						{
+							Name = Biome.Name;
+						}
+					}
+				}
+				const FBiomeCount& C = Pair.Value;
+				UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.BiomeCoverage:   %2d %-18s land %5.1f%%  all %5.1f%%  surface mean %7.1f m  max %7.1f m"),
+					Pair.Key, *Name, Land > 0 ? 100.0 * C.Land / Land : 0.0, Sampled > 0 ? 100.0 * C.All / Sampled : 0.0,
+					C.Land > 0 ? C.AltitudeSum / C.Land / 100.0 : 0.0, C.Land > 0 ? C.AltitudeMax / 100.0 : 0.0);
+			}
+		}
+	}));
+
+// Console: voxel.World.HeightProfile
+// The natural surface along a line (QuerySurfacePoint, the analytic rung): its height (world Z, or the altitude on a
+// planet), biome and material at each of n points from (x0, y0) to (x1, y1). For tuning a world's shape and for
+// looking at a crease or a step numerically rather than in a screenshot.
+static FAutoConsoleCommandWithWorldAndArgs GVoxelHeightProfileCmd(
+	TEXT("voxel.World.HeightProfile"),
+	TEXT("Log the natural surface along a line: voxel.World.HeightProfile x0 y0 x1 y1 [points=41] (a planet: the up-lines through those points at z 0)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		UWorld* TargetWorld = VoxelEditAuditHelpers::FindGameWorld(World);
+		if (!TargetWorld || Args.Num() < 4)
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.World.HeightProfile: start PIE and pass x0 y0 x1 y1 [points]"));
+			return;
+		}
+		const FVector2D A(FCString::Atod(*Args[0]), FCString::Atod(*Args[1]));
+		const FVector2D B(FCString::Atod(*Args[2]), FCString::Atod(*Args[3]));
+		const int32 Points = FMath::Clamp(Args.Num() > 4 ? FCString::Atoi(*Args[4]) : 41, 2, 2001);
+		for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
+		{
+			if (!CM || !CM->GetWorldMode())
+			{
+				continue;
+			}
+			const bool bPlanet = CM->GetWorldBounds().Shape == EVoxelWorldBoundsShape::Shell;
+			for (int32 i = 0; i < Points; ++i)
+			{
+				const FVector2D P = FMath::Lerp(A, B, static_cast<double>(i) / (Points - 1));
+				FVoxelSurfaceSample Surface;
+				if (CM->QuerySurfacePoint(FVector(P.X, P.Y, 0.0), EVoxelSurfaceLayer::Natural, Surface))
+				{
+					UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.HeightProfile: %4d (%10.1f, %10.1f) height %9.1f biome %3d material %3d slope %5.1f"),
+						i, P.X, P.Y, bPlanet ? Surface.Altitude : Surface.Position.Z, Surface.BiomeID, Surface.MaterialID, Surface.SlopeDegrees);
+				}
 			}
 		}
 	}));
