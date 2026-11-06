@@ -6,6 +6,7 @@
 #include "RenderResource.h"
 #include "LocalVertexFactory.h"
 #include "VoxelVertex.h"
+#include "ChunkRenderData.h"  // VoxelMaterialBlend
 #include "RenderUtils.h"  // For FPackedNormal
 
 #include <atomic>

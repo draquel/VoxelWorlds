@@ -42,6 +42,10 @@ To avoid static initialisation problems in GPU modules:
 2. Include `RenderGraphBuilder.h`, `RenderGraphResources.h` and the like in `.cpp` files (or private headers such as
    `VoxelGenerationShaders.h`).
 3. Use `RHIFwd.h` for RHI forward declarations in headers.
+4. A header type that holds a forward-declared one in a `TRefCountPtr` (or deletes a raw pointer to it) declares its
+   destructor there and defines it in the `.cpp`: an inline destructor needs the complete type in every file that
+   includes the header, which a unity build supplies by accident and a `-DisableUnity` build does not
+   (`FVoxelGPUNoiseGenerator::FGenerationResult`, G128).
 
 ## Shaders
 
