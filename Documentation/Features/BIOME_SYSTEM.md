@@ -93,6 +93,41 @@ shapes the climate the same way:
    - The height used is the one the reader has: generation's, with conditioning zones applied.
 4. The blend clamps all three axes to [-1, 1], as before.
 
+### Measuring a world's biomes
+
+- `voxel.World.BiomeCoverage [samples] [radius]` samples the natural surface (the analytic height and the shaped
+  climate) over the world and logs the land's share and each biome's share of the land. For each biome it also logs a
+  site: its flattest land sample at least 2 m above the sea.
+- `voxel.World.HeightProfile x0 y0 x1 y1 [points]` logs the natural surface along a line. It is how a continentalness
+  curve's cliffs and notches show up before any chunk is meshed.
+
+### The Smooth Terrain showcase (2026-11-06)
+
+The parent repository's showcase worlds turn all four steps on: `SmoothTerrain_Island` (IslandBowl, an 8 km island,
+300 m relief), `SmoothTerrain_Planet` (a 50 km planet, ridged terrain, latitude weight 0.4) and `CubicTerrain_Plane`
+(an InfinitePlane block world).
+- They share eleven biomes: Coast, Meadow, Temperate Forest, Taiga, Tundra, Snowfield, Marsh, Savanna, Desert, Alpine
+  and Ashlands. Their climate cells are 2-15 km across, against the demo's few hundred metres.
+- One table holds every world: `Tools/SmoothTerrain/smooth_terrain.json`, built by `Scripts/setup_smooth_terrain.py`.
+  The table holds the biomes, each world's overrides of their boxes, the continentalness curves and the height rules.
+
+`voxel.World.BiomeCoverage` measured:
+
+| World | Land | Biomes (share of the land) |
+|---|---|---|
+| Island | 45% | each biome 3-16% |
+| Planet | 42% | Taiga 22, Meadow 18, Alpine 15, Forest 13, Coast 8.5, Tundra 8, Savanna 7, Marsh 4, Snowfield 2, Desert 1, Ashlands 1 |
+| Block world | 38.9% | every biome present |
+
+On the planet, latitude and the lapse rate cool most of the land, so the hot biomes (Desert, Ashlands) are small.
+
+**Overlay biomes.** Coast, Marsh, Alpine and Ashlands are drawn over other biomes' boxes, gated by continentalness
+(the shore, the peaks) or by a band of temperature.
+- An overlay takes its material outright only where its share of the blend passes 0.9. Against a base biome of equal
+  raw weight, that needs a priority lead of about 16: 2^(16 x 0.2) is about 9.2.
+- With a smaller lead the whole overlap dithers between the two materials.
+- The showcase gives the overlays 20-24 and the base biomes 0-3.
+
 ## Selection and blend
 
 `FVoxelBiomeSnapshot::ComputeBiomeBlend` (`UVoxelBiomeConfiguration::GetBiomeBlend`) weighs every biome at a

@@ -258,6 +258,12 @@ A-Channel Encoding" below). A config with `bUseFaceVariants` gives each face its
 `BottomTile`), else every face uses `AtlasColumn` / `AtlasRow`. `MF_CubicAtlasSample` reads the LUT by texel with the
 vertex's MaterialID (UV1.x) and face type (UV1.y) and samples the tile with UV0.
 
+The normal atlas is imported as plain linear RGB: compression `TC_Default`, sRGB off, not as a normal map.
+`MF_CubicAtlasSample` decodes the atlas's rgb as rgb x 2 - 1. A BC5 normal map stores only red and green, and its blue
+of 0 decodes to a normal lying in the face, which draws the top faces black. The Smooth Terrain block world's atlas
+(`T_SmoothTerrainCubic_*`) is generated from Megascans sources by `Tools/CubicAtlas/build_cubic_atlas.py` and imported
+by `Scripts/setup_smooth_terrain.py`. The parent's `Scripts/README.md` gives the order.
+
 ### Face Type on a Planet (spherical Phase 4, SP-D3)
 
 The face type (top, side, bottom) that runs is the renderer's: `FVoxelSceneProxy::ConvertVertex` classifies
