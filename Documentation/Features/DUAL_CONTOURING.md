@@ -189,6 +189,37 @@ For each valid edge crossing:
 6. Split the quad along the diagonal that maximises the smaller triangle's area (a fixed diagonal can make slivers the
    renderer drops) and emit 6 indices
 
+### Materials and soft borders (VP2-O4)
+
+The material ID reaches the pixel shader in UV1.x and is rounded there, so every triangle carries one material: the
+quad's, the material of its edge's solid endpoint. A cell vertex shared by quads of different materials is duplicated
+(same position and normal). Since VP2-O4 a border between two materials fades across a cell instead of following the
+quads' edges:
+
+- **The cell's material.** Each cell votes: the materials of the solid endpoints of its sign-change edges, each corner
+  once, the most common winning (a tie to the first in the cell-edge table). The interior pass records each crossing's
+  solid material in Pass 1; the seams' `ComputeCellVertex` reads it with the cell's own sampler, so a ring recompute
+  agrees with the interior pass. A coarse cell solved by the boundary fallback (G17) takes its first fine crossing's.
+- **The quad's blend.** The second material is the most common cell material among the quad's cells that differs from
+  the quad's own. Each vertex gets a blend code (`VoxelMaterialBlend`, `ChunkRenderData.h`): the second material, and
+  the weight flag where its cell has the second material. Both materials are flat per quad, so only the weight
+  interpolates. A quad whose cells all have its material has no blend.
+- **Why it is continuous.** A vertex then shows its cell's material in every quad it is emitted for: with the weight
+  where the cell has the second material, without it where it has the first. So the material changes from cell to
+  cell, across the quads, and a border is a ramp one cell wide (75 cm at LOD 0, the stride's width further out).
+  A third material inside one quad shows the quad's own material at its corner.
+- **Emission.** `VoxelDCMaterialBlend::EmitQuadCells` (`VoxelCPUDualContourShared.h`) emits a quad or fan's cells for
+  the interior pass and every seam path: it reuses a vertex emitted with the same material, biome and blend code, and
+  otherwise keeps a duplicate per (cell, code, material, biome).
+- **Transport.** `FChunkMeshData::MaterialBlends` (one code per vertex; the other meshers leave it empty), then
+  `FVoxelVertex`'s bits 16-23 and flag bits 24-25, then the vertex colour the far field uses: R the second material, A
+  255 less its weight. `M_VoxelMaster`'s `FarFieldMaterialPick` picks one of the two per pixel
+  ([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Soft Material Borders").
+
+Tests `VoxelWorlds.Meshing.DualContour.MaterialBorder.MB5_LOD0_SoftBorder`, `.MB6_LOD1_SoftBorder` and
+`.MB7_OneMaterialNoBlend`. They check that a triangle's blend is flat, that blends occur only near the border, and that
+every vertex at one position shows one material.
+
 ---
 
 ## QEF Solver

@@ -5,6 +5,34 @@
 #include "CoreMinimal.h"
 #include "ChunkRenderData.generated.h"
 
+/**
+ * A vertex's material blend (VP2-O4, soft material borders), as FChunkMeshData::MaterialBlends carries it: 0 for none,
+ * else the blend flag, the second material in bits 8-15 and the weight flag where the vertex shows the second material.
+ * The Dual Contouring meshers set it on the vertices of a quad whose cells have two materials; the renderer passes it to
+ * the shader as the far field's blend (vertex colour R the second material, A 255 less its weight: M_VoxelMaster's
+ * FarFieldMaterialPick), so the weight interpolates across the triangles and a border fades over a cell.
+ */
+namespace VoxelMaterialBlend
+{
+	inline constexpr uint16 BlendFlag = 1;
+	inline constexpr uint16 WeightFlag = 2;
+
+	/** @return The code of a vertex in a blend with Secondary, showing it where bShowsSecondary */
+	FORCEINLINE uint16 Encode(uint8 Secondary, bool bShowsSecondary)
+	{
+		return static_cast<uint16>((static_cast<uint16>(Secondary) << 8) | BlendFlag | (bShowsSecondary ? WeightFlag : 0));
+	}
+
+	/** @return Whether the code is a blend */
+	FORCEINLINE bool IsBlend(uint16 Code) { return (Code & BlendFlag) != 0; }
+
+	/** @return Whether the vertex shows the second material (weight 1) */
+	FORCEINLINE bool ShowsSecondary(uint16 Code) { return (Code & WeightFlag) != 0; }
+
+	/** @return The blend's second material */
+	FORCEINLINE uint8 Secondary(uint16 Code) { return static_cast<uint8>(Code >> 8); }
+}
+
 /** The Lumen cards a mesh worker fitted to a mesh for the renderer (G116): defined by VoxelRendering, opaque here */
 struct FVoxelPrebuiltChunkMeshCards;
 
@@ -43,6 +71,13 @@ struct VOXELCORE_API FChunkMeshData
 	UPROPERTY()
 	TArray<FColor> Colors;
 
+	/**
+	 * Each vertex's material blend (VoxelMaterialBlend, VP2-O4): the Dual Contouring meshers fill it for every vertex,
+	 * other meshers leave it empty (no blend)
+	 */
+	UPROPERTY()
+	TArray<uint16> MaterialBlends;
+
 	/** Triangle indices */
 	UPROPERTY()
 	TArray<uint32> Indices;
@@ -63,6 +98,7 @@ struct VOXELCORE_API FChunkMeshData
 		UVs.Reset();
 		UV1s.Reset();
 		Colors.Reset();
+		MaterialBlends.Reset();
 		Indices.Reset();
 		bHasMaskedMaterial = false;
 		PrebuiltLumenCards.Reset();
@@ -94,6 +130,7 @@ struct VOXELCORE_API FChunkMeshData
 			+ UVs.GetAllocatedSize()
 			+ UV1s.GetAllocatedSize()
 			+ Colors.GetAllocatedSize()
+			+ MaterialBlends.GetAllocatedSize()
 			+ Indices.GetAllocatedSize();
 	}
 };

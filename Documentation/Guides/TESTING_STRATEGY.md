@@ -129,15 +129,15 @@ GPU against the CPU:
    main checkout's editor on 8080) and turns off its background throttle (`disable_bg_throttle.py`: an unfocused
    editor pins itself to 3 FPS and a run stalls).
 2. It runs `Automation RunTests VoxelWorlds.Generation.GPUvsCPU+VoxelWorlds.Generation.GPUNoiseGeneratorAsync+VoxelWorlds.Rendering.Crossfade+VoxelWorlds.Rendering.RayTracing+VoxelWorlds.Rendering.ChunkPrimitives+VoxelWorlds.Streaming.EditReachesProxy+VoxelEngine.Replication.Framework`:
-   the 17 GPU and proxy tests, the six crossfade tests and G116's `Rendering.ChunkPrimitives.CardsFromBounds` and
-   `Rendering.ChunkPrimitives.FittedCards` that also run headless, and the replication test, **26 results**
-   (19 before F3.3's `Rendering.RayTracing.ChunkGeometry`, 20 before G121's `Rendering.RayTracing.FarFieldGeometry`, 21 before G116's three `Rendering.ChunkPrimitives` tests, 24 before step 4's, 25 before the fitted cards'),
+   the 18 GPU and proxy tests (VoxelWorlds#263's `Generation.GPUvsCPUClimateShapingParity` the 18th), the six crossfade tests and G116's `Rendering.ChunkPrimitives.CardsFromBounds` and
+   `Rendering.ChunkPrimitives.FittedCards` that also run headless, and the replication test, **27 results**
+   (19 before F3.3's `Rendering.RayTracing.ChunkGeometry`, 20 before G121's `Rendering.RayTracing.FarFieldGeometry`, 21 before G116's three `Rendering.ChunkPrimitives` tests, 24 before step 4's, 25 before the fitted cards', 26 before the climate shaping's),
    each expected to be a single `Success`.
 3. It extracts the **parity lines** (the parity tests' `[N voxels]: density~` lines, one per case and LOD: density,
-   material, biome and metadata agreement and the GPU's CRC) and compares all **111** with the record,
-   `Documentation/CodeReview/VW8/gpu_parity_lines_2026-11-02_generation.txt` (`parity_lines.py`; CR2's 114 less the
-   three `BlendDither off` cases, gone with `voxel.Biome.BlendDither` in VoxelWorlds 8, and 24 lines moved by the shader
-   cleanup of G97 and G88, `Features/GPU_PIPELINE.md`). A changed line is a finding to
+   material, biome and metadata agreement and the GPU's CRC) and compares all **126** with the record,
+   `Documentation/CodeReview/Baselines/gpu_parity_lines_2026-11-06.txt` in the parent repository (`parity_lines.py`;
+   CR2's 114 less the three `BlendDither off` cases, gone with `voxel.Biome.BlendDither` in VoxelWorlds 8, 24 lines moved
+   by the shader cleanup of G97 and G88, `Features/GPU_PIPELINE.md`, and the climate shaping's 15 since VoxelWorlds#263). A changed line is a finding to
    explain, not a tolerance to widen: a change that should not touch generation leaves every line identical.
 4. It copies the editor's log to `Saved/QA/editor/`.
 

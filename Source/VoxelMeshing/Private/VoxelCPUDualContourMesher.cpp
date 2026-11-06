@@ -96,6 +96,7 @@ bool FVoxelCPUDualContourMesher::GenerateMeshCPU(
 	OutMeshData.UVs.Reserve(EstimatedTriangles * 3);
 	OutMeshData.UV1s.Reserve(EstimatedTriangles * 3);
 	OutMeshData.Colors.Reserve(EstimatedTriangles * 3);
+	OutMeshData.MaterialBlends.Reserve(EstimatedTriangles * 3);
 	OutMeshData.Indices.Reserve(EstimatedTriangles * 3);
 
 	uint32 TriangleCount = 0;
@@ -215,6 +216,11 @@ void FVoxelCPUDualContourMesher::DetectEdgeCrossings(
 							? VoxelLODCrossing::FindVoxelCrossing(DensityFn, VX, VY, VZ, Axis, Stride, IsoLevel) * VoxelSize
 							: P0 + (P1 - P0) * t;
 						Crossing.bValid = true;
+						// The solid endpoint's material: the cells around the edge vote with it (soft borders, VP2-O4)
+						Crossing.bSolidAtStart = bSolid0;
+						Crossing.SolidMaterial = bSolid0
+							? GetVoxelAt(Request, VX, VY, VZ).MaterialID
+							: GetVoxelAt(Request, NX, NY, NZ).MaterialID;
 
 						const float CrossVoxelX = Crossing.Position.X / VoxelSize;
 						const float CrossVoxelY = Crossing.Position.Y / VoxelSize;
@@ -286,6 +292,7 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 				FQEFSolver QEF;
 				FVector3f AvgNormal = FVector3f::ZeroVector;
 				FVector3f ShadingSum = FVector3f::ZeroVector;
+				VoxelDCMaterialBlend::FCellMaterialVote MaterialVote;
 
 				for (const auto& Edge : CellEdges)
 				{
@@ -293,6 +300,10 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 					const FDCEdgeCrossing& Crossing = EdgeCrossings[EIdx];
 					if (Crossing.bValid)
 					{
+						const int32 EndDX = Edge.DX + ((Edge.Axis == 0 && !Crossing.bSolidAtStart) ? 1 : 0);
+						const int32 EndDY = Edge.DY + ((Edge.Axis == 1 && !Crossing.bSolidAtStart) ? 1 : 0);
+						const int32 EndDZ = Edge.DZ + ((Edge.Axis == 2 && !Crossing.bSolidAtStart) ? 1 : 0);
+						MaterialVote.Add(VoxelDCMaterialBlend::CornerIndex(EndDX, EndDY, EndDZ), Crossing.SolidMaterial);
 						QEF.Add(Crossing.Position, Crossing.Normal);
 						AvgNormal += Crossing.Normal;
 						if (bCrossingShading)
@@ -327,7 +338,9 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 				}
 				Vertex.Normal = (bCrossingShading && ShadingSum.Normalize()) ? ShadingSum : AvgNormal;
 				// Material/biome are assigned per-quad in GenerateQuads (from the owned
-				// edge's solid endpoint) so triangles stay material-uniform.
+				// edge's solid endpoint) so triangles stay material-uniform; the cell's own
+				// material decides the quad's blend toward a neighbouring material (VP2-O4).
+				Vertex.CellMaterial = MaterialVote.Result();
 			}
 		}
 	}
@@ -463,39 +476,15 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 		const uint8 QuadMaterial = SolidVoxel.MaterialID;
 		const uint8 QuadBiome = SolidVoxel.BiomeID;
 
-		// Emit vertices. A cell vertex already emitted with a different material is
-		// duplicated (same position/normal, different material data) via the cache.
+		// Emit vertices with the quad's material and its blend toward a neighbouring cell's material (VP2-O4). A cell
+		// vertex already emitted with a different material or blend is duplicated (same position/normal) via the cache.
 		int32 Indices[4];
-		for (int32 i = 0; i < 4; i++)
-		{
-			FDCCellVertex& V = *Verts[i];
-			if (V.MeshVertexIndex >= 0 && V.EmittedMaterialID == QuadMaterial && V.EmittedBiomeID == QuadBiome)
+		VoxelDCMaterialBlend::EmitQuadCells(Verts, CellIdxs, 4, QuadMaterial, QuadBiome, DuplicateVertexCache,
+			[&](const FDCCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint16 EmitBlend)
 			{
-				Indices[i] = V.MeshVertexIndex;
-			}
-			else if (V.MeshVertexIndex < 0)
-			{
-				Indices[i] = EmitVertex(Request, V, QuadMaterial, QuadBiome, OutMeshData);
-				V.MeshVertexIndex = Indices[i];
-				V.EmittedMaterialID = QuadMaterial;
-				V.EmittedBiomeID = QuadBiome;
-			}
-			else
-			{
-				const uint64 DupKey = (static_cast<uint64>(CellIdxs[i]) << 16)
-					| (static_cast<uint64>(QuadMaterial) << 8)
-					| static_cast<uint64>(QuadBiome);
-				if (const int32* Found = DuplicateVertexCache.Find(DupKey))
-				{
-					Indices[i] = *Found;
-				}
-				else
-				{
-					Indices[i] = EmitVertex(Request, V, QuadMaterial, QuadBiome, OutMeshData);
-					DuplicateVertexCache.Add(DupKey, Indices[i]);
-				}
-			}
-		}
+				return EmitVertex(Request, EmitCell, EmitMaterial, EmitBiome, EmitBlend, OutMeshData);
+			},
+			Indices);
 
 		// Split the quad along the diagonal that maximises the smaller of the two triangle
 		// areas (a max-min-area / Delaunay-like choice). A fixed 0-2 diagonal can produce a
@@ -545,6 +534,7 @@ int32 FVoxelCPUDualContourMesher::EmitVertex(
 	const FDCCellVertex& Vertex,
 	uint8 MaterialID,
 	uint8 BiomeID,
+	uint16 BlendCode,
 	FChunkMeshData& OutMeshData) const
 {
 	const float VoxelSize = Request.VoxelSize;
@@ -581,6 +571,7 @@ int32 FVoxelCPUDualContourMesher::EmitVertex(
 
 	// Vertex color: R=MaterialID, G=BiomeID (same format as smooth mesher)
 	OutMeshData.Colors.Add(FColor(MaterialID, BiomeID, 0, 255));
+	OutMeshData.MaterialBlends.Add(BlendCode);
 
 	return Index;
 }
