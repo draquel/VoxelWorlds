@@ -107,6 +107,31 @@ public:
 	static int32 OctaveFrequencies(const FVoxelNoiseParams& Params, float* OutFrequencies);
 
 	/**
+	 * One ridged octave (FVoxelNoiseParams::bRidged): (1 - |n|)^2, a crest where the sample crosses 0. NoiseRidgedOctave
+	 * in VoxelNoise.ush is the same.
+	 *
+	 * @param Value The octave's sample, about [-1, 1]
+	 * @return The ridged value, in [0, 1]
+	 */
+	static float RidgedOctave(float Value)
+	{
+		const float Ridge = 1.0f - FMath::Abs(Value);
+		return Ridge * Ridge;
+	}
+
+	/**
+	 * The normalised octave sum as the fBm returns it: unchanged, or for a ridged sum in [0, 1] mapped to [-1, 1].
+	 *
+	 * @param Normalised The octave sum over the sum of the weights
+	 * @param bRidged FVoxelNoiseParams::bRidged
+	 * @return The fBm value, about [-1, 1]
+	 */
+	static float FinishFBM(float Normalised, bool bRidged)
+	{
+		return bRidged ? Normalised * 2.0f - 1.0f : Normalised;
+	}
+
+	/**
 	 * fBm at a position, each octave split at the point itself (the CPU paths: generation, the surface function, the
 	 * surface queries, the map).
 	 *

@@ -427,6 +427,7 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->NoiseFrequency = Request.NoiseParams.Frequency;
 	Parameters->NoiseLacunarity = Request.NoiseParams.Lacunarity;
 	Parameters->NoisePersistence = Request.NoiseParams.Persistence;
+	Parameters->NoiseRidged = Request.NoiseParams.bRidged ? 1 : 0;
 	Parameters->WorldMode = static_cast<int32>(Request.WorldMode);
 	Parameters->SeaLevel = Request.SeaLevel;
 	Parameters->HeightScale = Request.HeightScale;
@@ -437,6 +438,7 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->ContinentalnessEnabled = 0;
 	Parameters->ContinentalnessSeed = 0;
 	Parameters->ContinentalnessFrequency = 0.00002f;
+	Parameters->ContinentalnessEqualize = 0;
 	Parameters->ContinentalnessCurveSamples = 0;
 	// SHADER_PARAMETER_SCALAR_ARRAY packs floats into FVector4f (4 per element)
 	for (int32 i = 0; i < 8; ++i)
@@ -451,6 +453,7 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 		Parameters->ContinentalnessEnabled = 1;
 		Parameters->ContinentalnessSeed = Request.NoiseParams.Seed + BiomeConfig->ContinentalnessSeedOffset;
 		Parameters->ContinentalnessFrequency = BiomeConfig->ContinentalnessNoiseFrequency;
+		Parameters->ContinentalnessEqualize = BiomeConfig->bEqualizeContinentalness ? 1 : 0;
 
 		// Upload baked curve arrays to shader — pack 4 floats per FVector4f
 		const int32 NumSamples = FMath::Min(BiomeConfig->BakedHeightCurve.Num(), 32);
@@ -530,6 +533,9 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->TemperatureFrequency = 0.00005f;
 	Parameters->MoistureSeed = Request.NoiseParams.Seed + 5678;
 	Parameters->MoistureFrequency = 0.00007f;
+	Parameters->ClimateEqualize = 0;
+	Parameters->TemperatureLatitudeWeight = 0.0f;
+	Parameters->TemperatureLapseRate = 0.0f;
 	Parameters->EnableUnderwaterMaterials = 0;
 	Parameters->BlendDitherBase = FVoxelBiomeBlendDither::GridBase(Request.ChunkCoord, Request.ChunkSize, Request.WorldOrigin, Request.VoxelSize);
 	Parameters->DefaultUnderwaterMaterial = 3;
@@ -544,6 +550,9 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 		Parameters->TemperatureFrequency = BiomeConfig->TemperatureNoiseFrequency;
 		Parameters->MoistureSeed = Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset;
 		Parameters->MoistureFrequency = BiomeConfig->MoistureNoiseFrequency;
+		Parameters->ClimateEqualize = BiomeConfig->bEqualizeClimate ? 1 : 0;
+		Parameters->TemperatureLatitudeWeight = BiomeConfig->TemperatureLatitudeWeight;
+		Parameters->TemperatureLapseRate = BiomeConfig->TemperatureLapseRate;
 		Parameters->EnableUnderwaterMaterials = BiomeConfig->bEnableUnderwaterMaterials ? 1 : 0;
 		Parameters->DefaultUnderwaterMaterial = BiomeConfig->DefaultUnderwaterMaterial;
 	}

@@ -55,8 +55,25 @@ least 1 unless `Persistence` is negative, the guard's only case (`VoxelWorlds.No
 | `Frequency` | 0.001 | scale of features in 1/uu (lower = larger) |
 | `Lacunarity` | 2.0 | frequency step between octaves |
 | `Persistence` | 0.5 | amplitude step between octaves |
+| `bRidged` | false | ridged fBm: each octave's sample n becomes (1 - \|n\|)^2 and the normalised sum [0, 1] is mapped to [-1, 1] |
 
 `FVoxelNoise::MakeFieldParams` builds the 2-octave fields that callers make themselves (climate, continentalness).
+
+### Ridged fBm
+
+`bRidged` turns the zero crossings of every octave into crests. With a world's terrain parameters it gives mountain
+ranges with sharp ridges and wide valleys; the continentalness height-scale curve keeps them to the interior.
+- **CPU:** `FVoxelNoise::RidgedOctave` and `FinishFBM`, in both `FBM3D` forms and in `ReferenceFBM3D`.
+- **GPU:** `NoiseFBM3DRidged`, called with `NoiseRidged` at the terrain's three calls (the plane, the default branch
+  and the planet).
+- Every other field (caves, ores, climate, continentalness) builds its own parameters and calls `NoiseFBM3D`, which is
+  the ridged form with ridging off, so ridging reaches only the terrain.
+- It is a flag, not an `EVoxelNoiseType`. A new type would have split on the cube lattice and then sampled as Simplex.
+- The range stays [-1, 1], so the height bounds are unchanged.
+- The mean is higher than the standard fBm's (about +0.3 with 6 octaves at persistence 0.5): a world that turns it on
+  lowers `BaseHeight` to keep its sea level.
+- Tests: `VoxelWorlds.Noise.Ridged` checks the range, the double reference and the split origin; GPU and CPU agree in
+  `GPUvsCPUClimateShapingParity`.
 
 ## How it samples
 

@@ -271,8 +271,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 					// Sample biome noise at X,Y (2D, constant for a column)
 					// Use 3D function with Z=0 for 2D sampling
 					FVector BiomeSamplePos(WorldPos.X, WorldPos.Y, 0.0f);
-					float Temperature = FBM3D(BiomeSamplePos, TempNoiseParams);
-					float Moisture = FBM3D(BiomeSamplePos, MoistureNoiseParams);
+					// Shaped as every climate reader shapes it (equalised, the lapse over the column's height)
+					const float Temperature = BiomeSnapshot.ShapeTemperature(FBM3D(BiomeSamplePos, TempNoiseParams), TerrainHeight, 0.0f, false);
+					const float Moisture = BiomeSnapshot.ShapeMoisture(FBM3D(BiomeSamplePos, MoistureNoiseParams));
 
 					// Get blended biome selection for smooth transitions
 					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture, Continentalness);
@@ -538,6 +539,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					// in uu whatever the radius (SP-B1)
 					float Temperature, Moisture;
 					FSphericalPlanetWorldMode::SampleClimate(Direction, PlanetRadius, TempNoiseParams, MoistureNoiseParams, Temperature, Moisture);
+					// Shaped as every climate reader shapes it: equalised, toward latitude, the lapse over the column's altitude
+					Temperature = BiomeSnapshot.ShapeTemperature(Temperature, TerrainAltitude, static_cast<float>(Direction.Z), true);
+					Moisture = BiomeSnapshot.ShapeMoisture(Moisture);
 
 					FBiomeBlend Blend = BiomeConfig->GetBiomeBlend(Temperature, Moisture, Continentalness);
 					BiomeID = Blend.GetDominantBiome();

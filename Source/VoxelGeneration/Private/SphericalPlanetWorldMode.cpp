@@ -282,8 +282,8 @@ FWorldModeTerrainParams FSphericalPlanetWorldMode::ComputeEffectiveTerrainParams
 	FWorldModeTerrainParams Effective = BaseParams;
 	if (BiomeSnapshot && BiomeSnapshot->bEnableContinentalness)
 	{
-		OutContinentalness = FVoxelNoise::FBM3D(GetNoiseSamplePoint(Direction, PlanetRadius),
-			GetContinentalnessNoiseParams(NoiseParams.Seed, *BiomeSnapshot));
+		OutContinentalness = BiomeSnapshot->ShapeContinentalness(FVoxelNoise::FBM3D(GetNoiseSamplePoint(Direction, PlanetRadius),
+			GetContinentalnessNoiseParams(NoiseParams.Seed, *BiomeSnapshot)));
 		float HeightOffset = 0.0f;
 		float HeightScaleMult = 1.0f;
 		BiomeSnapshot->GetContinentalnessTerrainParams(OutContinentalness, HeightOffset, HeightScaleMult);
