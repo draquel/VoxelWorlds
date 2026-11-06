@@ -68,8 +68,10 @@ static FAutoConsoleCommandWithWorld GVoxelFarOceanStatsCmd(
 // Each biome's share of the land: the natural surface (QuerySurfacePoint, the analytic rung, nothing loaded needed) at
 // samples x samples points over the world (an island's footprint box, the points inside it; a plane's square of the
 // radius around the streaming viewer; a planet's sphere on a Fibonacci lattice, equal areas), above the sea counted as
-// land. One line per biome: its share of the land and of the samples, its mean and highest surface. The tool the biome
-// boxes and the climate options are tuned with (SMOOTH_TERRAIN_BIOMES_PLAN.md: every biome 5-20 % of the land).
+// land. One line per biome: its share of the land and of the samples, its mean and highest surface, and a site: the
+// flattest land sample of the biome (at least 2 m over the sea), its position on the surface. The tool the biome boxes
+// and the climate options are tuned with (SMOOTH_TERRAIN_BIOMES_PLAN.md: every biome 5-20 % of the land); the sites
+// are where Scripts/qa/biome_tour.py shoots each biome.
 static FAutoConsoleCommandWithWorldAndArgs GVoxelBiomeCoverageCmd(
 	TEXT("voxel.World.BiomeCoverage"),
 	TEXT("Log each biome's share of the land over the world: voxel.World.BiomeCoverage [samples=160] [radius=200000 (a plane's square around the viewer)]."),
@@ -128,7 +130,8 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBiomeCoverageCmd(
 				}
 			}
 
-			struct FBiomeCount { int32 Land = 0; int32 All = 0; double AltitudeSum = 0.0; float AltitudeMax = -MAX_FLT; };
+			struct FBiomeCount { int32 Land = 0; int32 All = 0; double AltitudeSum = 0.0; float AltitudeMax = -MAX_FLT;
+				float SiteSlope = MAX_FLT; FVector Site = FVector::ZeroVector; };
 			TMap<int32, FBiomeCount> Counts;
 			int32 Land = 0;
 			int32 Sampled = 0;
@@ -151,6 +154,12 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBiomeCoverageCmd(
 				const float Altitude = bPlanet ? Surface.Altitude : static_cast<float>(Surface.Position.Z);
 				C.AltitudeSum += Altitude;
 				C.AltitudeMax = FMath::Max(C.AltitudeMax, Altitude);
+				const float OverSea = Sea.bEnabled ? -static_cast<float>(Sea.GetDepth(Surface.Position)) : 1.0e6f;
+				if (OverSea >= 200.0f && Surface.SlopeDegrees < C.SiteSlope)
+				{
+					C.SiteSlope = Surface.SlopeDegrees;
+					C.Site = Surface.Position;
+				}
 			}
 
 			const UVoxelBiomeConfiguration* Biomes = Config->BiomeConfiguration;
@@ -171,9 +180,10 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBiomeCoverageCmd(
 					}
 				}
 				const FBiomeCount& C = Pair.Value;
-				UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.BiomeCoverage:   %2d %-18s land %5.1f%%  all %5.1f%%  surface mean %7.1f m  max %7.1f m"),
+				UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.BiomeCoverage:   %2d %-18s land %5.1f%%  all %5.1f%%  surface mean %7.1f m  max %7.1f m  site (%.0f, %.0f, %.0f) slope %.1f"),
 					Pair.Key, *Name, Land > 0 ? 100.0 * C.Land / Land : 0.0, Sampled > 0 ? 100.0 * C.All / Sampled : 0.0,
-					C.Land > 0 ? C.AltitudeSum / C.Land / 100.0 : 0.0, C.Land > 0 ? C.AltitudeMax / 100.0 : 0.0);
+					C.Land > 0 ? C.AltitudeSum / C.Land / 100.0 : 0.0, C.Land > 0 ? C.AltitudeMax / 100.0 : 0.0,
+					C.Site.X, C.Site.Y, C.Site.Z, C.SiteSlope < MAX_FLT ? C.SiteSlope : -1.0f);
 			}
 		}
 	}));
