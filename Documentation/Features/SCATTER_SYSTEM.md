@@ -732,12 +732,15 @@ their fade band. Scatter looked as if it existed only on the finest LOD and popp
 Now such a chunk is remembered (`ChunksAwaitingFirstExtraction`; an unload or a regeneration drops it) and the
 distance pass hands it off again once it comes within the horizon, nearest first, `MaxDistanceSpawnChunksPerPass` a
 pass, through the chunk manager's requester (`SetChunkHandOffRequester`: `HandOffChunkScatter` from the chunk's
-edit-merged voxels, the far-compressed snapshot path included). Its first extraction then runs at the horizon with the
+edit-merged voxels, the far-compressed snapshot path included). A far-compressed chunk's snapshot is decoded on a worker
+first: the requester starts the decode and answers `EVoxelScatterHandOff::Pending`, the chunk keeps waiting and is asked
+for again on the next pass, when its snapshot is ready (G130; before, up to `MaxDistanceSpawnChunksPerPass` decodes ran
+on the game thread in one pass, 5-10 ms frames on `SmoothTerrain_Island`). Its first extraction then runs at the horizon with the
 types in range there, and the distance pass streams the rest in at their own distances; types with `SpawnDistance` 0
 stream at `ScatterRadius` like the others (and are released past it like the others, where before they stayed once
 spawned). A hand-off that finds a type in range takes the chunk out of the set, so a chunk whose next mesh comes first
 is handled as before. `voxel.Scatter.Stats` reports the chunks awaiting, the deferred hand-offs and the horizon. Tests:
-`Scatter.FirstExtraction.Horizon`, `Streaming.Plane.ScatterFirstExtractionAtHorizon`.
+`Scatter.FirstExtraction.Horizon`, `Scatter.FirstExtraction.Pending`, `Streaming.Plane.ScatterFirstExtractionAtHorizon`.
 
 With the horizon in place the distances a definition needs are only the ones `ValidateScatterDistances` already
 checks: `LODStartDistance < CullDistance` (a fade band) and `CullDistance` below the effective spawn distance (a

@@ -1011,7 +1011,8 @@ bool FPlanetSeaDepthTest::RunTest(const FString& Parameters)
 /**
  * SP-B8: the radial water fill. In a chunk at 45 degrees that the sea sphere crosses, the open sea between the ground
  * and the sea surface takes the water flag, the air above the sea and a cave in the ground stay dry, and the Z-plane
- * WaterLevel plays no part. A chunk wholly under the sea is left to its neighbours, as on the plane.
+ * WaterLevel plays no part. A chunk wholly under the sea is left to its neighbours (on the plane such a chunk seeds
+ * from its top layer since G129; the radial pass keeps the neighbours' fill).
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetWaterFillTest,
 	"VoxelWorlds.WorldModes.Planet.WaterFill",
@@ -1087,7 +1088,7 @@ bool FPlanetWaterFillTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("The cave stays dry"), CaveWet, 0);
 	TestEqual(TEXT("Cave flags are cleared after the fill"), CaveFlagsLeft, 0);
 
-	// A chunk wholly under the sea seeds nothing by itself (its neighbours fill it at load, as on the plane).
+	// A chunk wholly under the sea seeds nothing by itself (its neighbours fill it at load; the plane's seeds since G129).
 	FVoxelNoiseGenerationRequest Deep = MakePlanetPassRequest(Chunk - FIntVector(3, 0, 3), EWorldMode::SphericalPlanet);
 	Deep.bEnableWaterLevel = true;
 	Deep.WaterRadius = Request.WaterRadius;

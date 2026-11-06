@@ -106,8 +106,8 @@ bool DownLineFromThread(uint LineId, out int LineB, out int LineC)
 // ==================== Water fill: phase 1 — column seed ====================
 // One thread per XY column. Mirrors ApplyWaterFillPass phase 1: if the column is open from the
 // chunk top down to the water level (no solid / cave-flagged voxels), flag water from the water
-// level downward until a solid or cave barrier. Dispatched only when the chunk contains the
-// water level (matching the CPU bChunkContainsWaterLevel gate).
+// level downward until a solid or cave barrier. Dispatched when the chunk contains the water
+// level or lies wholly under it (WaterZ clamps to the top layer, G129), as the CPU pass gates it.
 [numthreads(8, 8, 1)]
 void WaterColumnSeedCS(uint3 ThreadId : SV_DispatchThreadID)
 {

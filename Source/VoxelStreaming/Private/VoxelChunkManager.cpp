@@ -1276,16 +1276,29 @@ void UVoxelChunkManager::Initialize(
 		// A chunk handed off with every type out of range (it arrived at the window's front) is handed off again by the
 		// scatter manager's distance pass once within the scatter horizon (world modes review G79), from its voxels as the
 		// mesh submit hands them off.
-		ScatterManager->SetChunkHandOffRequester([this](const FIntVector& ChunkCoord) -> bool
+		// A far-compressed chunk's snapshot is decoded on a worker first and the chunk asked for again on the next pass,
+		// so the game thread never waits for the decode (G130: up to 8 decodes a pass, 5-10 ms frames on
+		// SmoothTerrain_Island); the mesh submit's hand-off has its snapshot prefetched when the chunk is queued.
+		ScatterManager->SetChunkHandOffRequester([this](const FIntVector& ChunkCoord) -> EVoxelScatterHandOff
 		{
 			FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
 			if (!State || !State->Descriptor.HasVoxelDataAvailable()
 				|| State->State == EChunkState::PendingUnload || State->State == EChunkState::Unloaded)
 			{
-				return false;
+				return EVoxelScatterHandOff::Gone;
+			}
+			if (State->Descriptor.IsCompact() && !(EditManager && EditManager->ChunkHasEdits(ChunkCoord)))
+			{
+				const VoxelResidencyStats::FReadScope ResidencyReadScope(TEXT("scatter"));
+				UE::Tasks::FTask Ready;
+				GetVoxelSnapshot(ChunkCoord, *State, &Ready);
+				if (Ready.IsValid())
+				{
+					return EVoxelScatterHandOff::Pending;
+				}
 			}
 			HandOffChunkScatter(ChunkCoord, *State);
-			return true;
+			return EVoxelScatterHandOff::HandedOff;
 		});
 
 		UE_LOG(LogVoxelStreaming, Log, TEXT("VoxelScatterManager created (Radius=%.0f)"),

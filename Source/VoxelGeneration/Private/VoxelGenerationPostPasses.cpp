@@ -55,10 +55,14 @@ void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
 	// === Phase 1: Column scan — seed water in open ocean ===
 	// Cave-flagged voxels are treated as solid barriers so the column scan
 	// doesn't flood through cave openings in the seabed.
-	const float ChunkTopZ = ChunkWorldPos.Z + ChunkSize * VoxelSize;
-	const bool bChunkContainsWaterLevel = (WaterLevel >= ChunkWorldPos.Z && WaterLevel < ChunkTopZ);
+	// A chunk the water level passes through scans each column from the level down. A chunk wholly under it scans from its
+	// top layer (WaterZ clamps to ChunkSize - 1, so no openness check): a heightmap column is solid below its surface and
+	// air above it but for caves, which are barriers here, so air at the top of the column is open sea. Until G129 such a
+	// chunk had no water of its own and the chunk manager flooded it on the game thread when its mesh landed
+	// (PropagateWaterFromNeighbors: a flood over the whole chunk, up to 17 ms a chunk under SmoothTerrain_Island's lakes).
+	const bool bChunkAtOrUnderWaterLevel = WaterLevel >= ChunkWorldPos.Z;
 
-	if (bChunkContainsWaterLevel)
+	if (bChunkAtOrUnderWaterLevel)
 	{
 		const int32 WaterZ = FMath::Clamp(
 			FMath::FloorToInt32((WaterLevel - ChunkWorldPos.Z) / VoxelSize),

@@ -134,10 +134,12 @@ GPU against the CPU:
    (19 before F3.3's `Rendering.RayTracing.ChunkGeometry`, 20 before G121's `Rendering.RayTracing.FarFieldGeometry`, 21 before G116's three `Rendering.ChunkPrimitives` tests, 24 before step 4's, 25 before the fitted cards', 26 before the climate shaping's),
    each expected to be a single `Success`.
 3. It extracts the **parity lines** (the parity tests' `[N voxels]: density~` lines, one per case and LOD: density,
-   material, biome and metadata agreement and the GPU's CRC) and compares all **126** with the record,
-   `Documentation/CodeReview/Baselines/gpu_parity_lines_2026-11-06.txt` in the parent repository (`parity_lines.py`;
+   material, biome and metadata agreement and the GPU's CRC) and compares all **129** with the record,
+   `Documentation/CodeReview/Baselines/gpu_parity_lines_2026-11-06_g129.txt` in the parent repository (`parity_lines.py`;
    CR2's 114 less the three `BlendDither off` cases, gone with `voxel.Biome.BlendDither` in VoxelWorlds 8, 24 lines moved
-   by the shader cleanup of G97 and G88, `Features/GPU_PIPELINE.md`, and the climate shaping's 15 since VoxelWorlds#263). A changed line is a finding to
+   by the shader cleanup of G97 and G88, `Features/GPU_PIPELINE.md`, the climate shaping's 15 since VoxelWorlds#263, and
+   G129's three: the water parity's chunk under the level, with the three `Caves under the sea` CRCs moved because that
+   chunk, wholly under its sea, now holds its own water; every agreement figure unchanged). A changed line is a finding to
    explain, not a tolerance to widen: a change that should not touch generation leaves every line identical.
 4. It copies the editor's log to `Saved/QA/editor/`.
 
