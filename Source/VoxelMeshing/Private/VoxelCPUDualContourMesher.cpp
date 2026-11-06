@@ -480,7 +480,7 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 		// vertex already emitted with a different material or blend is duplicated (same position/normal) via the cache.
 		int32 Indices[4];
 		VoxelDCMaterialBlend::EmitQuadCells(Verts, CellIdxs, 4, QuadMaterial, QuadBiome, DuplicateVertexCache,
-			[&](const FDCCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint16 EmitBlend)
+			[&](const FDCCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint32 EmitBlend)
 			{
 				return EmitVertex(Request, EmitCell, EmitMaterial, EmitBiome, EmitBlend, OutMeshData);
 			},
@@ -534,7 +534,7 @@ int32 FVoxelCPUDualContourMesher::EmitVertex(
 	const FDCCellVertex& Vertex,
 	uint8 MaterialID,
 	uint8 BiomeID,
-	uint16 BlendCode,
+	uint32 BlendCode,
 	FChunkMeshData& OutMeshData) const
 {
 	const float VoxelSize = Request.VoxelSize;

@@ -39,9 +39,11 @@ struct VOXELCORE_API FVoxelVertex
 	/**
 	 * Packed material data:
 	 * - Bits 0-7: MaterialID
-	 * - Bits 8-15: BiomeID
+	 * - Bits 8-15: BiomeID, or a material blend's third material (VP2-O4; with the third flag: nothing reads a border
+	 *   vertex's biome)
 	 * - Bits 16-23: The material blend's second material (VP2-O4; valid with the blend flag)
-	 * - Bits 24-31: Vertex flags (bit 24 the material blend, bit 25 its weight: VoxelMaterialBlend's flags)
+	 * - Bits 24-31: Vertex flags (bits 24-27 VoxelMaterialBlend's flags: the blend, the second's weight, the third's
+	 *   weight, the third)
 	 */
 	uint32 PackedMaterialData;
 
@@ -152,22 +154,28 @@ struct VOXELCORE_API FVoxelVertex
 	}
 
 	/**
-	 * Set the material blend (soft material borders, VP2-O4): the second material in bits 16-23, the blend and weight
-	 * flags in the low bits of the flags byte.
+	 * Set the material blend (soft material borders, VP2-O4): the second material in bits 16-23, the flags in the low four
+	 * bits of the flags byte, and a third material in the biome's bits 8-15 (the biome is kept where there is none).
 	 *
 	 * @param Code A VoxelMaterialBlend code (FChunkMeshData::MaterialBlends; 0 = no blend)
 	 */
-	void SetMaterialBlend(uint16 Code)
+	void SetMaterialBlend(uint32 Code)
 	{
-		PackedMaterialData = (PackedMaterialData & 0xFC00FFFF)
-			| (static_cast<uint32>(Code >> 8) << 16)
-			| (static_cast<uint32>(Code & 0x3) << 24);
+		PackedMaterialData = (PackedMaterialData & 0xF000FFFF)
+			| (((Code >> 8) & 0xFF) << 16)
+			| ((Code & 0xF) << 24);
+		if ((Code & 0x8) != 0)
+		{
+			SetBiomeID(static_cast<uint8>(Code >> 16));
+		}
 	}
 
 	/** @return The material blend as a VoxelMaterialBlend code (0 = no blend) */
-	uint16 GetMaterialBlend() const
+	uint32 GetMaterialBlend() const
 	{
-		return static_cast<uint16>((((PackedMaterialData >> 16) & 0xFF) << 8) | ((PackedMaterialData >> 24) & 0x3));
+		const uint32 Flags = (PackedMaterialData >> 24) & 0xF;
+		return (((PackedMaterialData >> 16) & 0xFF) << 8) | Flags
+			| ((Flags & 0x8) != 0 ? (((PackedMaterialData >> 8) & 0xFF) << 16) : 0);
 	}
 };
 

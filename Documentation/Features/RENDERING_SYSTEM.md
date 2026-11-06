@@ -473,10 +473,10 @@ The scheduling side (when a swap is held, seam buckets) is in [STREAMING_AND_SEA
 |-----------|------|-----------------|
 | UV1.x | MaterialID (exact float) | `MF_GetMaterialID` |
 | UV1.y | Face type against local up: 0 top, 1 side, 2 bottom (on a planet the radial direction) | |
-| Colour R | MaterialID (0-255); in the far field the quad's second material (G45) | `round(VertexColor.R * 255)` |
-| Colour G | BiomeID (0-255) | `round(VertexColor.G * 255)` |
-| Colour B | AO in the top 2 bits (0, 64, 128, 192) | `floor(VertexColor.B * 4)` → 0-3 |
-| Colour A | 255; in the far field 255 less the second material's weight at the vertex (G45) | |
+| Colour R | MaterialID (0-255); in a material blend (the far field, G45; a Dual Contouring border, VP2-O4) the quad's second material | `round(VertexColor.R * 255)` |
+| Colour G | BiomeID (0-255); on a Dual Contouring border with three materials the third | `round(VertexColor.G * 255)` |
+| Colour B | AO in the top 2 bits (0, 64, 128, 192); on a Dual Contouring border the third material's weight (0-63) | `floor(VertexColor.B * 4)` → 0-3 |
+| Colour A | 255; in a material blend below 255: the far field 255 less the second material's weight, a Dual Contouring border 254 less 254 x it | |
 
 ```cpp
 // In material:
