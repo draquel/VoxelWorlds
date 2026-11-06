@@ -325,8 +325,21 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 		F.RampHigh = FLinearColor(0.95f, 0.25f, 0.10f);  // hot  -> red
 		F.Sample = [](const FVoxelFieldSampleContext& C, double X, double Y, double /*Z*/)
 		{
-			// One noise for every world mode (MP4): the climate at the frame's sample point.
-			return FVoxelCPUNoiseGenerator::FBM3D(C.ClimateSamplePoint(X, Y), C.TempNoiseParams);
+			// One noise for every world mode (MP4): the climate at the frame's sample point, shaped as generation shapes
+			// it (equalised, toward latitude on a planet, the lapse over the surface: a surface sample only with a lapse).
+			const float Raw = FVoxelCPUNoiseGenerator::FBM3D(C.ClimateSamplePoint(X, Y), C.TempNoiseParams);
+			if (!C.BiomeSnapshot.bIsValid)
+			{
+				return Raw;
+			}
+			float SurfaceAltitude = 0.0f;
+			if (C.BiomeSnapshot.TemperatureLapseRate > 0.0f)
+			{
+				const FVoxelSurfaceSample Surface = C.SurfaceAbove(X, Y);
+				SurfaceAltitude = C.bPlanet ? Surface.Altitude : static_cast<float>(Surface.Position.Z);
+			}
+			const float SinLatitude = C.bPlanet ? static_cast<float>(C.PlanetDirectionAbove(X, Y).Z) : 0.0f;
+			return C.BiomeSnapshot.ShapeTemperature(Raw, SurfaceAltitude, SinLatitude, C.bPlanet);
 		};
 		RegisterField(F);
 	}
@@ -343,7 +356,8 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 		F.RampHigh = FLinearColor(0.05f, 0.45f, 0.35f);  // humid -> teal
 		F.Sample = [](const FVoxelFieldSampleContext& C, double X, double Y, double /*Z*/)
 		{
-			return FVoxelCPUNoiseGenerator::FBM3D(C.ClimateSamplePoint(X, Y), C.MoistureNoiseParams);
+			const float Raw = FVoxelCPUNoiseGenerator::FBM3D(C.ClimateSamplePoint(X, Y), C.MoistureNoiseParams);
+			return C.BiomeSnapshot.bIsValid ? C.BiomeSnapshot.ShapeMoisture(Raw) : Raw;
 		};
 		RegisterField(F);
 	}
@@ -360,7 +374,9 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 		F.RampHigh = FLinearColor(0.55f, 0.45f, 0.25f);  // inland
 		F.Sample = [](const FVoxelFieldSampleContext& C, double X, double Y, double /*Z*/)
 		{
-			return C.bUseContinentalness ? FVoxelCPUNoiseGenerator::FBM3D(C.ClimateSamplePoint(X, Y), C.ContinentalnessNoiseParams) : 0.0f;
+			return C.bUseContinentalness
+				? C.BiomeSnapshot.ShapeContinentalness(FVoxelCPUNoiseGenerator::FBM3D(C.ClimateSamplePoint(X, Y), C.ContinentalnessNoiseParams))
+				: 0.0f;
 		};
 		RegisterField(F);
 	}

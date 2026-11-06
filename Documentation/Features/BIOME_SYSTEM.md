@@ -49,6 +49,8 @@ lazily with no lock, and the first queries of several map tile tasks at once cra
   `MaxDepthBelowSurface`, by `Priority` (snow on peaks, rock at altitude).
 - Underwater materials (`bEnableUnderwaterMaterials`, `DefaultUnderwaterMaterial` sand).
 - Ores (`bEnableOreVeins`, `GlobalOreVeins`).
+- Climate shaping (below): `bEqualizeClimate`, `TemperatureLatitudeWeight`, `TemperatureLapseRate`, and
+  `bEqualizeContinentalness` beside the continentalness settings. All off by default.
 
 `InitializeDefaults()` fills a new asset; `IsDataValid` checks it in the editor. `BuildGpuData()` bakes biomes, height
 rules and ores into float4 buffers for the density shader (`BakedGpuBiomes` and the strides `VOXELGEN_*_FLOAT4_STRIDE`).
@@ -56,6 +58,75 @@ rules and ores into float4 buffers for the density shader (`BakedGpuBiomes` and 
 Worker threads and long-lived tasks (the map's tile drawing, the surface queries) read a plain-value copy,
 `FVoxelBiomeSnapshot::FromConfig`, taken on the game thread; the configuration's own functions delegate to the
 snapshot's static functions, so the two cannot drift.
+
+## Climate shaping
+
+The blend reads the climate after four optional steps, each off by default, so a world changes only when its
+configuration turns one on (none is in the save fingerprint, which leaves biome tuning out by design). Every reader
+shapes the climate the same way:
+- **CPU:** `FVoxelBiomeSnapshot::ShapeTemperature`, `ShapeMoisture` and `ShapeContinentalness`. This covers generation,
+  the surface queries, the far field, the map, PCG and the editor's field viewer.
+- **GPU:** `Shaders/Private/ClimateShaping.ush`, the same arithmetic.
+
+`VoxelWorlds.Generation.GPUvsCPUClimateShapingParity` holds the two equal on the plane and on a planet.
+
+1. **Equalisation** (`bEqualizeClimate` for temperature and moisture, `bEqualizeContinentalness` for continentalness).
+   - The raw 2-octave fields cluster near 0: about half of a field's samples lie within 0.2 of it.
+   - Equalising passes the raw value through the fields' measured CDF, so it is uniform on [-1, 1]. A box then covers
+     its share of the world: a box 0.5 wide on one axis holds a quarter of it.
+   - The CDF is `VOXELGEN_CLIMATE_CDF`: 129 points over [-1, 1], linear between them, in
+     `Shaders/Shared/VoxelGenerationShared.ush`, shared by C++ and HLSL.
+   - `VoxelWorlds.Biome.ClimateEqualize.Table` measures it against the field and prints a new table when it drifts.
+     `.Uniform` checks that each tenth of the equalised range holds a tenth of the samples.
+   - Equalised continentalness feeds both the height curves and the biome gate, so a curve key at c sits at the
+     (c + 1) / 2 quantile.
+2. **Latitude** (`TemperatureLatitudeWeight`, planets only).
+   - Temperature leans toward 1 - 2 |sin(latitude)|: 1 at the equator, -1 at the poles.
+   - That ramp is linear in sin(latitude), so it is uniform by area, like an equalised field.
+   - The weight runs from 0 (the field alone) to 1 (latitude alone). Latitude is measured from the +Z pole through the
+     planet's centre, as `FVoxelCubeSphere::DirectionToLatLon` does.
+3. **Lapse** (`TemperatureLapseRate`).
+   - Temperature drops by the rate for every 10,000 uu (100 m) of the column's terrain above the datum, so high ground
+     turns to the colder biomes.
+   - The datum is world Z 0 on a heightmap and the datum radius on a planet, as the height rules measure it. Ground
+     below the datum is not warmed.
+   - The height used is the one the reader has: generation's, with conditioning zones applied.
+4. The blend clamps all three axes to [-1, 1], as before.
+
+### Measuring a world's biomes
+
+- `voxel.World.BiomeCoverage [samples] [radius]` samples the natural surface (the analytic height and the shaped
+  climate) over the world and logs the land's share and each biome's share of the land. For each biome it also logs a
+  site: its flattest land sample at least 2 m above the sea.
+- `voxel.World.HeightProfile x0 y0 x1 y1 [points]` logs the natural surface along a line. It is how a continentalness
+  curve's cliffs and notches show up before any chunk is meshed.
+
+### The Smooth Terrain showcase (2026-11-06)
+
+The parent repository's showcase worlds turn all four steps on: `SmoothTerrain_Island` (IslandBowl, an 8 km island,
+300 m relief), `SmoothTerrain_Planet` (a 50 km planet, ridged terrain, latitude weight 0.4) and `CubicTerrain_Plane`
+(an InfinitePlane block world).
+- They share eleven biomes: Coast, Meadow, Temperate Forest, Taiga, Tundra, Snowfield, Marsh, Savanna, Desert, Alpine
+  and Ashlands. Their climate cells are 2-15 km across, against the demo's few hundred metres.
+- One table holds every world: `Tools/SmoothTerrain/smooth_terrain.json`, built by `Scripts/setup_smooth_terrain.py`.
+  The table holds the biomes, each world's overrides of their boxes, the continentalness curves and the height rules.
+
+`voxel.World.BiomeCoverage` measured:
+
+| World | Land | Biomes (share of the land) |
+|---|---|---|
+| Island | 45% | each biome 3-16% |
+| Planet | 42% | Taiga 22, Meadow 18, Alpine 15, Forest 13, Coast 8.5, Tundra 8, Savanna 7, Marsh 4, Snowfield 2, Desert 1, Ashlands 1 |
+| Block world | 38.9% | every biome present |
+
+On the planet, latitude and the lapse rate cool most of the land, so the hot biomes (Desert, Ashlands) are small.
+
+**Overlay biomes.** Coast, Marsh, Alpine and Ashlands are drawn over other biomes' boxes, gated by continentalness
+(the shore, the peaks) or by a band of temperature.
+- An overlay takes its material outright only where its share of the blend passes 0.9. Against a base biome of equal
+  raw weight, that needs a priority lead of about 16: 2^(16 x 0.2) is about 9.2.
+- With a smaller lead the whole overlap dithers between the two materials.
+- The showcase gives the overlays 20-24 and the base biomes 0-3.
 
 ## Selection and blend
 

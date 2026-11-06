@@ -243,6 +243,11 @@ FVoxelData FVoxelSurfaceQuery::GenerateVoxelAt(
 			float Temperature = 0.0f;
 			float Moisture = 0.0f;
 			FSphericalPlanetWorldMode::SampleClimate(Direction, PlanetParams->PlanetRadius, TemperatureParams, MoistureParams, Temperature, Moisture);
+			if (Snapshot.bIsValid)
+			{
+				Temperature = Snapshot.ShapeTemperature(Temperature, Surface->Altitude, static_cast<float>(Direction.Z), true);
+				Moisture = Snapshot.ShapeMoisture(Moisture);
+			}
 			BiomeID = Snapshot.bIsValid
 				? Snapshot.GetBiomeBlend(Temperature, Moisture, Continentalness).GetDominantBiome()
 				: FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f).GetDominantBiome();
@@ -340,8 +345,8 @@ void FVoxelSurfaceQuery::QuerySurfaceConditions(
 
 	// Sample at this world position (Z=0 for 2D biome sampling)
 	const FVector BiomeSamplePos(WorldX, WorldY, 0.0f);
-	const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, TempNoiseParams);
-	const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, MoistureNoiseParams);
+	const float Temperature = BiomeSnapshot.ShapeTemperature(FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, TempNoiseParams), TerrainHeight, 0.0f, false);
+	const float Moisture = BiomeSnapshot.ShapeMoisture(FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, MoistureNoiseParams));
 
 	// Sample continentalness noise if enabled
 	float Continentalness = 0.0f;
@@ -354,7 +359,7 @@ void FVoxelSurfaceQuery::QuerySurfaceConditions(
 		ContNoiseParams.Lacunarity = 2.0f;
 		ContNoiseParams.Seed = WorldSeed + BiomeSnapshot.ContinentalnessSeedOffset;
 		ContNoiseParams.Frequency = BiomeSnapshot.ContinentalnessNoiseFrequency;
-		Continentalness = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ContNoiseParams);
+		Continentalness = BiomeSnapshot.ShapeContinentalness(FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ContNoiseParams));
 	}
 
 	// Select biome (now with continentalness for proper tiered gating)
@@ -488,6 +493,8 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(
 		FVoxelNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.TemperatureSeedOffset, BiomeSnapshot.TemperatureNoiseFrequency),
 		FVoxelNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.MoistureSeedOffset, BiomeSnapshot.MoistureNoiseFrequency),
 		Temperature, Moisture);
+	Temperature = BiomeSnapshot.ShapeTemperature(Temperature, TerrainAltitude, static_cast<float>(Direction.Z), true);
+	Moisture = BiomeSnapshot.ShapeMoisture(Moisture);
 
 	const FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
 	OutBiomeID = Blend.GetDominantBiome();
@@ -522,6 +529,8 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(
 		FVoxelNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.TemperatureSeedOffset, BiomeSnapshot.TemperatureNoiseFrequency),
 		FVoxelNoise::MakeFieldParams(NoiseParams.Seed + BiomeSnapshot.MoistureSeedOffset, BiomeSnapshot.MoistureNoiseFrequency),
 		Temperature, Moisture);
+	Temperature = BiomeSnapshot.ShapeTemperature(Temperature, TerrainAltitude, static_cast<float>(Direction.Z), true);
+	Moisture = BiomeSnapshot.ShapeMoisture(Moisture);
 	const FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
 	Mix.BiomeID = Blend.GetDominantBiome();
 
@@ -596,10 +605,14 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QuerySurfaceMaterialMix(
 		return Params;
 	};
 	const FVector BiomeSamplePos(WorldX, WorldY, 0.0f);
-	const float Temperature = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ClimateParams(BiomeSnapshot.TemperatureSeedOffset, BiomeSnapshot.TemperatureNoiseFrequency));
-	const float Moisture = FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ClimateParams(BiomeSnapshot.MoistureSeedOffset, BiomeSnapshot.MoistureNoiseFrequency));
+	const float Temperature = BiomeSnapshot.ShapeTemperature(
+		FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ClimateParams(BiomeSnapshot.TemperatureSeedOffset, BiomeSnapshot.TemperatureNoiseFrequency)),
+		TerrainHeight, 0.0f, false);
+	const float Moisture = BiomeSnapshot.ShapeMoisture(
+		FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ClimateParams(BiomeSnapshot.MoistureSeedOffset, BiomeSnapshot.MoistureNoiseFrequency)));
 	const float Continentalness = BiomeSnapshot.bEnableContinentalness
-		? FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ClimateParams(BiomeSnapshot.ContinentalnessSeedOffset, BiomeSnapshot.ContinentalnessNoiseFrequency))
+		? BiomeSnapshot.ShapeContinentalness(
+			FVoxelCPUNoiseGenerator::FBM3D(BiomeSamplePos, ClimateParams(BiomeSnapshot.ContinentalnessSeedOffset, BiomeSnapshot.ContinentalnessNoiseFrequency)))
 		: 0.0f;
 	const FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
 	Mix.BiomeID = Blend.GetDominantBiome();

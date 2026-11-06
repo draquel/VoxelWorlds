@@ -235,5 +235,13 @@ struct VOXELCORE_API FVoxelNoiseParams
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Persistence = 0.5f;
 
+	/**
+	 * Ridged fBm: each octave's sample n becomes (1 - |n|)^2, so its zero crossings turn into sharp crests, and the
+	 * normalised sum [0, 1] is mapped back to [-1, 1] (the terrain's mountain ranges). Off for every field but the
+	 * terrain's, which a world opts into; the noise type and the lattice are unchanged.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	bool bRidged = false;
+
 	FVoxelNoiseParams() = default;
 };

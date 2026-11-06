@@ -1637,3 +1637,150 @@ bool FVoxelNoiseGeneratorPerformanceTest::RunTest(const FString& Parameters)
 
 	return true;
 }
+
+// The climate options and the ridged terrain fBm (ClimateShaping.ush, NoiseFBM3DRidged against FVoxelBiomeSnapshot's
+// Shape* functions and FVoxelNoise's ridged loop), every one on at once: on the plane equalised temperature, moisture
+// and continentalness, the lapse and the ridged terrain; on a planet also the latitude blend, at the poles, the equator
+// and 45 degrees. Climate fields a few hundred uu across, so a chunk crosses several biome borders, and a CPU run with
+// the options off shows they move biomes in these chunks (non-vacuous).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUClimateShapingParityTest, "VoxelWorlds.Generation.GPUvsCPUClimateShapingParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelGPUvsCPUClimateShapingParityTest::RunTest(const FString& Parameters)
+{
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+	using namespace VoxelSphericalParity;
+
+	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
+	BiomeConfig->AddToRoot();
+	BiomeConfig->InitializeDefaults();
+	BiomeConfig->bEnableContinentalness = true;
+	BiomeConfig->TemperatureNoiseFrequency = 0.0012f;
+	BiomeConfig->MoistureNoiseFrequency = 0.0015f;
+	BiomeConfig->ContinentalnessNoiseFrequency = 0.0008f;
+	BiomeConfig->RebuildCaches();
+	BiomeConfig->BuildGpuData();
+
+	auto SetOptions = [BiomeConfig](bool bOn, float LatitudeWeight)
+	{
+		BiomeConfig->bEqualizeClimate = bOn;
+		BiomeConfig->bEqualizeContinentalness = bOn;
+		BiomeConfig->TemperatureLatitudeWeight = bOn ? LatitudeWeight : 0.0f;
+		BiomeConfig->TemperatureLapseRate = bOn ? 1.5f : 0.0f;
+	};
+	// How many voxels change biome when the options go off: the options must act in the chunks compared.
+	FVoxelCPUNoiseGenerator CPUGenerator;
+	CPUGenerator.Initialize();
+	auto BiomesMoved = [&](const FVoxelNoiseGenerationRequest& Request, float LatitudeWeight)
+	{
+		TArray<FVoxelData> On, Off;
+		SetOptions(true, LatitudeWeight);
+		CPUGenerator.GenerateChunkCPU(Request, On);
+		SetOptions(false, LatitudeWeight);
+		FVoxelNoiseGenerationRequest Plain = Request;
+		Plain.NoiseParams.bRidged = false;
+		CPUGenerator.GenerateChunkCPU(Plain, Off);
+		SetOptions(true, LatitudeWeight);
+		int32 Moved = 0;
+		for (int32 i = 0; i < FMath::Min(On.Num(), Off.Num()); ++i)
+		{
+			Moved += On[i].BiomeID != Off[i].BiomeID;
+		}
+		return Moved;
+	};
+
+	FVoxelGPUNoiseGenerator GPUGenerator;
+	GPUGenerator.Initialize();
+	bool bAllPass = true;
+
+	// The plane
+	{
+		FVoxelNoiseGenerationRequest Request;
+		Request.ChunkCoord = FIntVector(3, 1, 0);
+		Request.ChunkSize = 16;
+		Request.VoxelSize = 100.0f;
+		Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+		Request.NoiseParams.Seed = 4325;
+		Request.NoiseParams.Frequency = 0.0025f;
+		Request.NoiseParams.Octaves = 4;
+		Request.NoiseParams.Lacunarity = 2.0f;
+		Request.NoiseParams.Persistence = 0.5f;
+		Request.NoiseParams.bRidged = true;
+		Request.WorldMode = EWorldMode::InfinitePlane;
+		Request.SeaLevel = 0.0f;
+		Request.HeightScale = 4000.0f;
+		Request.BaseHeight = 0.0f;
+		Request.bEnableBiomes = true;
+		Request.BiomeConfiguration = BiomeConfig;
+		const int32 Moved = BiomesMoved(Request, 0.0f);
+		AddInfo(FString::Printf(TEXT("Plane: %d voxels change biome with the options off"), Moved));
+		TestTrue(TEXT("Plane: the options move biomes in the chunk (non-vacuous)"), Moved > 0);
+		bAllPass &= VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("Climate shaping, plane"));
+	}
+
+	// A planet: Review_Planet's size, the latitude blend on
+	{
+		UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+		Config->AddToRoot();
+		Config->WorldMode = EWorldMode::SphericalPlanet;
+		Config->WorldOrigin = FVector(12345.0, 54321.0, 0.0);
+		Config->WorldRadius = Radius;
+		Config->PlanetHeightScale = 6000.0f;
+		Config->PlanetMaxTerrainHeight = 6500.0f;
+		Config->PlanetMaxTerrainDepth = 6500.0f;
+		Config->VoxelSize = 75.0f;
+		Config->ChunkSize = 32;
+		Config->NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+		Config->NoiseParams.Seed = 248675;
+		Config->NoiseParams.Octaves = 3;
+		Config->NoiseParams.Frequency = 0.000025f;
+		Config->NoiseParams.Lacunarity = 1.681f;
+		Config->NoiseParams.Persistence = 0.5f;
+		Config->NoiseParams.bRidged = true;
+		Config->BiomeConfiguration = BiomeConfig;
+		Config->bEnableBiomes = true;
+		SetOptions(true, 0.6f);
+
+		const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
+		const FVector Origin = Config->WorldOrigin;
+		const double ChunkWorldSize = Config->ChunkSize * Config->VoxelSize;
+		VoxelParityHarness::FParityThresholds PlanetThresholds;
+		PlanetThresholds.DensityClose = 99.5f;
+		PlanetThresholds.Mat = 99.0f;
+		PlanetThresholds.Biome = 99.9f;
+		PlanetThresholds.Meta = 99.9f;
+		PlanetThresholds.MatWhenDensEq = 99.5f;
+
+		const TPair<const TCHAR*, FVector> SurfaceSites[] = {
+			{ TEXT("north pole"), FVector(0, 0, 1) },
+			{ TEXT("south pole"), FVector(0, 0, -1) },
+			{ TEXT("equator"), LatLonDirection(0.0, 20.0) },
+			{ TEXT("latitude 45"), LatLonDirection(45.0, 3.0) },
+		};
+		int32 MovedTotal = 0;
+		for (const TPair<const TCHAR*, FVector>& Site : SurfaceSites)
+		{
+			const FVector Surface = Mode->GetSurfacePoint(Origin + Site.Value * Radius, Config->NoiseParams).Position;
+			const FVector Local = (Surface - Origin) / ChunkWorldSize;
+			FVoxelNoiseGenerationRequest Request;
+			Request.ChunkCoord = FIntVector(FMath::FloorToInt(Local.X), FMath::FloorToInt(Local.Y), FMath::FloorToInt(Local.Z));
+			Request.ChunkSize = Config->ChunkSize;
+			Request.VoxelSize = Config->VoxelSize;
+			Request.NoiseParams = Config->NoiseParams;
+			FVoxelWorldModeFactory::FillGenerationRequest(*Config, Request);
+			Request.bEnableBiomes = true;
+			Request.BiomeConfiguration = BiomeConfig;
+			MovedTotal += BiomesMoved(Request, 0.6f);
+			bAllPass &= VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request,
+				*FString::Printf(TEXT("Climate shaping, planet %s"), Site.Key), PlanetThresholds);
+		}
+		AddInfo(FString::Printf(TEXT("Planet: %d voxels change biome with the options off"), MovedTotal));
+		TestTrue(TEXT("Planet: the options move biomes in the chunks (non-vacuous)"), MovedTotal > 0);
+		Config->RemoveFromRoot();
+	}
+
+	GPUGenerator.Shutdown();
+	BiomeConfig->RemoveFromRoot();
+	TestTrue(TEXT("GPU==CPU parity with the climate options and the ridged terrain on, plane and planet, LOD 0/1/2"), bAllPass);
+	return true;
+}

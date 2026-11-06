@@ -1,0 +1,52 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+//
+// The climate the biome blend reads, as the CPU's FVoxelBiomeSnapshot shapes it (EqualizeField, ShapeTemperature,
+// ShapeMoisture, ShapeContinentalness): the raw 2-octave fields equalised through VOXELGEN_CLIMATE_CDF, temperature
+// leaned toward latitude on a planet and lowered by the lapse over the column's surface. The same float arithmetic in
+// the same order; the GPUvsCPU parity tests hold the two equal. References the globals ClimateEqualize,
+// ContinentalnessEqualize, TemperatureLatitudeWeight and TemperatureLapseRate (GenerateVoxelDensity.usf).
+
+#pragma once
+
+#include "/Plugin/VoxelWorlds/Shared/VoxelGenerationShared.ush"
+
+static const float ClimateCdf[VOXELGEN_CLIMATE_CDF_COUNT] = VOXELGEN_CLIMATE_CDF;
+
+// FVoxelBiomeSnapshot::EqualizeField: the raw value through the fields' CDF, linear between entries, on [-1, 1].
+float GpuEqualizeField(float RawValue)
+{
+    const float Position = (clamp(RawValue, -1.0f, 1.0f) + 1.0f) * 0.5f * (float)(VOXELGEN_CLIMATE_CDF_COUNT - 1);
+    const int Index = min((int)Position, VOXELGEN_CLIMATE_CDF_COUNT - 2);
+    const float Fraction = Position - (float)Index;
+    const float Quantile = ClimateCdf[Index] + (ClimateCdf[Index + 1] - ClimateCdf[Index]) * Fraction;
+    return Quantile * 2.0f - 1.0f;
+}
+
+// FVoxelBiomeSnapshot::ShapeTemperature. SurfaceAltitude: world Z on a heightmap, the altitude over the datum on a planet;
+// SinLatitude: the column direction's Z, read only when HasLatitude != 0.
+float GpuShapeTemperature(float RawTemperature, float SurfaceAltitude, float SinLatitude, int HasLatitude)
+{
+    float Temperature = (ClimateEqualize != 0) ? GpuEqualizeField(RawTemperature) : RawTemperature;
+    if (HasLatitude != 0 && TemperatureLatitudeWeight > 0.0f)
+    {
+        const float LatitudeTemperature = 1.0f - 2.0f * min(abs(SinLatitude), 1.0f);
+        Temperature += (LatitudeTemperature - Temperature) * TemperatureLatitudeWeight;
+    }
+    if (TemperatureLapseRate > 0.0f)
+    {
+        Temperature -= TemperatureLapseRate * max(SurfaceAltitude, 0.0f) * (1.0f / 10000.0f);
+    }
+    return Temperature;
+}
+
+// FVoxelBiomeSnapshot::ShapeMoisture
+float GpuShapeMoisture(float RawMoisture)
+{
+    return (ClimateEqualize != 0) ? GpuEqualizeField(RawMoisture) : RawMoisture;
+}
+
+// FVoxelBiomeSnapshot::ShapeContinentalness
+float GpuShapeContinentalness(float RawContinentalness)
+{
+    return (ContinentalnessEqualize != 0) ? GpuEqualizeField(RawContinentalness) : RawContinentalness;
+}

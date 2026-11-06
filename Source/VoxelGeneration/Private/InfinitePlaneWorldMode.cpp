@@ -190,7 +190,7 @@ FWorldModeTerrainParams FInfinitePlaneWorldMode::ComputeEffectiveTerrainParamsAt
 		ContinentalnessNoiseParams.Seed = BaseNoiseParams.Seed + BiomeSnapshot->ContinentalnessSeedOffset;
 		ContinentalnessNoiseParams.Frequency = BiomeSnapshot->ContinentalnessNoiseFrequency;
 
-		OutContinentalness = FVoxelCPUNoiseGenerator::FBM3D(SamplePos, ContinentalnessNoiseParams);
+		OutContinentalness = BiomeSnapshot->ShapeContinentalness(FVoxelCPUNoiseGenerator::FBM3D(SamplePos, ContinentalnessNoiseParams));
 
 		float HeightOffset = 0.0f;
 		float HeightScaleMult = 1.0f;
