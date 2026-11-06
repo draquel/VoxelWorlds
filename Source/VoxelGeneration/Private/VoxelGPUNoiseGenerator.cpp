@@ -49,8 +49,9 @@ static void GetPlanetChunkAnchor(const FVoxelNoiseGenerationRequest& Request, FV
  * clear the cave flags) and pass 1 of ApplyUndergroundClassificationPass along the same lines. The lines come from
  * FVoxelDownLines, the geometry the CPU passes use, so both walk the same voxels in the same order.
  *
- * Gating as on the CPU: the water passes only with water on; the seed and flood only when the sea surface crosses the
- * chunk's voxel box (no seeds otherwise); the cave-flag clear whenever the water pass ran, folded into the line scan.
+ * Gating as on the CPU: the water passes only with water on; the seed and flood when the sea surface crosses the
+ * chunk's voxel box or the box lies wholly under it (G132; no seeds above the sea); the cave-flag clear whenever the
+ * water pass ran, folded into the line scan.
  */
 static void AddPlanetLinePassDispatches(
 	FRDGBuilder& GraphBuilder,
@@ -94,7 +95,7 @@ static void AddPlanetLinePassDispatches(
 	const FVoxelSeaSurface Sea = FVoxelSeaSurface::MakeSphere(Request.SphericalPlanetParams.PlanetCenter, Request.WaterRadius);
 	const FBox VoxelBox(ChunkWorldPos, ChunkWorldPos + FVector((ChunkSize - 1) * Request.VoxelSize));
 
-	if (bWaterPass && Sea.Crosses(VoxelBox))
+	if (bWaterPass && !Sea.IsAbove(VoxelBox))
 	{
 		// Phase 1: seed along the lines
 		{

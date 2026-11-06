@@ -1011,8 +1011,8 @@ bool FPlanetSeaDepthTest::RunTest(const FString& Parameters)
 /**
  * SP-B8: the radial water fill. In a chunk at 45 degrees that the sea sphere crosses, the open sea between the ground
  * and the sea surface takes the water flag, the air above the sea and a cave in the ground stay dry, and the Z-plane
- * WaterLevel plays no part. A chunk wholly under the sea is left to its neighbours (on the plane such a chunk seeds
- * from its top layer since G129; the radial pass keeps the neighbours' fill).
+ * WaterLevel plays no part. A chunk wholly under the sea seeds every line from where it enters it (G132, as the plane's
+ * chunks under the level since G129): its open sea is wet, its cave dry.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetWaterFillTest,
 	"VoxelWorlds.WorldModes.Planet.WaterFill",
@@ -1088,19 +1088,51 @@ bool FPlanetWaterFillTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("The cave stays dry"), CaveWet, 0);
 	TestEqual(TEXT("Cave flags are cleared after the fill"), CaveFlagsLeft, 0);
 
-	// A chunk wholly under the sea seeds nothing by itself (its neighbours fill it at load; the plane's seeds since G129).
+	// A chunk wholly under the sea (three chunks deeper along the diagonal), with the same ground and cave: every line seeds
+	// from where it enters it, so its open sea is wet and the cave dry (G132; before, it seeded nothing and its neighbours
+	// flooded it on the game thread when its mesh landed)
 	FVoxelNoiseGenerationRequest Deep = MakePlanetPassRequest(Chunk - FIntVector(3, 0, 3), EWorldMode::SphericalPlanet);
 	Deep.bEnableWaterLevel = true;
 	Deep.WaterRadius = Request.WaterRadius;
+	Deep.WaterLevel = 1.0e9f;
+	const FVector DeepCorner = Deep.GetChunkWorldPosition() + FVector((N - 1) * PlanetTestVoxelSize);
+	TestTrue(TEXT("The deep chunk lies wholly under the sea"), DeepCorner.Size() < Deep.WaterRadius
+		&& Deep.GetChunkWorldPosition().Size() < Deep.WaterRadius);
 	TArray<FVoxelData> DeepData;
-	DeepData.Init(FVoxelData::Air(), N * N * N);
-	FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Deep, DeepData);
-	int32 DeepWet = 0;
-	for (const FVoxelData& Voxel : DeepData)
+	DeepData.SetNum(N * N * N);
+	for (int32 Z = 0; Z < N; ++Z)
+	for (int32 Y = 0; Y < N; ++Y)
+	for (int32 X = 0; X < N; ++X)
 	{
-		DeepWet += Voxel.HasWaterFlag() ? 1 : 0;
+		const bool bGround = X + Z < 20;
+		FVoxelData Voxel = bGround ? FVoxelData::Solid(1, 0) : FVoxelData::Air();
+		if (bGround && FVector::Dist(FVector(X, Y, Z), CaveCentre) < 3.0)
+		{
+			Voxel = FVoxelData::Air();
+			Voxel.SetCaveFlag(true);
+		}
+		DeepData[VoxelIndex(X, Y, Z)] = Voxel;
 	}
-	TestEqual(TEXT("A chunk wholly under the sea seeds nothing by itself"), DeepWet, 0);
+	FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Deep, DeepData);
+	int32 DeepSeaAir = 0, DeepSeaWet = 0, DeepCaveAir = 0, DeepCaveWet = 0;
+	for (int32 Z = 0; Z < N; ++Z)
+	for (int32 Y = 0; Y < N; ++Y)
+	for (int32 X = 0; X < N; ++X)
+	{
+		const FVoxelData& Voxel = DeepData[VoxelIndex(X, Y, Z)];
+		if (Voxel.IsSolid())
+		{
+			continue;
+		}
+		int32& Air = X + Z < 20 ? DeepCaveAir : DeepSeaAir;
+		int32& Wet = X + Z < 20 ? DeepCaveWet : DeepSeaWet;
+		++Air;
+		Wet += Voxel.HasWaterFlag() ? 1 : 0;
+	}
+	AddInfo(FString::Printf(TEXT("wholly under the sea: sea %d of %d air voxels wet, cave %d of %d"), DeepSeaWet, DeepSeaAir, DeepCaveWet, DeepCaveAir));
+	TestTrue(TEXT("The deep chunk has open sea and a cave"), DeepSeaAir > 1000 && DeepCaveAir > 50);
+	TestEqual(TEXT("A chunk wholly under the sea: all its open sea is wet"), DeepSeaWet, DeepSeaAir);
+	TestEqual(TEXT("A chunk wholly under the sea: the cave stays dry"), DeepCaveWet, 0);
 	return true;
 }
 

@@ -191,15 +191,17 @@ void FVoxelCPUNoiseGenerator::ApplyRadialWaterFillPass(
 		return ChunkWorldPos + FVector(Local) * VoxelSize;
 	};
 
-	// === Phase 1: seed the open sea, in a chunk the sea surface passes through ===
+	// === Phase 1: seed the open sea, in a chunk the sea surface passes through or one wholly under it ===
 	// As the plane's column scan: along each line in local down (FVoxelDownLines, the chunk centre's down), the part above
 	// the sea must be clear of solid and cave voxels from where the line enters the chunk (the column is open from the
 	// chunk top); from the sea surface down, air takes the water flag until the first solid or cave voxel. A line that
 	// enters the chunk already below the sea counts as open, as a column does when the water plane is the chunk's top
-	// layer. Chunks wholly under the sea fill from their neighbours (UVoxelChunkManager::PropagateWaterFromNeighbors). The
-	// GPU's WaterLineSeedCS walks the same lines.
+	// layer: a planet's terrain is solid under its surface and air above it along local down, caves aside, and caves are
+	// barriers here. So a chunk wholly under the sea seeds every line from where it enters (G132; until then such a chunk
+	// had no water of its own and UVoxelChunkManager::PropagateWaterFromNeighbors flooded it on the game thread when its
+	// mesh landed, as heightmap chunks did before G129). The GPU's WaterLineSeedCS walks the same lines.
 	const FBox VoxelBox(ChunkWorldPos, ChunkWorldPos + FVector((ChunkSize - 1) * VoxelSize));
-	if (Sea.Crosses(VoxelBox))
+	if (!Sea.IsAbove(VoxelBox))
 	{
 		struct FSeaLine
 		{
