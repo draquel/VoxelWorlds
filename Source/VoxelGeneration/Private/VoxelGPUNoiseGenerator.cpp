@@ -166,12 +166,11 @@ static void AddVoxelPostPassDispatches(
 
 	// The CPU pass intentionally uses the base VoxelSize (not the LOD-effective size) — mirror it.
 	const float ChunkWorldZ = static_cast<float>(Request.GetChunkWorldPosition().Z);
-	const float ChunkTopZ = ChunkWorldZ + ChunkSize * Request.VoxelSize;
 
 	const bool bPlanet = Request.WorldMode == EWorldMode::SphericalPlanet;
 	const bool bWaterPass = Request.bEnableWaterLevel && !bPlanet;
-	const bool bChunkContainsWaterLevel = bWaterPass
-		&& Request.WaterLevel >= ChunkWorldZ && Request.WaterLevel < ChunkTopZ;
+	// The chunk the water level passes through, or one wholly under it (seeded from its top layer, G129), as the CPU pass
+	const bool bChunkAtOrUnderWaterLevel = bWaterPass && Request.WaterLevel >= ChunkWorldZ;
 
 	const auto& ShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
 
@@ -180,7 +179,7 @@ static void AddVoxelPostPassDispatches(
 		AddPlanetLinePassDispatches(GraphBuilder, Request, VoxelBuffer);
 	}
 
-	if (bChunkContainsWaterLevel)
+	if (bChunkAtOrUnderWaterLevel)
 	{
 		// Phase 1: column seed
 		{

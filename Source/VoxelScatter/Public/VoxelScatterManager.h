@@ -36,6 +36,18 @@ enum class EVoxelScatterOutsideReads : uint8
 	PlanetShell,
 };
 
+/** What a hand-off the distance pass asks for did (UVoxelScatterManager::SetChunkHandOffRequester). */
+enum class EVoxelScatterHandOff : uint8
+{
+	/** The chunk's voxels were handed off (HandOffChunkVoxels) */
+	HandedOff,
+	/** Not yet: its voxels are being made ready off the game thread (a far-compressed chunk's snapshot decoding on a
+	 *  worker, G130); the chunk stays awaiting and is asked for again on a later pass */
+	Pending,
+	/** The chunk has no voxel data any more: it is dropped */
+	Gone,
+};
+
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnChunkScatterReady, const FIntVector& /*ChunkCoord*/, int32 /*SpawnPointCount*/);
 
 /**
@@ -574,10 +586,14 @@ public:
 	 * is handed off only when it submits a mesh, and while walking every chunk arrives at the window's front beyond every
 	 * spawn distance, so without this its scatter waited for its next mesh, the LOD refine near the viewer, and popped
 	 * there. The distance pass calls it on the game thread for the chunks awaiting their first extraction that have come
-	 * within the scatter horizon, nearest first, MaxDistanceSpawnChunksPerPass a pass. Returns false when the chunk has
-	 * no voxel data any more (it is dropped). Unset: those chunks wait for their next mesh (the behaviour before).
+	 * within the scatter horizon, nearest first, MaxDistanceSpawnChunksPerPass a pass. Returns Gone when the chunk has
+	 * no voxel data any more (it is dropped), Pending when its voxels are not ready without a game-thread wait (it stays
+	 * awaiting for the next pass and counts against the pass's limit). Unset: those chunks wait for their next mesh (the
+	 * behaviour before).
+	 *
+	 * @param InRequester Hands the chunk off; returns what it did
 	 */
-	void SetChunkHandOffRequester(TFunction<bool(const FIntVector& /*ChunkCoord*/)> InRequester)
+	void SetChunkHandOffRequester(TFunction<EVoxelScatterHandOff(const FIntVector& /*ChunkCoord*/)> InRequester)
 	{
 		ChunkHandOffRequester = MoveTemp(InRequester);
 	}
@@ -675,7 +691,7 @@ protected:
 	TFunction<const FChunkEditLayer*(const FIntVector&)> EditLayerSource;
 
 	/** How to hand a chunk off again (see SetChunkHandOffRequester). */
-	TFunction<bool(const FIntVector&)> ChunkHandOffRequester;
+	TFunction<EVoxelScatterHandOff(const FIntVector&)> ChunkHandOffRequester;
 
 	/**
 	 * Chunks handed off with every type out of range and nothing cached (G79). The distance pass hands them off again

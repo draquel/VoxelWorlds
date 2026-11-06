@@ -886,11 +886,27 @@ bool FVoxelGPUvsCPUWaterParityTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Underwater materials should appear (non-vacuous)"), UwMatCount > 0);
 	}
 
-	const bool bAllPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("Water"));
+	bool bAllPass = VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, TEXT("Water"));
+
+	// G129: the chunk below, wholly under the water level: both paths seed its open sea from its top layer
+	FVoxelNoiseGenerationRequest Submerged = Request;
+	Submerged.ChunkCoord = FIntVector(3, 1, -1);
+	{
+		TArray<FVoxelData> ProbeData;
+		GPUGenerator.GenerateChunkCPU(Submerged, ProbeData);
+		int32 WaterCount = 0;
+		for (const FVoxelData& V : ProbeData)
+		{
+			WaterCount += V.HasWaterFlag() ? 1 : 0;
+		}
+		AddInfo(FString::Printf(TEXT("Submerged probe: %d water-flagged of %d"), WaterCount, ProbeData.Num()));
+		TestTrue(TEXT("The submerged chunk holds water of its own (non-vacuous)"), WaterCount > 0);
+	}
+	bAllPass &= VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Submerged, TEXT("WaterSubmerged"));
 
 	GPUGenerator.Shutdown();
 	BiomeConfig->RemoveFromRoot();
-	TestTrue(TEXT("GPU==CPU water parity (underwater materials + water fill) across LOD 0/1/2"), bAllPass);
+	TestTrue(TEXT("GPU==CPU water parity (underwater materials + water fill, a chunk holding the level and one under it) across LOD 0/1/2"), bAllPass);
 	return true;
 }
 
@@ -1782,5 +1798,98 @@ bool FVoxelGPUvsCPUClimateShapingParityTest::RunTest(const FString& Parameters)
 	GPUGenerator.Shutdown();
 	BiomeConfig->RemoveFromRoot();
 	TestTrue(TEXT("GPU==CPU parity with the climate options and the ridged terrain on, plane and planet, LOD 0/1/2"), bAllPass);
+	return true;
+}
+
+// G129: the heightmap water fill in a chunk wholly under the water level. Until G129 only the chunk holding the level
+// was seeded, so a chunk under it had no water of its own and the chunk manager flooded it on the game thread when its
+// mesh landed (PropagateWaterFromNeighbors, a flood over the whole chunk). Now its columns are scanned from its top layer:
+// the open sea over the ground takes the flag, the ground and a cave in it stay dry, the cave flags clear; a chunk whose
+// top meets the water level is under it too, and a chunk above the level takes none.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterFillSubmergedChunkTest, "VoxelWorlds.Generation.WaterFill.SubmergedChunk",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelWaterFillSubmergedChunkTest::RunTest(const FString& Parameters)
+{
+	constexpr int32 N = 16;
+	auto Index = [](int32 X, int32 Y, int32 Z) { return X + Y * N + Z * N * N; };
+	// Ground below Z 4 + (X + Y) % 5 in voxels, a cave (cave-flagged, as carving leaves it) in it
+	auto Build = [&](TArray<FVoxelData>& Data)
+	{
+		Data.SetNum(N * N * N);
+		for (int32 Z = 0; Z < N; ++Z)
+		for (int32 Y = 0; Y < N; ++Y)
+		for (int32 X = 0; X < N; ++X)
+		{
+			const bool bGround = Z < 4 + (X + Y) % 5;
+			FVoxelData Voxel = bGround ? FVoxelData::Solid(1, 0) : FVoxelData::Air();
+			if (bGround && FVector::Dist(FVector(X, Y, Z), FVector(8.0, 8.0, 1.5)) < 1.6)
+			{
+				Voxel = FVoxelData::Air();
+				Voxel.SetCaveFlag(true);
+			}
+			Data[Index(X, Y, Z)] = Voxel;
+		}
+	};
+	auto Count = [&](const TArray<FVoxelData>& Data, int32& OutSeaAir, int32& OutSeaWet, int32& OutCaveAir, int32& OutCaveWet,
+		int32& OutSolidWet, int32& OutCaveFlags)
+	{
+		OutSeaAir = OutSeaWet = OutCaveAir = OutCaveWet = OutSolidWet = OutCaveFlags = 0;
+		for (int32 Z = 0; Z < N; ++Z)
+		for (int32 Y = 0; Y < N; ++Y)
+		for (int32 X = 0; X < N; ++X)
+		{
+			const FVoxelData& Voxel = Data[Index(X, Y, Z)];
+			OutCaveFlags += Voxel.HasCaveFlag() ? 1 : 0;
+			if (Voxel.IsSolid())
+			{
+				OutSolidWet += Voxel.HasWaterFlag() ? 1 : 0;
+			}
+			else if (Z < 4 + (X + Y) % 5)
+			{
+				++OutCaveAir;
+				OutCaveWet += Voxel.HasWaterFlag() ? 1 : 0;
+			}
+			else
+			{
+				++OutSeaAir;
+				OutSeaWet += Voxel.HasWaterFlag() ? 1 : 0;
+			}
+		}
+	};
+
+	FVoxelNoiseGenerationRequest Request;
+	Request.ChunkSize = N;
+	Request.VoxelSize = 100.0f;
+	Request.WorldMode = EWorldMode::InfinitePlane;
+	Request.bEnableWaterLevel = true;
+	Request.ChunkCoord = FIntVector(2, -1, -2); // the chunk spans Z -3,200 to -1,600, its voxels -3,200 to -1,700
+
+	// Wholly under the level (the level 2,000 above the chunk's top), and with the level at the chunk's top
+	for (const float WaterLevel : { 400.0f, -1600.0f })
+	{
+		Request.WaterLevel = WaterLevel;
+		TArray<FVoxelData> Data;
+		Build(Data);
+		FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Request, Data);
+		int32 SeaAir, SeaWet, CaveAir, CaveWet, SolidWet, CaveFlags;
+		Count(Data, SeaAir, SeaWet, CaveAir, CaveWet, SolidWet, CaveFlags);
+		AddInfo(FString::Printf(TEXT("Water level %.0f: sea %d of %d air voxels wet, cave %d of %d, solid %d wet"),
+			WaterLevel, SeaWet, SeaAir, CaveWet, CaveAir, SolidWet));
+		TestTrue(TEXT("The chunk has open sea and a cave"), SeaAir > 1000 && CaveAir > 5);
+		TestEqual(TEXT("All open sea over the ground is wet"), SeaWet, SeaAir);
+		TestEqual(TEXT("The cave stays dry"), CaveWet, 0);
+		TestEqual(TEXT("No solid voxel is wet"), SolidWet, 0);
+		TestEqual(TEXT("Cave flags are cleared after the fill"), CaveFlags, 0);
+	}
+
+	// Above the level: nothing to seed
+	Request.WaterLevel = -3300.0f;
+	TArray<FVoxelData> Dry;
+	Build(Dry);
+	FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(Request, Dry);
+	int32 SeaAir, SeaWet, CaveAir, CaveWet, SolidWet, CaveFlags;
+	Count(Dry, SeaAir, SeaWet, CaveAir, CaveWet, SolidWet, CaveFlags);
+	TestEqual(TEXT("A chunk above the water level takes no water"), SeaWet + CaveWet + SolidWet, 0);
 	return true;
 }

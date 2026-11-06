@@ -1669,10 +1669,16 @@ void UVoxelScatterManager::ProcessDeferredFirstExtractions()
 			break;
 		}
 		// The hand-off runs HandOffChunkVoxels, which queues the extraction and takes the chunk out of the set; a chunk
-		// without voxel data any more is dropped.
+		// without voxel data any more is dropped, and one whose voxels are still being made ready (a far-compressed chunk's
+		// snapshot decoding on a worker, G130) waits for the next pass.
 		ChunksAwaitingFirstExtraction.Remove(Candidate.ChunkCoord);
 		++TotalDeferredFirstExtractions;
-		if (ChunkHandOffRequester(Candidate.ChunkCoord))
+		const EVoxelScatterHandOff HandOff = ChunkHandOffRequester(Candidate.ChunkCoord);
+		if (HandOff == EVoxelScatterHandOff::Pending)
+		{
+			ChunksAwaitingFirstExtraction.Add(Candidate.ChunkCoord);
+		}
+		if (HandOff != EVoxelScatterHandOff::Gone)
 		{
 			++Launched;
 		}
@@ -1799,12 +1805,14 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 		return;
 	}
 
-	// Collect candidates: chunks with cached surface data that need new scatter types
+	// Collect candidates: chunks with cached surface data that need new scatter types. A candidate points at the
+	// definitions (ScatterDefinitions does not change during the pass); only the launched ones copy them for their task, as
+	// most candidates wait for a later pass (a world with a hundred definitions copied thousands a pass).
 	struct FSpawnCandidate
 	{
 		FIntVector ChunkCoord;
 		float Distance;
-		TArray<FScatterDefinition> Definitions;
+		TArray<const FScatterDefinition*> Definitions;
 	};
 	TArray<FSpawnCandidate> Candidates;
 
@@ -1841,7 +1849,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 		const TSet<int32>* CompletedTypes = CompletedScatterTypes.Find(ChunkCoord);
 
 		// Find definitions that are now in range but haven't been generated
-		TArray<FScatterDefinition> NewlyInRangeDefs;
+		TArray<const FScatterDefinition*> NewlyInRangeDefs;
 		for (const FDistanceLimitedDef& Limited : DistanceLimitedDefs)
 		{
 			if (CompletedTypes && CompletedTypes->Contains(Limited.Def->ScatterID))
@@ -1855,7 +1863,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 
 			if (ChunkDistance <= Limited.SpawnDistance)
 			{
-				NewlyInRangeDefs.Add(*Limited.Def);
+				NewlyInRangeDefs.Add(Limited.Def);
 			}
 		}
 
@@ -1905,17 +1913,19 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 		// Pre-mark types as completed to prevent duplicate launches on next pass
 		TSet<int32>& Completed = CompletedScatterTypes.FindOrAdd(Candidate.ChunkCoord);
 		TArray<int32> TypeIDs;
-		for (const FScatterDefinition& Def : Candidate.Definitions)
+		TArray<FScatterDefinition> DefsToGenerate;
+		DefsToGenerate.Reserve(Candidate.Definitions.Num());
+		for (const FScatterDefinition* Def : Candidate.Definitions)
 		{
-			Completed.Add(Def.ScatterID);
-			TypeIDs.Add(Def.ScatterID);
+			Completed.Add(Def->ScatterID);
+			TypeIDs.Add(Def->ScatterID);
+			DefsToGenerate.Add(*Def);
 		}
 
 		// Capture data for thread pool — copy surface data, move definitions
 		TWeakObjectPtr<UVoxelScatterManager> WeakThis(this);
 		const FIntVector ChunkCoord = Candidate.ChunkCoord;
 		FChunkSurfaceData CapturedSurface = *SurfaceData;
-		TArray<FScatterDefinition> DefsToGenerate = Candidate.Definitions;
 
 		Async(EAsyncExecution::ThreadPool,
 			[WeakThis, ChunkCoord, ChunkSeed,

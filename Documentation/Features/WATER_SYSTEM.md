@@ -112,8 +112,12 @@ static FVoxelData Water();        // Create water voxel (air + water flag)
 
 During chunk generation, `FVoxelCPUNoiseGenerator::ApplyWaterFillPass()` runs three phases:
 
-1. **Column seed** (only in a chunk holding the water level): a column open from the chunk's top down to `WaterLevel`
-   takes the water flag from there down to the first solid or cave-flagged voxel
+1. **Column seed** (in a chunk holding the water level or wholly under it): a column open from the chunk's top down to
+   `WaterLevel` takes the water flag from there down to the first solid or cave-flagged voxel. In a chunk wholly under the
+   level the scan starts at the chunk's top layer, so a column whose top voxel is air is open sea: a heightmap column is
+   solid below its surface and air above it, caves aside, and caves are barriers here (G129; before it such a chunk had no
+   water of its own and `PropagateWaterFromNeighbors` flooded all of it on the game thread when its mesh landed, up to
+   17 ms a chunk under `SmoothTerrain_Island`'s lakes)
 2. **Flood**: a BFS spreads the flag through non-cave air below the sea
 3. **Clear** the cave flags (a temporary barrier: caves below the sea stay dry)
 
@@ -136,7 +140,8 @@ version, so the water tile reads them. A resident chunk's snapshot shares its ar
 the array only while a seam job or a cook still holds it, and that reader keeps the voxels it took.
 
 **The second pulls (world modes review G70).** A chunk pulls once when its mesh lands, and a chunk wholly under the sea
-gets all of its water that way, so water that reached it only through a neighbour that flooded after it pulled never came:
+got all of its water that way (on a planet it still does; a heightmap one has its open sea from generation since G129),
+so water that reached it only through a neighbour that flooded after it pulled never came:
 which voxels flooded depended on the order the chunks finished meshing in. Now a chunk's water rising queues its face
 neighbours that have already pulled (`bWaterSettled`) and reach below the sea to pull again (`QueueWaterRepulls`): across
 every face when its water first settles (its generated water arrived with it), else across the faces its pull flooded.
@@ -169,8 +174,9 @@ generation's fill pass tests it.
   flag) with a 6-connected **water-flagged air** neighbour. A filled voxel keeps the water flag of the sea it filled (`Add` keeps the
   metadata) but is solid, so it is no source: a cavity dug under a fill plug stays dry.
 - A chunk's water must be in place (`UVoxelChunkManager::IsChunkWaterSettled`): it has voxel data and has submitted a
-  mesh since the data arrived, which runs `PropagateWaterFromNeighbors`. A chunk wholly under a heightmap sea has no water
-  flags before that (generation's column scan seeds only the chunk holding the water level). An edit of a chunk that is
+  mesh since the data arrived, which runs `PropagateWaterFromNeighbors`. A chunk wholly under a planet's sea has no water
+  flags before that (its line scan seeds only the chunks the sea surface crosses; a heightmap chunk under the level has its
+  open sea from generation since G129, and the pull adds what reaches it across its faces). An edit of a chunk that is
   not settled (a POI's terraform or a dungeon stamp at stream-in, a save's edits, a chunk generated but not meshed yet)
   waits: its box is kept until the chunk manager calls `OnChunkWaterSettled` at that mesh submit (once per arrival of
   the chunk's voxel data), then queued.
@@ -230,8 +236,8 @@ heightmap worlds, the sphere of `WaterRadius` around the planet centre on a plan
 Generation runs `ApplyRadialWaterFillPass` on planets: chunks the sea sphere crosses seed the open sea along digital
 lines in the chunk's local down direction (the column scan's rule: the part above the sea must be clear from where
 the line enters the chunk, then air takes the flag down to the first solid or cave voxel), a BFS spreads through
-non-cave air inside the radius, and the cave flags clear. Chunks wholly under the sea fill from their neighbours as on
-the plane. The 2D water tiles below are XY grids at `WaterLevel`, so they are off on planets
+non-cave air inside the radius, and the cave flags clear. Chunks wholly under the sea fill from their neighbours
+(`PropagateWaterFromNeighbors`), as heightmap chunks under the level did before G129. The 2D water tiles below are XY grids at `WaterLevel`, so they are off on planets
 (`UVoxelChunkManager::UsesWaterTiles`).
 
 **One sea for gameplay (SP-E1, spherical Phase 3).** Everything that asks "how deep under the water is this" goes

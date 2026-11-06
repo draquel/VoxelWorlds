@@ -35,6 +35,8 @@
 //   the trees' distance) the distance pass hands it off again and it holds the trees and no grass; with the viewer near
 //   it holds the same spawn points as a chunk submitted with the viewer near from the start; with the viewer far again
 //   every type is released (the radius types too), and an unloaded chunk is never asked for.
+// - Pending (G130): a requester that answers Pending (a far-compressed chunk's snapshot still decoding on a worker) keeps
+//   the chunk waiting; a later pass asks again and hands it off, with the same trees as a chunk handed off at once.
 // ---------------------------------------------------------------------------
 
 namespace VoxelScatterHorizonTestUtils
@@ -86,6 +88,8 @@ namespace VoxelScatterHorizonTestUtils
 		TSet<FIntVector> Loaded;
 		int32 Requests = 0;
 		int32 RequestsForUnloaded = 0;
+		/** Answers Pending to this many requests first, as the chunk manager does while a compressed chunk's snapshot decodes (G130) */
+		int32 PendingAnswers = 0;
 
 		explicit FHarness(const TCHAR* WorldName)
 			: FScatterTestWorld(WorldName)
@@ -108,16 +112,21 @@ namespace VoxelScatterHorizonTestUtils
 				}
 			}
 			// The chunk manager's requester: a loaded chunk is handed off again from its voxels
-			Manager->SetChunkHandOffRequester([this](const FIntVector& Coord) -> bool
+			Manager->SetChunkHandOffRequester([this](const FIntVector& Coord) -> EVoxelScatterHandOff
 			{
 				++Requests;
 				if (!Loaded.Contains(Coord))
 				{
 					++RequestsForUnloaded;
-					return false;
+					return EVoxelScatterHandOff::Gone;
+				}
+				if (PendingAnswers > 0)
+				{
+					--PendingAnswers;
+					return EVoxelScatterHandOff::Pending;
 				}
 				Manager->HandOffChunkVoxels(Coord, MakeChunk(Coord), ChunkSize, VoxelSize);
-				return true;
+				return EVoxelScatterHandOff::HandedOff;
 			});
 		}
 
@@ -277,6 +286,40 @@ bool FVoxelScatterFirstExtractionHorizonTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Unloaded, nothing of it is cached"), H.Manager->GetChunkSurfaceData(Other) != nullptr, false);
 	AddInfo(FString::Printf(TEXT("end: requests %d (%d for unloaded chunks), deferred first extractions %lld"), H.Requests, H.RequestsForUnloaded,
 		H.Manager->GetTotalDeferredFirstExtractions()));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterFirstExtractionPendingTest,
+	"VoxelWorlds.Scatter.FirstExtraction.Pending",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterFirstExtractionPendingTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterHorizonTestUtils;
+
+	const FIntVector Target(0, 0, 0);
+	const FVector Near = ChunkCenter(Target);
+	const FVector Far = Near + FVector(40000.0, 0.0, 0.0);
+	const FVector TreeRange = Near + FVector(15000.0, 0.0, 0.0);
+
+	FHarness H(TEXT("VoxelScatterHorizonPendingWorld"));
+	H.Viewer = Far;
+	H.Update();
+	H.Load(Target);
+	H.Settle(Far);
+	TestTrue(TEXT("Loaded at the front: the chunk awaits its first extraction"), H.State(Target).bAwaiting);
+
+	// The first two requests answer Pending: the chunk stays waiting, nothing extracted, and a third pass hands it off
+	H.PendingAnswers = 2;
+	H.Settle(TreeRange);
+	const FChunkState InTreeRange = H.State(Target);
+	AddInfo(H.Describe(TEXT("viewer within the trees' distance, two pending answers"), InTreeRange));
+	TestEqual(TEXT("Every pending answer was asked again"), H.PendingAnswers, 0);
+	TestEqual(TEXT("Three hand-offs asked for: two pending, one done"), H.Requests, 3);
+	TestTrue(TEXT("Handed off at last: the surface is cached"), InTreeRange.bSurface);
+	TestFalse(TEXT("Handed off at last: the chunk no longer waits"), InTreeRange.bAwaiting);
+	TestTrue(TEXT("Handed off at last: the trees came"), InTreeRange.Trees > 0);
+	TestEqual(TEXT("Handed off at last: each spawn point renders once"), InTreeRange.Instances, InTreeRange.Spawns.Num());
 	return true;
 }
 
