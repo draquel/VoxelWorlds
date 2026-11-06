@@ -8,6 +8,7 @@
 #include "Diagnostics/VoxelConsoleHelpers.h"
 #include "VoxelTreeInjector.h"
 #include "VoxelSurfaceQuery.h"
+#include "VoxelSeaSurface.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelWorldConfiguration.h"
 #include "GameFramework/PlayerController.h"
