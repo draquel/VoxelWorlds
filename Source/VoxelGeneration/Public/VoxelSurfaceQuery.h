@@ -65,6 +65,39 @@ struct FVoxelSurfaceMaterialMix
 };
 
 /**
+ * The climate at a position (FVoxelSurfaceQuery::QueryClimateAt, UVoxelChunkManager::GetClimateAt): the three
+ * dimensionless fields the biome came from, as generation shaped them (latitude, lapse rate, equalisation), with the
+ * surface they were read at. The weather system reads it (the weather plan's D66: VoxelWorlds has no unit; the weather
+ * maps the temperature to degrees). Invalid (bValid false) without a valid biome snapshot: the fields are then 0.
+ */
+struct VOXELGENERATION_API FVoxelClimateSample
+{
+	/** Temperature in about [-1, 1], shaped as generation shapes it (the biome's input). */
+	float Temperature = 0.0f;
+
+	/** Moisture in about [-1, 1], shaped. */
+	float Moisture = 0.0f;
+
+	/** Continentalness in [-1, 1]; 0 where the biome configuration has it off. */
+	float Continentalness = 0.0f;
+
+	/** The generated surface's altitude over the datum on the position's up-line (what the lapse rate read), uu. */
+	float SurfaceAltitude = 0.0f;
+
+	/** sin(latitude) of the position on a planet (its direction's Z); 0 on a heightmap world. */
+	float SinLatitude = 0.0f;
+
+	/** Local up at the position (+Z in heightmap modes, radial on a planet). */
+	FVector Up = FVector::UpVector;
+
+	/** The dominant biome of the blend at these fields (0 when invalid). */
+	uint8 BiomeID = 0;
+
+	/** The biome snapshot was valid: the fields are generation's. */
+	bool bValid = false;
+};
+
+/**
  * Stateless, thread-safe surface queries against the procedural generator.
  *
  * Answers "what is the terrain surface at world X,Y" (height, normal, slope, biome,
@@ -154,6 +187,72 @@ public:
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
 		const FVoxelSeaSurface& Sea);
+
+	/**
+	 * The climate at a position, in any world mode (the weather plan's P2): the generated surface on the position's
+	 * up-line (GetGeneratedSurface, with the zones there) and the three climate fields read at it exactly as the biome
+	 * pipeline reads them (SampleHeightmapClimate on a heightmap world, SamplePlanetClimate on a planet: the same noise,
+	 * seeds and shaping, so the sample's biome is the surface's), with the local up. The one runtime "climate at a
+	 * position"; the editor's field preview is the other reader of the fields.
+	 *
+	 * @param WorldMode World mode
+	 * @param WorldPos Any position on the up-line
+	 * @param NoiseParams Terrain noise (its seed derives the climate seeds)
+	 * @param BiomeSnapshot Value-captured biome data (FVoxelBiomeSnapshot::FromConfig)
+	 * @param Zones The conditioning zones there, or null / empty for the natural surface
+	 * @param OutSample The climate; invalid with the fields 0 when the snapshot is invalid (the up and the surface still filled)
+	 * @return OutSample.bValid
+	 */
+	static bool QueryClimateAt(
+		const IVoxelWorldMode& WorldMode,
+		const FVector& WorldPos,
+		const FVoxelNoiseParams& NoiseParams,
+		const FVoxelBiomeSnapshot& BiomeSnapshot,
+		const TArray<struct FVoxelConditioningZone>* Zones,
+		FVoxelClimateSample& OutSample);
+
+	/**
+	 * The climate fields at a heightmap column, as the CPU generator and QuerySurfaceConditions read them: the temperature
+	 * and moisture fields (FVoxelNoise::MakeFieldParams of the snapshot's seed offsets and frequencies) sampled at (X, Y,
+	 * 0) and shaped (the lapse rate from the terrain height; no latitude), continentalness where the snapshot has it on,
+	 * else 0. The one implementation the biome and the climate queries share.
+	 *
+	 * @param WorldX World X
+	 * @param WorldY World Y
+	 * @param TerrainHeight The surface's world Z there (the lapse rate's input)
+	 * @param WorldSeed The world seed the climate seeds offset
+	 * @param BiomeSnapshot Value-captured biome data; invalid: the fields are 0
+	 * @param OutTemperature Shaped temperature
+	 * @param OutMoisture Shaped moisture
+	 * @param OutContinentalness Shaped continentalness, 0 when off
+	 */
+	static void SampleHeightmapClimate(
+		float WorldX, float WorldY, float TerrainHeight,
+		int32 WorldSeed,
+		const FVoxelBiomeSnapshot& BiomeSnapshot,
+		float& OutTemperature, float& OutMoisture, float& OutContinentalness);
+
+	/**
+	 * The climate fields along a planet direction, as GenerateChunkSphericalPlanet and the planet queries read them: the
+	 * planet noise at the direction's point on the datum sphere (FSphericalPlanetWorldMode::SampleClimate, WM-BP5), the
+	 * temperature shaped by the latitude (the direction's Z) and the terrain altitude, the moisture shaped. The
+	 * continentalness is the radial height's (SampleRadialDisplacement returns it) and is not sampled here.
+	 *
+	 * @param Direction Unit direction from the planet centre
+	 * @param PlanetRadius The datum radius
+	 * @param TerrainAltitude The terrain's altitude along the direction (the lapse rate's input)
+	 * @param WorldSeed The world seed the climate seeds offset
+	 * @param BiomeSnapshot Value-captured biome data; invalid: the fields are 0
+	 * @param OutTemperature Shaped temperature
+	 * @param OutMoisture Shaped moisture
+	 */
+	static void SamplePlanetClimate(
+		const FVector& Direction,
+		double PlanetRadius,
+		float TerrainAltitude,
+		int32 WorldSeed,
+		const FVoxelBiomeSnapshot& BiomeSnapshot,
+		float& OutTemperature, float& OutMoisture);
 
 	/**
 	 * The surface material the map draws at a surface point (code review CR2, REND-15), as the generators write it at
