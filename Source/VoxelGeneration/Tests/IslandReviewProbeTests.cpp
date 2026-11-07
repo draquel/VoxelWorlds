@@ -13,6 +13,7 @@
 // height the "island analytic" column checks.
 
 #include "CoreMinimal.h"
+#include "Async/ParallelFor.h"
 #include "Misc/AutomationTest.h"
 #include "IslandBowlWorldMode.h"
 #include "InfinitePlaneWorldMode.h"
@@ -137,28 +138,39 @@ bool FIslandReviewHeightProbeTest::RunTest(const FString& Parameters)
 
 		for (const FZone& Zone : Zones)
 		{
-			FZoneStats Stats;
+			// Each sample generates a five-chunk column, so the samples run in parallel (the generator is thread-safe)
+			// and the stats are summed afterwards in ray order, the same numbers as one sample after another.
+			struct FSample { float X, Y, IslandH, PlaneH, GenH; };
+			TArray<FSample> Samples;
 			for (int32 Ray = 0; Ray < 16; ++Ray)
 			{
 				const float Angle = UE_TWO_PI * Ray / 16.0f + 0.1f;
 				for (const float Distance : Zone.Value)
 				{
-					const float X = Island.CenterX + Distance * FMath::Cos(Angle);
-					const float Y = Island.CenterY + Distance * FMath::Sin(Angle);
-					const float IslandH = IslandMode.GetTerrainHeightAt(X, Y, Config->NoiseParams);
-					const float PlaneH = FInfinitePlaneWorldMode::SampleTerrainHeight(X, Y, Terrain, Config->NoiseParams, &Biome);
-					const float GenH = GenerateIslandSurfaceZ(Generator, *Config, Island, X, Y, IslandH);
-					if (GenH == FLT_MAX)
-					{
-						AddWarning(FString::Printf(TEXT("%s %s: no generated surface at (%.0f, %.0f), analytic %.0f"), Name, Zone.Key, X, Y, IslandH));
-						continue;
-					}
-					++Stats.Samples;
-					Stats.MaxIslandGap = FMath::Max(Stats.MaxIslandGap, FMath::Abs(IslandH - GenH));
-					Stats.MaxPlaneGap = FMath::Max(Stats.MaxPlaneGap, FMath::Abs(PlaneH - GenH));
-					Stats.MeanPlaneGap += FMath::Abs(PlaneH - GenH);
-					Stats.PlaneDryIslandWet += (PlaneH >= WaterLine && GenH < WaterLine) ? 1 : 0;
+					Samples.Add({ Island.CenterX + Distance * FMath::Cos(Angle), Island.CenterY + Distance * FMath::Sin(Angle), 0.0f, 0.0f, 0.0f });
 				}
+			}
+			ParallelFor(Samples.Num(), [&](int32 Index)
+			{
+				FSample& S = Samples[Index];
+				S.IslandH = IslandMode.GetTerrainHeightAt(S.X, S.Y, Config->NoiseParams);
+				S.PlaneH = FInfinitePlaneWorldMode::SampleTerrainHeight(S.X, S.Y, Terrain, Config->NoiseParams, &Biome);
+				S.GenH = GenerateIslandSurfaceZ(Generator, *Config, Island, S.X, S.Y, S.IslandH);
+			});
+
+			FZoneStats Stats;
+			for (const FSample& S : Samples)
+			{
+				if (S.GenH == FLT_MAX)
+				{
+					AddWarning(FString::Printf(TEXT("%s %s: no generated surface at (%.0f, %.0f), analytic %.0f"), Name, Zone.Key, S.X, S.Y, S.IslandH));
+					continue;
+				}
+				++Stats.Samples;
+				Stats.MaxIslandGap = FMath::Max(Stats.MaxIslandGap, FMath::Abs(S.IslandH - S.GenH));
+				Stats.MaxPlaneGap = FMath::Max(Stats.MaxPlaneGap, FMath::Abs(S.PlaneH - S.GenH));
+				Stats.MeanPlaneGap += FMath::Abs(S.PlaneH - S.GenH);
+				Stats.PlaneDryIslandWet += (S.PlaneH >= WaterLine && S.GenH < WaterLine) ? 1 : 0;
 			}
 			if (Stats.Samples > 0)
 			{
@@ -182,21 +194,26 @@ bool FIslandReviewHeightProbeTest::RunTest(const FString& Parameters)
 			Variant.FalloffType = Falloff;
 			FIslandBowlWorldMode VariantMode(Terrain, Variant);
 			VariantMode.SetBiomeContext(Config->BiomeConfiguration);
-			float MaxStep = 0.0f, MinStep = FLT_MAX;
-			for (int32 Ray = 0; Ray < 16; ++Ray)
+			constexpr int32 Rays = 16;
+			float InsideGen[Rays], OutsideGen[Rays];
+			ParallelFor(Rays, [&](int32 Ray)
 			{
 				const float Angle = UE_TWO_PI * Ray / 16.0f + 0.1f;
 				const FVector2D Dir(FMath::Cos(Angle), FMath::Sin(Angle));
 				const FVector2D Inside = FVector2D(Variant.CenterX, Variant.CenterY) + Dir * (R + F - 40.0f);
 				const FVector2D Outside = FVector2D(Variant.CenterX, Variant.CenterY) + Dir * (R + F + 40.0f);
-				const float InsideGen = GenerateIslandSurfaceZ(Generator, *Config, Variant, Inside.X, Inside.Y,
+				InsideGen[Ray] = GenerateIslandSurfaceZ(Generator, *Config, Variant, Inside.X, Inside.Y,
 					VariantMode.GetTerrainHeightAt(Inside.X, Inside.Y, Config->NoiseParams));
-				const float OutsideGen = GenerateIslandSurfaceZ(Generator, *Config, Variant, Outside.X, Outside.Y,
+				OutsideGen[Ray] = GenerateIslandSurfaceZ(Generator, *Config, Variant, Outside.X, Outside.Y,
 					VariantMode.GetTerrainHeightAt(Outside.X, Outside.Y, Config->NoiseParams));
-				if (InsideGen != FLT_MAX && OutsideGen != FLT_MAX)
+			});
+			float MaxStep = 0.0f, MinStep = FLT_MAX;
+			for (int32 Ray = 0; Ray < Rays; ++Ray)
+			{
+				if (InsideGen[Ray] != FLT_MAX && OutsideGen[Ray] != FLT_MAX)
 				{
-					MaxStep = FMath::Max(MaxStep, InsideGen - OutsideGen);
-					MinStep = FMath::Min(MinStep, InsideGen - OutsideGen);
+					MaxStep = FMath::Max(MaxStep, InsideGen[Ray] - OutsideGen[Ray]);
+					MinStep = FMath::Min(MinStep, InsideGen[Ray] - OutsideGen[Ray]);
 				}
 			}
 			AddInfo(FString::Printf(TEXT("PROBE %s edge step at R+F (falloff type %d): generated surface drops %.0f to %.0f uu across 80 uu (EdgeHeight %.0f, seabed slopes %.0f uu down over %.0f uu beyond)"),
