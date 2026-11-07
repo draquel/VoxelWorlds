@@ -10,6 +10,7 @@
 class UVoxelRegionComponent;
 class UMaterialInterface;
 class UVoxelMaterialAtlas;
+class UTexture2D;
 class UWorld;
 class UVoxelWorldConfiguration;
 
@@ -199,6 +200,9 @@ private:
 
 	/** Settings replayed on a new region component */
 	TWeakObjectPtr<UVoxelMaterialAtlas> CurrentAtlas;
+
+	/** The world's biome lookup for the materials (FVoxelBiomeLookup, built at Initialize from the configuration's biomes; P3) */
+	TStrongObjectPtr<UTexture2D> BiomeLookup;
 	bool bHasViewerPosition = false;
 	FVector CurrentViewerPosition = FVector::ZeroVector;
 

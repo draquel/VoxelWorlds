@@ -14,6 +14,8 @@
 #endif
 #include "VoxelRendering.h"
 #include "VoxelMaterialAtlas.h"
+#include "VoxelBiomeLookup.h"
+#include "Engine/Texture2D.h"
 #include "VoxelMaterialRegistry.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInterface.h"
@@ -1936,6 +1938,15 @@ UMaterialInstanceDynamic* UVoxelRegionComponent::CreateVoxelMaterialInstance(UMa
 	return DynamicMaterialInstance;
 }
 
+void UVoxelRegionComponent::SetBiomeLookup(UTexture2D* InLookup)
+{
+	BiomeLookup = InLookup;
+	if (DynamicMaterialInstance && BiomeLookup)
+	{
+		DynamicMaterialInstance->SetTextureParameterValue(FVoxelBiomeLookup::ParameterName, BiomeLookup);
+	}
+}
+
 void UVoxelRegionComponent::UpdateMaterialAtlasParameters()
 {
 	UE_LOG(LogVoxelRendering, Log, TEXT("UpdateMaterialAtlasParameters called - DynamicMaterial: %s, MaterialAtlas: %s"),
@@ -1955,6 +1966,12 @@ void UVoxelRegionComponent::UpdateMaterialAtlasParameters()
 	// The local up for the slope-aware rock (VP2-O3): the planet's radial up, or world +Z
 	DynamicMaterialInstance->SetVectorParameterValue(VoxelLocalUpCenterParamName,
 		FLinearColor(static_cast<float>(FaceUpCenter.X), static_cast<float>(FaceUpCenter.Y), static_cast<float>(FaceUpCenter.Z), bRadialFaceUp ? 1.0f : 0.0f));
+
+	// The biome lookup for the weather's snow and wetness (P3), where the world has one
+	if (BiomeLookup)
+	{
+		DynamicMaterialInstance->SetTextureParameterValue(FVoxelBiomeLookup::ParameterName, BiomeLookup);
+	}
 
 	if (!MaterialAtlas)
 	{

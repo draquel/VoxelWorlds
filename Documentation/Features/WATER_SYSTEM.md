@@ -490,6 +490,13 @@ The `WaterMeshMaterial` should be:
 
 When `WaterMeshMaterial` is null no water is drawn; the game module's demo actor (`AVoxelDemoActor::bShowWaterPlane`) draws a static plane at `WaterLevel` for such a world.
 
+The demo's `M_VoxelWater` (parent content, `/Game/PluginTesting/Materials/`; rebuilt by the parent's
+`Scripts/setup_weather_materials.py` for the weather plan's P3, 2026-11-07) is translucent, surface-lit, with a
+world-space normal from a Custom node, **WindRipples**: three sine waves along and across `MPC_VoxelMaterial`'s
+`WindDirection` on the surface's own tangent plane (the mesh normal is the base, so a planet's sphere ripples too),
+their slope by `RippleStrength`, which the weather fills with its wind intensity. No texture; a calm sea is near flat,
+a storm's is choppy.
+
 ### Lumen: Translucency Reflections
 
 With Lumen and a translucent water material (the default `M_Water` is translucent, default lit), the water's reflections come

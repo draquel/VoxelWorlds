@@ -5,6 +5,8 @@
 #include "VoxelRegionComponent.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelMaterialAtlas.h"
+#include "VoxelBiomeLookup.h"
+#include "Engine/Texture2D.h"
 #include "VoxelVertex.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -49,6 +51,9 @@ void FVoxelMeshRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguratio
 	ChunkWorldSize = WorldConfig->GetChunkWorldSize();
 	// Render regions (WM-BP7): a planet splits into regions of voxel.Render.RegionChunks^3 chunks, heightmaps keep one
 	Regions = FVoxelRenderRegions::FromConfig(*WorldConfig);
+
+	// The biome lookup the materials read for the weather's snow and wetness (P3): one per world, from the configuration's biomes
+	BiomeLookup.Reset(FVoxelBiomeLookup::Build(WorldConfig->bEnableBiomes ? WorldConfig->BiomeConfiguration.Get() : nullptr));
 
 	// Spawn container actor (no fixed Name — multiple renderers may coexist)
 	FActorSpawnParameters SpawnParams;
@@ -114,6 +119,7 @@ UVoxelRegionComponent* FVoxelMeshRenderer::CreateRegionComponent(const FIntVecto
 	// Sync material mode with configuration's meshing mode
 	// Both MarchingCubes and DualContouring use triplanar texturing instead of atlas faces
 	Component->SetUseSmoothMeshing(WorldConfig->MeshingMode != EMeshingMode::Cubic);
+	Component->SetBiomeLookup(BiomeLookup.Get());
 
 	// The region's origin (WM-BP7): the proxy stores its vertices relative to the component's location. The world origin
 	// (0, 0, 0) when not split, as the single component always was.
