@@ -7,6 +7,7 @@
 
 #include "Engine/Texture2D.h"
 #include "TextureResource.h"
+#include "UObject/Package.h"
 
 const FName FVoxelBiomeLookup::ParameterName(TEXT("BiomeLUT"));
 
@@ -40,7 +41,10 @@ UTexture2D* FVoxelBiomeLookup::Build(const UVoxelBiomeConfiguration* Config, con
 {
 	TArray<FColor> Texels;
 	Encode(Config, Texels);
-	UTexture2D* Texture = UTexture2D::CreateTransient(Width, 1, PF_B8G8R8A8, Name);
+	// Every world's lookup lives in the transient package: a name of its own for each, or a second world in the process (a
+	// PIE server and its clients) would replace the first's texture in place while that world's renderer still holds it (G144)
+	const FName UniqueName = MakeUniqueObjectName(GetTransientPackage(), UTexture2D::StaticClass(), Name);
+	UTexture2D* Texture = UTexture2D::CreateTransient(Width, 1, PF_B8G8R8A8, UniqueName);
 	if (!Texture)
 	{
 		UE_LOG(LogVoxelRendering, Warning, TEXT("VoxelBiomeLookup: no transient texture (no RHI?); the materials keep their default"));
@@ -63,6 +67,6 @@ UTexture2D* FVoxelBiomeLookup::Build(const UVoxelBiomeConfiguration* Config, con
 	{
 		Biomes += T.B == 255 ? 1 : 0;
 	}
-	UE_LOG(LogVoxelRendering, Log, TEXT("VoxelBiomeLookup: %d biome(s) encoded for the materials (%s)."), Biomes, *Name.ToString());
+	UE_LOG(LogVoxelRendering, Log, TEXT("VoxelBiomeLookup: %d biome(s) encoded for the materials (%s)."), Biomes, *UniqueName.ToString());
 	return Texture;
 }

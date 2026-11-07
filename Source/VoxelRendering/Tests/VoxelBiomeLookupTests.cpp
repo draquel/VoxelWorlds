@@ -4,6 +4,8 @@
 #include "Misc/AutomationTest.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelBiomeLookup.h"
+#include "Engine/Texture2D.h"
+#include "UObject/StrongObjectPtr.h"
 
 // The biome lookup the master materials read for the weather's snow and wetness (P3): one texel per biome ID with the
 // ends of the biome's temperature range mapped from [-1, 1] to a byte, B 255 where the biome exists; the middle elsewhere.
@@ -41,5 +43,27 @@ bool FVoxelBiomeLookupEncodeTest::RunTest(const FString& Parameters)
 		Texels[7].R >= 178 && Texels[7].R <= 179 && Texels[7].G == 255 && Texels[7].B == 255);
 	TestTrue(TEXT("An unused ID keeps the middle and B 0"), Texels[5] == FColor(128, 128, 0, 255));
 	Config->RemoveFromRoot();
+	return true;
+}
+
+// Two worlds in one process (a PIE server and its client) each build a lookup under the same base name: the second gets a
+// texture of its own and the first's, still held, stays (G144: the second replaced the first in place and the engine's
+// check on the held object's reference count stopped the editor).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelBiomeLookupTwoWorldsTest, "VoxelWorlds.Rendering.BiomeLookup.TwoWorlds",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelBiomeLookupTwoWorldsTest::RunTest(const FString& Parameters)
+{
+	TStrongObjectPtr<UTexture2D> First(FVoxelBiomeLookup::Build(nullptr));
+	if (!First)
+	{
+		AddInfo(TEXT("No transient texture here (no RHI); nothing to compare"));
+		return true;
+	}
+	TStrongObjectPtr<UTexture2D> Second(FVoxelBiomeLookup::Build(nullptr));
+	TestTrue(TEXT("The second world's lookup is built"), Second.IsValid());
+	TestTrue(TEXT("It is a texture of its own"), Second.Get() != First.Get());
+	TestTrue(TEXT("The first world's lookup is still alive"), IsValid(First.Get()));
+	TestNotEqual(TEXT("Under a name of its own"), Second->GetFName(), First->GetFName());
 	return true;
 }

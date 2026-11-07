@@ -570,8 +570,9 @@ with `Wetness`, and whitens (toward 0.86, 0.88, 0.92; roughness 0.75) with `Snow
 wetness and no snow). The snow is local by biome: the node reads the vertex's biome (vertex colour G) in the
 **BiomeLUT** texture parameter, one texel per biome ID with the ends of the biome's temperature range mapped from
 [-1, 1] to 0..1 (`FVoxelBiomeLookup`, `VoxelRendering`: built once per world from the configuration's biomes by
-`FVoxelMeshRenderer::Initialize`, set on every region component's instance by `SetBiomeLookup`; B 0 marks an unused
-ID, which is never cold), and compares the range's middle with `SnowFreezeLevel`, the climate temperature at which the
+`FVoxelMeshRenderer::Initialize`, a transient texture under a name of its own, since a PIE server and its clients
+build theirs in one process (G144), set on every region component's instance by `SetBiomeLookup`; B 0 marks an
+unused ID, which is never cold), and compares the range's middle with `SnowFreezeLevel`, the climate temperature at which the
 weather snows in the same units: a biome whose middle sits under the line (the band is 0.12 wide) takes the snow and no
 wetness, one above it the wetness and no snow. A wide biome, one spanning about half the climate or more (the smooth
 terrain's Alpine and Coast), says nothing about the cold, so for it the node takes `LocalCold` instead, the weather's
