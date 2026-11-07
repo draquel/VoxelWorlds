@@ -9,6 +9,7 @@
 #include "VoxelScatterTypes.h"
 #include "VoxelScatterManager.generated.h"
 
+class UMaterialInstanceDynamic;
 class UVoxelWorldConfiguration;
 class UVoxelScatterRenderer;
 class IVoxelWorldMode;
@@ -49,6 +50,22 @@ enum class EVoxelScatterHandOff : uint8
 };
 
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnChunkScatterReady, const FIntVector& /*ChunkCoord*/, int32 /*SpawnPointCount*/);
+
+/** A scatter definition's dynamic material instance made or released (FScatterDefinition::bDynamicMaterials). */
+DECLARE_MULTICAST_DELEGATE_TwoParams(FOnScatterDynamicMaterial, const FString& /*DefinitionName*/, UMaterialInstanceDynamic* /*Material*/);
+
+/** One dynamic material instance the scatter draws a definition's slot with (UVoxelScatterManager::GetAllDynamicMaterials). */
+struct FVoxelScatterDynamicMaterial
+{
+	/** The definition's Name, the instance's published name */
+	FString DefinitionName;
+	/** The definition's ScatterID */
+	int32 ScatterID = 0;
+	/** The material slot */
+	int32 Slot = 0;
+	/** The instance, shared by every region's component of the definition */
+	UMaterialInstanceDynamic* Material = nullptr;
+};
 
 /**
  * Voxel Scatter Manager.
@@ -201,6 +218,30 @@ public:
 	 * @return The renderer; null before Initialize and after Shutdown.
 	 */
 	const UVoxelScatterRenderer* GetScatterRenderer() const;
+
+	// ==================== Dynamic Materials ====================
+
+	/**
+	 * The dynamic material instances a definition is drawn with (FScatterDefinition::bDynamicMaterials): one per override
+	 * slot, made when the definition's first component is, shared by every region's component, released at Shutdown.
+	 *
+	 * @param DefinitionName The definition's Name (every definition of that name)
+	 * @return The instances; empty before the definition's first component, without the flag, or after Shutdown
+	 */
+	TArray<UMaterialInstanceDynamic*> GetDynamicMaterials(const FString& DefinitionName) const;
+
+	/**
+	 * Every dynamic material instance the scatter draws with, for a game that binds after some were made.
+	 *
+	 * @param OutMaterials Filled with one entry per definition slot
+	 */
+	void GetAllDynamicMaterials(TArray<FVoxelScatterDynamicMaterial>& OutMaterials) const;
+
+	/** A definition's dynamic material instance was made (its first component, one call per slot). */
+	FOnScatterDynamicMaterial OnDynamicMaterialCreated;
+
+	/** A definition's dynamic material instance is dropped (Shutdown): stop using it. */
+	FOnScatterDynamicMaterial OnDynamicMaterialReleased;
 
 	/**
 	 * A digest of every cached spawn point, for comparing two builds' scatter on the same route (spherical Phase 4's

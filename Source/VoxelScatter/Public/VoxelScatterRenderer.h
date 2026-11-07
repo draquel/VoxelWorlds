@@ -9,6 +9,8 @@
 
 class UVoxelScatterManager;
 class UHierarchicalInstancedStaticMeshComponent;
+class UMaterialInstanceDynamic;
+class UMaterialInterface;
 
 /**
  * Per-HISM instance pool state for recycling instances without structural HISM changes.
@@ -277,6 +279,14 @@ public:
 	 */
 	TArray<int32> GetChunkScatterTypes(const FIntVector& ChunkCoord) const;
 
+	/**
+	 * The dynamic material instances made for definitions with bDynamicMaterials (one per override slot, shared by the
+	 * definition's components in every region); the scatter manager publishes them.
+	 *
+	 * @param OutMaterials Appended with one entry per definition slot
+	 */
+	void GetDynamicMaterials(TArray<struct FVoxelScatterDynamicMaterial>& OutMaterials) const;
+
 	// ==================== Visibility ====================
 
 	// ==================== Debug ====================
@@ -299,6 +309,20 @@ protected:
 	 */
 	void ConfigureHISMComponent(UHierarchicalInstancedStaticMeshComponent* HISM, const FScatterDefinition& Definition);
 
+	/**
+	 * A definition's dynamic material instance for a slot (bDynamicMaterials): made from the slot's override material the
+	 * first time a component asks, then the same one for every region; the manager's OnDynamicMaterialCreated fires once.
+	 *
+	 * @param Definition The definition
+	 * @param Slot The material slot
+	 * @param Parent The slot's override material (loaded)
+	 * @return The instance; null when it could not be made
+	 */
+	UMaterialInstanceDynamic* GetOrCreateDynamicMaterial(const FScatterDefinition& Definition, int32 Slot, UMaterialInterface* Parent);
+
+	/** Drop every dynamic material instance, firing the manager's OnDynamicMaterialReleased for each (Shutdown). */
+	void ReleaseDynamicMaterials();
+
 protected:
 	// ==================== Components ====================
 
@@ -315,6 +339,22 @@ protected:
 
 	/** The render regions (SetRenderRegions); one at the world origin unless a planet splits them */
 	FVoxelRenderRegions Regions;
+
+	/** One definition slot's dynamic material instance (bDynamicMaterials) */
+	struct FDynamicMaterialSlot
+	{
+		int32 ScatterID = 0;
+		int32 Slot = 0;
+		FString DefinitionName;
+		TObjectPtr<UMaterialInstanceDynamic> Material;
+	};
+
+	/** The dynamic material instances made, in the order made */
+	TArray<FDynamicMaterialSlot> DynamicMaterialSlots;
+
+	/** The same instances, referenced for the garbage collector */
+	UPROPERTY()
+	TArray<TObjectPtr<UMaterialInstanceDynamic>> AllDynamicMaterials;
 
 	// ==================== Instance Tracking ====================
 

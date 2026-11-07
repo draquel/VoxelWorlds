@@ -130,6 +130,7 @@ struct FScatterDefinition
     // Mesh
     TSoftObjectPtr<UStaticMesh> Mesh;
     TArray<TSoftObjectPtr<UMaterialInterface>> OverrideMaterials;
+    bool bDynamicMaterials = false;          // the overrides drawn through published dynamic instances (Dynamic materials)
 
     // Cubic Scatter Settings
     EScatterMeshType MeshType = EScatterMeshType::StaticMesh;
@@ -525,6 +526,22 @@ The instances drawn are the same as with every write made at once (`voxel.Scatte
 before G42, for A/B runs): `VoxelWorlds.Scatter.HISMBatch.{SameInstances,InPlaceRelease,Regions}`. The bench logs
 `ScatBatchN` and `ScatCompactN` per sample, and the scatter section's steps (`ScatApplyMs`, `ScatLaunchMs`,
 `ScatDistMs`, `ScatFlushMs`).
+
+### Dynamic materials (the foliage and bolt plan's D67)
+
+A definition with `bDynamicMaterials` is drawn through one `UMaterialInstanceDynamic` per override slot: the renderer
+makes it from the slot's `OverrideMaterials` entry when the definition's first HISM is made
+(`UVoxelScatterRenderer::GetOrCreateDynamicMaterial`, outer the renderer, transient), and every HISM of the definition,
+in every region, gets that same instance, so one parameter write reaches every instance of the definition everywhere. A
+slot with no override keeps the mesh's own material; a definition without the flag sets its overrides as they are. The
+manager publishes the instances under the definition's `Name`: `GetDynamicMaterials(Name)`, `GetAllDynamicMaterials`
+(name, ScatterID, slot, instance) for a reader that comes late, `OnDynamicMaterialCreated(Name, Instance)` once per slot
+as it is made, and `OnDynamicMaterialReleased(Name, Instance)` for each at `Shutdown`, before the components go (the
+registry is empty when it fires). The scatter knows nothing of who writes them: in this project VoxelWorldPOI's
+`UPOIWeatherBridge` registers them with the weather's mirror table, which writes the Megascans foliage master's
+`Wind Intensity` from the front's wind every tick (the parent's `Scripts/setup_smooth_terrain.py` writes the wind
+material instances the overrides name). A definition replaced by `AddScatterDefinition` keeps the instance its first
+HISM made. Test `VoxelWorlds.Scatter.DynamicMaterials`.
 
 ### Debug Stats
 
