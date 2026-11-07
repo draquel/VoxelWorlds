@@ -608,6 +608,30 @@ const UVoxelScatterRenderer* UVoxelScatterManager::GetScatterRenderer() const
 	return ScatterRenderer;
 }
 
+TArray<UMaterialInstanceDynamic*> UVoxelScatterManager::GetDynamicMaterials(const FString& DefinitionName) const
+{
+	TArray<FVoxelScatterDynamicMaterial> All;
+	GetAllDynamicMaterials(All);
+	TArray<UMaterialInstanceDynamic*> Out;
+	for (const FVoxelScatterDynamicMaterial& Entry : All)
+	{
+		if (Entry.DefinitionName == DefinitionName)
+		{
+			Out.Add(Entry.Material);
+		}
+	}
+	return Out;
+}
+
+void UVoxelScatterManager::GetAllDynamicMaterials(TArray<FVoxelScatterDynamicMaterial>& OutMaterials) const
+{
+	OutMaterials.Reset();
+	if (ScatterRenderer)
+	{
+		ScatterRenderer->GetDynamicMaterials(OutMaterials);
+	}
+}
+
 bool UVoxelScatterManager::HasScatterData(const FIntVector& ChunkCoord) const
 {
 	const FChunkScatterData* Data = SpawnCache.Find(ChunkCoord);

@@ -117,6 +117,9 @@ void UVoxelScatterRenderer::Shutdown()
 	// Clear all instances first
 	ClearAllInstances();
 
+	// The dynamic material instances go before their components, their users told first
+	ReleaseDynamicMaterials();
+
 	// Destroy HISM components
 	for (auto& Pair : HISMComponents)
 	{
@@ -1077,12 +1080,19 @@ void UVoxelScatterRenderer::ConfigureHISMComponent(UHierarchicalInstancedStaticM
 
 	HISM->bReceivesDecals = Definition.bReceivesDecals;
 
-	// Override materials if specified
+	// Override materials if specified; with bDynamicMaterials each slot's one dynamic instance, the same in every region
 	for (int32 i = 0; i < Definition.OverrideMaterials.Num(); ++i)
 	{
 		if (!Definition.OverrideMaterials[i].IsNull())
 		{
 			UMaterialInterface* Material = Definition.OverrideMaterials[i].LoadSynchronous();
+			if (Material && Definition.bDynamicMaterials)
+			{
+				if (UMaterialInstanceDynamic* Dynamic = GetOrCreateDynamicMaterial(Definition, i, Material))
+				{
+					Material = Dynamic;
+				}
+			}
 			if (Material)
 			{
 				HISM->SetMaterial(i, Material);
@@ -1261,5 +1271,72 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 	{
 		UE_LOG(LogVoxelScatter, Verbose, TEXT("Deferred instance adds: %d entries remaining (%d budget used)"),
 			PendingInstanceAdds.Num(), MaxInstanceAddsPerFrame - InstanceBudget);
+	}
+}
+
+// ==================== Dynamic Materials ====================
+
+UMaterialInstanceDynamic* UVoxelScatterRenderer::GetOrCreateDynamicMaterial(const FScatterDefinition& Definition, int32 Slot, UMaterialInterface* Parent)
+{
+	for (const FDynamicMaterialSlot& Existing : DynamicMaterialSlots)
+	{
+		if (Existing.ScatterID == Definition.ScatterID && Existing.Slot == Slot)
+		{
+			return Existing.Material;
+		}
+	}
+	if (!Parent)
+	{
+		return nullptr;
+	}
+	const FName InstanceName = MakeUniqueObjectName(this, UMaterialInstanceDynamic::StaticClass(),
+		FName(*FString::Printf(TEXT("MID_%s_%d"), *Definition.Name, Slot)));
+	UMaterialInstanceDynamic* Material = UMaterialInstanceDynamic::Create(Parent, this, InstanceName);
+	if (!Material)
+	{
+		UE_LOG(LogVoxelScatter, Warning, TEXT("Scatter type %d (%s): could not make a dynamic instance of %s for slot %d; the override is drawn as it is."),
+			Definition.ScatterID, *Definition.Name, *Parent->GetName(), Slot);
+		return nullptr;
+	}
+	Material->SetFlags(RF_Transient);
+	FDynamicMaterialSlot& Entry = DynamicMaterialSlots.AddDefaulted_GetRef();
+	Entry.ScatterID = Definition.ScatterID;
+	Entry.Slot = Slot;
+	Entry.DefinitionName = Definition.Name;
+	Entry.Material = Material;
+	AllDynamicMaterials.Add(Material);
+	UE_LOG(LogVoxelScatter, Log, TEXT("Scatter type %d (%s): slot %d drawn through the dynamic instance %s of %s"),
+		Definition.ScatterID, *Definition.Name, Slot, *Material->GetName(), *Parent->GetName());
+	if (ScatterManager)
+	{
+		ScatterManager->OnDynamicMaterialCreated.Broadcast(Definition.Name, Material);
+	}
+	return Material;
+}
+
+void UVoxelScatterRenderer::ReleaseDynamicMaterials()
+{
+	// Emptied before the broadcasts, so a listener reading GetDynamicMaterials sees them gone
+	const TArray<FDynamicMaterialSlot> Released = MoveTemp(DynamicMaterialSlots);
+	DynamicMaterialSlots.Reset();
+	AllDynamicMaterials.Reset();
+	if (ScatterManager)
+	{
+		for (const FDynamicMaterialSlot& Entry : Released)
+		{
+			ScatterManager->OnDynamicMaterialReleased.Broadcast(Entry.DefinitionName, Entry.Material);
+		}
+	}
+}
+
+void UVoxelScatterRenderer::GetDynamicMaterials(TArray<FVoxelScatterDynamicMaterial>& OutMaterials) const
+{
+	for (const FDynamicMaterialSlot& Entry : DynamicMaterialSlots)
+	{
+		FVoxelScatterDynamicMaterial& Out = OutMaterials.AddDefaulted_GetRef();
+		Out.DefinitionName = Entry.DefinitionName;
+		Out.ScatterID = Entry.ScatterID;
+		Out.Slot = Entry.Slot;
+		Out.Material = Entry.Material;
 	}
 }

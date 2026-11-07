@@ -383,6 +383,15 @@ struct VOXELCORE_API FScatterDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh")
 	TArray<TSoftObjectPtr<UMaterialInterface>> OverrideMaterials;
 
+	/**
+	 * Draw the override materials through dynamic instances: the renderer makes one per override slot, gives every
+	 * region's component of this definition the same one, and the scatter manager publishes them under the definition's
+	 * Name (UVoxelScatterManager::GetDynamicMaterials, OnDynamicMaterialCreated), so a game can set their parameters at
+	 * runtime (a pack's foliage wind). A slot with no override material keeps the mesh's own.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh")
+	bool bDynamicMaterials = false;
+
 	/** Enable collision for mesh instances */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh")
 	bool bEnableCollision = false;
