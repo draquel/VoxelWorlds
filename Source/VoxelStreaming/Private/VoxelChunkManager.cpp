@@ -3729,6 +3729,32 @@ bool UVoxelChunkManager::QuerySurfacePoint(const FVector& WorldPos, EVoxelSurfac
 	return true;
 }
 
+bool UVoxelChunkManager::GetClimateAt(const FVector& WorldPos, FVoxelClimateSample& OutSample) const
+{
+	OutSample = FVoxelClimateSample();
+	const IVoxelWorldMode* WM = GetWorldMode();
+	if (!bIsInitialized || !Configuration || !WM)
+	{
+		return false;
+	}
+	// The generated rung's zones, as QuerySurfacePoint gathers them: the climate's surface is the conditioned one.
+	TArray<FVoxelConditioningZone> Zones;
+	if (!ConditioningZones.IsEmpty())
+	{
+		if (WM->GetWorldModeType() == EWorldMode::SphericalPlanet)
+		{
+			const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WM);
+			GatherConditioningZonesOnSphere(FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, Planet.GetPlanetParams().PlanetCenter), 0.0, Zones);
+		}
+		else
+		{
+			GatherConditioningZonesForPoint(WorldPos.X, WorldPos.Y, Zones);
+		}
+	}
+	const FVoxelBiomeSnapshot Snapshot = FVoxelBiomeSnapshot::FromConfig(Configuration->BiomeConfiguration);
+	return FVoxelSurfaceQuery::QueryClimateAt(*WM, WorldPos, Configuration->GetNoiseParams(), Snapshot, Zones.Num() > 0 ? &Zones : nullptr, OutSample);
+}
+
 void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, FVoxelNoiseGenerationRequest GenRequest)
 {
 	// Mark as in-progress (stamped: the serial travels with the result, see FAsyncJobStamp)

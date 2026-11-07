@@ -93,6 +93,19 @@ shapes the climate the same way:
    - The height used is the one the reader has: generation's, with conditioning zones applied.
 4. The blend clamps all three axes to [-1, 1], as before.
 
+### The climate at a position (2026-11-06)
+
+The three fields are computed and discarded by generation (only the biome byte is stored), so a runtime reader gets them
+from the same arithmetic: `FVoxelSurfaceQuery::QueryClimateAt` samples the generated surface on a position's up-line
+(with the conditioning zones there) and reads the temperature, moisture and continentalness at it through the two
+samplers the biome queries themselves use, `SampleHeightmapClimate` (the fields at (X, Y, 0), the lapse rate from the
+surface's height) and `SamplePlanetClimate` (the planet noise at the direction's datum point, the latitude from the
+direction's Z and the lapse rate from the terrain's altitude), and returns them in an `FVoxelClimateSample` with the
+surface's altitude, the latitude, the local up and the dominant biome. `UVoxelChunkManager::GetClimateAt` is the entry
+from a world (the zones gathered as `QuerySurfacePoint` gathers them). `VoxelWorlds.Generation.SurfaceQuery.ClimateMatchesBiome`
+holds the sample's biome to the surface query's on a plane and on a planet. The weather system reads it through
+VoxelWorldPOI's bridge (the fields are dimensionless; degrees are the weather's reading of them).
+
 ### Measuring a world's biomes
 
 - `voxel.World.BiomeCoverage [samples] [radius]` samples the natural surface (the analytic height and the shaped

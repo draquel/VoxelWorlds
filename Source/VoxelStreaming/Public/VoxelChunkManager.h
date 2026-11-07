@@ -40,6 +40,7 @@ class FVoxelStreamingBenchmark;
 struct FVoxelBenchConfig;
 struct FVoxelSeaSurface;
 struct FVoxelSurfaceSample;
+struct FVoxelClimateSample;
 enum class EVoxelSurfaceLayer : uint8;
 struct FVoxelTreeInstance;
 struct FVoxelTreeVoxel;
@@ -664,6 +665,17 @@ public:
 	 * @return true when the rung has a surface there
 	 */
 	bool QuerySurfacePoint(const FVector& WorldPos, EVoxelSurfaceLayer Layer, FVoxelSurfaceSample& OutSample) const;
+
+	/**
+	 * The climate at a position (the weather plan's P2): the three dimensionless fields the biome there came from
+	 * (FVoxelSurfaceQuery::QueryClimateAt at the generated surface on the position's up-line, with the conditioning zones
+	 * there), the surface's altitude, the latitude on a planet and the local up. Game thread only.
+	 *
+	 * @param WorldPos Any position on the up-line
+	 * @param OutSample The climate (invalid, fields 0, when the world has no valid biome configuration)
+	 * @return true once the manager is initialized and the sample is valid
+	 */
+	bool GetClimateAt(const FVector& WorldPos, FVoxelClimateSample& OutSample) const;
 
 	/**
 	 * The generated (analytic) surface point on the local up-line through a position, without loaded chunks (spherical
