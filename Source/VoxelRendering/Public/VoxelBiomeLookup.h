@@ -37,7 +37,7 @@ struct VOXELRENDERING_API FVoxelBiomeLookup
 	/**
 	 * A transient texture of the texels (uncompressed, no mips, nearest filtering, never streamed), ready for the materials.
 	 * @param Config The world's biome configuration, or null
-	 * @param Name The texture's name (for the log and the stats)
+	 * @param Name The texture's base name (for the log and the stats), made unique in the transient package
 	 * @return The texture, or null when no RHI can hold one (the headless suite)
 	 */
 	static UTexture2D* Build(const UVoxelBiomeConfiguration* Config, const FName& Name = TEXT("VoxelBiomeLookup"));
