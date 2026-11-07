@@ -848,7 +848,12 @@ int32 BillboardAtlasRows = 4;    // Atlas grid rows
 #### Billboard Material
 
 `CreateBillboardMaterial()` creates a `UMaterialInstanceDynamic`:
-1. Tries to load user-provided `/VoxelWorlds/Materials/M_Billboard_Master`
+1. Tries to load `/VoxelWorlds/Materials/M_Billboard_Master`, which exists since the weather plan's P3 (2026-11-07; the
+   parent's `Scripts/setup_weather_materials.py` builds it): two-sided masked, `BaseTexture` to Base Color and Opacity
+   Mask, and a world position offset, **BillboardWind**, that leans the quad along `MPC_VoxelMaterial`'s `WindDirection`
+   by `WindIntensity` and `GustFactor`, by the square of the vertex's height over the instance (nothing moves at the
+   base; `ObjectOrientation` is the up, so a planet's billboards lean in their own frame), swaying by time with a
+   per-instance phase (`PerInstanceRandom`). The weather plugin fills the collection; without it the quads stand still.
 2. Falls back to runtime-generated `UMaterial` with proper settings:
    - `TwoSided = true`, `BlendMode = BLEND_Masked`, `bUsedWithInstancedStaticMeshes = true`
    - `TextureSampleParameter2D("BaseTexture")` connected to BaseColor + OpacityMask

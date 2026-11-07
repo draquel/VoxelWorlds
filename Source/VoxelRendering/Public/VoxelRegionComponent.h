@@ -22,6 +22,7 @@ struct FVoxelChunkDrawInfo;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class UVoxelMaterialAtlas;
+class UTexture2D;
 
 /**
  * Primitive component for rendering voxel worlds.
@@ -442,6 +443,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Materials")
 	void UpdateMaterialAtlasParameters();
 
+	/**
+	 * The biome lookup the master materials read as BiomeLUT (FVoxelBiomeLookup: one texel per biome ID with its climate,
+	 * for the weather's snow and wetness; the weather plan's P3). Set on the instance at once and on every later one.
+	 * @param InLookup The world's lookup texture, or null to leave the material's default
+	 */
+	void SetBiomeLookup(UTexture2D* InLookup);
+
 	/** Get whether smooth meshing mode is enabled */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Materials")
 	bool GetUseSmoothMeshing() const { return bUseSmoothMeshing; }
@@ -531,6 +539,10 @@ private:
 	/** Material atlas data asset for texture configuration */
 	UPROPERTY(EditAnywhere, Category = "Voxel|Materials")
 	TObjectPtr<UVoxelMaterialAtlas> MaterialAtlas;
+
+	/** The world's biome lookup for the materials (SetBiomeLookup), or null. */
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> BiomeLookup;
 
 	/** Enable smooth meshing mode (triplanar projection with Texture2DArrays) vs cubic (packed atlas) */
 	UPROPERTY(EditAnywhere, Category = "Voxel|Materials")

@@ -555,6 +555,32 @@ materials), and the meshes and the 111 GPU parity lines are unchanged. Ground sc
 
 ---
 
+### Weather Surface (the weather plan's P3, 2026-11-07)
+
+`MPC_VoxelMaterial` holds the weather's inputs beside `MacroVariation`: `WindDirection` (a vector, unit and tangent to
+the local up at the viewer), `WindSpeed`, `WindIntensity`, `GustFactor`, `Wetness`, `SnowCover`, `SnowFreezeLevel`,
+`LocalCold`, `RippleStrength`. The weather plugin fills them through its mirror table (the parent's `Config/DefaultGame.ini`);
+nothing in VoxelWorlds knows it exists, and with no weather they hold their defaults (dry, no snow, no wind). The
+parent's `Scripts/setup_weather_materials.py` adds the parameters and the nodes below (idempotent, headless).
+
+`M_VoxelMaster` and `M_VoxelMaster_Fade` end in a Custom node, **WeatherSurface**, between the albedo lerp and Base
+Color and between the roughness and Roughness. The ground darkens (albedo x 0.5) and smooths (roughness toward 0.2)
+with `Wetness`, and whitens (toward 0.86, 0.88, 0.92; roughness 0.75) with `SnowCover`, both scaled by a top-face mask
+(the vertex normal against the local up: `LocalUpCenter`'s radial up on a planet, +Z elsewhere; side faces get half the
+wetness and no snow). The snow is local by biome: the node reads the vertex's biome (vertex colour G) in the
+**BiomeLUT** texture parameter, one texel per biome ID with the ends of the biome's temperature range mapped from
+[-1, 1] to 0..1 (`FVoxelBiomeLookup`, `VoxelRendering`: built once per world from the configuration's biomes by
+`FVoxelMeshRenderer::Initialize`, set on every region component's instance by `SetBiomeLookup`; B 0 marks an unused
+ID, which is never cold), and compares the range's middle with `SnowFreezeLevel`, the climate temperature at which the
+weather snows in the same units: a biome whose middle sits under the line (the band is 0.12 wide) takes the snow and no
+wetness, one above it the wetness and no snow. A wide biome, one spanning about half the climate or more (the smooth
+terrain's Alpine and Coast), says nothing about the cold, so for it the node takes `LocalCold` instead, the weather's
+cold factor at the viewer (1 at or under the snow temperature, 0 a sleet band above it). So one global front is snow on
+the tundra, the taiga and the cold alpine slopes around a player standing in the cold, and rain on the meadow, at every
+LOD and on the far field alike (both carry the biome byte). A Dual Contouring border vertex carries its third material
+in G instead of the biome and reads the wrong texel there: a texel-wide error on three-material borders, not visible.
+Test `VoxelWorlds.Rendering.BiomeLookup.Encode`.
+
 ## Material Assignment
 
 Which material a voxel gets (the biome's surface and depth layers, height rules, ores) is decided at generation; see
