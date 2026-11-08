@@ -70,7 +70,7 @@ the config's name appended, so override runs never load or overwrite the map's n
 
 **Headless (focus-immune, CPU generation):**
 ```
-UnrealEditor-Cmd <uproject> /Game/PluginTesting/VoxelWorldsTest -game -nullrhi \
+UnrealEditor-Cmd <uproject> /Game/PluginTesting/Tests/Voxel/VoxelWorldsTest -game -nullrhi \
   -VoxelForceCPU -unattended -ExecCmds="voxel.Bench.Run <tag> 6000 60000"
 ```
 `-VoxelForceCPU` forces CPU generation (GPU compute cannot dispatch under `-nullrhi`; meshing is always on the CPU).
