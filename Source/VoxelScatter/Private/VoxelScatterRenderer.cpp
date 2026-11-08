@@ -6,8 +6,12 @@
 #include "VoxelScatterManager.h"
 #include "VoxelBillboardMeshGenerator.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Components/InstancedSkinnedMeshComponent.h"
+#include "Animation/TransformProviderData.h"
 #include "Engine/World.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/StreamableManager.h"
 #include "Engine/Texture2D.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -57,6 +61,7 @@ void UVoxelScatterRenderer::Initialize(UVoxelScatterManager* Manager, UWorld* Wo
 
 	ScatterManager = Manager;
 	CachedWorld = World;
+	Streamable = MakeShared<FStreamableManager>();
 
 	// Create container actor for HISM components. Requested name mode: keep the recognizable
 	// name when free, but auto-uniquify instead of the default fatal error when a container
@@ -130,6 +135,27 @@ void UVoxelScatterRenderer::Shutdown()
 	}
 	HISMComponents.Empty();
 	AllHISMComponents.Empty();
+	for (auto& Pair : SkinnedComponents)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->DestroyComponent();
+		}
+	}
+	SkinnedComponents.Empty();
+	AllSkinnedComponents.Empty();
+
+	// The skeletal definitions' loads go with the components that wanted them
+	for (auto& Pair : DefinitionLoads)
+	{
+		if (Pair.Value.Handle.IsValid())
+		{
+			Pair.Value.Handle->CancelHandle();
+		}
+	}
+	DefinitionLoads.Empty();
+	Streamable.Reset();
+	SkeletalWarnings.Empty();
 
 	// Destroy container actor
 	if (ContainerActor)
@@ -364,6 +390,22 @@ void UVoxelScatterRenderer::ReleaseChunkScatterType(const FIntVector& ChunkCoord
 
 	// The chunk's HISM: its type's in the chunk's render region (WM-BP7)
 	const FVoxelScatterHISMKey Key{ ScatterTypeID, Regions.GetRegion(ChunkCoord) };
+
+	// A skeletal definition's instances leave its skinned component by id at once: no pool, no held write (D68)
+	if (SkinnedInstances.Contains(Key))
+	{
+		TotalInstancesRemoved += RemoveSkinnedInstances(Key, ChunkCoord);
+		if (TSet<int32>* ChunkTypes = ChunkScatterTypes.Find(ChunkCoord))
+		{
+			ChunkTypes->Remove(ScatterTypeID);
+			if (ChunkTypes->Num() == 0)
+			{
+				ChunkScatterTypes.Remove(ChunkCoord);
+			}
+		}
+		return;
+	}
+
 	FHISMInstancePool* Pool = InstancePools.Find(Key);
 	if (!Pool)
 	{
@@ -486,10 +528,19 @@ void UVoxelScatterRenderer::ClearAllInstances()
 			Pair.Value->ClearInstances();
 		}
 	}
+	for (auto& Pair : SkinnedComponents)
+	{
+		if (Pair.Value)
+		{
+			TotalInstancesRemoved += Pair.Value->GetInstanceCount();
+			Pair.Value->ClearInstances();
+		}
+	}
 
 	// Clear tracking and pools
 	ChunkScatterTypes.Empty();
 	InstancePools.Empty();
+	SkinnedInstances.Empty();
 }
 
 // ==================== HISM Management ====================
@@ -511,6 +562,12 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::GetOrCreateHIS
 	// Get scatter definition
 	const FScatterDefinition* Definition = ScatterManager->GetScatterDefinition(ScatterTypeID);
 	if (!Definition)
+	{
+		return nullptr;
+	}
+
+	// A skeletal definition is drawn through skinned components, never a HISM (GetOrCreateSkinnedComponent)
+	if (Definition->IsSkeletal())
 	{
 		return nullptr;
 	}
@@ -557,6 +614,16 @@ int32 UVoxelScatterRenderer::GetTotalInstanceCount() const
 		{
 			Total += GetEffectiveInstanceCount(Pair.Key, Pair.Value.Get());
 		}
+	}
+	return Total + GetSkinnedInstanceCount();
+}
+
+int32 UVoxelScatterRenderer::GetSkinnedInstanceCount() const
+{
+	int32 Total = 0;
+	for (const auto& Pair : SkinnedInstances)
+	{
+		Total += Pair.Value.Num;
 	}
 	return Total;
 }
@@ -744,6 +811,25 @@ FString UVoxelScatterRenderer::GetHISMBreakdown(int32 TopN) const
 		Type.Key.Region.Y = FMath::Max(Type.Key.Region.Y, Row.Instances); // largest HISM
 	}
 	FString Out = FString::Printf(TEXT("Scatter HISMs: %d in regions of %d chunks"), Rows.Num(), Regions.RegionChunks);
+	if (SkinnedComponents.Num() > 0)
+	{
+		// The skeletal definitions' skinned components (D68): per type its components and instances (no pool)
+		TMap<int32, FIntVector> SkinnedByType; // X components, Y instances, Z largest
+		for (const auto& Pair : SkinnedInstances)
+		{
+			FIntVector& Type = SkinnedByType.FindOrAdd(Pair.Key.ScatterTypeID);
+			Type.X += 1;
+			Type.Y += Pair.Value.Num;
+			Type.Z = FMath::Max(Type.Z, Pair.Value.Num);
+		}
+		Out += FString::Printf(TEXT("\n  skinned components: %d, %d instances"), SkinnedComponents.Num(), GetSkinnedInstanceCount());
+		for (const auto& Pair : SkinnedByType)
+		{
+			const FScatterDefinition* Definition = ScatterManager ? ScatterManager->GetScatterDefinition(Pair.Key) : nullptr;
+			Out += FString::Printf(TEXT("\n  type %d %s: %d skinned components, %d instances, largest %d"), Pair.Key,
+				Definition ? *Definition->Name : TEXT("?"), Pair.Value.X, Pair.Value.Y, Pair.Value.Z);
+		}
+	}
 	TArray<FRow> Types;
 	ByType.GenerateValueArray(Types);
 	Types.Sort([](const FRow& A, const FRow& B) { return A.Instances > B.Instances; });
@@ -798,6 +884,18 @@ int64 UVoxelScatterRenderer::GetTotalMemoryUsage() const
 		}
 	}
 
+	// Skinned components: their instance data (a transform and an animation index each) and the ids per chunk
+	Total += SkinnedInstances.GetAllocatedSize();
+	for (const auto& Pair : SkinnedInstances)
+	{
+		Total += Pair.Value.Num * static_cast<int64>(sizeof(FSkinnedMeshInstanceData));
+		Total += Pair.Value.ChunkInstanceIds.GetAllocatedSize();
+		for (const auto& ChunkPair : Pair.Value.ChunkInstanceIds)
+		{
+			Total += ChunkPair.Value.GetAllocatedSize();
+		}
+	}
+
 	return Total;
 }
 
@@ -810,6 +908,11 @@ int32 UVoxelScatterRenderer::GetChunkInstanceCount(const FIntVector& ChunkCoord,
 	{
 		const TArray<int32>* Indices = (ScatterTypeID == INDEX_NONE || Pair.Key.ScatterTypeID == ScatterTypeID) ? Pair.Value.ChunkInstanceIndices.Find(ChunkCoord) : nullptr;
 		Count += Indices ? Indices->Num() : 0;
+	}
+	for (const auto& Pair : SkinnedInstances)
+	{
+		const TArray<FPrimitiveInstanceId>* Ids = (ScatterTypeID == INDEX_NONE || Pair.Key.ScatterTypeID == ScatterTypeID) ? Pair.Value.ChunkInstanceIds.Find(ChunkCoord) : nullptr;
+		Count += Ids ? Ids->Num() : 0;
 	}
 	for (const FPendingInstanceAdd& Add : PendingInstanceAdds)
 	{
@@ -879,6 +982,45 @@ bool UVoxelScatterRenderer::FindNearestInstance(int32 ScatterTypeID, const FVect
 			}
 		}
 	}
+	// A skeletal definition's skinned components (D68): the instances of the chunks whose box (half a chunk's margin: a
+	// spawn point lies in its chunk) reaches the sphere, read by id (OutIndex is the id)
+	const double ChunkSize = Regions.ChunkWorldSize;
+	for (const auto& Pair : SkinnedInstances)
+	{
+		const TObjectPtr<UInstancedSkinnedMeshComponent>* Found = SkinnedComponents.Find(Pair.Key);
+		UInstancedSkinnedMeshComponent* Component = Found ? Found->Get() : nullptr;
+		if (Pair.Key.ScatterTypeID != ScatterTypeID || !Component)
+		{
+			continue;
+		}
+		for (const TPair<FIntVector, TArray<FPrimitiveInstanceId>>& ChunkPair : Pair.Value.ChunkInstanceIds)
+		{
+			if (ChunkSize > 0.0)
+			{
+				const FVector Min = Regions.WorldOrigin + FVector(ChunkPair.Key) * ChunkSize;
+				const FBox ChunkBox = FBox(Min, Min + FVector(ChunkSize)).ExpandBy(ChunkSize * 0.5);
+				if (ChunkBox.ComputeSquaredDistanceToPoint(Location) > FMath::Square(static_cast<double>(BestDist)))
+				{
+					continue;
+				}
+			}
+			for (const FPrimitiveInstanceId Id : ChunkPair.Value)
+			{
+				FTransform Xf;
+				if (!Component->GetInstanceTransform(Id, Xf, /*bWorldSpace=*/true))
+				{
+					continue;
+				}
+				const float Dist = FVector::Dist(Xf.GetLocation(), Location);
+				if (Dist <= BestDist)
+				{
+					BestDist = Dist;
+					OutIndex = Id.GetAsIndex();
+					OutTransform = Xf;
+				}
+			}
+		}
+	}
 	return OutIndex != INDEX_NONE;
 }
 
@@ -899,12 +1041,14 @@ FString UVoxelScatterRenderer::GetDebugStats() const
 	const int32 ActiveInstances = TotalAllocated - TotalPooled;
 	const float Utilization = TotalAllocated > 0 ? (static_cast<float>(ActiveInstances) / TotalAllocated * 100.0f) : 0.0f;
 
-	return FString::Printf(TEXT("ScatterRenderer: %d HISM, %d instances (Active: %d, Pooled: %d, Util: %.0f%%), %d chunks, Pending: %d adds"),
+	return FString::Printf(TEXT("ScatterRenderer: %d HISM, %d instances (Active: %d, Pooled: %d, Util: %.0f%%), %d skinned (%d instances), %d chunks, Pending: %d adds"),
 		HISMComponents.Num(),
 		TotalAllocated,
 		ActiveInstances,
 		TotalPooled,
 		Utilization,
+		SkinnedComponents.Num(),
+		GetSkinnedInstanceCount(),
 		ChunksWithInstances,
 		PendingInstanceAdds.Num());
 }
@@ -1081,24 +1225,7 @@ void UVoxelScatterRenderer::ConfigureHISMComponent(UHierarchicalInstancedStaticM
 	HISM->bReceivesDecals = Definition.bReceivesDecals;
 
 	// Override materials if specified; with bDynamicMaterials each slot's one dynamic instance, the same in every region
-	for (int32 i = 0; i < Definition.OverrideMaterials.Num(); ++i)
-	{
-		if (!Definition.OverrideMaterials[i].IsNull())
-		{
-			UMaterialInterface* Material = Definition.OverrideMaterials[i].LoadSynchronous();
-			if (Material && Definition.bDynamicMaterials)
-			{
-				if (UMaterialInstanceDynamic* Dynamic = GetOrCreateDynamicMaterial(Definition, i, Material))
-				{
-					Material = Dynamic;
-				}
-			}
-			if (Material)
-			{
-				HISM->SetMaterial(i, Material);
-			}
-		}
-	}
+	ApplyOverrideMaterials(HISM, Definition);
 
 	// ==================== Performance Settings ====================
 
@@ -1126,6 +1253,236 @@ void UVoxelScatterRenderer::ConfigureHISMComponent(UHierarchicalInstancedStaticM
 		*Definition.Name, Definition.LODStartDistance, Definition.CullDistance);
 }
 
+void UVoxelScatterRenderer::ApplyOverrideMaterials(UMeshComponent* Component, const FScatterDefinition& Definition)
+{
+	for (int32 i = 0; i < Definition.OverrideMaterials.Num(); ++i)
+	{
+		if (!Definition.OverrideMaterials[i].IsNull())
+		{
+			UMaterialInterface* Material = Definition.OverrideMaterials[i].LoadSynchronous();
+			if (Material && Definition.bDynamicMaterials)
+			{
+				if (UMaterialInstanceDynamic* Dynamic = GetOrCreateDynamicMaterial(Definition, i, Material))
+				{
+					Material = Dynamic;
+				}
+			}
+			if (Material)
+			{
+				Component->SetMaterial(i, Material);
+			}
+		}
+	}
+}
+
+// ==================== Skeletal Definitions (the foliage and bolt plan's D68) ====================
+
+UClass* UVoxelScatterRenderer::GetSkinnedTransformProviderClass()
+{
+	// The Dynamic Wind plugin's provider (an engine plugin, experimental): looked up by name, so VoxelWorlds builds and
+	// runs without it and a static definition never touches it. Its runtime module loads at PostConfigInit when enabled.
+	static TWeakObjectPtr<UClass> Cached;
+	if (!Cached.IsValid())
+	{
+		UClass* Found = FindObject<UClass>(nullptr, TEXT("/Script/DynamicWind.DynamicWindData"));
+		Cached = (Found && Found->IsChildOf(UTransformProviderData::StaticClass())) ? Found : nullptr;
+	}
+	return Cached.Get();
+}
+
+void UVoxelScatterRenderer::PreloadDefinition(const FScatterDefinition& Definition)
+{
+	if (!Definition.IsSkeletal() || !Streamable)
+	{
+		return;
+	}
+	const FSoftObjectPath MeshPath = Definition.SkeletalMesh.ToSoftObjectPath();
+	if (const FDefinitionLoad* Existing = DefinitionLoads.Find(Definition.ScatterID); Existing && Existing->MeshPath == MeshPath)
+	{
+		return;
+	}
+	// The mesh pulls its assembly parts (the skeletal meshes on its bones) along as its references
+	TArray<FSoftObjectPath> Paths = { MeshPath };
+	for (const TSoftObjectPtr<UMaterialInterface>& Material : Definition.OverrideMaterials)
+	{
+		if (!Material.IsNull())
+		{
+			Paths.AddUnique(Material.ToSoftObjectPath());
+		}
+	}
+	FDefinitionLoad& Load = DefinitionLoads.Add(Definition.ScatterID);
+	Load.MeshPath = MeshPath;
+	Load.Handle = Streamable->RequestAsyncLoad(MoveTemp(Paths), FStreamableDelegateWithHandle(), FStreamableManager::AsyncLoadHighPriority,
+		/*bManageActiveHandle=*/false, /*bStartStalled=*/false, FString::Printf(TEXT("VoxelScatter %s"), *Definition.Name));
+	UE_LOG(LogVoxelScatter, Log, TEXT("Scatter type %d (%s): loading the skeletal mesh %s ahead%s"), Definition.ScatterID, *Definition.Name,
+		*MeshPath.ToString(), (Load.Handle.IsValid() && Load.Handle->HasLoadCompleted()) ? TEXT(" (already loaded)") : TEXT(""));
+}
+
+bool UVoxelScatterRenderer::IsDefinitionLoaded(const FScatterDefinition& Definition)
+{
+	if (!Definition.IsSkeletal())
+	{
+		return true;
+	}
+	const FSoftObjectPath MeshPath = Definition.SkeletalMesh.ToSoftObjectPath();
+	const FDefinitionLoad* Load = DefinitionLoads.Find(Definition.ScatterID);
+	if (!Load || Load->MeshPath != MeshPath)
+	{
+		PreloadDefinition(Definition);
+		Load = DefinitionLoads.Find(Definition.ScatterID);
+	}
+	// No handle: nothing could be requested (no streamable manager, an empty path); the component's make reports it
+	return !Load || !Load->Handle.IsValid() || Load->Handle->HasLoadCompleted();
+}
+
+void UVoxelScatterRenderer::WaitForDefinitionLoads()
+{
+	for (auto& Pair : DefinitionLoads)
+	{
+		if (Pair.Value.Handle.IsValid() && !Pair.Value.Handle->HasLoadCompleted())
+		{
+			Pair.Value.Handle->WaitUntilComplete();
+		}
+	}
+}
+
+UInstancedSkinnedMeshComponent* UVoxelScatterRenderer::GetOrCreateSkinnedComponent(int32 ScatterTypeID, const FIntVector& Region)
+{
+	if (!bIsInitialized || !ScatterManager || !ContainerActor)
+	{
+		return nullptr;
+	}
+	const FVoxelScatterHISMKey Key{ ScatterTypeID, Region };
+	if (const TObjectPtr<UInstancedSkinnedMeshComponent>* Existing = SkinnedComponents.Find(Key))
+	{
+		return Existing->Get();
+	}
+	const FScatterDefinition* Definition = ScatterManager->GetScatterDefinition(ScatterTypeID);
+	if (!Definition || !Definition->IsSkeletal() || !IsDefinitionLoaded(*Definition))
+	{
+		return nullptr;
+	}
+	UInstancedSkinnedMeshComponent* Component = CreateSkinnedComponent(*Definition, Region);
+	if (Component)
+	{
+		SkinnedComponents.Add(Key, Component);
+		AllSkinnedComponents.Add(Component);
+	}
+	return Component;
+}
+
+void UVoxelScatterRenderer::GetTypeSkinnedComponents(int32 ScatterTypeID, TArray<TPair<FIntVector, UInstancedSkinnedMeshComponent*>>& OutComponents) const
+{
+	OutComponents.Reset();
+	for (const auto& Pair : SkinnedComponents)
+	{
+		if (Pair.Key.ScatterTypeID == ScatterTypeID && Pair.Value)
+		{
+			OutComponents.Emplace(Pair.Key.Region, Pair.Value.Get());
+		}
+	}
+}
+
+UInstancedSkinnedMeshComponent* UVoxelScatterRenderer::CreateSkinnedComponent(const FScatterDefinition& Definition, const FIntVector& Region)
+{
+	// Loaded ahead (IsDefinitionLoaded); Get, never a load here on the game thread
+	USkeletalMesh* Mesh = Definition.SkeletalMesh.Get();
+	if (!Mesh)
+	{
+		if (!SkeletalWarnings.Contains(Definition.ScatterID))
+		{
+			SkeletalWarnings.Add(Definition.ScatterID);
+			UE_LOG(LogVoxelScatter, Warning, TEXT("Scatter type %d (%s): the skeletal mesh %s did not load; its instances are dropped."),
+				Definition.ScatterID, *Definition.Name, *Definition.SkeletalMesh.ToString());
+		}
+		return nullptr;
+	}
+
+	const FName ComponentName = MakeUniqueObjectName(ContainerActor, UInstancedSkinnedMeshComponent::StaticClass(), Regions.IsSplit()
+		? FName(*FString::Printf(TEXT("ISKM_%s_%d_R%d_%d_%d"), *Definition.Name, Definition.ScatterID, Region.X, Region.Y, Region.Z))
+		: FName(*FString::Printf(TEXT("ISKM_%s_%d"), *Definition.Name, Definition.ScatterID)));
+	UInstancedSkinnedMeshComponent* Component = NewObject<UInstancedSkinnedMeshComponent>(ContainerActor, ComponentName, RF_Transient);
+	if (!Component)
+	{
+		UE_LOG(LogVoxelScatter, Error, TEXT("Failed to create the skinned component for: %s"), *Definition.Name);
+		return nullptr;
+	}
+
+	// No tick: its tick (RefreshBoneTransforms) recomputes the bounds over every instance and sends the render transform
+	// again every frame, which a GPU-only provider needs neither of (F2: the game thread's whole premium); the instance data
+	// manager recomputes the bounds when the instances change (SendRenderInstanceData_Concurrent)
+	Component->PrimaryComponentTick.bCanEverTick = false;
+	Component->PrimaryComponentTick.bStartWithTickEnabled = false;
+
+	Component->AttachToComponent(ContainerActor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+	Component->SetRelativeLocation(Regions.GetRegionOrigin(Region));
+	// The setter that tells the component its asset changed (SetSkinnedAsset alone trips its asset-changed check)
+	Component->SetSkinnedAssetAndUpdate(Mesh);
+	if (UClass* ProviderClass = GetSkinnedTransformProviderClass())
+	{
+		Component->SetTransformProvider(NewObject<UTransformProviderData>(Component, ProviderClass, NAME_None, RF_Transient));
+	}
+
+	// The fade and cull of a static definition's HISM (the same per-instance start and end cull distances)
+	Component->SetCullDistances(Definition.LODStartDistance, Definition.CullDistance);
+	Component->SetCastShadow(Definition.bCastShadows);
+	Component->bReceivesDecals = Definition.bReceivesDecals;
+	Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Component->SetCanEverAffectNavigation(false);
+	if (Definition.bEnableCollision && !SkeletalWarnings.Contains(Definition.ScatterID))
+	{
+		SkeletalWarnings.Add(Definition.ScatterID);
+		UE_LOG(LogVoxelScatter, Warning, TEXT("Scatter type %d (%s): a skeletal definition is drawn without collision (bEnableCollision ignored)."),
+			Definition.ScatterID, *Definition.Name);
+	}
+	ApplyOverrideMaterials(Component, Definition);
+
+	Component->RegisterComponent();
+	UE_LOG(LogVoxelScatter, Log, TEXT("Created skinned component for: %s (ID: %d, %s, %s)"), *Definition.Name, Definition.ScatterID,
+		*Mesh->GetName(), Component->GetTransformProvider() ? *Component->GetTransformProvider()->GetClass()->GetName() : TEXT("no transform provider: drawn at rest"));
+	return Component;
+}
+
+bool UVoxelScatterRenderer::AddSkinnedInstances(const FVoxelScatterHISMKey& Key, const FIntVector& ChunkCoord, TConstArrayView<FTransform> Transforms)
+{
+	UInstancedSkinnedMeshComponent* Component = GetOrCreateSkinnedComponent(Key.ScatterTypeID, Key.Region);
+	if (!Component)
+	{
+		return false;
+	}
+	// Local to the component (at its region's origin), so a planet's instances stay small floats
+	const FTransform& ComponentTransform = Component->GetComponentTransform();
+	TArray<FTransform> Local;
+	Local.Reserve(Transforms.Num());
+	for (const FTransform& Transform : Transforms)
+	{
+		Local.Add(Transform.GetRelativeTransform(ComponentTransform));
+	}
+	TArray<int32> Animations;
+	Animations.SetNumZeroed(Local.Num());
+	const TArray<FPrimitiveInstanceId> Ids = Component->AddInstances(Local, Animations, /*bShouldReturnIds=*/true, /*bWorldSpace=*/false);
+	FSkinnedInstanceSet& Set = SkinnedInstances.FindOrAdd(Key);
+	Set.ChunkInstanceIds.FindOrAdd(ChunkCoord).Append(Ids);
+	Set.Num += Ids.Num();
+	return true;
+}
+
+int32 UVoxelScatterRenderer::RemoveSkinnedInstances(const FVoxelScatterHISMKey& Key, const FIntVector& ChunkCoord)
+{
+	FSkinnedInstanceSet* Set = SkinnedInstances.Find(Key);
+	TArray<FPrimitiveInstanceId> Ids;
+	if (!Set || !Set->ChunkInstanceIds.RemoveAndCopyValue(ChunkCoord, Ids))
+	{
+		return 0;
+	}
+	Set->Num -= Ids.Num();
+	if (const TObjectPtr<UInstancedSkinnedMeshComponent>* Found = SkinnedComponents.Find(Key); Found && *Found)
+	{
+		(*Found)->RemoveInstances(Ids);
+	}
+	return Ids.Num();
+}
+
 void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_FlushInstanceAdds);
@@ -1135,7 +1492,10 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 	}
 
 	int32 InstanceBudget = MaxInstanceAddsPerFrame;
-	int32 EntriesProcessed = 0;
+	// Entries done this frame: removed after the walk. A skeletal definition's entries wait in place while its assets load
+	// (IsDefinitionLoaded), and the entries behind them go on.
+	TArray<bool> Done;
+	Done.SetNumZeroed(PendingInstanceAdds.Num());
 	const bool bBatching = IsBatchingHISMWrites();
 	if (!bBatching)
 	{
@@ -1153,17 +1513,46 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 		// Skip entries for chunks that were unloaded while pending
 		if (!ChunkScatterTypes.Contains(PendingAdd.ChunkCoord))
 		{
-			++EntriesProcessed;
+			Done[i] = true;
 			continue;
 		}
 
 		// The chunk's region's HISM of the type (WM-BP7)
 		const FIntVector Region = Regions.GetRegion(PendingAdd.ChunkCoord);
+
+		// A skeletal definition (D68): into its region's skinned component by id once its assets are in, under the same budget
+		const FScatterDefinition* Definition = ScatterManager ? ScatterManager->GetScatterDefinition(PendingAdd.ScatterTypeID) : nullptr;
+		if (Definition && Definition->IsSkeletal())
+		{
+			if (!IsDefinitionLoaded(*Definition))
+			{
+				continue;
+			}
+			const int32 ToAdd = FMath::Min(PendingAdd.Transforms.Num(), InstanceBudget);
+			if (!AddSkinnedInstances(FVoxelScatterHISMKey{ PendingAdd.ScatterTypeID, Region }, PendingAdd.ChunkCoord,
+				MakeArrayView(PendingAdd.Transforms.GetData(), ToAdd)))
+			{
+				Done[i] = true; // no mesh: discarded, as a type without a HISM is
+				continue;
+			}
+			TotalInstancesAdded += ToAdd;
+			InstanceBudget -= ToAdd;
+			if (ToAdd >= PendingAdd.Transforms.Num())
+			{
+				Done[i] = true;
+			}
+			else
+			{
+				PendingAdd.Transforms.RemoveAt(0, ToAdd);
+			}
+			continue;
+		}
+
 		UHierarchicalInstancedStaticMeshComponent* HISM = GetOrCreateHISM(PendingAdd.ScatterTypeID, Region);
 		if (!HISM)
 		{
 			// Can't create HISM for this type — discard
-			++EntriesProcessed;
+			Done[i] = true;
 			continue;
 		}
 
@@ -1242,13 +1631,12 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 		if (ToProcess >= TotalNeeded)
 		{
 			// Entire batch processed
-			++EntriesProcessed;
+			Done[i] = true;
 		}
 		else
 		{
 			// Partial batch: remove processed transforms, keep rest for next frame
 			PendingAdd.Transforms.RemoveAt(0, ToProcess);
-			// Don't increment EntriesProcessed — this entry still has remaining transforms
 		}
 	}
 
@@ -1261,11 +1649,20 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 		}
 	}
 
-	// Remove fully processed entries from the front
-	if (EntriesProcessed > 0)
+	// Remove the entries done, keeping the rest in their order
+	int32 Kept = 0;
+	for (int32 i = 0; i < PendingInstanceAdds.Num(); ++i)
 	{
-		PendingInstanceAdds.RemoveAt(0, EntriesProcessed);
+		if (!Done[i])
+		{
+			if (Kept != i)
+			{
+				PendingInstanceAdds[Kept] = MoveTemp(PendingInstanceAdds[i]);
+			}
+			++Kept;
+		}
 	}
+	PendingInstanceAdds.SetNum(Kept);
 
 	if (PendingInstanceAdds.Num() > 0)
 	{

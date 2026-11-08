@@ -8,6 +8,7 @@
 #include "VoxelScatterTypes.generated.h"
 
 class UStaticMesh;
+class USkeletalMesh;
 class UTexture2D;
 class UMaterialInterface;
 
@@ -379,6 +380,16 @@ struct VOXELCORE_API FScatterDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh")
 	TSoftObjectPtr<UStaticMesh> Mesh;
 
+	/**
+	 * Skeletal mesh to instance instead of Mesh (the foliage and bolt plan's D68: a Megaplant's growth stage, one stage per
+	 * definition as a static plant's variants are). Set, the definition is drawn through one UInstancedSkinnedMeshComponent
+	 * per region with the Dynamic Wind transform provider (when the engine's Dynamic Wind plugin is loaded), its tick off,
+	 * the mesh and its assembly parts loaded ahead asynchronously; placement, extraction, regions, the fade and cull,
+	 * claims, edits and dynamic materials are a static definition's. Only with MeshType StaticMesh. No collision.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh", meta = (EditCondition = "MeshType == EScatterMeshType::StaticMesh"))
+	TSoftObjectPtr<USkeletalMesh> SkeletalMesh;
+
 	/** Override materials for the mesh (empty = use mesh defaults) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh")
 	TArray<TSoftObjectPtr<UMaterialInterface>> OverrideMaterials;
@@ -493,6 +504,12 @@ struct VOXELCORE_API FScatterDefinition
 	float MinScreenSize = 0.0f;
 
 	FScatterDefinition() = default;
+
+	/** Whether the definition is drawn through instanced skinned meshes (SkeletalMesh set on a StaticMesh-type definition). */
+	bool IsSkeletal() const
+	{
+		return MeshType == EScatterMeshType::StaticMesh && !SkeletalMesh.IsNull();
+	}
 
 	// ==================== Methods ====================
 
