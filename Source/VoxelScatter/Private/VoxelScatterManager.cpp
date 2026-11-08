@@ -377,6 +377,13 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 	UE_LOG(LogVoxelScatter, Log, TEXT("Scatter HISM regions: %d chunks along an edge (0 = one region)"), ScatterRegions.RegionChunks);
 	ScatterRenderer->Initialize(this, World);
 
+	// The skeletal definitions' meshes and assembly parts start loading now, asynchronously (the foliage and bolt plan's
+	// D68): a region's first instance never loads them on the game thread
+	for (const FScatterDefinition& Def : ScatterDefinitions)
+	{
+		ScatterRenderer->PreloadDefinition(Def);
+	}
+
 	bIsInitialized = true;
 
 	// Register with the world's exclusion subsystem, which replays any volumes registered before
@@ -569,6 +576,7 @@ void UVoxelScatterManager::AddScatterDefinition(const FScatterDefinition& Defini
 			ScatterDefinitions[i] = Definition;
 			UE_LOG(LogVoxelScatter, Log, TEXT("Replaced scatter definition: %s (ID=%d)"),
 				*Definition.Name, Definition.ScatterID);
+			PreloadDefinitionAssets(Definition);
 			return;
 		}
 	}
@@ -577,6 +585,15 @@ void UVoxelScatterManager::AddScatterDefinition(const FScatterDefinition& Defini
 	ScatterDefinitions.Add(Definition);
 	UE_LOG(LogVoxelScatter, Log, TEXT("Added scatter definition: %s (ID=%d)"),
 		*Definition.Name, Definition.ScatterID);
+	PreloadDefinitionAssets(Definition);
+}
+
+void UVoxelScatterManager::PreloadDefinitionAssets(const FScatterDefinition& Definition)
+{
+	if (ScatterRenderer && ScatterRenderer->IsInitialized())
+	{
+		ScatterRenderer->PreloadDefinition(Definition);
+	}
 }
 
 const FScatterDefinition* UVoxelScatterManager::GetScatterDefinition(int32 ScatterID) const

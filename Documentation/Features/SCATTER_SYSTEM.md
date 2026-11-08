@@ -7,7 +7,7 @@
 
 ## Overview
 
-The scatter system places vegetation (trees, grass, rocks) on voxel terrain using CPU-based placement and Hierarchical Instanced Static Mesh (HISM) rendering. It extracts surface points from each chunk's voxels (never its mesh), applies placement rules, and manages HISM instances in pools whose writes are batched. Extraction and placement run on the thread pool.
+The scatter system places vegetation (trees, grass, rocks) on voxel terrain using CPU-based placement and Hierarchical Instanced Static Mesh (HISM) rendering, or instanced skinned meshes for a definition with a skeletal mesh (the Megaplants, [Skeletal definitions](#skeletal-definitions-the-foliage-and-bolt-plans-d68)). It extracts surface points from each chunk's voxels (never its mesh), applies placement rules, and manages HISM instances in pools whose writes are batched. Extraction and placement run on the thread pool.
 
 ## Architecture
 
@@ -129,6 +129,7 @@ struct FScatterDefinition
 
     // Mesh
     TSoftObjectPtr<UStaticMesh> Mesh;
+    TSoftObjectPtr<USkeletalMesh> SkeletalMesh; // set: drawn skinned instead of Mesh (Skeletal definitions); IsSkeletal()
     TArray<TSoftObjectPtr<UMaterialInterface>> OverrideMaterials;
     bool bDynamicMaterials = false;          // the overrides drawn through published dynamic instances (Dynamic materials)
 
@@ -543,11 +544,54 @@ registry is empty when it fires). The scatter knows nothing of who writes them: 
 material instances the overrides name). A definition replaced by `AddScatterDefinition` keeps the instance its first
 HISM made. Test `VoxelWorlds.Scatter.DynamicMaterials`.
 
+### Skeletal definitions (the foliage and bolt plan's D68)
+
+A definition whose `SkeletalMesh` is set (with `MeshType` StaticMesh; `FScatterDefinition::IsSkeletal`) is drawn through
+one `UInstancedSkinnedMeshComponent` per type and region instead of a HISM: a Megaplant's growth stage, a skeletal mesh
+whose needles and fronds are assembly parts on its bones, exported for the engine's Dynamic Wind. One stage per
+definition, as a static plant's variants are one mesh per definition. Everything before the renderer is a static
+definition's (extraction, placement, regions, claims, exclusion volumes, edits, the distance cleanup, harvesting); the
+renderer differs in four things:
+
+- **The component.** `CreateSkinnedComponent` makes it at the region's origin with the definition's
+  `LODStartDistance` and `CullDistance` as its per-instance start and end cull distances (the HISM's fade band and cull),
+  its shadows and decals, `ApplyOverrideMaterials` (the dynamic instances of [Dynamic materials](#dynamic-materials-the-foliage-and-bolt-plans-d67)
+  if the definition asks), no collision (a skeletal definition's `bEnableCollision` is ignored with a warning) and, when
+  the engine's Dynamic Wind plugin is loaded, a `UDynamicWindData` transform provider: the GPU animates each instance
+  from the plugin's wind simulation, which `UDynamicWindSubsystem::UpdateWindParameters` drives (in this project
+  VoxelWorldPOI's `UPOIWeatherBridge`, from the weather). VoxelWorlds finds the provider class by name
+  (`GetSkinnedTransformProviderClass`) and takes no dependency on the experimental plugin; without it the plants stand
+  at rest.
+- **No tick.** The component is made with no tick (`bCanEverTick` false): an instanced skinned mesh's tick
+  (`RefreshBoneTransforms`) recomputes its bounds over every instance and sends its render transform again every frame,
+  which a GPU-only provider needs neither of (F2 measured it as the whole game-thread premium of the skinned path). The
+  bounds are recomputed when the instances change, by the instance data manager's flush
+  (`SendRenderInstanceData_Concurrent`).
+- **Instances by id.** An instanced skinned mesh keeps its instances in the GPU scene's instance data by id, updated per
+  instance with no cluster tree to rebuild, so the renderer adds and removes them as they come (`FSkinnedInstanceSet`:
+  per region the ids per chunk): no pool, no held writes, no compaction. They go through the same add queue and
+  per-frame budget as the HISMs' (`FlushPendingInstanceAdds`); a release (`ReleaseChunkScatterType`, so an unload, the
+  distance cleanup, an edit, an exclusion volume) removes the chunk's ids at once. `GetChunkInstanceCount`,
+  `GetTotalInstanceCount`, `FindNearestInstance` (harvest: the ids of the chunks near the point) and the stats count them.
+- **Loaded ahead.** A stage pulls its assembly parts (25 skeletal meshes for the heather's four stages) and their
+  derived data; loaded synchronously at a region's first instance, as a static mesh is, that was a hitch of 1.3 s warm
+  and minutes cold (F2). The manager asks the renderer to load every skeletal definition's mesh and override materials
+  asynchronously as the definitions load (`PreloadDefinition`, from `Initialize` and `AddScatterDefinition`), and a
+  skeletal definition's queued instances wait in the queue, the entries behind them going on, until its load has
+  finished (`IsDefinitionLoaded`); the component then takes the loaded mesh (`Get`, never a load).
+
+A static definition never touches any of it. The diagnostics are `voxel.Scatter.Skinned` (the components, their
+instances, provider and ticking count), `voxel.Scatter.Skinned.TimeRefresh` (what the tick would cost) and
+`voxel.Scatter.Skinned.Sample` (stat unit's times over a few seconds); `voxel.Scatter.Stats hism` lists the skinned
+components per type. The costs and the decision (the skinned instances everywhere, no near range, the static bakes
+retired) are the foliage and bolt plan's F2 and F3 results (`Plugins/WorldWeatherPlugin/Documentation/WEATHER_SYSTEM.md`
+section 10). Test `VoxelWorlds.Scatter.Skeletal`.
+
 ### Debug Stats
 
 `GetDebugStats()` reports pool health:
 ```
-ScatterRenderer: 5 HISM, 12400 instances (Active: 8200, Pooled: 4200, Util: 66%), 42 chunks, Pending: 0 adds
+ScatterRenderer: 5 HISM, 12400 instances (Active: 8200, Pooled: 4200, Util: 66%), 2 skinned (480 instances), 42 chunks, Pending: 0 adds
 ```
 
 - **Active**: Instances with real transforms (visible within CullDistance)

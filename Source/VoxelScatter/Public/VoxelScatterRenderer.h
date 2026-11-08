@@ -5,10 +5,15 @@
 #include "CoreMinimal.h"
 #include "VoxelScatterTypes.h"
 #include "VoxelRenderRegions.h"
+#include "InstanceDataTypes.h"
 #include "VoxelScatterRenderer.generated.h"
 
 class UVoxelScatterManager;
 class UHierarchicalInstancedStaticMeshComponent;
+class UInstancedSkinnedMeshComponent;
+class UMeshComponent;
+struct FStreamableHandle;
+struct FStreamableManager;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
 
@@ -51,6 +56,20 @@ struct FVoxelScatterHISMKey
 };
 
 /**
+ * A skeletal definition's instances in one region's skinned component (the foliage and bolt plan's D68), by chunk. An
+ * instanced skinned mesh keeps its instances by id in the GPU scene's instance data, updated per instance with no cluster
+ * tree to rebuild, so instances are added and removed as they come: no pool, no held writes.
+ */
+struct FSkinnedInstanceSet
+{
+	/** Which instances belong to each chunk: ChunkCoord -> their ids in the component */
+	TMap<FIntVector, TArray<FPrimitiveInstanceId>> ChunkInstanceIds;
+
+	/** Live instances in the component */
+	int32 Num = 0;
+};
+
+/**
  * Manages HISM (Hierarchical Instanced Static Mesh) components for scatter rendering.
  *
  * Creates one HISM per scatter type (per type and region on a planet, FVoxelScatterHISMKey; voxel.Scatter.RegionChunks) and
@@ -60,6 +79,11 @@ struct FVoxelScatterHISMKey
  * distance-based streaming. Writes to a HISM are held and applied at most once per voxel.Scatter.HISMBatchSeconds, and a
  * HISM whose pool outgrows its live instances is rewritten without it (world modes review G42: each change costs a UE HISM
  * all its instances, pooled ones included).
+ *
+ * A skeletal definition (FScatterDefinition::IsSkeletal, the foliage and bolt plan's D68) is drawn through one
+ * UInstancedSkinnedMeshComponent per type and region instead, with the Dynamic Wind transform provider and its tick off,
+ * its instances added and removed by id (FSkinnedInstanceSet); its mesh, and the assembly parts the mesh references, are
+ * loaded ahead asynchronously (PreloadDefinition), and its instances wait in the add queue until they are.
  *
  * Key responsibilities:
  * - Create and configure HISM components per scatter type
@@ -225,6 +249,69 @@ public:
 	 */
 	int32 GetHISMCount() const { return HISMComponents.Num(); }
 
+	// ==================== Skeletal Definitions (the foliage and bolt plan's D68) ====================
+
+	/**
+	 * Start loading a skeletal definition's mesh (its assembly parts are its references and load with it) and override
+	 * materials asynchronously, so its first component never loads them on the game thread. The manager calls it for every
+	 * definition as the definitions load; a static definition, or one already requested for the same mesh, is left alone.
+	 *
+	 * @param Definition The definition
+	 */
+	void PreloadDefinition(const FScatterDefinition& Definition);
+
+	/**
+	 * Whether a skeletal definition's assets are loaded (its queued instances wait until they are). Requests the load when
+	 * nothing has. A static definition is always loaded.
+	 *
+	 * @param Definition The definition
+	 * @return True when its components can be made now
+	 */
+	bool IsDefinitionLoaded(const FScatterDefinition& Definition);
+
+	/**
+	 * Whether a load was requested for a skeletal definition (PreloadDefinition), for tests.
+	 *
+	 * @param ScatterTypeID Scatter type ID
+	 * @return True once requested
+	 */
+	bool IsDefinitionLoadRequested(int32 ScatterTypeID) const { return DefinitionLoads.Contains(ScatterTypeID); }
+
+	/** Block until every requested definition load has finished, for tests and tools (the scatter itself never waits). */
+	void WaitForDefinitionLoads();
+
+	/**
+	 * Get or create the skinned component of a skeletal definition in a render region (at the region's origin). Never loads
+	 * the mesh: null until IsDefinitionLoaded.
+	 *
+	 * @param ScatterTypeID Scatter type ID
+	 * @param Region Render region
+	 * @return The component, or null (not a skeletal definition, not loaded yet, no mesh)
+	 */
+	UInstancedSkinnedMeshComponent* GetOrCreateSkinnedComponent(int32 ScatterTypeID, const FIntVector& Region = FIntVector::ZeroValue);
+
+	/**
+	 * Every skinned component of a scatter type, by region.
+	 *
+	 * @param ScatterTypeID Scatter type ID
+	 * @param OutComponents Region and component pairs
+	 */
+	void GetTypeSkinnedComponents(int32 ScatterTypeID, TArray<TPair<FIntVector, UInstancedSkinnedMeshComponent*>>& OutComponents) const;
+
+	/** Skinned components made (skeletal definitions, one per type and region). */
+	int32 GetSkinnedComponentCount() const { return SkinnedComponents.Num(); }
+
+	/** Instances in skinned components. */
+	int32 GetSkinnedInstanceCount() const;
+
+	/**
+	 * The transform provider class a skeletal definition's components animate with: the engine's Dynamic Wind plugin's
+	 * UDynamicWindData, found by name (VoxelWorlds takes no dependency on the experimental plugin).
+	 *
+	 * @return The class; null when the plugin is not loaded (the plants are drawn at rest)
+	 */
+	static UClass* GetSkinnedTransformProviderClass();
+
 	/**
 	 * Get total instance count across all HISMs.
 	 */
@@ -310,6 +397,37 @@ protected:
 	void ConfigureHISMComponent(UHierarchicalInstancedStaticMeshComponent* HISM, const FScatterDefinition& Definition);
 
 	/**
+	 * A definition's override materials on a component of it (a HISM or a skinned component): each slot's loaded override,
+	 * through the definition's dynamic instance with bDynamicMaterials.
+	 */
+	void ApplyOverrideMaterials(UMeshComponent* Component, const FScatterDefinition& Definition);
+
+	/**
+	 * Create a skeletal definition's skinned component in a region, its mesh loaded (IsDefinitionLoaded): at the region's
+	 * origin, the definition's fade and cull, shadows and materials, the transform provider, no tick, no collision.
+	 */
+	UInstancedSkinnedMeshComponent* CreateSkinnedComponent(const FScatterDefinition& Definition, const FIntVector& Region);
+
+	/**
+	 * Add a chunk's instances of a skeletal definition to its region's component (world transforms, stored local to it).
+	 *
+	 * @param Key The definition and region
+	 * @param ChunkCoord The chunk
+	 * @param Transforms World transforms
+	 * @return False when the component could not be made (the instances are dropped)
+	 */
+	bool AddSkinnedInstances(const FVoxelScatterHISMKey& Key, const FIntVector& ChunkCoord, TConstArrayView<FTransform> Transforms);
+
+	/**
+	 * Remove a chunk's instances of a skeletal definition from its region's component.
+	 *
+	 * @param Key The definition and region
+	 * @param ChunkCoord The chunk
+	 * @return The instances removed
+	 */
+	int32 RemoveSkinnedInstances(const FVoxelScatterHISMKey& Key, const FIntVector& ChunkCoord);
+
+	/**
 	 * A definition's dynamic material instance for a slot (bDynamicMaterials): made from the slot's override material the
 	 * first time a component asks, then the same one for every region; the manager's OnDynamicMaterialCreated fires once.
 	 *
@@ -339,6 +457,32 @@ protected:
 
 	/** The render regions (SetRenderRegions); one at the world origin unless a planet splits them */
 	FVoxelRenderRegions Regions;
+
+	/** Skinned components per skeletal scatter type and region (the foliage and bolt plan's D68) */
+	TMap<FVoxelScatterHISMKey, TObjectPtr<UInstancedSkinnedMeshComponent>> SkinnedComponents;
+
+	/** Every skinned component (keeps SkinnedComponents' values referenced for the garbage collector) */
+	UPROPERTY()
+	TArray<TObjectPtr<UInstancedSkinnedMeshComponent>> AllSkinnedComponents;
+
+	/** The instances of each skinned component, by chunk */
+	TMap<FVoxelScatterHISMKey, FSkinnedInstanceSet> SkinnedInstances;
+
+	/** A skeletal definition's asynchronous load (PreloadDefinition): the mesh it is for and the handle keeping it loaded */
+	struct FDefinitionLoad
+	{
+		FSoftObjectPath MeshPath;
+		TSharedPtr<FStreamableHandle> Handle;
+	};
+
+	/** The skeletal definitions' loads, by ScatterID */
+	TMap<int32, FDefinitionLoad> DefinitionLoads;
+
+	/** The streamable manager the loads go through (made at Initialize) */
+	TSharedPtr<FStreamableManager> Streamable;
+
+	/** Skeletal definitions already warned about (collision asked, a mesh that did not load), by ScatterID */
+	TSet<int32> SkeletalWarnings;
 
 	/** One definition slot's dynamic material instance (bDynamicMaterials) */
 	struct FDynamicMaterialSlot

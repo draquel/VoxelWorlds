@@ -123,6 +123,14 @@ public:
 	void ValidateScatterDistances() const;
 
 	/**
+	 * Start loading a skeletal definition's assets ahead (UVoxelScatterRenderer::PreloadDefinition) once the renderer is
+	 * up; Initialize does every configured definition, AddScatterDefinition the one it adds.
+	 *
+	 * @param Definition The definition
+	 */
+	void PreloadDefinitionAssets(const FScatterDefinition& Definition);
+
+	/**
 	 * Check if manager is initialized.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
@@ -149,6 +157,9 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
 	void AddScatterDefinition(const FScatterDefinition& Definition);
+
+	/** The spawn distance of a definition whose SpawnDistance is 0 (the configuration's ScatterRadius), uu. */
+	float GetScatterRadius() const { return ScatterRadius; }
 
 	/**
 	 * Get all scatter definitions.
