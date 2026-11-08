@@ -221,7 +221,7 @@ Radial terrain on a sphere, on the same Cartesian chunk grid as the other modes,
 generated on the GPU or the CPU (the same voxels), walkable with gravity toward its centre, carries every game system
 (scatter, PCG, map, navigation, NPCs, POIs, dungeons, campsites, saves, the clock) in its local frame, is precise up to
 a radius of about 1,000 km, and can be left for orbit and landed on again. Test content in the parent project:
-`/Game/PluginTesting/Planet` (`PlanetTest`) and `/Game/PluginTesting/Review/` (`Review_Planet`, `Review_Planet_M` 50 km,
+`/Game/PluginTesting/Demo` (`PlanetTest`) and `/Game/PluginTesting/Review/` (`Review_Planet`, `Review_Planet_M` 50 km,
 `Review_Planet_L` 1,000 km).
 
 ### Configuration (UVoxelWorldConfiguration)
