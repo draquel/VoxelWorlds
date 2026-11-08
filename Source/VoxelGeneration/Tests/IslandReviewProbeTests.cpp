@@ -2,7 +2,7 @@
 
 // Review B probes (Documentation/WORLD_MODES_REVIEW_PLAN.md §5 I1): island height queries against the real generated
 // surface, in the island, in the falloff band and beyond it. They load the review configs
-// (/Game/PluginTesting/Review/Review_Island_*) so the numbers are the demo's seed, biomes and water line.
+// (/Game/PluginTesting/Tests/Review/Review_Island_*) so the numbers are the demo's seed, biomes and water line.
 //
 // These tests record what the code does today and pass; the numbers go to the review (KI1, KI2, KI4). The checks that
 // would fail today are logged as "PROBE" lines instead of being asserted, so the suite stays green until the findings
@@ -30,7 +30,7 @@ namespace IslandProbe
 {
 	UVoxelWorldConfiguration* LoadReviewConfig(const TCHAR* Name)
 	{
-		return LoadObject<UVoxelWorldConfiguration>(nullptr, *FString::Printf(TEXT("/Game/PluginTesting/Review/%s.%s"), Name, Name));
+		return LoadObject<UVoxelWorldConfiguration>(nullptr, *FString::Printf(TEXT("/Game/PluginTesting/Tests/Review/%s.%s"), Name, Name));
 	}
 
 	/** The surface generation produces at (X, Y): a CPU island chunk stack around ExpectedZ, caves off. FLT_MAX if none. */

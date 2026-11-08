@@ -15,7 +15,7 @@ static TAutoConsoleVariable<FString> CVarVoxelConfigOverride(
 	TEXT("voxel.World.ConfigOverride"),
 	TEXT(""),
 	TEXT("Object path of a UVoxelWorldConfiguration that replaces the voxel world actor's own on the next ")
-	TEXT("initialize (e.g. /Game/PluginTesting/Review/Review_Cubic). Empty = use the actor's config. ")
+	TEXT("initialize (e.g. /Game/PluginTesting/Tests/Review/Review_Cubic). Empty = use the actor's config. ")
 	TEXT("The -VoxelConfig=<path> command-line switch takes priority."),
 	ECVF_Default);
 

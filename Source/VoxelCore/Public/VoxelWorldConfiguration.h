@@ -715,7 +715,7 @@ public:
 	 * standalone runs), then the voxel.World.ConfigOverride console variable (set it in the editor before
 	 * pressing Play). Read when a voxel world initializes, so a change applies to the next PIE session.
 	 *
-	 * @return Object path such as /Game/PluginTesting/Review/Review_Cubic, or empty.
+	 * @return Object path such as /Game/PluginTesting/Tests/Review/Review_Cubic, or empty.
 	 */
 	static FString GetOverridePath();
 
