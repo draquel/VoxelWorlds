@@ -515,7 +515,7 @@ the atlas has no config for: never), and `BuildMaterialLUT` writes it into the s
 (`UVoxelMaterialAtlas::GetSlopeMaterialID`; test `VoxelWorlds.MaterialAtlas.SlopeMaterial`). The voxels keep their
 material: digging, hardness and the map see grass where the shader draws rock; scatter counts it as the rock (G106,
 below). The project's atlases
-(`DemoMaterialAtlas`, `PluginTesting/Config/VoxelMaterialAtlas`) turn Grass and Frozen Dirt to Stone. Dirt stays dirt, so
+(`DemoMaterialAtlas`, `PluginTesting/Tests/Voxel/VoxelMaterialAtlas`) turn Grass and Frozen Dirt to Stone. Dirt stays dirt, so
 a dig's walls look like what was dug; Sand (dunes, beaches), Snow, Sandstone, Stone, the ores, Wood and Leaves never turn.
 
 Both triplanar functions include `Shaders/Private/VoxelSlopeRock.ush` and compute the same weight
