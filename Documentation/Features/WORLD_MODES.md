@@ -67,6 +67,18 @@ zones applied, block tops on a block world), `QueryEditMergedSurfacePoint` (the 
 local up in every mode. `FVoxelSurfaceQuery` answers the same without a chunk manager (`SampleSurfacePoint`, the
 conditions at the surface).
 
+In the heightmap modes `QueryEditMergedSurfacePoint` reads the edit-merged voxels on the voxel grid: voxel g holds the
+density at `WorldOrigin + g * VoxelSize`, where the generator samples it and the meshers place it. The query takes the
+four grid columns around (X, Y), one chunk under the generated estimate to one above, finds each column's top crossing
+(`FVoxelSurfaceQuery::ExtractSurfaceFromColumn`) and blends them bilinearly; the nearest column names the material and
+the biome, and the normal is the blend's slope (the density gradient where a column has no surface in its window). The
+height is then on the mesh and the collision: on a hilly plane of 75 uu voxels 3.4 uu off on average and 26 at worst,
+the slope 3 to 5 degrees off the collision triangle's (G165, 2026-11-09: one column read from an off-grid Z and (X, Y) had
+put it 42 uu above on average and up to 266 on a steep slope; `VoxelWorlds.Streaming.SurfaceQuery.MatchesCollision`). The
+nearest column is read over the whole window and the other three over a few voxels about its crossing (the whole window
+when their top crossing is not there): about 3.2 us a query, a cold path search on `VoxelDemo` 3.2 ms against 2.7 before. A block world's query is the block tops instead
+(`QueryEditMergedBlockSurface`), a planet's a digital line along local up.
+
 **Reaching it from game code and Blueprint.** The chunk manager (a component of the world actor) exposes the configured
 mode's bounds and frame as `BlueprintPure` functions in the `Voxel|World` category: `IsInsideWorld`, `GetWorldBounds`,
 `GetUpVectorAt`, `GetAltitudeAt`, `WorldToSurface`, `SurfaceToWorld`, `GetSurfacePointAt`, `IsBlockSurface`,
