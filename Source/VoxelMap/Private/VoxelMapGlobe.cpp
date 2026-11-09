@@ -80,7 +80,7 @@ const FVoxelMapGlobeAlbedo* UVoxelMapSubsystem::GetGlobeAlbedo()
 			Self->bGlobeAlbedoBuilding = false;
 			Self->GlobeExploredFromCount = -1;
 			UE_LOG(LogVoxelMap, Log, TEXT("Globe albedo: %d cells a face edge built in %.2f s."), Built->Grid.GetCellsPerEdge(), Built->BuildSeconds);
-			Self->OnMapTileReady.Broadcast(FIntPoint(-1, -1));
+			Self->OnGlobeAlbedoReady.Broadcast();
 		});
 	});
 	return nullptr;

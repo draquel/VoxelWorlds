@@ -68,6 +68,20 @@ namespace VoxelMapPlanetTest
 		return false;
 	}
 
+	/**
+	 * A view of every explored tile at level 0 (MAP_PYRAMID_PLAN.md P1: exploring draws nothing, the views ask), as the world
+	 * map zoomed in asks for them.
+	 */
+	void RequestExploredImages(UVoxelMapSubsystem* Map)
+	{
+		TArray<FVoxelMapTileId> View;
+		for (const uint64 Key : Map->GetExploredTiles())
+		{
+			View.Emplace(FIntPoint(static_cast<int32>(static_cast<uint32>(Key >> 32)), static_cast<int32>(static_cast<uint32>(Key & 0xFFFFFFFF))));
+		}
+		Map->RequestView(EVoxelMapRequester::WorldMap, View);
+	}
+
 	FVector RandomDirection(FRandomStream& Random)
 	{
 		return Random.GetUnitVector();
@@ -316,6 +330,7 @@ bool FVoxelMapPlanetTileMatchesGenerationTest::RunTest(const FString& Parameters
 			const FVector Position = Mode->GetSurfacePoint(Center + Site.Value, W.Config->NoiseParams).Position;
 			Map->RequestTilesInRadius(Position, 1500.0f);
 		}
+		RequestExploredImages(Map);
 		TestTrue(TEXT("Every tile drew"), DrainMap(Map, nullptr));
 		for (const TPair<const TCHAR*, FVector>& Site : Sites())
 		{
@@ -411,6 +426,7 @@ bool FVoxelMapPlanetConditionedPixelsTest::RunTest(const FString& Parameters)
 	{
 		W.Manager->AddConditioningZone(FVoxelConditioningZone::MakeRadial(Site, Inner, Falloff, SeaAltitude - 200.0f));
 		Map->RequestTilesInRadius(Center + Site * Radius, 1400.0f);
+		RequestExploredImages(Map);
 		TestTrue(TEXT("Every tile drew"), DrainMap(Map, nullptr));
 		const FVoxelCubeSphereGrid& Grid = Map->GetPlanetTileGrid();
 		const int32 Res = Map->GetTileResolution();
@@ -539,7 +555,7 @@ bool FVoxelMapPlanetExplorationTest::RunTest(const FString& Parameters)
 		AddInfo(FString::Printf(TEXT("Streaming explored %d more tiles"), Map->GetExploredTiles().Num() - BeforeStreaming.Num()));
 		TestTrue(TEXT("Streaming explored the tiles under the viewer"), Map->IsTileExplored(Map->WorldToTileCoord(Center + Equator * Radius)));
 		TestEqual(TEXT("Streaming explored nothing on the far side"), FarSide, 0);
-		TestTrue(TEXT("The tile under the viewer keeps its detail image"), Map->HasTileDetail(Map->WorldToTileCoord(Center + Equator * Radius)));
+		TestEqual(TEXT("Exploring queues no image: the views ask (MAP_PYRAMID_PLAN.md P1)"), Map->GetTileQueue().NumWaiting(), 0);
 	}
 
 	// Planet overlays save as format 2; plane overlays stay format 1 (their bytes unchanged).
@@ -790,9 +806,23 @@ bool FVoxelMapPlanetEditOverlayTest::RunTest(const FString& Parameters)
 		if (TestNotNull(TEXT("The game world has a map"), Map) && TestTrue(TEXT("Streaming settles"), W.Settle()))
 		{
 			Map->RequestTilesInRadius(SitePoint, 1000.0f);
-			TestTrue(TEXT("The tiles drew"), DrainMap(Map, W.World));
 			const FIntPoint Tile = Map->WorldToTileCoord(SitePoint);
+			// A view of the site's tile one level up (MAP_PYRAMID_PLAN.md P1): its pixels read the level-0 overlay under them.
+			const FVoxelMapTileFrame& Frame = Map->GetTileFrame();
+			const FVoxelMapTileId Coarse = Frame.LevelTileOf(Tile, 1);
+			Map->RequestView(EVoxelMapRequester::WorldMap, { Coarse });
+			TestTrue(TEXT("The tiles drew"), DrainMap(Map, W.World));
 			TestNull(TEXT("No overlay before the dig"), Map->GetEditOverlay(Tile));
+			FIntPoint SiteTile;
+			int32 SitePX = 0, SitePY = 0;
+			Map->PlanetDirectionToTilePixel(Site, SiteTile, SitePX, SitePY);
+			const int32 Res = Map->GetTileResolution();
+			const FIntPoint First = Frame.FirstLevel0Tile(Coarse);
+			const int32 CoarsePX = ((SiteTile.X - First.X) * Res + SitePX) >> 1;
+			const int32 CoarsePY = ((SiteTile.Y - First.Y) * Res + SitePY) >> 1;
+			const FVoxelMapTile* CoarseBefore = Map->FindTile(Coarse);
+			const FColor ColourBefore = CoarseBefore ? CoarseBefore->PixelData[CoarsePY * Res + CoarsePX] : FColor::Black;
+			TestNotNull(TEXT("The coarse view drew"), CoarseBefore);
 
 			FVoxelBrushParams Brush;
 			Brush.Shape = EVoxelBrushShape::Sphere;
@@ -813,6 +843,13 @@ bool FVoxelMapPlanetEditOverlayTest::RunTest(const FString& Parameters)
 				Slot != INDEX_NONE ? *FString::Printf(TEXT("at altitude %.1f (analytic %.1f)"), Overlay->Heights[Slot], Analytic) : TEXT("not masked")));
 			TestTrue(TEXT("The site's tile has an overlay of altitudes"), Overlay && Overlay->bAltitudeHeights && Overlay->Num() > 0);
 			TestTrue(TEXT("The site's column is more than 100 uu lower"), Slot != INDEX_NONE && Overlay->Heights[Slot] < Analytic - 100.0f);
+
+			// The coarse tile in view went stale with the overlay and was drawn again with the dig under its pixel.
+			const FVoxelMapTile* CoarseAfter = Map->FindTile(Coarse);
+			const FColor ColourAfter = CoarseAfter ? CoarseAfter->PixelData[CoarsePY * Res + CoarsePX] : FColor::Black;
+			AddInfo(FString::Printf(TEXT("The level-1 pixel over the site: %s before the dig, %s after"), *ColourBefore.ToString(), *ColourAfter.ToString()));
+			TestTrue(TEXT("The coarse tile was drawn again"), CoarseAfter && !Map->GetTileStore().IsStale(Coarse));
+			TestTrue(TEXT("... with the dig under its pixel"), ColourAfter != ColourBefore);
 
 			// The overlay round-trips through the save blob and comes back on import.
 			int32 Count = 0;

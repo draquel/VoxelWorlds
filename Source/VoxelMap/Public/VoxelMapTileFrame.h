@@ -8,6 +8,7 @@
 #include "VoxelWorldModeTypes.h"
 #include "VoxelCoreTypes.h"
 #include "VoxelTerrainConditioning.h"
+#include "VoxelMapTypes.h"
 
 class IVoxelWorldMode;
 class UVoxelChunkManager;
@@ -136,9 +137,10 @@ struct VOXELMAP_API FVoxelMapTileFrame
 	 * @param GridSize The grid's edge (ChunkSize + 2)
 	 * @param Altitudes The grid's altitudes
 	 * @param Samples The grid's samples
+	 * @param Level The tile's pyramid level (a heightmap's grid points are 2^Level voxels apart)
 	 * @return The brightness factor
 	 */
-	float ShadeAt(int32 G, int32 GridSize, TConstArrayView<float> Altitudes, TConstArrayView<FVoxelMapTileSample> Samples) const;
+	float ShadeAt(int32 G, int32 GridSize, TConstArrayView<float> Altitudes, TConstArrayView<FVoxelMapTileSample> Samples, int32 Level = 0) const;
 
 	/**
 	 * The tile and pixel an apron grid point of a tile belongs to (a neighbouring tile's border pixel; the tile's own
@@ -152,4 +154,70 @@ struct VOXELMAP_API FVoxelMapTileFrame
 	 * layers them onto the base height, so the map must too (QA W-05).
 	 */
 	void GatherZones(const UVoxelChunkManager& ChunkManager, FIntPoint Tile, TArray<FVoxelConditioningZone>& OutZones) const;
+
+	// ---- The tile pyramid (MAP_PYRAMID_PLAN.md P1, D84) ----
+
+	/** A plane's coarsest level (its pyramid has no top; the world map's zoom-out limit asks for far less). */
+	static constexpr int32 MaxPlaneLevel = 16;
+
+	/** The coarsest level: on a planet the one whose tile holds a whole face (ceil(log2 N)); on a plane MaxPlaneLevel. */
+	int32 GetMaxLevel() const;
+
+	/** Planets: tiles along a face edge at a level, ceil(N / 2^Level) (the face's last tile partly empty). */
+	int32 TilesPerFaceEdgeAt(int32 Level) const;
+
+	/** The world size of a level-0 pixel (a voxel column on a heightmap world; about one on a planet). */
+	double GetPixelWorldSize() const { return GetTileWorldSize() / FMath::Max(1, ChunkSize); }
+
+	/**
+	 * The level whose pixels match a texel: the coarsest whose pixel spacing (2^L level-0 pixels) is at most the texel, so
+	 * a view composed from it is as sharp as its texels allow and reads about one pixel a texel.
+	 * @param TexelWorldSize The texel's size (uu)
+	 * @return The level, 0 to GetMaxLevel()
+	 */
+	int32 LevelForTexel(double TexelWorldSize) const;
+
+	/** The tile at a level holding a level-0 tile (X >> L, Y >> L on a plane; per face on a planet). */
+	FVoxelMapTileId LevelTileOf(const FIntPoint& Tile0, int32 Level) const;
+
+	/** The tile a level up holding a tile. */
+	FVoxelMapTileId ParentOf(const FVoxelMapTileId& Id) const;
+
+	/** The level-0 tile at a tile's minimum corner (on a planet always a cell of the atlas, for a valid tile). */
+	FIntPoint FirstLevel0Tile(const FVoxelMapTileId& Id) const;
+
+	/** Whether a tile at any level is one of the world's: inside the bounds on a heightmap world, in the level's atlas on a planet. */
+	bool IsValidTile(const FVoxelMapTileId& Id) const;
+
+	/** Whether the drawer can draw a tile at any level: any on a heightmap world, one in the level's atlas on a planet. */
+	bool CanDrawTile(const FVoxelMapTileId& Id) const;
+
+	/**
+	 * Whether a level-0 tile lies under a tile or within Ring level-0 tiles of it (on a planet, on the same face): the edit
+	 * overlays a coarse tile's pixels and apron read.
+	 */
+	bool CoversLevel0Tile(const FVoxelMapTileId& Id, const FIntPoint& Tile0, int32 Ring) const;
+
+	/** The level-0 tiles under a tile and Ring around it (on a planet, those on its face). */
+	void Level0TilesOf(const FVoxelMapTileId& Id, int32 Ring, TArray<FIntPoint>& OutTiles) const;
+
+	/**
+	 * The sample at a tile's grid point at any level: SampleAt's, with the pixels 2^Level level-0 pixels apart (a heightmap
+	 * tile's pixel corners, a planet tile's pixel centres along its face from its first level-0 cell). Level 0 is SampleAt.
+	 */
+	FVoxelMapTileSample SampleAt(const FVoxelMapTileId& Id, int32 GX, int32 GY) const;
+
+	/**
+	 * The level-0 tile and pixel a grid point of a tile at any level falls in (the edit overlay drawn there): ApronPixel at
+	 * level 0; on a heightmap world the level-0 pixel at the point's corner; on a planet the level-0 pixel the point's
+	 * direction falls in.
+	 */
+	void SourcePixel(const FVoxelMapTileId& Id, int32 GX, int32 GY, const FVoxelMapTileSample& Sample, FIntPoint& OutTile0, int32& OutPX, int32& OutPY) const;
+
+	/** GatherZones for a tile at any level: the conditioning zones over its area and apron. */
+	void GatherZones(const UVoxelChunkManager& ChunkManager, const FVoxelMapTileId& Id, TArray<FVoxelConditioningZone>& OutZones) const;
+
+private:
+	/** Planets: a tile's face and its indices along the face at its level. @return False outside the level's atlas */
+	bool FaceIndicesAt(const FVoxelMapTileId& Id, int32& OutFace, int32& OutU, int32& OutV) const;
 };

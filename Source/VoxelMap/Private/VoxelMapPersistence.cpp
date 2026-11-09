@@ -118,32 +118,15 @@ int32 UVoxelMapSubsystem::ImportExploredTiles(const FString& Encoded, int32 Coun
 	}
 	for (const FIntPoint& Tile : Tiles)
 	{
-		ExploredTiles.Add(PackTileKey(Tile));
+		MarkExplored(PackTileKey(Tile));
 	}
 
-	// Explored tiles draw from the tile cache: queue the images (four run at a time; the rest wait in the queue).
-	// Tiles outside the world (explored before exploration stopped at the edge, WM-I2) are dropped first; without a
-	// resolved world they are dropped when it resolves.
+	// No image is queued: the views ask for what they show (MAP_PYRAMID_PLAN.md P1). Tiles outside the world (explored
+	// before exploration stopped at the edge, WM-I2) are dropped now; without a resolved world they are dropped when it
+	// resolves.
 	if (ResolveChunkManager())
 	{
 		PruneExploredOutsideWorld();
-		for (const FIntPoint& Tile : Tiles)
-		{
-			const uint64 Key = PackTileKey(Tile);
-			if (!ExploredTiles.Contains(Key))
-			{
-				continue;
-			}
-			// Restored tiles keep only their overview (WM-E2): the minimap asks for detail where the player is.
-			if (!TileStore.Contains(Key) && !TileQueue.IsQueued(Key))
-			{
-				QueueTileGeneration(Tile);
-			}
-		}
-	}
-	else
-	{
-		bGenerateExploredWhenReady = true;
 	}
 
 	UE_LOG(LogVoxelMap, Log, TEXT("Restored %d explored map tile(s) (%d explored now)."), Tiles.Num(), ExploredTiles.Num());
@@ -319,11 +302,14 @@ int32 UVoxelMapSubsystem::ImportEditOverlays(const FString& Encoded)
 	for (const uint64 Key : Touched)
 	{
 		MarkOverlayDirty(Key);
-		if (bCacheResolved && (TileStore.Contains(Key) || TileQueue.IsQueued(Key)))
+		if (bCacheResolved)
 		{
-			QueueTileGeneration(UnpackTileKey(Key), /*bInvalidate*/ true);
+			// The tile and the coarser tiles over it read the overlay: their images are stale.
+			InvalidateTile(FVoxelMapTileId(UnpackTileKey(Key)));
+			InvalidateAncestors(UnpackTileKey(Key));
 		}
 	}
+	LaunchWaitingTiles();
 	UE_LOG(LogVoxelMap, Log, TEXT("Restored %d map edit overlay(s) (%d tile(s) refreshed)."), Restored, Touched.Num());
 	return Restored;
 }
