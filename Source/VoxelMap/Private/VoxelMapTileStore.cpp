@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelMapTileStore.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 TArray<FColor> FVoxelMapTileStore::Downsample(const TArray<FColor>& Pixels, int32 Resolution, int32 Factor)
 {
@@ -131,6 +132,7 @@ void FVoxelMapTileStore::Reset()
 
 int32 FVoxelMapTileStore::Enforce()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_StoreEnforce);
 	int32 Dropped = 0;
 
 	// Detail first: the least recently used detail images go; their tiles keep the overview.

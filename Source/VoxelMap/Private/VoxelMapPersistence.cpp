@@ -37,6 +37,7 @@
 #include "Serialization/MemoryReader.h"
 #include "Serialization/MemoryWriter.h"
 #include "VoxelResidencyStats.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 FString UVoxelMapSubsystem::EncodeTileCoords(const TArray<FIntPoint>& Tiles)
 {
@@ -92,6 +93,7 @@ bool UVoxelMapSubsystem::DecodeTileCoords(const FString& Encoded, int32 Count, T
 
 FString UVoxelMapSubsystem::ExportExploredTiles(int32& OutCount) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_ExportExploredTiles);
 	TArray<FIntPoint> Tiles;
 	Tiles.Reserve(ExploredTiles.Num());
 	for (const uint64 Key : ExploredTiles)
@@ -107,6 +109,7 @@ FString UVoxelMapSubsystem::ExportExploredTiles(int32& OutCount) const
 
 int32 UVoxelMapSubsystem::ImportExploredTiles(const FString& Encoded, int32 Count)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_ImportExploredTiles);
 	TArray<FIntPoint> Tiles;
 	if (!DecodeTileCoords(Encoded, Count, Tiles))
 	{

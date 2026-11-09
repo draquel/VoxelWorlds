@@ -37,6 +37,7 @@
 #include "Serialization/MemoryReader.h"
 #include "Serialization/MemoryWriter.h"
 #include "VoxelResidencyStats.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord, uint32 Generation)
 {
@@ -127,6 +128,8 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord, uint32 Generatio
 		 FallbackTempNoiseParams, FallbackMoistureNoiseParams, MaterialPalette = MoveTemp(MaterialPalette),
 		 Zones = MoveTemp(Zones), OwnOverlay, NeighbourOverlays, RebuildInput, bRebuild]() mutable
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_DrawTile);
+		const double DrawStart = FPlatformTime::Seconds();
 		// WorldMode is a TSharedPtr capture, validated non-null before launch — this task co-owns
 		// the instance, so it stays valid even if the subsystem and world are torn down while we run.
 		const int32 Resolution = Frame.ChunkSize;
@@ -328,13 +331,15 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord, uint32 Generatio
 			}
 		}
 
-		// Marshal back to game thread
+		// Marshal back to game thread, with the worker time the drawing took (voxel.Map.Stats).
+		const double DrawSeconds = FPlatformTime::Seconds() - DrawStart;
 		AsyncTask(ENamedThreads::GameThread,
 			[WeakThis, TileCoord, PixelData = MoveTemp(PixelData), Resolution, Generation, bRebuild, Overlay,
-			 bOverlayPending, AnalyticMin, AnalyticMax]() mutable
+			 bOverlayPending, AnalyticMin, AnalyticMax, DrawSeconds]() mutable
 		{
 			if (UVoxelMapSubsystem* Self = WeakThis.Get())
 			{
+				Self->DrawStats.DrawSeconds += DrawSeconds;
 				Self->FinishTileDrawing(TileCoord, MoveTemp(PixelData), Resolution, Generation, bRebuild, Overlay, bOverlayPending,
 					AnalyticMin, AnalyticMax);
 			}
@@ -345,6 +350,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(FIntPoint TileCoord, uint32 Generatio
 void UVoxelMapSubsystem::FinishTileDrawing(FIntPoint TileCoord, TArray<FColor>&& PixelData, int32 Resolution, uint32 Generation,
 	bool bRebuild, const TSharedPtr<const FVoxelMapEditOverlay>& Overlay, bool bOverlayPending, float AnalyticMin, float AnalyticMax)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_FinishTileDrawing);
 	if (bShuttingDown)
 	{
 		// Deinitialize() already ran (PIE stop / world teardown): don't resurrect cache
@@ -416,6 +422,8 @@ void UVoxelMapSubsystem::FinishTileDrawing(FIntPoint TileCoord, TArray<FColor>&&
 		// detail budget (0) keeps every detail image, as the map did before WM-E2.
 		const bool bKeepDetail = DetailWanted.Remove(Key) > 0 || TileStore.HasDetail(Key)
 			|| TileStore.GetDetailBudget() == 0;
+		++DrawStats.Drawn;
+		DrawStats.Replaced += TileStore.Contains(Key) ? 1 : 0;
 		{
 			FScopeLock Lock(&TileMutex);
 			TileStore.Store(Key, TileCoord, MoveTemp(PixelData), Resolution, bKeepDetail);
