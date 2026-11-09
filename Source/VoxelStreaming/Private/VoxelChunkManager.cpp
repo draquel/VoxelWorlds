@@ -2066,47 +2066,137 @@ bool UVoxelChunkManager::QueryEditMergedSurfacePoint(const FVector& WorldPos, FV
 		}
 		else
 		{
-			// Assemble a vertical merged-voxel column over a +/- one-chunk window around the estimate
-			// (covers dig-down / build-up that shifts the surface off the analytic height).
+			// Vertical merged-voxel columns over a +/- one-chunk window around the estimate (covers dig-down / build-up that
+			// shifts the surface off the analytic height), on the voxel grid: voxel g holds the density at
+			// WorldOrigin + g * VoxelSize (where the generator samples it and the meshers place it), so each column is read
+			// at its voxels' own sample points and the crossing lands where the mesh and the collision put it. A column read
+			// from an off-grid Z or (X, Y) placed the surface up to a voxel above the mesh, more on a slope (G165). The
+			// height at (X, Y) is the bilinear blend of the four grid columns around it, as the mesh between them is, and
+			// the normal that blend's slope.
 			const int32 Window = ChunkSize;
-			const float BaseZ = EstZ - Window * VoxelSize;
 			const int32 Count = 2 * Window + 1;
+			const FVector& Origin = Configuration->WorldOrigin;
+			const double GridX = (WorldPos.X - Origin.X) / VoxelSize;
+			const double GridY = (WorldPos.Y - Origin.Y) / VoxelSize;
+			const int64 CellX = FMath::FloorToInt64(GridX);
+			const int64 CellY = FMath::FloorToInt64(GridY);
+			const double FracX = GridX - static_cast<double>(CellX);
+			const double FracY = GridY - static_cast<double>(CellY);
+			const int64 BaseK = FMath::FloorToInt64((static_cast<double>(EstZ) - Origin.Z) / VoxelSize) - Window;
+			const float BaseZ = static_cast<float>(Origin.Z + static_cast<double>(BaseK) * VoxelSize);
 
 			FMergedVoxelReadCache ReadCache;
 			auto ReadVoxel = [this, &ReadCache](const FVector& P) { return ReadMergedVoxel(ChunkStates, EditManager, *Configuration, ReadCache, P); };
 			TArray<FVoxelData> Column;
 			Column.SetNumUninitialized(Count);
-			for (int32 i = 0; i < Count; ++i)
+			// The top crossing of one grid column over the window's voxels [First, First + Num). Each voxel is read at its
+			// cell's centre, so the cell lookup lands on that voxel whatever the rounding. Its top voxel is air when it
+			// returns true with bTopIsAir.
+			auto ExtractColumn = [&](int32 Corner, int32 First, int32 Num, float& OutHeight, uint8& OutMaterial, uint8& OutBiome, bool& bTopIsAir) -> bool
 			{
-				const float Z = BaseZ + i * VoxelSize;
-				Column[i] = ReadVoxel(FVector(WorldPos.X, WorldPos.Y, Z));
+				const double CX = Origin.X + (static_cast<double>(CellX + (Corner & 1)) + 0.5) * VoxelSize;
+				const double CY = Origin.Y + (static_cast<double>(CellY + (Corner >> 1)) + 0.5) * VoxelSize;
+				Column.SetNum(Num, EAllowShrinking::No);
+				for (int32 i = 0; i < Num; ++i)
+				{
+					Column[i] = ReadVoxel(FVector(CX, CY, Origin.Z + (static_cast<double>(BaseK + First + i) + 0.5) * VoxelSize));
+				}
+				bTopIsAir = Column[Num - 1].IsAir();
+				return FVoxelSurfaceQuery::ExtractSurfaceFromColumn(Column, BaseZ + First * VoxelSize, VoxelSize, OutHeight, OutMaterial, OutBiome);
+			};
+
+			double Weights[4];
+			int32 Nearest = 0;
+			for (int32 Corner = 0; Corner < 4; ++Corner)
+			{
+				Weights[Corner] = ((Corner & 1) ? FracX : 1.0 - FracX) * ((Corner >> 1) ? FracY : 1.0 - FracY);
+				Nearest = Weights[Corner] > Weights[Nearest] ? Corner : Nearest;
 			}
 
-			if (!FVoxelSurfaceQuery::ExtractSurfaceFromColumn(Column, BaseZ, VoxelSize, Height, OutSample.MaterialID, OutSample.BiomeID))
+			// The nearest column over the whole window; the other three only a few voxels about its crossing (a column a
+			// voxel away is within that unless the ground is a wall), over the whole window when their top crossing is not
+			// in that short window. The full window for each cost a cold path search three times as much.
+			constexpr int32 NeighbourReach = 4;
+			double HeightSum = 0.0;
+			double WeightSum = 0.0;
+			double BestWeight = 0.0;
+			double ColumnHeights[4] = {};
+			int32 Found = 0;
+			int32 NearestCrossing = INDEX_NONE;
+			for (int32 Step = 0; Step < 4; ++Step)
+			{
+				const int32 Corner = (Nearest + Step) % 4;
+				float ColumnHeight = 0.0f;
+				uint8 ColumnMaterial = 0, ColumnBiome = 0;
+				bool bTopIsAir = false;
+				bool bHit = false;
+				if (NearestCrossing != INDEX_NONE)
+				{
+					const int32 First = FMath::Max(0, NearestCrossing - NeighbourReach);
+					const int32 Last = FMath::Min(Count - 1, NearestCrossing + NeighbourReach + 1);
+					bHit = ExtractColumn(Corner, First, Last - First + 1, ColumnHeight, ColumnMaterial, ColumnBiome, bTopIsAir) && bTopIsAir;
+				}
+				if (!bHit)
+				{
+					bHit = ExtractColumn(Corner, 0, Count, ColumnHeight, ColumnMaterial, ColumnBiome, bTopIsAir);
+				}
+				if (!bHit)
+				{
+					continue; // no surface in this column's window: the others carry the height
+				}
+				if (Corner == Nearest)
+				{
+					NearestCrossing = FMath::Clamp(FMath::FloorToInt32((ColumnHeight - BaseZ) / VoxelSize), 0, Count - 1);
+				}
+				if (Weights[Corner] > BestWeight)
+				{
+					// The nearest column with a surface names the material and the biome.
+					BestWeight = Weights[Corner];
+					OutSample.MaterialID = ColumnMaterial;
+					OutSample.BiomeID = ColumnBiome;
+				}
+				ColumnHeights[Corner] = ColumnHeight;
+				++Found;
+				HeightSum += Weights[Corner] * ColumnHeight;
+				WeightSum += Weights[Corner];
+			}
+			if (WeightSum <= 0.0)
 			{
 				return false;
 			}
+			Height = static_cast<float>(HeightSum / WeightSum);
 
-			// Surface normal from the edit-merged density gradient (central differences at the surface).
-			auto Density = [&ReadVoxel](double X, double Y, double Z) -> float
+			if (Found == 4)
 			{
-				return static_cast<float>(ReadVoxel(FVector(X, Y, Z)).Density);
-			};
-			const float Step = VoxelSize;
-			const float Hz = Height;
-			const float dX = Density(WorldPos.X + Step, WorldPos.Y, Hz) - Density(WorldPos.X - Step, WorldPos.Y, Hz);
-			const float dY = Density(WorldPos.X, WorldPos.Y + Step, Hz) - Density(WorldPos.X, WorldPos.Y - Step, Hz);
-			const float dZ = Density(WorldPos.X, WorldPos.Y, Hz + Step) - Density(WorldPos.X, WorldPos.Y, Hz - Step);
-
-			// Density increases into the solid; the outward surface normal is the negated gradient.
-			OutSample.Normal = FVector(-dX, -dY, -dZ).GetSafeNormal();
-			if (OutSample.Normal.IsNearlyZero())
-			{
-				OutSample.Normal = FVector::UpVector;
+				// The normal of the blended height: its slope over the cell, the mesh's own between the four columns.
+				const double SlopeX = ((1.0 - FracY) * (ColumnHeights[1] - ColumnHeights[0]) + FracY * (ColumnHeights[3] - ColumnHeights[2])) / VoxelSize;
+				const double SlopeY = ((1.0 - FracX) * (ColumnHeights[2] - ColumnHeights[0]) + FracX * (ColumnHeights[3] - ColumnHeights[1])) / VoxelSize;
+				OutSample.Normal = FVector(-SlopeX, -SlopeY, 1.0).GetSafeNormal();
 			}
-			else if (OutSample.Normal.Z < 0.0f)
+			else
 			{
-				OutSample.Normal = -OutSample.Normal; // keep it up-facing for a top surface
+				// A column without a surface in the window (the loaded area's edge, a hole): the edit-merged density
+				// gradient, central differences at the surface.
+				auto Density = [&ReadVoxel](double X, double Y, double Z) -> float
+				{
+					return static_cast<float>(ReadVoxel(FVector(X, Y, Z)).Density);
+				};
+				const float Step = VoxelSize;
+				const float Hz = Height;
+				const float dX = Density(WorldPos.X + Step, WorldPos.Y, Hz) - Density(WorldPos.X - Step, WorldPos.Y, Hz);
+				const float dY = Density(WorldPos.X, WorldPos.Y + Step, Hz) - Density(WorldPos.X, WorldPos.Y - Step, Hz);
+				const float dZ = Density(WorldPos.X, WorldPos.Y, Hz + Step) - Density(WorldPos.X, WorldPos.Y, Hz - Step);
+
+				// Density increases into the solid; the outward surface normal is the negated gradient.
+				OutSample.Normal = FVector(-dX, -dY, -dZ).GetSafeNormal();
+				if (OutSample.Normal.IsNearlyZero())
+				{
+					OutSample.Normal = FVector::UpVector;
+				}
+				else if (OutSample.Normal.Z < 0.0f)
+				{
+					OutSample.Normal = -OutSample.Normal; // keep it up-facing for a top surface
+				}
 			}
 
 			OutSample.SlopeDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(static_cast<float>(OutSample.Normal.Z), -1.0f, 1.0f)));

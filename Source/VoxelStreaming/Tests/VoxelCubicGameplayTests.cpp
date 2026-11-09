@@ -26,7 +26,8 @@
 //
 // A cubic block at voxel layer k spans [k V, (k + 1) V) above WorldOrigin and the top face of the topmost solid block lies
 // up to a block above the density isosurface. The surface queries must return that top face, exactly what the streamed
-// voxels hold, at any WorldOrigin and inside a conditioning zone; a smooth world's queries must be what they were.
+// voxels hold, at any WorldOrigin and inside a conditioning zone; a smooth world's queries must stay the isosurface (read
+// from the voxel-grid columns since G165).
 // ---------------------------------------------------------------------------
 
 namespace VoxelCubicGameplayTestUtils
@@ -393,8 +394,9 @@ bool FVoxelCubicBlockSurfaceSmoothUnchangedTest::RunTest(const FString& Paramete
 		const float Expected = FVoxelTerrainConditioning::ApplyToHeight(X, Y, Natural, { Pad });
 		Generated += Manager->GetGeneratedSurfacePoint(FVector(X, Y, 0.0)).Z == Expected ? 1 : 0;
 
-		// QueryEditMergedSurfacePoint: the column at (X, Y) from one chunk under the estimate to one above, interpolated
-		// where the density crosses the threshold (FVoxelSurfaceQuery::ExtractSurfaceFromColumn), as before.
+		// QueryEditMergedSurfacePoint: the four voxel-grid columns around (X, Y) from one chunk under the estimate to one
+		// above, each interpolated where the density crosses the threshold (FVoxelSurfaceQuery::ExtractSurfaceFromColumn)
+		// and blended bilinearly, the nearest column's material (G165).
 		FVoxelSurfaceSample Hit;
 		if (!Manager->QueryEditMergedSurfacePoint(FVector(X, Y, 0.0), Hit))
 		{
@@ -403,22 +405,48 @@ bool FVoxelCubicBlockSurfaceSmoothUnchangedTest::RunTest(const FString& Paramete
 		const float Height = static_cast<float>(Hit.Position.Z);
 		const uint8 Material = Hit.MaterialID;
 		++Loaded;
+		const double VS = Config->VoxelSize;
 		const int32 Window = Config->ChunkSize;
-		const float BaseZ = Natural - Window * Config->VoxelSize;
-		TArray<FVoxelData> Column;
-		for (int32 i = 0; i < 2 * Window + 1; ++i)
+		const FIntPoint Cell = Test.ColumnOf(X, Y);
+		const double FX = (X - Config->WorldOrigin.X) / VS - Cell.X;
+		const double FY = (Y - Config->WorldOrigin.Y) / VS - Cell.Y;
+		const int64 BaseK = FMath::FloorToInt64((Natural - Config->WorldOrigin.Z) / VS) - Window;
+		const float BaseZ = static_cast<float>(Config->WorldOrigin.Z + BaseK * VS);
+		double Sum = 0.0, WeightSum = 0.0, Best = -1.0;
+		uint8 RefMaterial = 0;
+		for (int32 Corner = 0; Corner < 4; ++Corner)
 		{
-			Column.Add(Manager->GetVoxelAt(FVector(X, Y, BaseZ + i * Config->VoxelSize)));
+			const int32 DX = Corner & 1, DY = Corner >> 1;
+			const double Weight = (DX ? FX : 1.0 - FX) * (DY ? FY : 1.0 - FY);
+			if (Weight <= 0.0)
+			{
+				continue;
+			}
+			TArray<FVoxelData> Column;
+			for (int32 i = 0; i < 2 * Window + 1; ++i)
+			{
+				Column.Add(Manager->GetVoxelAt(Test.VoxelCentre(Cell.X + DX, Cell.Y + DY, BaseK + i)));
+			}
+			float ColumnHeight = 0.0f;
+			uint8 ColumnMaterial = 0, ColumnBiome = 0;
+			if (FVoxelSurfaceQuery::ExtractSurfaceFromColumn(Column, BaseZ, Config->VoxelSize, ColumnHeight, ColumnMaterial, ColumnBiome))
+			{
+				Sum += Weight * ColumnHeight;
+				WeightSum += Weight;
+				if (Weight > Best)
+				{
+					Best = Weight;
+					RefMaterial = ColumnMaterial;
+				}
+			}
 		}
-		float RefHeight = 0.0f;
-		uint8 RefMaterial = 0, RefBiome = 0;
-		const bool bRef = FVoxelSurfaceQuery::ExtractSurfaceFromColumn(Column, BaseZ, Config->VoxelSize, RefHeight, RefMaterial, RefBiome);
-		EditMerged += bRef && Height == RefHeight && Material == RefMaterial ? 1 : 0;
+		const bool bRef = WeightSum > 0.0;
+		EditMerged += bRef && FMath::IsNearlyEqual(Height, static_cast<float>(Sum / WeightSum), 0.01f) && Material == RefMaterial ? 1 : 0;
 	}
-	AddInfo(FString::Printf(TEXT("generated %d / 300, edit-merged %d / %d as before"), Generated, EditMerged, Loaded));
+	AddInfo(FString::Printf(TEXT("generated %d / 300, edit-merged %d / %d from the voxel-grid columns"), Generated, EditMerged, Loaded));
 	TestEqual(TEXT("GetGeneratedSurfacePoint unchanged in a smooth world"), Generated, 300);
 	TestTrue(TEXT("Loaded columns sampled"), Loaded >= 200);
-	TestEqual(TEXT("QueryEditMergedSurfacePoint unchanged in a smooth world"), EditMerged, Loaded);
+	TestEqual(TEXT("QueryEditMergedSurfacePoint reads the voxel-grid columns in a smooth world"), EditMerged, Loaded);
 
 	Test.Stop();
 	return true;
