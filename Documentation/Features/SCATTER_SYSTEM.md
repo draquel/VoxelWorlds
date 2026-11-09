@@ -183,7 +183,9 @@ struct FScatterDefinition
 
     // Rendering
     bool bCastShadows = true;
-    bool bEnableCollision = false;
+    bool bEnableCollision = false;            // static: the mesh's collision; skeletal: a capsule per instance (G149)
+    float SkeletalCollisionRadius = 0.0f;     // skeletal: the capsule's radius at scale 1; 0 = from the mesh's bounds
+    float SkeletalCollisionHeight = 0.0f;     // skeletal: the capsule's height from the base; 0 = the bounds' top
     bool bReceivesDecals = true;
 
     // Debug
@@ -556,7 +558,7 @@ renderer differs in four things:
 - **The component.** `CreateSkinnedComponent` makes it at the region's origin with the definition's
   `LODStartDistance` and `CullDistance` as its per-instance start and end cull distances (the HISM's fade band and cull),
   its shadows and decals, `ApplyOverrideMaterials` (the dynamic instances of [Dynamic materials](#dynamic-materials-the-foliage-and-bolt-plans-d67)
-  if the definition asks), no collision (a skeletal definition's `bEnableCollision` is ignored with a warning) and, when
+  if the definition asks), no collision of its own (with `bEnableCollision`, [Collision](#collision-g149) below) and, when
   the engine's Dynamic Wind plugin is loaded, a `UDynamicWindData` transform provider: the GPU animates each instance
   from the plugin's wind simulation, which `UDynamicWindSubsystem::UpdateWindParameters` drives (in this project
   VoxelWorldPOI's `UPOIWeatherBridge`, from the weather). VoxelWorlds finds the provider class by name
@@ -580,8 +582,46 @@ renderer differs in four things:
   skeletal definition's queued instances wait in the queue, the entries behind them going on, until its load has
   finished (`IsDefinitionLoaded`); the component then takes the loaded mesh (`Get`, never a load).
 
+#### Collision (G149)
+
+An instanced skinned mesh has no bodies per instance, and the Megaplants come with no physics asset, so the renderer
+gives a skeletal definition with `bEnableCollision` a second component per type and region: a collision-only
+`UInstancedStaticMeshComponent` (`GetOrCreateCollisionComponent`) beside the skinned one, at the same region origin,
+holding one capsule per skinned instance. `AddSkinnedInstances` adds a chunk's capsules with its instances and
+`RemoveSkinnedInstances` removes them with the instances (`FSkinnedInstanceSet`: the capsules' ids per chunk beside the
+instances'), so every path that adds or releases a skinned instance (the add queue, an unload, the distance cleanup, an
+edit, an exclusion volume, a harvest) moves its capsule too; `ClearAllInstances` and `Shutdown` clear and destroy the
+components.
+
+- **The shape.** Every component instances one transient mesh, a capsule of radius 50 and height 100 standing on its
+  origin (`GetCollisionCapsuleMesh`: a box for the render data the component needs, never drawn, and an `FKSphylElem`
+  used as simple and complex collision, nothing to cook). A capsule's radius scales with the larger of X and Y and its
+  height with Z, so a per-axis scale under the instance's transform gives each instance the definition's capsule
+  (`MakeSkinnedCollisionTransform`), tilting and scaling with the plant. The capsule is the trunk's:
+  `SkeletalCollisionRadius` and `SkeletalCollisionHeight`, or from the stage's imported bounds when zero
+  (`GetSkeletalCollisionCapsule`: a fifth of the smaller horizontal half extent, up to the bounds' top, the radius at
+  most half the height). The Utah Junipers' stages A, B, C come out at 59 x 464, 42 x 276 and 17 x 211 cm (a stage A's
+  trunk is about a metre across at its base); the canopy stays passable, as the old static bakes' was (they had no
+  simple collision at all, only their triangles for traces).
+- **Out of the render scene.** The component is hidden, casts nothing and is never added to the scene
+  (`UPrimitiveComponent::ShouldComponentAddToScene`), so it costs only its physics bodies; it blocks every channel as a
+  static definition's HISM does, does not tick and does not affect navigation.
+- **Why not a physics asset.** The alternative was a physics asset per stage for the skinned component's own bodies:
+  every stage of every species authored by hand, and bodies an instanced skinned mesh does not make per instance. One
+  capsule per instance is a shape the scatter can make for any skeletal definition from its numbers or bounds.
+- **What it costs** (measured 2026-11-09 in PIE on `SmoothTerrain_Island`): nothing per frame (static bodies; the game
+  thread 23.2, 24.8 and 24.0 ms with the capsules against 22.7 and 26.4 ms without, within the run-to-run noise); a
+  chunk's add 30 to 80 µs for one capsule, 55 to 106 µs for three, 140 to 330 µs for ten, about 10 to 15 µs each in
+  batches of a hundred, and a removal about a third of that, timed in the editor through Python (so an upper bound).
+
+A walk into a juniper is deflected around its trunk (the pawn's path keeps the capsule's and the pawn's radii, 88 uu,
+from the trunk's axis; with the collision components turned off the same walk passes through the trunk), a chop finds it
+through the aim trace as before and its harvest removes the capsule with the instance, and a trip away and back leaves
+no capsule behind and none twice (24 capsules for 24 junipers before, 0 and 0 away, 24 unique after). Test
+`VoxelWorlds.Scatter.SkeletalCollision`.
+
 A static definition never touches any of it. The diagnostics are `voxel.Scatter.Skinned` (the components, their
-instances, provider and ticking count), `voxel.Scatter.Skinned.TimeRefresh` (what the tick would cost) and
+instances, provider and ticking count, and the collision capsules with their radius and height), `voxel.Scatter.Skinned.TimeRefresh` (what the tick would cost) and
 `voxel.Scatter.Skinned.Sample` (stat unit's times over a few seconds); `voxel.Scatter.Stats hism` lists the skinned
 components per type. The costs and the decision (the skinned instances everywhere, no near range, the static bakes
 retired) are the foliage and bolt plan's F2 and F3 results (`Plugins/WorldWeatherPlugin/Documentation/WEATHER_SYSTEM.md`
@@ -591,7 +631,7 @@ section 10). Test `VoxelWorlds.Scatter.Skeletal`.
 
 `GetDebugStats()` reports pool health:
 ```
-ScatterRenderer: 5 HISM, 12400 instances (Active: 8200, Pooled: 4200, Util: 66%), 2 skinned (480 instances), 42 chunks, Pending: 0 adds
+ScatterRenderer: 5 HISM, 12400 instances (Active: 8200, Pooled: 4200, Util: 66%), 2 skinned (480 instances, 60 capsules), 42 chunks, Pending: 0 adds
 ```
 
 - **Active**: Instances with real transforms (visible within CullDistance)

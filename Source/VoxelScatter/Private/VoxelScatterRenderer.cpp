@@ -7,12 +7,16 @@
 #include "VoxelBillboardMeshGenerator.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/InstancedSkinnedMeshComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Animation/TransformProviderData.h"
 #include "Engine/World.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StreamableManager.h"
 #include "Engine/Texture2D.h"
+#include "PhysicsEngine/BodySetup.h"
+#include "StaticMeshAttributes.h"
+#include "StaticMeshDescription.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "GameFramework/Actor.h"
@@ -144,6 +148,16 @@ void UVoxelScatterRenderer::Shutdown()
 	}
 	SkinnedComponents.Empty();
 	AllSkinnedComponents.Empty();
+	for (auto& Pair : CollisionComponents)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->DestroyComponent();
+		}
+	}
+	CollisionComponents.Empty();
+	AllCollisionComponents.Empty();
+	CollisionCapsuleMesh = nullptr;
 
 	// The skeletal definitions' loads go with the components that wanted them
 	for (auto& Pair : DefinitionLoads)
@@ -536,6 +550,14 @@ void UVoxelScatterRenderer::ClearAllInstances()
 			Pair.Value->ClearInstances();
 		}
 	}
+	// The skinned instances' capsules go with them (G149)
+	for (auto& Pair : CollisionComponents)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->ClearInstances();
+		}
+	}
 
 	// Clear tracking and pools
 	ChunkScatterTypes.Empty();
@@ -626,6 +648,28 @@ int32 UVoxelScatterRenderer::GetSkinnedInstanceCount() const
 		Total += Pair.Value.Num;
 	}
 	return Total;
+}
+
+int32 UVoxelScatterRenderer::GetSkinnedCollisionCount() const
+{
+	int32 Total = 0;
+	for (const auto& Pair : SkinnedInstances)
+	{
+		Total += Pair.Value.NumCollision;
+	}
+	return Total;
+}
+
+void UVoxelScatterRenderer::GetTypeCollisionComponents(int32 ScatterTypeID, TArray<TPair<FIntVector, UInstancedStaticMeshComponent*>>& OutComponents) const
+{
+	OutComponents.Reset();
+	for (const auto& Pair : CollisionComponents)
+	{
+		if (Pair.Key.ScatterTypeID == ScatterTypeID && Pair.Value)
+		{
+			OutComponents.Emplace(Pair.Key.Region, Pair.Value.Get());
+		}
+	}
 }
 
 // ==================== Batched HISM Writes (world modes review G42) ====================
@@ -822,7 +866,8 @@ FString UVoxelScatterRenderer::GetHISMBreakdown(int32 TopN) const
 			Type.Y += Pair.Value.Num;
 			Type.Z = FMath::Max(Type.Z, Pair.Value.Num);
 		}
-		Out += FString::Printf(TEXT("\n  skinned components: %d, %d instances"), SkinnedComponents.Num(), GetSkinnedInstanceCount());
+		Out += FString::Printf(TEXT("\n  skinned components: %d, %d instances; collision components: %d, %d capsules"), SkinnedComponents.Num(),
+			GetSkinnedInstanceCount(), CollisionComponents.Num(), GetSkinnedCollisionCount());
 		for (const auto& Pair : SkinnedByType)
 		{
 			const FScatterDefinition* Definition = ScatterManager ? ScatterManager->GetScatterDefinition(Pair.Key) : nullptr;
@@ -891,6 +936,13 @@ int64 UVoxelScatterRenderer::GetTotalMemoryUsage() const
 		Total += Pair.Value.Num * static_cast<int64>(sizeof(FSkinnedMeshInstanceData));
 		Total += Pair.Value.ChunkInstanceIds.GetAllocatedSize();
 		for (const auto& ChunkPair : Pair.Value.ChunkInstanceIds)
+		{
+			Total += ChunkPair.Value.GetAllocatedSize();
+		}
+		// Their capsules (G149): an instance's matrix and its physics body each, and the ids per chunk
+		Total += Pair.Value.NumCollision * static_cast<int64>(sizeof(FInstancedStaticMeshInstanceData) + sizeof(FBodyInstance));
+		Total += Pair.Value.ChunkCollisionIds.GetAllocatedSize();
+		for (const auto& ChunkPair : Pair.Value.ChunkCollisionIds)
 		{
 			Total += ChunkPair.Value.GetAllocatedSize();
 		}
@@ -1041,7 +1093,7 @@ FString UVoxelScatterRenderer::GetDebugStats() const
 	const int32 ActiveInstances = TotalAllocated - TotalPooled;
 	const float Utilization = TotalAllocated > 0 ? (static_cast<float>(ActiveInstances) / TotalAllocated * 100.0f) : 0.0f;
 
-	return FString::Printf(TEXT("ScatterRenderer: %d HISM, %d instances (Active: %d, Pooled: %d, Util: %.0f%%), %d skinned (%d instances), %d chunks, Pending: %d adds"),
+	return FString::Printf(TEXT("ScatterRenderer: %d HISM, %d instances (Active: %d, Pooled: %d, Util: %.0f%%), %d skinned (%d instances, %d capsules), %d chunks, Pending: %d adds"),
 		HISMComponents.Num(),
 		TotalAllocated,
 		ActiveInstances,
@@ -1049,6 +1101,7 @@ FString UVoxelScatterRenderer::GetDebugStats() const
 		Utilization,
 		SkinnedComponents.Num(),
 		GetSkinnedInstanceCount(),
+		GetSkinnedCollisionCount(),
 		ChunksWithInstances,
 		PendingInstanceAdds.Num());
 }
@@ -1427,14 +1480,9 @@ UInstancedSkinnedMeshComponent* UVoxelScatterRenderer::CreateSkinnedComponent(co
 	Component->SetCullDistances(Definition.LODStartDistance, Definition.CullDistance);
 	Component->SetCastShadow(Definition.bCastShadows);
 	Component->bReceivesDecals = Definition.bReceivesDecals;
+	// No bodies of its own (the Megaplants have no physics asset): bEnableCollision's capsules are the collision component's (G149)
 	Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Component->SetCanEverAffectNavigation(false);
-	if (Definition.bEnableCollision && !SkeletalWarnings.Contains(Definition.ScatterID))
-	{
-		SkeletalWarnings.Add(Definition.ScatterID);
-		UE_LOG(LogVoxelScatter, Warning, TEXT("Scatter type %d (%s): a skeletal definition is drawn without collision (bEnableCollision ignored)."),
-			Definition.ScatterID, *Definition.Name);
-	}
 	ApplyOverrideMaterials(Component, Definition);
 
 	Component->RegisterComponent();
@@ -1464,6 +1512,30 @@ bool UVoxelScatterRenderer::AddSkinnedInstances(const FVoxelScatterHISMKey& Key,
 	FSkinnedInstanceSet& Set = SkinnedInstances.FindOrAdd(Key);
 	Set.ChunkInstanceIds.FindOrAdd(ChunkCoord).Append(Ids);
 	Set.Num += Ids.Num();
+
+	// Their capsules (G149), in the same space: the collision component sits at the region's origin too
+	const FScatterDefinition* Definition = ScatterManager ? ScatterManager->GetScatterDefinition(Key.ScatterTypeID) : nullptr;
+	if (Definition && Definition->bEnableCollision)
+	{
+		const FVector2D Capsule = GetSkeletalCollisionCapsule(*Definition, Cast<USkeletalMesh>(Component->GetSkinnedAsset()));
+		UInstancedStaticMeshComponent* Collision = Capsule.X > 0.0 ? GetOrCreateCollisionComponent(*Definition, Key.Region) : nullptr;
+		if (Collision)
+		{
+			for (FTransform& Transform : Local)
+			{
+				Transform = MakeSkinnedCollisionTransform(Capsule, Transform);
+			}
+			const TArray<FPrimitiveInstanceId> CollisionIds = Collision->AddInstancesById(Local, /*bWorldSpace=*/false, /*bUpdateNavigation=*/false);
+			Set.ChunkCollisionIds.FindOrAdd(ChunkCoord).Append(CollisionIds);
+			Set.NumCollision += CollisionIds.Num();
+		}
+		else if (!SkeletalWarnings.Contains(Definition->ScatterID))
+		{
+			SkeletalWarnings.Add(Definition->ScatterID);
+			UE_LOG(LogVoxelScatter, Warning, TEXT("Scatter type %d (%s): no collision capsule could be made (radius %.1f, height %.1f); its instances are drawn without collision."),
+				Definition->ScatterID, *Definition->Name, Capsule.X, Capsule.Y);
+		}
+	}
 	return true;
 }
 
@@ -1480,7 +1552,152 @@ int32 UVoxelScatterRenderer::RemoveSkinnedInstances(const FVoxelScatterHISMKey& 
 	{
 		(*Found)->RemoveInstances(Ids);
 	}
+	// Their capsules leave with them (G149)
+	TArray<FPrimitiveInstanceId> CollisionIds;
+	if (Set->ChunkCollisionIds.RemoveAndCopyValue(ChunkCoord, CollisionIds))
+	{
+		Set->NumCollision -= CollisionIds.Num();
+		if (const TObjectPtr<UInstancedStaticMeshComponent>* Found = CollisionComponents.Find(Key); Found && *Found)
+		{
+			(*Found)->RemoveInstancesById(CollisionIds, /*bUpdateNavigation=*/false);
+		}
+	}
 	return Ids.Num();
+}
+
+FVector2D UVoxelScatterRenderer::GetSkeletalCollisionCapsule(const FScatterDefinition& Definition, const USkeletalMesh* Mesh)
+{
+	double Radius = Definition.SkeletalCollisionRadius;
+	double Height = Definition.SkeletalCollisionHeight;
+	if ((Radius <= 0.0 || Height <= 0.0) && Mesh)
+	{
+		// The mesh as imported (no bounds extensions), its pivot at the plant's base
+		const FBox Box = Mesh->GetImportedBounds().GetBox();
+		if (Radius <= 0.0)
+		{
+			Radius = 0.2 * FMath::Min(Box.GetExtent().X, Box.GetExtent().Y);
+		}
+		if (Height <= 0.0)
+		{
+			Height = Box.Max.Z;
+		}
+	}
+	if (Radius <= 0.0 || Height <= 0.0)
+	{
+		return FVector2D::ZeroVector;
+	}
+	return FVector2D(FMath::Min(Radius, Height * 0.5), Height);
+}
+
+FTransform UVoxelScatterRenderer::MakeSkinnedCollisionTransform(const FVector2D& Capsule, const FTransform& Instance)
+{
+	// The unit capsule: radius 50, height 100 from its origin (GetCollisionCapsuleMesh). A capsule's radius scales with the
+	// larger of X and Y and its height with Z, so a per-axis scale gives any radius and height.
+	const FVector Scale(Capsule.X / 50.0, Capsule.X / 50.0, Capsule.Y / 100.0);
+	return FTransform(FQuat::Identity, FVector::ZeroVector, Scale) * Instance;
+}
+
+UStaticMesh* UVoxelScatterRenderer::GetCollisionCapsuleMesh()
+{
+	if (CollisionCapsuleMesh)
+	{
+		return CollisionCapsuleMesh;
+	}
+	UStaticMesh* Mesh = NewObject<UStaticMesh>(this, NAME_None, RF_Transient);
+	UStaticMeshDescription* MeshDesc = Mesh ? Mesh->CreateStaticMeshDescription() : nullptr;
+	if (!MeshDesc)
+	{
+		return nullptr;
+	}
+
+	// Render data the component needs to hold instances, never drawn (the component is hidden): the capsule's box, so the
+	// component's bounds are its capsules'
+	FMeshDescription& MD = MeshDesc->GetMeshDescription();
+	FStaticMeshAttributes Attributes(MD);
+	Attributes.Register();
+	const FPolygonGroupID Group = MD.CreatePolygonGroup();
+	FVertexID Corners[8];
+	for (int32 i = 0; i < 8; ++i)
+	{
+		Corners[i] = MD.CreateVertex();
+		Attributes.GetVertexPositions()[Corners[i]] = FVector3f((i & 1) ? 50.0f : -50.0f, (i & 2) ? 50.0f : -50.0f, (i & 4) ? 100.0f : 0.0f);
+	}
+	// Each face's corners, counter-clockwise seen from outside
+	static const int32 Faces[6][4] = { { 0, 2, 3, 1 }, { 4, 5, 7, 6 }, { 0, 1, 5, 4 }, { 2, 6, 7, 3 }, { 0, 4, 6, 2 }, { 1, 3, 7, 5 } };
+	for (const int32 (&Face)[4] : Faces)
+	{
+		FVertexInstanceID Instances[4];
+		for (int32 i = 0; i < 4; ++i)
+		{
+			Instances[i] = MD.CreateVertexInstance(Corners[Face[i]]);
+		}
+		MD.CreatePolygon(Group, { Instances[0], Instances[1], Instances[2] });
+		MD.CreatePolygon(Group, { Instances[0], Instances[2], Instances[3] });
+	}
+	Mesh->BuildFromStaticMeshDescriptions({ MeshDesc }, /*bBuildSimpleCollision=*/false);
+	Mesh->NeverStream = true;
+
+	// The collision: one capsule, simple used as complex (the box above never collides), nothing to cook
+	UBodySetup* BodySetup = Mesh->GetBodySetup();
+	if (!BodySetup)
+	{
+		return nullptr;
+	}
+	FKSphylElem Capsule(50.0f, 0.0f);
+	Capsule.Center = FVector(0.0, 0.0, 50.0);
+	BodySetup->AggGeom.SphylElems.Add(Capsule);
+	BodySetup->CollisionTraceFlag = CTF_UseSimpleAsComplex;
+	BodySetup->bNeverNeedsCookedCollisionData = true;
+	BodySetup->InvalidatePhysicsData();
+	BodySetup->CreatePhysicsMeshes();
+	CollisionCapsuleMesh = Mesh;
+	return Mesh;
+}
+
+UInstancedStaticMeshComponent* UVoxelScatterRenderer::GetOrCreateCollisionComponent(const FScatterDefinition& Definition, const FIntVector& Region)
+{
+	const FVoxelScatterHISMKey Key{ Definition.ScatterID, Region };
+	if (const TObjectPtr<UInstancedStaticMeshComponent>* Existing = CollisionComponents.Find(Key))
+	{
+		return Existing->Get();
+	}
+	UStaticMesh* Capsule = GetCollisionCapsuleMesh();
+	if (!Capsule || !ContainerActor)
+	{
+		return nullptr;
+	}
+	const FName ComponentName = MakeUniqueObjectName(ContainerActor, UInstancedStaticMeshComponent::StaticClass(), Regions.IsSplit()
+		? FName(*FString::Printf(TEXT("ISMCol_%s_%d_R%d_%d_%d"), *Definition.Name, Definition.ScatterID, Region.X, Region.Y, Region.Z))
+		: FName(*FString::Printf(TEXT("ISMCol_%s_%d"), *Definition.Name, Definition.ScatterID)));
+	UInstancedStaticMeshComponent* Component = NewObject<UInstancedStaticMeshComponent>(ContainerActor, ComponentName, RF_Transient);
+	if (!Component)
+	{
+		return nullptr;
+	}
+	Component->PrimaryComponentTick.bCanEverTick = false;
+	Component->PrimaryComponentTick.bStartWithTickEnabled = false;
+	Component->AttachToComponent(ContainerActor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+	Component->SetRelativeLocation(Regions.GetRegionOrigin(Region));
+	Component->SetStaticMesh(Capsule);
+
+	// Hidden and casting nothing: never added to the render scene (UPrimitiveComponent::ShouldComponentAddToScene), so the
+	// capsules cost the physics scene alone
+	Component->SetVisibility(false);
+	Component->SetHiddenInGame(true);
+	Component->SetCastShadow(false);
+	Component->bAffectDistanceFieldLighting = false;
+
+	// Blocking as a static definition's HISM (ConfigureHISMComponent)
+	Component->SetMobility(EComponentMobility::Static);
+	Component->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	Component->SetCollisionResponseToAllChannels(ECR_Block);
+	Component->SetCanEverAffectNavigation(false);
+	Component->RegisterComponent();
+
+	CollisionComponents.Add(Key, Component);
+	AllCollisionComponents.Add(Component);
+	UE_LOG(LogVoxelScatter, Log, TEXT("Created collision component for: %s (ID: %d)"), *Definition.Name, Definition.ScatterID);
+	return Component;
 }
 
 void UVoxelScatterRenderer::FlushPendingInstanceAdds()
