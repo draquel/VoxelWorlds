@@ -178,7 +178,11 @@ both budgets unlimited (539 MB of detail images, the pre-WM-E2 cost, plus the ov
 the whole view from overviews.
 
 Drawing: a 64 × 64 tile takes about 8 ms of background work (four run at a time, about 480 tiles a second while the game
-runs); all generation is async, with no game-thread cost beyond storing the result.
+runs); all generation is async, with no game-thread cost beyond storing the result. `voxel.Map.Stats [reset]` reports
+the drawing since its last reset: tiles drawn, their rate and the worker ms a tile, the drawings that replaced an image
+the store held, the images views asked for (`RequestTileImage`), and the globe's fog-of-war rebuilds with their game-thread ms. Insights shows `ExploreAll`, the drawing and its
+completion, the store's trimming, the fog-of-war rebuild and the explored tiles' save and load as `VoxelMap_*` scopes
+(the map scaling plan's M0, G163).
 
 ## Configuration
 

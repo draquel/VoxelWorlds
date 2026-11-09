@@ -298,9 +298,12 @@ public:
 
 	/**
 	 * One-line state summary for diagnostics (voxel.Map.Stats).
-	 * @return Cached / explored / queued tiles, overlays and their pending state
+	 * @return Cached / explored / queued tiles, the drawing counters since the last reset, overlays and their pending state
 	 */
 	FString GetDebugStats() const;
+
+	/** Restart the drawing counters GetDebugStats reports (voxel.Map.Stats reset; the map scaling plan's M0, G163). */
+	void ResetDebugStats();
 
 	/**
 	 * Debug (voxel.Map.Capture): write the explored tiles around a world position to a PNG, north up as the world map
@@ -556,6 +559,29 @@ private:
 	TSet<uint64> GlobeExploredCells;
 	int32 GlobeExploredFromCount = -1;
 	double GlobeExploredRefreshedSeconds = 0.0;
+
+	/**
+	 * Drawing counters since the last ResetDebugStats (voxel.Map.Stats; the map scaling plan's M0, G163): how fast tiles
+	 * draw, how many drawings replaced an image the store still held, and how many images a view asked for.
+	 */
+	struct FDrawStats
+	{
+		/** Drawings stored. */
+		int64 Drawn = 0;
+		/** Of those, drawings of a tile the store already held (an invalidation, a detail upgrade). */
+		int64 Replaced = 0;
+		/** RequestTileImage calls that queued a drawing (the world map's fills). */
+		int64 ImageRequests = 0;
+		/** Worker seconds spent drawing the stored tiles. */
+		double DrawSeconds = 0.0;
+		/** The globe's fog-of-war rebuilds (IsGlobeCellExplored), their game-thread seconds and the longest. */
+		int64 FogRebuilds = 0;
+		double FogSeconds = 0.0;
+		double FogMaxSeconds = 0.0;
+		/** FPlatformTime::Seconds() at the last reset. */
+		double SinceSeconds = 0.0;
+	};
+	FDrawStats DrawStats;
 
 	/** GFrameCounter of the last overlay gather: LaunchWaitingTiles starts at most one rebuild per frame. */
 	uint64 LastOverlayGatherFrame = MAX_uint64;

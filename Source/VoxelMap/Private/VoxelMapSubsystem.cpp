@@ -35,6 +35,7 @@
 #include "Serialization/MemoryReader.h"
 #include "Serialization/MemoryWriter.h"
 #include "VoxelResidencyStats.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 static TAutoConsoleVariable<float> CVarMapEditRefreshSeconds(
 	TEXT("voxel.Map.EditRefreshSeconds"),
@@ -130,17 +131,22 @@ namespace
 
 	FAutoConsoleCommandWithWorldAndArgs GVoxelMapStatsCmd(
 		TEXT("voxel.Map.Stats"),
-		TEXT("Log the map's tile, queue and edit-overlay state."),
+		TEXT("Log the map's tile, queue, drawing and edit-overlay state. voxel.Map.Stats reset logs it, then restarts the ")
+		TEXT("drawing counters (drawn, replaced, image requests, the rate)."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			UWorld* Target = FindPlayWorld(World);
-			const UVoxelMapSubsystem* Map = Target ? Target->GetSubsystem<UVoxelMapSubsystem>() : nullptr;
+			UVoxelMapSubsystem* Map = Target ? Target->GetSubsystem<UVoxelMapSubsystem>() : nullptr;
 			if (!Map)
 			{
 				UE_LOG(LogVoxelMap, Warning, TEXT("voxel.Map.Stats: no PIE/Game world with a map subsystem (start PIE first)"));
 				return;
 			}
 			UE_LOG(LogVoxelMap, Log, TEXT("voxel.Map.Stats: %s"), *Map->GetDebugStats());
+			if (Args.Num() > 0 && Args[0].Equals(TEXT("reset"), ESearchCase::IgnoreCase))
+			{
+				Map->ResetDebugStats();
+			}
 		}));
 
 	FAutoConsoleCommandWithWorldAndArgs GVoxelMapExploreAllCmd(
@@ -159,8 +165,10 @@ namespace
 				return;
 			}
 			const float Radius = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 200000.0f;
+			const double Start = FPlatformTime::Seconds();
 			const int64 Count = Map->ExploreAllTiles(Pawn ? Pawn->GetActorLocation() : FVector::ZeroVector, Radius);
-			UE_LOG(LogVoxelMap, Log, TEXT("voxel.Map.ExploreAll: %lld tile(s) explored; %s"), Count, *Map->GetDebugStats());
+			UE_LOG(LogVoxelMap, Log, TEXT("voxel.Map.ExploreAll: %lld tile(s) explored in %.1f ms on the game thread; %s"), Count,
+				(FPlatformTime::Seconds() - Start) * 1000.0, *Map->GetDebugStats());
 		}));
 
 	FAutoConsoleCommandWithWorldAndArgs GVoxelMapCaptureCmd(
@@ -247,6 +255,7 @@ void UVoxelMapSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 	UE_LOG(LogVoxelMap, Log, TEXT("UVoxelMapSubsystem initialized"));
+	ResetDebugStats();
 
 	// Attempt to resolve chunk manager immediately.
 	// It may not be available yet (depends on actor initialization order),
@@ -502,6 +511,7 @@ bool UVoxelMapSubsystem::RequestTileImage(FIntPoint TileCoord, bool bDetail)
 	}
 	if (!TileQueue.IsQueued(Key))
 	{
+		++DrawStats.ImageRequests;
 		QueueTileGeneration(TileCoord);
 	}
 	return true;
@@ -517,6 +527,7 @@ void UVoxelMapSubsystem::ApplyTileBudgets()
 
 int64 UVoxelMapSubsystem::ExploreAllTiles(const FVector& Center, float Radius)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_ExploreAll);
 	if (bShuttingDown || !ResolveChunkManager())
 	{
 		return 0;
@@ -707,6 +718,7 @@ void UVoxelMapSubsystem::GetChunkTiles(const FIntVector& ChunkCoord, TArray<FInt
 
 void UVoxelMapSubsystem::RequestTilesInRadius(const FVector& WorldPos, float Radius)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_RequestTilesInRadius);
 	if (!ResolveChunkManager())
 	{
 		return;
@@ -875,14 +887,27 @@ FString UVoxelMapSubsystem::GetDebugStats() const
 		ExploredOutside += IsTileInsideWorld(UnpackTileKey(Key)) ? 0 : 1;
 	}
 	constexpr double MB = 1024.0 * 1024.0;
+	// The drawing since the last reset (the map scaling plan's M0, G163): the rate, the worker time a tile takes, and how
+	// many drawings replaced images the store still held or answered a view's requests.
+	const double Elapsed = FMath::Max(FPlatformTime::Seconds() - DrawStats.SinceSeconds, 1.0e-3);
+	const double MsPerTile = DrawStats.Drawn > 0 ? 1000.0 * DrawStats.DrawSeconds / static_cast<double>(DrawStats.Drawn) : 0.0;
 	return FString::Printf(
-		TEXT("tiles cached=%d explored=%d (outside the world %d) waiting=%d drawing=%d | images detail=%d %.1f/%.0f MB overview=%d %.1f/%.0f MB evicted detail=%lld overview=%lld | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d"),
+		TEXT("tiles cached=%d explored=%d (outside the world %d) waiting=%d drawing=%d | drawn=%lld (%.0f/s over %.0f s, %.2f ms a tile on a worker) replaced=%lld image-requests=%lld fog-rebuilds=%lld (mean %.1f ms, max %.1f ms) | images detail=%d %.1f/%.0f MB overview=%d %.1f/%.0f MB evicted detail=%lld overview=%lld | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d"),
 		TileStore.Num(), ExploredTiles.Num(), ExploredOutside, TileQueue.NumWaiting(), TileQueue.NumDrawing(),
+		DrawStats.Drawn, static_cast<double>(DrawStats.Drawn) / Elapsed, Elapsed, MsPerTile, DrawStats.Replaced, DrawStats.ImageRequests,
+		DrawStats.FogRebuilds, DrawStats.FogRebuilds > 0 ? 1000.0 * DrawStats.FogSeconds / static_cast<double>(DrawStats.FogRebuilds) : 0.0,
+		1000.0 * DrawStats.FogMaxSeconds,
 		TileStore.NumDetail(), TileStore.GetDetailBytes() / MB, TileStore.GetDetailBudget() / MB,
 		TileStore.Num(), TileStore.GetOverviewBytes() / MB, TileStore.GetOverviewBudget() / MB,
 		TileStore.GetDetailEvictions(), TileStore.GetOverviewEvictions(),
 		EditOverlays.Num(), MaskedColumns, Bytes, TileEditedChunks.Num(), OverlayDirtyTiles.Num(),
 		OverlayAwaitingTiles.Num(), OverlayRebuildTiles.Num());
+}
+
+void UVoxelMapSubsystem::ResetDebugStats()
+{
+	DrawStats = FDrawStats();
+	DrawStats.SinceSeconds = FPlatformTime::Seconds();
 }
 
 bool UVoxelMapSubsystem::CaptureMapImage(const FVector& Center, int32 RadiusTiles, const FString& FilePath, bool bHighlightOverlay) const
@@ -1332,6 +1357,7 @@ void UVoxelMapSubsystem::QueueTileGeneration(FIntPoint TileCoord, bool bInvalida
 
 void UVoxelMapSubsystem::LaunchWaitingTiles()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_LaunchWaitingTiles);
 	// At most one overlay rebuild gathers chunk data per frame: a gather shares snapshots and walks edit layers on the
 	// game thread (0.1-2.5 ms per tile measured in VoxelDemo), and four in one frame would hitch. A skipped rebuild
 	// keeps waiting; a next-tick retry starts it (a completion cannot be relied on: it may land in this same frame).
