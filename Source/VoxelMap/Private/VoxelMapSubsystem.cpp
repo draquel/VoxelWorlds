@@ -892,9 +892,11 @@ FString UVoxelMapSubsystem::GetDebugStats() const
 	const double Elapsed = FMath::Max(FPlatformTime::Seconds() - DrawStats.SinceSeconds, 1.0e-3);
 	const double MsPerTile = DrawStats.Drawn > 0 ? 1000.0 * DrawStats.DrawSeconds / static_cast<double>(DrawStats.Drawn) : 0.0;
 	return FString::Printf(
-		TEXT("tiles cached=%d explored=%d (outside the world %d) waiting=%d drawing=%d | drawn=%lld (%.0f/s over %.0f s, %.2f ms a tile on a worker) replaced=%lld image-requests=%lld | images detail=%d %.1f/%.0f MB overview=%d %.1f/%.0f MB evicted detail=%lld overview=%lld | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d"),
+		TEXT("tiles cached=%d explored=%d (outside the world %d) waiting=%d drawing=%d | drawn=%lld (%.0f/s over %.0f s, %.2f ms a tile on a worker) replaced=%lld image-requests=%lld fog-rebuilds=%lld (mean %.1f ms, max %.1f ms) | images detail=%d %.1f/%.0f MB overview=%d %.1f/%.0f MB evicted detail=%lld overview=%lld | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d"),
 		TileStore.Num(), ExploredTiles.Num(), ExploredOutside, TileQueue.NumWaiting(), TileQueue.NumDrawing(),
 		DrawStats.Drawn, static_cast<double>(DrawStats.Drawn) / Elapsed, Elapsed, MsPerTile, DrawStats.Replaced, DrawStats.ImageRequests,
+		DrawStats.FogRebuilds, DrawStats.FogRebuilds > 0 ? 1000.0 * DrawStats.FogSeconds / static_cast<double>(DrawStats.FogRebuilds) : 0.0,
+		1000.0 * DrawStats.FogMaxSeconds,
 		TileStore.NumDetail(), TileStore.GetDetailBytes() / MB, TileStore.GetDetailBudget() / MB,
 		TileStore.Num(), TileStore.GetOverviewBytes() / MB, TileStore.GetOverviewBudget() / MB,
 		TileStore.GetDetailEvictions(), TileStore.GetOverviewEvictions(),

@@ -39,6 +39,7 @@
 #include "Serialization/MemoryWriter.h"
 #include "VoxelResidencyStats.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "Misc/ScopeExit.h"
 
 const FVoxelMapGlobeAlbedo* UVoxelMapSubsystem::GetGlobeAlbedo()
 {
@@ -98,6 +99,13 @@ bool UVoxelMapSubsystem::IsGlobeCellExplored(const FIntPoint& AlbedoCell)
 		&& (GlobeExploredFromCount < 0 || ExploredTiles.Num() < 100000 || Now - GlobeExploredRefreshedSeconds >= 1.0))
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_GlobeFogRebuild);
+		ON_SCOPE_EXIT
+		{
+			const double Took = FPlatformTime::Seconds() - Now;
+			++DrawStats.FogRebuilds;
+			DrawStats.FogSeconds += Took;
+			DrawStats.FogMaxSeconds = FMath::Max(DrawStats.FogMaxSeconds, Took);
+		};
 		GlobeExploredCells.Reset();
 		const int32 N = TileFrame.Grid.GetCellsPerEdge();
 		const int32 Nc = GlobeAlbedo->Grid.GetCellsPerEdge();

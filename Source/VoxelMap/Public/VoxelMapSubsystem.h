@@ -574,6 +574,10 @@ private:
 		int64 ImageRequests = 0;
 		/** Worker seconds spent drawing the stored tiles. */
 		double DrawSeconds = 0.0;
+		/** The globe's fog-of-war rebuilds (IsGlobeCellExplored), their game-thread seconds and the longest. */
+		int64 FogRebuilds = 0;
+		double FogSeconds = 0.0;
+		double FogMaxSeconds = 0.0;
 		/** FPlatformTime::Seconds() at the last reset. */
 		double SinceSeconds = 0.0;
 	};
