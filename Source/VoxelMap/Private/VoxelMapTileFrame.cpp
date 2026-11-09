@@ -223,7 +223,7 @@ void FVoxelMapTileFrame::GetShadingSpans(float& OutLandBase, float& OutLandSpan,
 	OutDepthSpan = FMath::Max(OutLandBase - MinAltitude, 1.0f);
 }
 
-float FVoxelMapTileFrame::ShadeAt(int32 G, int32 GridSize, TConstArrayView<float> Altitudes, TConstArrayView<FVoxelMapTileSample> Samples) const
+float FVoxelMapTileFrame::ShadeAt(int32 G, int32 GridSize, TConstArrayView<float> Altitudes, TConstArrayView<FVoxelMapTileSample> Samples, int32 Level) const
 {
 	float NdotL = 0.0f;
 	if (bPlanet)
@@ -259,8 +259,10 @@ float FVoxelMapTileFrame::ShadeAt(int32 G, int32 GridSize, TConstArrayView<float
 		const float HR = Altitudes[G + 1];
 		const float HD = Altitudes[G - GridSize];
 		const float HU = Altitudes[G + GridSize];
-		const float DX = (HR - HL) / (2.0f * VoxelSize);
-		const float DY = (HU - HD) / (2.0f * VoxelSize);
+		// The grid points are 2^Level voxels apart at a coarse level of the pyramid.
+		const float Spacing = VoxelSize * static_cast<float>(1 << Level);
+		const float DX = (HR - HL) / (2.0f * Spacing);
+		const float DY = (HU - HD) / (2.0f * Spacing);
 		const FVector Normal = FVector(-DX, -DY, 1.0f).GetSafeNormal();
 		NdotL = FMath::Clamp(static_cast<float>(FVector::DotProduct(Normal, LightDir)), 0.0f, 1.0f);
 	}
@@ -310,5 +312,269 @@ void FVoxelMapTileFrame::GatherZones(const UVoxelChunkManager& ChunkManager, FIn
 		(Tile.X * ChunkSize - 1) * VoxelSize + WorldOrigin.X,
 		(Tile.Y * ChunkSize - 1) * VoxelSize + WorldOrigin.Y);
 	const FVector2D TileMax = TileMin + FVector2D((ChunkSize + 2) * VoxelSize);
+	ChunkManager.GatherConditioningZones(FBox2D(TileMin, TileMax), OutZones);
+}
+
+// ---------------------------------------------------------------------------
+// The tile pyramid (MAP_PYRAMID_PLAN.md P1, D84)
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	/** Floor division (the tile of a pixel index, negative on a plane). */
+	int64 FloorDiv(int64 A, int64 B)
+	{
+		const int64 Q = A / B;
+		return (A % B != 0 && ((A < 0) != (B < 0))) ? Q - 1 : Q;
+	}
+}
+
+int32 FVoxelMapTileFrame::GetMaxLevel() const
+{
+	if (!bPlanet)
+	{
+		return MaxPlaneLevel;
+	}
+	// The level whose one tile holds a face: ceil(log2 N).
+	const int32 N = Grid.GetCellsPerEdge();
+	return N > 1 ? static_cast<int32>(FMath::CeilLogTwo(static_cast<uint32>(N))) : 0;
+}
+
+int32 FVoxelMapTileFrame::TilesPerFaceEdgeAt(int32 Level) const
+{
+	const int32 N = Grid.GetCellsPerEdge();
+	return N > 0 ? ((N - 1) >> Level) + 1 : 0;
+}
+
+int32 FVoxelMapTileFrame::LevelForTexel(double TexelWorldSize) const
+{
+	const double Pixel = GetPixelWorldSize();
+	if (Pixel <= 0.0 || TexelWorldSize <= Pixel)
+	{
+		return 0;
+	}
+	const int32 Level = FMath::FloorToInt32(FMath::Log2(TexelWorldSize / Pixel) + 1.0e-6);
+	return FMath::Clamp(Level, 0, GetMaxLevel());
+}
+
+bool FVoxelMapTileFrame::FaceIndicesAt(const FVoxelMapTileId& Id, int32& OutFace, int32& OutU, int32& OutV) const
+{
+	const int32 NL = TilesPerFaceEdgeAt(Id.Level);
+	if (!bPlanet || NL <= 0 || Id.Level < 0 || Id.Level > GetMaxLevel() || Id.Coord.X < 0 || Id.Coord.Y < 0 || Id.Coord.X >= 6 * NL || Id.Coord.Y >= NL)
+	{
+		return false;
+	}
+	OutFace = Id.Coord.X / NL;
+	OutU = Id.Coord.X - OutFace * NL;
+	OutV = Id.Coord.Y;
+	return true;
+}
+
+FVoxelMapTileId FVoxelMapTileFrame::LevelTileOf(const FIntPoint& Tile0, int32 Level) const
+{
+	if (!bPlanet)
+	{
+		return FVoxelMapTileId(FIntPoint(Tile0.X >> Level, Tile0.Y >> Level), Level);
+	}
+	int32 Face = 0, IU = 0, IV = 0;
+	if (!Grid.FromAtlas(Tile0, Face, IU, IV))
+	{
+		return FVoxelMapTileId(Tile0, Level);
+	}
+	return FVoxelMapTileId(FIntPoint(Face * TilesPerFaceEdgeAt(Level) + (IU >> Level), IV >> Level), Level);
+}
+
+FVoxelMapTileId FVoxelMapTileFrame::ParentOf(const FVoxelMapTileId& Id) const
+{
+	if (!bPlanet)
+	{
+		return FVoxelMapTileId(FIntPoint(Id.Coord.X >> 1, Id.Coord.Y >> 1), Id.Level + 1);
+	}
+	int32 Face = 0, U = 0, V = 0;
+	if (!FaceIndicesAt(Id, Face, U, V))
+	{
+		return FVoxelMapTileId(Id.Coord, Id.Level + 1);
+	}
+	return FVoxelMapTileId(FIntPoint(Face * TilesPerFaceEdgeAt(Id.Level + 1) + (U >> 1), V >> 1), Id.Level + 1);
+}
+
+FIntPoint FVoxelMapTileFrame::FirstLevel0Tile(const FVoxelMapTileId& Id) const
+{
+	if (!bPlanet)
+	{
+		return FIntPoint(Id.Coord.X * (1 << Id.Level), Id.Coord.Y * (1 << Id.Level));
+	}
+	int32 Face = 0, U = 0, V = 0;
+	if (!FaceIndicesAt(Id, Face, U, V))
+	{
+		return Id.Coord;
+	}
+	return Grid.ToAtlas(Face, U << Id.Level, V << Id.Level);
+}
+
+bool FVoxelMapTileFrame::IsValidTile(const FVoxelMapTileId& Id) const
+{
+	if (Id.Level == 0)
+	{
+		return IsValidTile(Id.Coord);
+	}
+	if (bPlanet)
+	{
+		int32 Face = 0, U = 0, V = 0;
+		return FaceIndicesAt(Id, Face, U, V);
+	}
+	if (Id.Level < 0 || Id.Level > MaxPlaneLevel)
+	{
+		return false;
+	}
+	if (!Bounds.IsBounded())
+	{
+		return true;
+	}
+	const FVector Min = TileOrigin(FirstLevel0Tile(Id));
+	const double Size = GetTileWorldSize() * static_cast<double>(1 << Id.Level);
+	return Bounds.IntersectsBox2D(FBox2D(FVector2D(Min.X, Min.Y), FVector2D(Min.X + Size, Min.Y + Size)));
+}
+
+bool FVoxelMapTileFrame::CanDrawTile(const FVoxelMapTileId& Id) const
+{
+	if (!bPlanet)
+	{
+		return Id.Level >= 0 && Id.Level <= MaxPlaneLevel;
+	}
+	int32 Face = 0, U = 0, V = 0;
+	return FaceIndicesAt(Id, Face, U, V);
+}
+
+bool FVoxelMapTileFrame::CoversLevel0Tile(const FVoxelMapTileId& Id, const FIntPoint& Tile0, int32 Ring) const
+{
+	const int32 Span = 1 << Id.Level;
+	const FIntPoint First = FirstLevel0Tile(Id);
+	if (!bPlanet)
+	{
+		return Tile0.X >= First.X - Ring && Tile0.X < First.X + Span + Ring && Tile0.Y >= First.Y - Ring && Tile0.Y < First.Y + Span + Ring;
+	}
+	int32 Face = 0, IU = 0, IV = 0, FirstFace = 0, FirstU = 0, FirstV = 0;
+	if (!Grid.FromAtlas(Tile0, Face, IU, IV) || !Grid.FromAtlas(First, FirstFace, FirstU, FirstV) || Face != FirstFace)
+	{
+		return false;
+	}
+	return IU >= FirstU - Ring && IU < FirstU + Span + Ring && IV >= FirstV - Ring && IV < FirstV + Span + Ring;
+}
+
+void FVoxelMapTileFrame::Level0TilesOf(const FVoxelMapTileId& Id, int32 Ring, TArray<FIntPoint>& OutTiles) const
+{
+	const int32 Span = 1 << Id.Level;
+	const FIntPoint First = FirstLevel0Tile(Id);
+	if (!bPlanet)
+	{
+		for (int32 Y = First.Y - Ring; Y < First.Y + Span + Ring; ++Y)
+		{
+			for (int32 X = First.X - Ring; X < First.X + Span + Ring; ++X)
+			{
+				OutTiles.Add(FIntPoint(X, Y));
+			}
+		}
+		return;
+	}
+	int32 Face = 0, U = 0, V = 0;
+	if (!Grid.FromAtlas(First, Face, U, V))
+	{
+		return;
+	}
+	const int32 N = Grid.GetCellsPerEdge();
+	for (int32 IV = FMath::Max(0, V - Ring); IV < FMath::Min(N, V + Span + Ring); ++IV)
+	{
+		for (int32 IU = FMath::Max(0, U - Ring); IU < FMath::Min(N, U + Span + Ring); ++IU)
+		{
+			OutTiles.Add(Grid.ToAtlas(Face, IU, IV));
+		}
+	}
+}
+
+FVoxelMapTileSample FVoxelMapTileFrame::SampleAt(const FVoxelMapTileId& Id, int32 GX, int32 GY) const
+{
+	if (Id.Level == 0)
+	{
+		return SampleAt(Id.Coord, GX, GY);
+	}
+	FVoxelMapTileSample Sample;
+	const int32 Scale = 1 << Id.Level;
+	if (bPlanet)
+	{
+		// The pixel's centre, 2^L level-0 pixels a pixel from the tile's first level-0 cell (past the face's last cell on
+		// its edge tiles: the face's plane extended, pixels no view reads).
+		Sample.Direction = Grid.DirectionAt(FirstLevel0Tile(Id), (GX - 0.5) / ChunkSize * Scale, (GY - 0.5) / ChunkSize * Scale);
+		return Sample;
+	}
+	// The pixel's corner, as level 0's: grid index (GX, GY) is pixel (GX - 1, GY - 1), each 2^L voxels.
+	Sample.X = static_cast<float>(static_cast<double>((static_cast<int64>(Id.Coord.X) * ChunkSize + GX - 1) * Scale) * VoxelSize + WorldOrigin.X);
+	Sample.Y = static_cast<float>(static_cast<double>((static_cast<int64>(Id.Coord.Y) * ChunkSize + GY - 1) * Scale) * VoxelSize + WorldOrigin.Y);
+	return Sample;
+}
+
+void FVoxelMapTileFrame::SourcePixel(const FVoxelMapTileId& Id, int32 GX, int32 GY, const FVoxelMapTileSample& Sample, FIntPoint& OutTile0,
+	int32& OutPX, int32& OutPY) const
+{
+	if (Id.Level == 0)
+	{
+		ApronPixel(Id.Coord, GX, GY, Sample, OutTile0, OutPX, OutPY);
+		return;
+	}
+	const int64 Scale = static_cast<int64>(1) << Id.Level;
+	const int32 Res = FMath::Max(1, ChunkSize);
+	if (bPlanet)
+	{
+		int32 Face = 0, U = 0, V = 0;
+		const int64 N = Grid.GetCellsPerEdge();
+		if (FaceIndicesAt(Id, Face, U, V))
+		{
+			// The point's level-0 pixel along the face: the pixel's centre lies 2^(L-1) level-0 pixels into it.
+			const int64 PU = (static_cast<int64>(U) * Res + GX - 1) * Scale + Scale / 2;
+			const int64 PV = (static_cast<int64>(V) * Res + GY - 1) * Scale + Scale / 2;
+			if (PU >= 0 && PV >= 0 && PU < N * Res && PV < N * Res)
+			{
+				OutTile0 = Grid.ToAtlas(Face, static_cast<int32>(PU / Res), static_cast<int32>(PV / Res));
+				OutPX = static_cast<int32>(PU % Res);
+				OutPY = static_cast<int32>(PV % Res);
+				return;
+			}
+		}
+		// Across a face edge: the cell the direction falls in.
+		FVector2D Fraction;
+		OutTile0 = Grid.CellOfDirection(Sample.Direction, &Fraction);
+		OutPX = FMath::Clamp(FMath::FloorToInt32(Fraction.X * Res), 0, Res - 1);
+		OutPY = FMath::Clamp(FMath::FloorToInt32(Fraction.Y * Res), 0, Res - 1);
+		return;
+	}
+	const int64 PX = (static_cast<int64>(Id.Coord.X) * Res + GX - 1) * Scale;
+	const int64 PY = (static_cast<int64>(Id.Coord.Y) * Res + GY - 1) * Scale;
+	const int64 TX = FloorDiv(PX, Res);
+	const int64 TY = FloorDiv(PY, Res);
+	OutTile0 = FIntPoint(static_cast<int32>(TX), static_cast<int32>(TY));
+	OutPX = static_cast<int32>(PX - TX * Res);
+	OutPY = static_cast<int32>(PY - TY * Res);
+}
+
+void FVoxelMapTileFrame::GatherZones(const UVoxelChunkManager& ChunkManager, const FVoxelMapTileId& Id, TArray<FVoxelConditioningZone>& OutZones) const
+{
+	if (Id.Level == 0)
+	{
+		GatherZones(ChunkManager, Id.Coord, OutZones);
+		return;
+	}
+	const double Scale = static_cast<double>(1 << Id.Level);
+	if (bPlanet)
+	{
+		// The tile's cap: its centre's direction and 1.5 of its widths of angle.
+		const FVector Centre = Grid.DirectionAt(FirstLevel0Tile(Id), 0.5 * Scale, 0.5 * Scale);
+		ChunkManager.GatherConditioningZonesOnSphere(Centre, 1.5 * Scale * GetTileWorldSize() / FMath::Max(Radius, 1.0), OutZones);
+		return;
+	}
+	// The tile and its one-pixel apron.
+	const FVector2D TileMin(
+		(static_cast<double>(Id.Coord.X) * ChunkSize - 1.0) * Scale * VoxelSize + WorldOrigin.X,
+		(static_cast<double>(Id.Coord.Y) * ChunkSize - 1.0) * Scale * VoxelSize + WorldOrigin.Y);
+	const FVector2D TileMax = TileMin + FVector2D((ChunkSize + 2) * Scale * VoxelSize);
 	ChunkManager.GatherConditioningZones(FBox2D(TileMin, TileMax), OutZones);
 }

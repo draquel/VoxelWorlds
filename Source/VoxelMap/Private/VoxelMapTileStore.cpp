@@ -3,94 +3,30 @@
 #include "VoxelMapTileStore.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
-TArray<FColor> FVoxelMapTileStore::Downsample(const TArray<FColor>& Pixels, int32 Resolution, int32 Factor)
+void FVoxelMapTileStore::SetBudget(int64 InBudgetBytes)
 {
-	TArray<FColor> Out;
-	if (Factor <= 0 || Resolution <= 0 || Resolution % Factor != 0 || Pixels.Num() != Resolution * Resolution)
-	{
-		return Out;
-	}
-	const int32 Small = Resolution / Factor;
-	const int32 Count = Factor * Factor;
-	Out.SetNumUninitialized(Small * Small);
-	for (int32 Y = 0; Y < Small; ++Y)
-	{
-		for (int32 X = 0; X < Small; ++X)
-		{
-			int32 R = 0, G = 0, B = 0, A = 0;
-			for (int32 DY = 0; DY < Factor; ++DY)
-			{
-				const FColor* Row = &Pixels[(Y * Factor + DY) * Resolution + X * Factor];
-				for (int32 DX = 0; DX < Factor; ++DX)
-				{
-					R += Row[DX].R;
-					G += Row[DX].G;
-					B += Row[DX].B;
-					A += Row[DX].A;
-				}
-			}
-			Out[Y * Small + X] = FColor(
-				static_cast<uint8>((R + Count / 2) / Count),
-				static_cast<uint8>((G + Count / 2) / Count),
-				static_cast<uint8>((B + Count / 2) / Count),
-				static_cast<uint8>((A + Count / 2) / Count));
-		}
-	}
-	return Out;
-}
-
-void FVoxelMapTileStore::SetBudgets(int64 InDetailBudgetBytes, int64 InOverviewBudgetBytes)
-{
-	DetailBudgetBytes = FMath::Max<int64>(InDetailBudgetBytes, 0);
-	OverviewBudgetBytes = FMath::Max<int64>(InOverviewBudgetBytes, 0);
+	BudgetBytes = FMath::Max<int64>(InBudgetBytes, 0);
 	Enforce();
 }
 
-void FVoxelMapTileStore::Store(uint64 Key, FIntPoint Coord, TArray<FColor>&& Pixels, int32 Resolution, bool bKeepDetail)
+void FVoxelMapTileStore::Store(const FVoxelMapTileId& Id, TArray<FColor>&& Pixels, int32 Resolution)
 {
-	FEntry& Entry = Entries.FindOrAdd(Key);
-	const bool bHadDetail = Entry.Detail.PixelData.Num() > 0;
-	DetailBytes -= ImageBytes(Entry.Detail);
-	OverviewBytes -= ImageBytes(Entry.Overview);
-	DetailCount -= bHadDetail ? 1 : 0;
-
-	// The overview, from the new image (a size that does not divide keeps the image itself as its overview).
-	TArray<FColor> Small = Downsample(Pixels, Resolution, OverviewDownsample);
-	Entry.Overview.TileCoord = Coord;
-	Entry.Overview.bIsReady = true;
-	if (Small.Num() > 0)
-	{
-		Entry.Overview.Resolution = Resolution / OverviewDownsample;
-		Entry.Overview.PixelData = MoveTemp(Small);
-	}
-	else
-	{
-		Entry.Overview.Resolution = Resolution;
-		Entry.Overview.PixelData = Pixels;
-	}
-
-	Entry.Detail.TileCoord = Coord;
-	Entry.Detail.Resolution = Resolution;
-	Entry.Detail.bIsReady = true;
-	if (bKeepDetail || bHadDetail)
-	{
-		Entry.Detail.PixelData = MoveTemp(Pixels);
-	}
-	else
-	{
-		Entry.Detail.PixelData.Empty();
-	}
-
-	DetailBytes += ImageBytes(Entry.Detail);
-	OverviewBytes += ImageBytes(Entry.Overview);
-	DetailCount += Entry.Detail.PixelData.Num() > 0 ? 1 : 0;
+	FEntry& Entry = Entries.FindOrAdd(Id);
+	Bytes -= ImageBytes(Entry.Tile);
+	Entry.Tile.TileCoord = Id.Coord;
+	Entry.Tile.Level = Id.Level;
+	Entry.Tile.Resolution = Resolution;
+	Entry.Tile.PixelData = MoveTemp(Pixels);
+	Entry.Tile.bIsReady = true;
+	Entry.bStale = false;
 	Entry.LastUse = ++UseClock;
+	Bytes += ImageBytes(Entry.Tile);
 	Enforce();
 }
 
-const FVoxelMapTile* FVoxelMapTileStore::Find(uint64 Key, bool bTouch) const
+const FVoxelMapTile* FVoxelMapTileStore::Find(const FVoxelMapTileId& Id, bool bTouch) const
 {
-	const FEntry* Entry = Entries.Find(Key);
+	const FEntry* Entry = Entries.Find(Id);
 	if (!Entry)
 	{
 		return nullptr;
@@ -99,23 +35,42 @@ const FVoxelMapTile* FVoxelMapTileStore::Find(uint64 Key, bool bTouch) const
 	{
 		Entry->LastUse = ++UseClock;
 	}
-	return Entry->Detail.PixelData.Num() > 0 ? &Entry->Detail : &Entry->Overview;
+	return &Entry->Tile;
 }
 
-bool FVoxelMapTileStore::HasDetail(uint64 Key) const
+bool FVoxelMapTileStore::IsStale(const FVoxelMapTileId& Id) const
 {
-	const FEntry* Entry = Entries.Find(Key);
-	return Entry && Entry->Detail.PixelData.Num() > 0;
+	const FEntry* Entry = Entries.Find(Id);
+	return Entry && Entry->bStale;
 }
 
-void FVoxelMapTileStore::Remove(uint64 Key)
+bool FVoxelMapTileStore::MarkStale(const FVoxelMapTileId& Id)
 {
-	if (const FEntry* Entry = Entries.Find(Key))
+	FEntry* Entry = Entries.Find(Id);
+	if (!Entry)
 	{
-		DetailBytes -= ImageBytes(Entry->Detail);
-		OverviewBytes -= ImageBytes(Entry->Overview);
-		DetailCount -= Entry->Detail.PixelData.Num() > 0 ? 1 : 0;
-		Entries.Remove(Key);
+		return false;
+	}
+	Entry->bStale = true;
+	return true;
+}
+
+int32 FVoxelMapTileStore::NumAtLevel(int32 Level) const
+{
+	int32 Count = 0;
+	for (const TPair<FVoxelMapTileId, FEntry>& Pair : Entries)
+	{
+		Count += Pair.Key.Level == Level ? 1 : 0;
+	}
+	return Count;
+}
+
+void FVoxelMapTileStore::Remove(const FVoxelMapTileId& Id)
+{
+	if (const FEntry* Entry = Entries.Find(Id))
+	{
+		Bytes -= ImageBytes(Entry->Tile);
+		Entries.Remove(Id);
 	}
 }
 
@@ -123,72 +78,38 @@ void FVoxelMapTileStore::Reset()
 {
 	Entries.Empty();
 	UseClock = 0;
-	DetailBytes = 0;
-	OverviewBytes = 0;
-	DetailCount = 0;
-	DetailEvictions = 0;
-	OverviewEvictions = 0;
+	Bytes = 0;
+	Evictions = 0;
 }
 
 int32 FVoxelMapTileStore::Enforce()
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_StoreEnforce);
-	int32 Dropped = 0;
-
-	// Detail first: the least recently used detail images go; their tiles keep the overview.
-	if (DetailBudgetBytes > 0 && DetailBytes > DetailBudgetBytes)
+	if (BudgetBytes <= 0 || Bytes <= BudgetBytes)
 	{
-		TArray<TPair<uint64, uint64>> Order; // (last use, key)
-		Order.Reserve(DetailCount);
-		for (const TPair<uint64, FEntry>& Pair : Entries)
-		{
-			if (Pair.Value.Detail.PixelData.Num() > 0)
-			{
-				Order.Emplace(Pair.Value.LastUse, Pair.Key);
-			}
-		}
-		Order.Sort([](const TPair<uint64, uint64>& A, const TPair<uint64, uint64>& B) { return A.Key < B.Key; });
-		const int64 Target = DetailBudgetBytes * 9 / 10;
-		for (const TPair<uint64, uint64>& Item : Order)
-		{
-			if (DetailBytes <= Target)
-			{
-				break;
-			}
-			FEntry& Entry = Entries[Item.Value];
-			DetailBytes -= ImageBytes(Entry.Detail);
-			--DetailCount;
-			Entry.Detail.PixelData.Empty();
-			++DetailEvictions;
-			++Dropped;
-		}
+		return 0;
 	}
-
-	// Then overviews: the least recently used tiles without a detail image lose their images altogether.
-	if (OverviewBudgetBytes > 0 && OverviewBytes > OverviewBudgetBytes)
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_StoreEnforce);
+	// The least recently used images go, at every level alike: the views read what they show at each fill, so what they
+	// show (and the coarser tiles they fall back on) stays.
+	TArray<TPair<uint64, FVoxelMapTileId>> Order; // (last use, id)
+	Order.Reserve(Entries.Num());
+	for (const TPair<FVoxelMapTileId, FEntry>& Pair : Entries)
 	{
-		TArray<TPair<uint64, uint64>> Order;
-		Order.Reserve(Entries.Num());
-		for (const TPair<uint64, FEntry>& Pair : Entries)
+		Order.Emplace(Pair.Value.LastUse, Pair.Key);
+	}
+	Order.Sort([](const TPair<uint64, FVoxelMapTileId>& A, const TPair<uint64, FVoxelMapTileId>& B) { return A.Key < B.Key; });
+	const int64 Target = BudgetBytes * 9 / 10;
+	int32 Dropped = 0;
+	for (const TPair<uint64, FVoxelMapTileId>& Item : Order)
+	{
+		if (Bytes <= Target)
 		{
-			if (Pair.Value.Detail.PixelData.Num() == 0)
-			{
-				Order.Emplace(Pair.Value.LastUse, Pair.Key);
-			}
+			break;
 		}
-		Order.Sort([](const TPair<uint64, uint64>& A, const TPair<uint64, uint64>& B) { return A.Key < B.Key; });
-		const int64 Target = OverviewBudgetBytes * 9 / 10;
-		for (const TPair<uint64, uint64>& Item : Order)
-		{
-			if (OverviewBytes <= Target)
-			{
-				break;
-			}
-			OverviewBytes -= ImageBytes(Entries[Item.Value].Overview);
-			Entries.Remove(Item.Value);
-			++OverviewEvictions;
-			++Dropped;
-		}
+		Bytes -= ImageBytes(Entries[Item.Value].Tile);
+		Entries.Remove(Item.Value);
+		++Evictions;
+		++Dropped;
 	}
 	return Dropped;
 }
