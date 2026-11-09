@@ -12,6 +12,7 @@
 #include "VoxelStreaming.h"
 #include "Animation/TransformProviderData.h"
 #include "Components/InstancedSkinnedMeshComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Containers/Ticker.h"
 #include "DynamicRHI.h"
 #include "RenderCore.h"
@@ -91,10 +92,11 @@ namespace VoxelSkinnedScatter
 
 // Console: voxel.Scatter.Skinned
 // The skeletal definitions' skinned components: per definition its components, instances, mesh, transform provider and
-// whether any component ticks (none should: the scatter makes them without a tick, F2's game-thread premium)
+// whether any component ticks (none should: the scatter makes them without a tick, F2's game-thread premium), and with
+// bEnableCollision its capsules (G149: one per instance) and the capsule's radius and height
 static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterSkinnedCmd(
 	TEXT("voxel.Scatter.Skinned"),
-	TEXT("Log the skeletal scatter definitions' skinned components: per definition the components, instances, mesh, transform provider and ticking components."),
+	TEXT("Log the skeletal scatter definitions' skinned components: per definition the components, instances, mesh, transform provider, ticking components and collision capsules."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& /*Args*/, UWorld* World)
 	{
 		UWorld* TargetWorld = VoxelEditAuditHelpers::FindGameWorld(World);
@@ -105,12 +107,16 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterSkinnedCmd(
 		}
 		TArray<TPair<const FScatterDefinition*, UInstancedSkinnedMeshComponent*>> Components;
 		VoxelSkinnedScatter::CollectComponents(TargetWorld, Components);
-		struct FRow { int32 Components = 0, Instances = 0, Ticking = 0; FString Mesh, Provider; };
+		struct FRow { int32 Components = 0, Instances = 0, Ticking = 0, Capsules = 0; FVector2D Capsule = FVector2D::ZeroVector; FString Mesh, Provider; };
 		TMap<FString, FRow> Rows;
-		int32 Total = 0, Ticking = 0;
+		int32 Total = 0, Ticking = 0, Capsules = 0;
 		for (const TPair<const FScatterDefinition*, UInstancedSkinnedMeshComponent*>& Pair : Components)
 		{
 			FRow& Row = Rows.FindOrAdd(FString::Printf(TEXT("%d %s"), Pair.Key->ScatterID, *Pair.Key->Name));
+			if (Row.Components == 0 && Pair.Key->bEnableCollision)
+			{
+				Row.Capsule = UVoxelScatterRenderer::GetSkeletalCollisionCapsule(*Pair.Key, Cast<USkeletalMesh>(Pair.Value->GetSkinnedAsset()));
+			}
 			++Row.Components;
 			Row.Instances += Pair.Value->GetInstanceCount();
 			Row.Ticking += Pair.Value->IsComponentTickEnabled() ? 1 : 0;
@@ -119,12 +125,34 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelScatterSkinnedCmd(
 			Total += Pair.Value->GetInstanceCount();
 			Ticking += Pair.Value->IsComponentTickEnabled() ? 1 : 0;
 		}
-		FString Out = FString::Printf(TEXT("voxel.Scatter.Skinned: %d components, %d instances, %d ticking; provider class %s"), Components.Num(),
-			Total, Ticking, UVoxelScatterRenderer::GetSkinnedTransformProviderClass() ? TEXT("loaded") : TEXT("NOT loaded (the Dynamic Wind plugin)"));
+		// The capsules (G149), per definition from its collision components
+		for (UVoxelChunkManager* CM : UVoxelChunkManager::FindAll(TargetWorld))
+		{
+			const UVoxelScatterManager* Scatter = CM ? CM->GetScatterManager() : nullptr;
+			const UVoxelScatterRenderer* Renderer = Scatter ? Scatter->GetScatterRenderer() : nullptr;
+			if (!Renderer)
+			{
+				continue;
+			}
+			for (const FScatterDefinition& Definition : Scatter->GetScatterDefinitions())
+			{
+				TArray<TPair<FIntVector, UInstancedStaticMeshComponent*>> Collision;
+				Renderer->GetTypeCollisionComponents(Definition.ScatterID, Collision);
+				for (const TPair<FIntVector, UInstancedStaticMeshComponent*>& Pair : Collision)
+				{
+					Rows.FindOrAdd(FString::Printf(TEXT("%d %s"), Definition.ScatterID, *Definition.Name)).Capsules += Pair.Value->GetInstanceCount();
+					Capsules += Pair.Value->GetInstanceCount();
+				}
+			}
+		}
+		FString Out = FString::Printf(TEXT("voxel.Scatter.Skinned: %d components, %d instances, %d ticking, %d collision capsules; provider class %s"),
+			Components.Num(), Total, Ticking, Capsules,
+			UVoxelScatterRenderer::GetSkinnedTransformProviderClass() ? TEXT("loaded") : TEXT("NOT loaded (the Dynamic Wind plugin)"));
 		for (const TPair<FString, FRow>& Row : Rows)
 		{
-			Out += FString::Printf(TEXT("\n  type %s: %d components, %d instances, %d ticking, mesh %s, provider %s"), *Row.Key,
-				Row.Value.Components, Row.Value.Instances, Row.Value.Ticking, *Row.Value.Mesh, *Row.Value.Provider);
+			Out += FString::Printf(TEXT("\n  type %s: %d components, %d instances, %d ticking, mesh %s, provider %s, %d capsules (radius %.0f, height %.0f)"),
+				*Row.Key, Row.Value.Components, Row.Value.Instances, Row.Value.Ticking, *Row.Value.Mesh, *Row.Value.Provider, Row.Value.Capsules,
+				Row.Value.Capsule.X, Row.Value.Capsule.Y);
 		}
 		UE_LOG(LogVoxelStreaming, Display, TEXT("%s"), *Out);
 	}));

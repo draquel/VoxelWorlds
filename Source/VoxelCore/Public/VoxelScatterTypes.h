@@ -385,7 +385,9 @@ struct VOXELCORE_API FScatterDefinition
 	 * definition as a static plant's variants are). Set, the definition is drawn through one UInstancedSkinnedMeshComponent
 	 * per region with the Dynamic Wind transform provider (when the engine's Dynamic Wind plugin is loaded), its tick off,
 	 * the mesh and its assembly parts loaded ahead asynchronously; placement, extraction, regions, the fade and cull,
-	 * claims, edits and dynamic materials are a static definition's. Only with MeshType StaticMesh. No collision.
+	 * claims, edits and dynamic materials are a static definition's. Only with MeshType StaticMesh. Its collision, with
+	 * bEnableCollision, is a capsule per instance (SkeletalCollisionRadius, SkeletalCollisionHeight) in a hidden
+	 * collision-only instanced static mesh beside the skinned component (G149).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh", meta = (EditCondition = "MeshType == EScatterMeshType::StaticMesh"))
 	TSoftObjectPtr<USkeletalMesh> SkeletalMesh;
@@ -403,9 +405,26 @@ struct VOXELCORE_API FScatterDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh")
 	bool bDynamicMaterials = false;
 
-	/** Enable collision for mesh instances */
+	/**
+	 * Enable collision for mesh instances: a static definition's instances collide with their mesh's collision, a skeletal
+	 * definition's with a capsule standing on each instance's base (SkeletalCollisionRadius, SkeletalCollisionHeight; G149)
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh")
 	bool bEnableCollision = false;
+
+	/**
+	 * A skeletal definition's collision capsule radius (cm at instance scale 1): the trunk's. 0 = from the mesh's bounds
+	 * (UVoxelScatterRenderer::GetSkeletalCollisionCapsule). Scales with the instance.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh", meta = (ClampMin = "0.0", EditCondition = "bEnableCollision"))
+	float SkeletalCollisionRadius = 0.0f;
+
+	/**
+	 * A skeletal definition's collision capsule height (cm at instance scale 1), from the instance's base along its up.
+	 * 0 = the mesh's bounds' height above its base. Scales with the instance.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh", meta = (ClampMin = "0.0", EditCondition = "bEnableCollision"))
+	float SkeletalCollisionHeight = 0.0f;
 
 	/** Cast shadows from mesh instances */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mesh")

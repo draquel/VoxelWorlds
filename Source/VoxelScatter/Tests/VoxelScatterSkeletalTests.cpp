@@ -6,6 +6,8 @@
 #include "Animation/TransformProviderData.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/InstancedSkinnedMeshComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "Engine/World.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Materials/Material.h"
@@ -43,6 +45,8 @@ namespace VoxelScatterSkeletalTestUtils
 	constexpr int32 TreeID = 2;
 	const TCHAR* const SkeletalCubePath = TEXT("/Engine/EngineMeshes/SkeletalCube.SkeletalCube");
 	const TCHAR* const CubePath = TEXT("/Engine/BasicShapes/Cube.Cube");
+	constexpr float CapsuleRadius = 30.0f;
+	constexpr float CapsuleHeight = 200.0f;
 
 	TArray<FVoxelData> MakeChunk(const FIntVector& Coord)
 	{
@@ -54,7 +58,7 @@ namespace VoxelScatterSkeletalTestUtils
 	/** A plane world whose trees are static or skeletal, regions of one chunk. */
 	struct FHarness : FScatterTestWorld
 	{
-		explicit FHarness(const TCHAR* WorldName, bool bSkeletal, UMaterialInterface* Override)
+		explicit FHarness(const TCHAR* WorldName, bool bSkeletal, UMaterialInterface* Override, bool bCollision = false)
 			: FScatterTestWorld(WorldName)
 		{
 			Config->ChunkSize = ChunkSize;
@@ -73,7 +77,13 @@ namespace VoxelScatterSkeletalTestUtils
 				FScatterDefinition Copy = *Def;
 				Copy.Mesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(CubePath));
 				Copy.Density = 0.3f;
-				Copy.bEnableCollision = false;
+				Copy.bEnableCollision = bCollision;
+				Copy.SkeletalCollisionRadius = bCollision ? CapsuleRadius : 0.0f;
+				Copy.SkeletalCollisionHeight = bCollision ? CapsuleHeight : 0.0f;
+				if (bCollision)
+				{
+					Copy.HarvestCategory = TEXT("Tree");
+				}
 				if (bSkeletal)
 				{
 					Copy.SkeletalMesh = TSoftObjectPtr<USkeletalMesh>(FSoftObjectPath(SkeletalCubePath));
@@ -191,6 +201,7 @@ bool FVoxelScatterSkeletalTest::RunTest(const FString& Parameters)
 		StaticTrees = Static.DrawnTrees();
 		TestEqual(TEXT("A static definition makes no skinned component"), Static.Renderer()->GetSkinnedComponentCount(), 0);
 		TestFalse(TEXT("... and requests no load"), Static.Renderer()->IsDefinitionLoadRequested(TreeID));
+		TestEqual(TEXT("... and no collision component"), Static.Renderer()->GetCollisionComponentCount(), 0);
 	}
 	if (!TestTrue(TEXT("The plane grows trees"), StaticTrees.Num() > 4))
 	{
@@ -230,6 +241,8 @@ bool FVoxelScatterSkeletalTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("As many instances as the static definition"), SkinnedTrees.Num(), StaticTrees.Num());
 	TestEqual(TEXT("... the same transforms"), CountUnmatched(SkinnedTrees, StaticTrees), 0);
 	TestEqual(TEXT("The renderer counts them"), Renderer->GetSkinnedInstanceCount(), SkinnedTrees.Num());
+	TestEqual(TEXT("Without bEnableCollision, no collision component"), Renderer->GetCollisionComponentCount(), 0);
+	TestEqual(TEXT("... and no capsule"), Renderer->GetSkinnedCollisionCount(), 0);
 	for (const FIntVector& Coord : Coords)
 	{
 		int32 Spawns = 0;
@@ -323,6 +336,192 @@ bool FVoxelScatterSkeletalTest::RunTest(const FString& Parameters)
 	TWeakObjectPtr<UInstancedSkinnedMeshComponent> Any = Components.Num() > 0 ? Components[0].Value : nullptr;
 	Manager->Shutdown();
 	TestTrue(TEXT("Shutdown destroys the skinned components"), !Any.IsValid() || Any->IsBeingDestroyed() || !Any->IsRegistered());
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// A skeletal definition's collision (G149): with bEnableCollision every skinned instance has a capsule in a hidden
+// collision-only instanced static mesh per type and region, added and removed with it.
+// - One collision component per skinned component, at its region's origin, hidden and out of the render scene, blocking,
+//   a physics body per capsule.
+// - As many capsules as skinned instances, each the definition's capsule on its instance's transform; a trace hits one.
+// - A harvest takes the tree's capsule with it; a chunk unloaded takes its capsules, reloaded brings them back once.
+// - The capsule falls back to the mesh's bounds; Shutdown destroys the components.
+// ---------------------------------------------------------------------------
+
+namespace VoxelScatterSkeletalTestUtils
+{
+	/** Every capsule of the trees' collision components, world transforms; counts the capsules with no physics body. */
+	TArray<FTransform> Capsules(const UVoxelScatterRenderer* Renderer, int32& OutMissingBodies)
+	{
+		TArray<FTransform> Out;
+		OutMissingBodies = 0;
+		TArray<TPair<FIntVector, UInstancedStaticMeshComponent*>> Components;
+		Renderer->GetTypeCollisionComponents(TreeID, Components);
+		for (const TPair<FIntVector, UInstancedStaticMeshComponent*>& Pair : Components)
+		{
+			for (int32 i = 0; i < Pair.Value->GetInstanceCount(); ++i)
+			{
+				FTransform Xf;
+				if (Pair.Value->GetInstanceTransform(i, Xf, /*bWorldSpace=*/true))
+				{
+					Out.Add(Xf);
+				}
+				const FBodyInstance* Body = Pair.Value->GetBodyInstance(NAME_None, /*bGetWelded=*/false, i);
+				OutMissingBodies += (Body && Body->IsValidBodyInstance()) ? 0 : 1;
+			}
+		}
+		return Out;
+	}
+
+	/** The capsules the trees drawn should have. */
+	TArray<FTransform> ExpectedCapsules(const TArray<FTransform>& Trees)
+	{
+		TArray<FTransform> Out;
+		for (const FTransform& Tree : Trees)
+		{
+			Out.Add(UVoxelScatterRenderer::MakeSkinnedCollisionTransform(FVector2D(CapsuleRadius, CapsuleHeight), Tree));
+		}
+		return Out;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterSkeletalCollisionTest,
+	"VoxelWorlds.Scatter.SkeletalCollision",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterSkeletalCollisionTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterSkeletalTestUtils;
+	const TArray<FIntVector> Coords = { FIntVector(0, 0, 0), FIntVector(1, 0, 0), FIntVector(0, 1, 0), FIntVector(1, 1, 0) };
+
+	FHarness Harness(TEXT("VoxelScatterSkeletalCollisionTest"), /*bSkeletal=*/true, nullptr, /*bCollision=*/true);
+	UVoxelScatterManager* Manager = Harness.Manager;
+	UVoxelScatterRenderer* Renderer = Harness.Renderer();
+	const FScatterDefinition* Trees = Manager->GetScatterDefinition(TreeID);
+	if (!TestNotNull(TEXT("The trees' definition"), Trees) || !TestTrue(TEXT("... skeletal with collision"), Trees->IsSkeletal() && Trees->bEnableCollision))
+	{
+		return false;
+	}
+	for (const FIntVector& Coord : Coords)
+	{
+		Harness.Submit(Coord);
+	}
+	Renderer->WaitForDefinitionLoads();
+	Harness.Settle();
+	const TArray<FTransform> Drawn = Harness.DrawnTrees();
+	if (!TestTrue(TEXT("The plane grows trees"), Drawn.Num() > 4))
+	{
+		return false;
+	}
+
+	// The components: one beside each skinned component, at its region's origin, hidden and out of the scene, blocking.
+	TArray<TPair<FIntVector, UInstancedStaticMeshComponent*>> Collision;
+	Renderer->GetTypeCollisionComponents(TreeID, Collision);
+	TArray<TPair<FIntVector, UInstancedSkinnedMeshComponent*>> Skinned;
+	Renderer->GetTypeSkinnedComponents(TreeID, Skinned);
+	TestEqual(TEXT("A collision component per skinned component"), Collision.Num(), Skinned.Num());
+	for (const TPair<FIntVector, UInstancedStaticMeshComponent*>& Pair : Collision)
+	{
+		UInstancedStaticMeshComponent* Component = Pair.Value;
+		const FString Where = Pair.Key.ToString();
+		TestTrue(*FString::Printf(TEXT("Region %s: at its origin"), *Where),
+			Component->GetComponentLocation().Equals(Renderer->GetRenderRegions().GetRegionOrigin(Pair.Key), 0.01));
+		TestFalse(*FString::Printf(TEXT("Region %s: hidden"), *Where), Component->IsVisible());
+		TestNull(*FString::Printf(TEXT("Region %s: ... never in the render scene"), *Where), Component->SceneProxy);
+		TestFalse(*FString::Printf(TEXT("Region %s: no tick"), *Where), Component->PrimaryComponentTick.IsTickFunctionRegistered());
+		TestEqual(*FString::Printf(TEXT("Region %s: queries and physics"), *Where), Component->GetCollisionEnabled(), ECollisionEnabled::QueryAndPhysics);
+		TestEqual(*FString::Printf(TEXT("Region %s: blocks a pawn"), *Where), Component->GetCollisionResponseToChannel(ECC_Pawn), ECR_Block);
+		bool bBeside = false;
+		for (const TPair<FIntVector, UInstancedSkinnedMeshComponent*>& SkinnedPair : Skinned)
+		{
+			if (SkinnedPair.Key == Pair.Key)
+			{
+				bBeside = true;
+				TestEqual(*FString::Printf(TEXT("Region %s: as many capsules as skinned instances"), *Where),
+					Component->GetInstanceCount(), SkinnedPair.Value->GetInstanceCount());
+			}
+		}
+		TestTrue(*FString::Printf(TEXT("Region %s: beside a skinned component"), *Where), bBeside);
+	}
+
+	// The capsules: one per tree drawn, the definition's capsule on the tree's transform, each with its body.
+	int32 MissingBodies = 0;
+	TestEqual(TEXT("The renderer counts a capsule per instance"), Renderer->GetSkinnedCollisionCount(), Renderer->GetSkinnedInstanceCount());
+	TArray<FTransform> Placed = Capsules(Renderer, MissingBodies);
+	TestEqual(TEXT("A capsule per tree drawn"), Placed.Num(), Drawn.Num());
+	TestEqual(TEXT("... each on its tree"), CountUnmatched(Placed, ExpectedCapsules(Drawn)), 0);
+	TestEqual(TEXT("... each with a physics body"), MissingBodies, 0);
+
+	// A trace across a tree's trunk at half its capsule's height hits a capsule.
+	{
+		const FTransform& Tree = Drawn[0];
+		const FVector Up = Tree.GetRotation().GetUpVector();
+		const FVector Side = Tree.GetRotation().GetRightVector();
+		const FVector Mid = Tree.GetLocation() + Up * (CapsuleHeight * 0.5 * Tree.GetScale3D().Z);
+		FHitResult Hit;
+		const bool bHit = Harness.World->LineTraceSingleByChannel(Hit, Mid - Side * 500.0, Mid + Side * 500.0, ECC_Pawn);
+		TestTrue(TEXT("A trace across a trunk hits"), bHit);
+		TestTrue(TEXT("... a collision component"), bHit && Collision.ContainsByPredicate(
+			[&Hit](const TPair<FIntVector, UInstancedStaticMeshComponent*>& Pair) { return Pair.Value == Hit.GetComponent(); }));
+	}
+
+	// A harvest takes its tree's capsule with it.
+	{
+		const FVector Base = Drawn[0].GetLocation();
+		FScatterHarvestResult Removed;
+		TestTrue(TEXT("The tree is harvested"), Manager->HarvestScatterNear(Base, 50.0f, /*bRemove=*/true, Removed));
+		Harness.Settle();
+		const TArray<FTransform> After = Harness.DrawnTrees();
+		TestTrue(TEXT("... it is gone"), After.Num() < Drawn.Num());
+		TestEqual(TEXT("... the capsules still pair with the instances"), Renderer->GetSkinnedCollisionCount(), Renderer->GetSkinnedInstanceCount());
+		Placed = Capsules(Renderer, MissingBodies);
+		TestEqual(TEXT("... a capsule per tree left"), CountUnmatched(Placed, ExpectedCapsules(After)), 0);
+		TestEqual(TEXT("... and none for a tree gone"), Placed.Num(), After.Num());
+		TestFalse(TEXT("... no capsule where it stood"), Placed.ContainsByPredicate([&Base](const FTransform& Xf) { return Xf.GetLocation().Equals(Base, 1.0); }));
+	}
+
+	// A chunk unloaded takes its capsules; reloaded, they come back once.
+	const FIntVector Unloaded = Coords[1];
+	const int32 InChunk = Renderer->GetChunkInstanceCount(Unloaded, TreeID);
+	const int32 Before = Renderer->GetSkinnedCollisionCount();
+	Manager->OnChunkUnloaded(Unloaded);
+	TestTrue(TEXT("The unloaded chunk had trees"), InChunk > 0);
+	TestEqual(TEXT("Unloaded: its capsules go"), Renderer->GetSkinnedCollisionCount(), Before - InChunk);
+	Placed = Capsules(Renderer, MissingBodies);
+	TestEqual(TEXT("... the components hold the rest"), Placed.Num(), Before - InChunk);
+	Harness.Submit(Unloaded);
+	Harness.Settle();
+	TestEqual(TEXT("Reloaded: its capsules come back"), Renderer->GetSkinnedCollisionCount(), Before);
+	TestEqual(TEXT("... paired with its instances"), Renderer->GetSkinnedCollisionCount(), Renderer->GetSkinnedInstanceCount());
+	Placed = Capsules(Renderer, MissingBodies);
+	TestEqual(TEXT("... none twice"), CountUnmatched(Placed, ExpectedCapsules(Harness.DrawnTrees())), 0);
+	TestEqual(TEXT("... each with a physics body"), MissingBodies, 0);
+
+	// The capsule's fallback: from the mesh's bounds when the fields are zero, the radius at most half the height.
+	{
+		FScatterDefinition Bare = *Trees;
+		Bare.SkeletalCollisionRadius = 0.0f;
+		Bare.SkeletalCollisionHeight = 0.0f;
+		const USkeletalMesh* Mesh = Bare.SkeletalMesh.Get();
+		const FVector2D Derived = UVoxelScatterRenderer::GetSkeletalCollisionCapsule(Bare, Mesh);
+		if (Mesh && Mesh->GetImportedBounds().GetBox().Max.Z > 0.0)
+		{
+			const FBox Box = Mesh->GetImportedBounds().GetBox();
+			TestEqual(TEXT("Fallback height: the bounds' top"), Derived.Y, Box.Max.Z, 0.01);
+			TestEqual(TEXT("Fallback radius: a fifth of the smaller half extent"), Derived.X,
+				FMath::Min(0.2 * FMath::Min(Box.GetExtent().X, Box.GetExtent().Y), Box.Max.Z * 0.5), 0.01);
+		}
+		TestTrue(TEXT("No mesh and no fields: no capsule"), UVoxelScatterRenderer::GetSkeletalCollisionCapsule(Bare, nullptr).IsZero());
+		Bare.SkeletalCollisionRadius = 500.0f;
+		Bare.SkeletalCollisionHeight = 100.0f;
+		TestEqual(TEXT("The radius at most half the height"), UVoxelScatterRenderer::GetSkeletalCollisionCapsule(Bare, nullptr).X, 50.0, 0.01);
+	}
+
+	// Shutdown: the collision components go.
+	TWeakObjectPtr<UInstancedStaticMeshComponent> Any = Collision.Num() > 0 ? Collision[0].Value : nullptr;
+	Manager->Shutdown();
+	TestTrue(TEXT("Shutdown destroys the collision components"), !Any.IsValid() || Any->IsBeingDestroyed() || !Any->IsRegistered());
 	return true;
 }
 

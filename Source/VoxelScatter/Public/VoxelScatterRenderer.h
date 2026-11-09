@@ -11,7 +11,10 @@
 class UVoxelScatterManager;
 class UHierarchicalInstancedStaticMeshComponent;
 class UInstancedSkinnedMeshComponent;
+class UInstancedStaticMeshComponent;
 class UMeshComponent;
+class USkeletalMesh;
+class UStaticMesh;
 struct FStreamableHandle;
 struct FStreamableManager;
 class UMaterialInstanceDynamic;
@@ -58,15 +61,22 @@ struct FVoxelScatterHISMKey
 /**
  * A skeletal definition's instances in one region's skinned component (the foliage and bolt plan's D68), by chunk. An
  * instanced skinned mesh keeps its instances by id in the GPU scene's instance data, updated per instance with no cluster
- * tree to rebuild, so instances are added and removed as they come: no pool, no held writes.
+ * tree to rebuild, so instances are added and removed as they come: no pool, no held writes. With bEnableCollision each
+ * instance has a capsule in the region's collision component, added and removed with it (G149).
  */
 struct FSkinnedInstanceSet
 {
 	/** Which instances belong to each chunk: ChunkCoord -> their ids in the component */
 	TMap<FIntVector, TArray<FPrimitiveInstanceId>> ChunkInstanceIds;
 
+	/** Each chunk's capsules: ChunkCoord -> their ids in the collision component (absent without collision) */
+	TMap<FIntVector, TArray<FPrimitiveInstanceId>> ChunkCollisionIds;
+
 	/** Live instances in the component */
 	int32 Num = 0;
+
+	/** Live capsules in the collision component */
+	int32 NumCollision = 0;
 };
 
 /**
@@ -83,7 +93,9 @@ struct FSkinnedInstanceSet
  * A skeletal definition (FScatterDefinition::IsSkeletal, the foliage and bolt plan's D68) is drawn through one
  * UInstancedSkinnedMeshComponent per type and region instead, with the Dynamic Wind transform provider and its tick off,
  * its instances added and removed by id (FSkinnedInstanceSet); its mesh, and the assembly parts the mesh references, are
- * loaded ahead asynchronously (PreloadDefinition), and its instances wait in the add queue until they are.
+ * loaded ahead asynchronously (PreloadDefinition), and its instances wait in the add queue until they are. With
+ * bEnableCollision a hidden collision-only UInstancedStaticMeshComponent per type and region holds a capsule per instance
+ * (G149), added and removed with the skinned instances.
  *
  * Key responsibilities:
  * - Create and configure HISM components per scatter type
@@ -305,6 +317,41 @@ public:
 	int32 GetSkinnedInstanceCount() const;
 
 	/**
+	 * Every collision component of a skeletal scatter type (bEnableCollision, G149), by region.
+	 *
+	 * @param ScatterTypeID Scatter type ID
+	 * @param OutComponents Region and component pairs
+	 */
+	void GetTypeCollisionComponents(int32 ScatterTypeID, TArray<TPair<FIntVector, UInstancedStaticMeshComponent*>>& OutComponents) const;
+
+	/** Collision components made (skeletal definitions with bEnableCollision, one per type and region). */
+	int32 GetCollisionComponentCount() const { return CollisionComponents.Num(); }
+
+	/** Capsules in collision components (one per skinned instance of a definition with bEnableCollision). */
+	int32 GetSkinnedCollisionCount() const;
+
+	/**
+	 * A skeletal definition's collision capsule at instance scale 1 (G149): its SkeletalCollisionRadius and
+	 * SkeletalCollisionHeight, a zero one from the mesh's bounds (the radius a fifth of the smaller horizontal half extent,
+	 * the height the bounds' top above the base), the radius at most half the height.
+	 *
+	 * @param Definition The definition
+	 * @param Mesh Its skeletal mesh (loaded), for the bounds; null = the fields alone
+	 * @return X the radius, Y the height (cm); zero when there is none to make
+	 */
+	static FVector2D GetSkeletalCollisionCapsule(const FScatterDefinition& Definition, const USkeletalMesh* Mesh);
+
+	/**
+	 * A skinned instance's capsule transform (G149): the unit capsule (radius 50, height 100, base at its origin) scaled
+	 * to the capsule, then the instance's transform.
+	 *
+	 * @param Capsule X the radius, Y the height (GetSkeletalCollisionCapsule)
+	 * @param Instance The instance's transform
+	 * @return The capsule's transform, in the instance's space
+	 */
+	static FTransform MakeSkinnedCollisionTransform(const FVector2D& Capsule, const FTransform& Instance);
+
+	/**
 	 * The transform provider class a skeletal definition's components animate with: the engine's Dynamic Wind plugin's
 	 * UDynamicWindData, found by name (VoxelWorlds takes no dependency on the experimental plugin).
 	 *
@@ -404,12 +451,28 @@ protected:
 
 	/**
 	 * Create a skeletal definition's skinned component in a region, its mesh loaded (IsDefinitionLoaded): at the region's
-	 * origin, the definition's fade and cull, shadows and materials, the transform provider, no tick, no collision.
+	 * origin, the definition's fade and cull, shadows and materials, the transform provider, no tick, no collision of its own
+	 * (a definition with bEnableCollision collides through its collision component, G149).
 	 */
 	UInstancedSkinnedMeshComponent* CreateSkinnedComponent(const FScatterDefinition& Definition, const FIntVector& Region);
 
 	/**
-	 * Add a chunk's instances of a skeletal definition to its region's component (world transforms, stored local to it).
+	 * Get or create a skeletal definition's collision component in a region (G149): a UInstancedStaticMeshComponent of the
+	 * unit capsule (GetCollisionCapsuleMesh) at the region's origin, hidden (never in the render scene), blocking every
+	 * channel as a static definition's HISM does, no tick, no navigation.
+	 *
+	 * @param Definition The definition (bEnableCollision)
+	 * @param Region Render region
+	 * @return The component; null when the capsule mesh could not be made
+	 */
+	UInstancedStaticMeshComponent* GetOrCreateCollisionComponent(const FScatterDefinition& Definition, const FIntVector& Region);
+
+	/** The unit capsule every collision component instances (radius 50, height 100, base at the origin), made once. */
+	UStaticMesh* GetCollisionCapsuleMesh();
+
+	/**
+	 * Add a chunk's instances of a skeletal definition to its region's component (world transforms, stored local to it), and
+	 * with bEnableCollision their capsules to its region's collision component (G149).
 	 *
 	 * @param Key The definition and region
 	 * @param ChunkCoord The chunk
@@ -419,7 +482,8 @@ protected:
 	bool AddSkinnedInstances(const FVoxelScatterHISMKey& Key, const FIntVector& ChunkCoord, TConstArrayView<FTransform> Transforms);
 
 	/**
-	 * Remove a chunk's instances of a skeletal definition from its region's component.
+	 * Remove a chunk's instances of a skeletal definition from its region's component, and their capsules from its collision
+	 * component.
 	 *
 	 * @param Key The definition and region
 	 * @param ChunkCoord The chunk
@@ -467,6 +531,17 @@ protected:
 
 	/** The instances of each skinned component, by chunk */
 	TMap<FVoxelScatterHISMKey, FSkinnedInstanceSet> SkinnedInstances;
+
+	/** Collision components per skeletal scatter type with bEnableCollision and region (G149) */
+	TMap<FVoxelScatterHISMKey, TObjectPtr<UInstancedStaticMeshComponent>> CollisionComponents;
+
+	/** Every collision component (keeps CollisionComponents' values referenced for the garbage collector) */
+	UPROPERTY()
+	TArray<TObjectPtr<UInstancedStaticMeshComponent>> AllCollisionComponents;
+
+	/** The unit capsule the collision components instance (GetCollisionCapsuleMesh) */
+	UPROPERTY()
+	TObjectPtr<UStaticMesh> CollisionCapsuleMesh;
 
 	/** A skeletal definition's asynchronous load (PreloadDefinition): the mesh it is for and the handle keeping it loaded */
 	struct FDefinitionLoad
