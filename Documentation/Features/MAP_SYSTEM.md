@@ -1,6 +1,7 @@
 # Map System
 
-> State as of 2026-11-09 (MAP_PYRAMID_PLAN.md P1, the tile pyramid; P2, the explored mask). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-10 (MAP_PYRAMID_PLAN.md, done: P1, the tile pyramid; P2, the explored mask; P3, the widgets' costs;
+> P4, the map at scale). Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelMap
 **Dependencies**: VoxelCore, VoxelGeneration, VoxelStreaming
@@ -235,6 +236,30 @@ refusals; a fully explored 50 km planet's fill and blob), `VoxelWorlds.Map.Explo
 the square explored), `VoxelWorlds.Map.Planet.Exploration` (the mask's blob and an old one on a planet), `.ZoomAtScale`
 (the top levels kept through trimming; `ExploreAll` over 5.8 million tiles). The results are in
 `Documentation/MAP_PYRAMID_PLAN.md` §6.
+
+### The Map at Scale (MAP_PYRAMID_PLAN.md P4)
+
+The map's cost is bounded by the view, not by the world or by what is explored. On the 50 km planet fully explored
+(16,078,614 tiles; `Scripts/qa/map_scale.py`, a gate editor, the machine quiet, 2026-11-10):
+
+- **Exploration.** `ExploreAll` takes 1.0-1.2 ms, and the mask holds 223 KB in memory. The world's whole save is 13,990
+  bytes. A load restores every tile and queues no image.
+- **Drawing.** A view holds at most about 300 tiles at its level (630 at a tile a texel). Once its tiles are in, a view
+  draws nothing more.
+- **The world map.** A 1024² rebuild costs 3.7-5.8 ms of fill (the worst 7.4) and 1.2-2.0 ms of upload, at every zoom from level 0 to the
+  whole globe (`VoxelCharacterPlugin`'s samplers on the task graph's workers). A marker gather costs 0.02-1.1 ms.
+- **The frame with the map open.** With the weather held clear (`map_scale.py --weather=Clear`), every zoom reads
+  13.3-15.7 ms of game thread at P50 against 15.4 with the map closed. Insights puts the open map's own cost at 0.3-0.4 ms
+  a frame of Slate: the canvas's paint and the text.
+- **The minimap.** After a teleport across the planet its surroundings are 0.99 drawn at 5 s and whole by 30 s; with the planet explored, whole at 5 s.
+
+Before the pyramid, the same world capped exploration at a million tiles in 0.9-1.5 s and saved 2.0 MB; a load queued
+985,677 images, and a zoom-1 view ran at 94 ms frames (`MAP_SCALING_PLAN.md` §8).
+
+The weather confounds these measurements. Its fronts are drawn from the seed and the clock, so every PIE of a world
+meets the same front at the same time. A snow front over the planet's pawn, about 90 to 200 s into a PIE and again from
+270 s, costs about 6 ms of game thread whether the map is open or not (G172, WorldWeatherPlugin's `NS_WeatherSnow`). P3 had read it as the open
+map's cost. `map_scale.py --weather=<Preset>` locks the weather (`ww.Set`, `ww.Lock 1`) for an A/B of the map alone.
 
 ## Configuration
 
