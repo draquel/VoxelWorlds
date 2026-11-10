@@ -58,7 +58,17 @@ public:
 	/** Drop a tile's image. */
 	void Remove(const FVoxelMapTileId& Id);
 
-	/** Drop everything. */
+	/**
+	 * Keep a tile's image whatever the budget (a planet's prefetched top levels, MAP_PYRAMID_PLAN.md P2): trimming passes
+	 * it by. The pin holds before the image is stored and until Reset.
+	 * @param Id Tile id
+	 */
+	void Pin(const FVoxelMapTileId& Id) { Pinned.Add(Id); }
+
+	/** @return True when the tile is pinned */
+	bool IsPinned(const FVoxelMapTileId& Id) const { return Pinned.Contains(Id); }
+
+	/** Drop everything, the pins too. */
 	void Reset();
 
 	/** Trim to the budget now. @return Number of images dropped */
@@ -93,6 +103,7 @@ private:
 	static int64 ImageBytes(const FVoxelMapTile& Tile) { return static_cast<int64>(Tile.PixelData.Num()) * sizeof(FColor); }
 
 	TMap<FVoxelMapTileId, FEntry> Entries;
+	TSet<FVoxelMapTileId> Pinned;
 	mutable uint64 UseClock = 0;
 	int64 Bytes = 0;
 	int64 BudgetBytes = 0;

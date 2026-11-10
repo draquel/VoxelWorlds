@@ -1,7 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
-// UVoxelMapSubsystem's save data: the explored tiles and the edit overlays, encoded for the world save, a translation
-// unit of the class.
+// UVoxelMapSubsystem's save data: the explored mask (and the coordinate pairs saves held before it) and the edit
+// overlays, encoded for the world save, a translation unit of the class.
 
 #include "VoxelMapSubsystem.h"
 #include "VoxelMap.h"
@@ -91,46 +91,145 @@ bool UVoxelMapSubsystem::DecodeTileCoords(const FString& Encoded, int32 Count, T
 	return true;
 }
 
+namespace
+{
+	/** 'VMXM': the explored mask (MAP_PYRAMID_PLAN.md P2). A blob of the coordinate pairs before it starts with a zlib header. */
+	constexpr uint32 ExploredMaskBlobMagic = 0x4D584D56;
+
+	/** Refuse to inflate a claimed payload beyond this (a corrupt size field). */
+	constexpr uint32 MaxExploredMaskBlobBytes = 256u * 1024u * 1024u;
+}
+
+FString UVoxelMapSubsystem::EncodeExploredMask(const FVoxelMapExploredMask& Mask)
+{
+	if (Mask.Num() == 0)
+	{
+		return FString();
+	}
+	TArray<uint8> Raw;
+	{
+		FMemoryWriter Writer(Raw);
+		Mask.Save(Writer);
+	}
+	int32 CompressedBytes = FCompression::CompressMemoryBound(NAME_Zlib, Raw.Num());
+	TArray<uint8> Compressed;
+	Compressed.SetNumUninitialized(CompressedBytes);
+	if (!FCompression::CompressMemory(NAME_Zlib, Compressed.GetData(), CompressedBytes, Raw.GetData(), Raw.Num()))
+	{
+		UE_LOG(LogVoxelMap, Warning, TEXT("EncodeExploredMask: compressing %d block(s) failed."), Mask.NumBlocks());
+		return FString();
+	}
+	// The magic, then the uncompressed size decoding needs, then the zlib stream.
+	TArray<uint8> Blob;
+	{
+		FMemoryWriter Writer(Blob);
+		uint32 Magic = ExploredMaskBlobMagic;
+		uint32 RawSize = static_cast<uint32>(Raw.Num());
+		Writer << Magic << RawSize;
+		Writer.Serialize(Compressed.GetData(), CompressedBytes);
+	}
+	return FBase64::Encode(Blob);
+}
+
+bool UVoxelMapSubsystem::DecodeExploredMask(const FString& Encoded, FVoxelMapExploredMask& OutMask)
+{
+	OutMask.Reset();
+	TArray<uint8> Blob;
+	constexpr int32 HeaderBytes = 2 * sizeof(uint32);
+	if (Encoded.IsEmpty() || !FBase64::Decode(Encoded, Blob) || Blob.Num() <= HeaderBytes)
+	{
+		return false;
+	}
+	uint32 Magic = 0;
+	uint32 RawSize = 0;
+	{
+		FMemoryReader Header(Blob);
+		Header << Magic << RawSize;
+	}
+	if (Magic != ExploredMaskBlobMagic || RawSize == 0 || RawSize > MaxExploredMaskBlobBytes)
+	{
+		return false;
+	}
+	TArray<uint8> Raw;
+	Raw.SetNumUninitialized(RawSize);
+	if (!FCompression::UncompressMemory(NAME_Zlib, Raw.GetData(), RawSize, Blob.GetData() + HeaderBytes, Blob.Num() - HeaderBytes))
+	{
+		return false;
+	}
+	FMemoryReader Reader(Raw);
+	return OutMask.Load(Reader);
+}
+
 FString UVoxelMapSubsystem::ExportExploredTiles(int32& OutCount) const
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_ExportExploredTiles);
-	TArray<FIntPoint> Tiles;
-	Tiles.Reserve(ExploredTiles.Num());
-	for (const uint64 Key : ExploredTiles)
-	{
-		Tiles.Add(UnpackTileKey(Key));
-	}
-	// Row-major order: neighbouring tiles become near-identical byte runs, which is what makes the blob small.
-	Tiles.Sort([](const FIntPoint& A, const FIntPoint& B) { return A.Y != B.Y ? A.Y < B.Y : A.X < B.X; });
-	FString Encoded = EncodeTileCoords(Tiles);
-	OutCount = Encoded.IsEmpty() ? 0 : Tiles.Num();
+	FString Encoded = EncodeExploredMask(ExploredMask);
+	OutCount = Encoded.IsEmpty() ? 0 : static_cast<int32>(FMath::Clamp<int64>(ExploredMask.Num(), 1, MAX_int32));
 	return Encoded;
+}
+
+int32 UVoxelMapSubsystem::ApplyExploredBlob(const FString& Encoded, int32 Count)
+{
+	// The mask's blob (P2), merged block by block.
+	FVoxelMapExploredMask Loaded;
+	if (DecodeExploredMask(Encoded, Loaded))
+	{
+		if (Loaded.GetFaces() != ExploredMask.GetFaces() || Loaded.GetFaceTiles() != ExploredMask.GetFaceTiles())
+		{
+			UE_LOG(LogVoxelMap, Warning, TEXT("ImportExploredTiles: the explored mask is another world's (%d face(s) of %d tiles; this map's %d of %d); not restored."),
+				Loaded.GetFaces(), Loaded.GetFaceTiles(), ExploredMask.GetFaces(), ExploredMask.GetFaceTiles());
+			return -1;
+		}
+		ExplorationRevision += ExploredMask.Merge(Loaded) > 0 ? 1 : 0;
+		return static_cast<int32>(FMath::Min<int64>(Loaded.Num(), MAX_int32));
+	}
+	// The coordinate pairs saves held before the mask, converted (written back as the mask at the next save).
+	TArray<FIntPoint> Tiles;
+	if (!DecodeTileCoords(Encoded, Count, Tiles))
+	{
+		return -1;
+	}
+	for (const FIntPoint& Tile : Tiles)
+	{
+		MarkExplored(Tile);
+	}
+	return Tiles.Num();
 }
 
 int32 UVoxelMapSubsystem::ImportExploredTiles(const FString& Encoded, int32 Count)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_ImportExploredTiles);
-	TArray<FIntPoint> Tiles;
-	if (!DecodeTileCoords(Encoded, Count, Tiles))
+	if (bShuttingDown || Encoded.IsEmpty())
+	{
+		return 0;
+	}
+	if (!ResolveChunkManager())
+	{
+		// The mask's faces come from the world: the blob is checked now and applied when the map resolves it.
+		FVoxelMapExploredMask Probe;
+		TArray<FIntPoint> Tiles;
+		const int64 Held = DecodeExploredMask(Encoded, Probe) ? Probe.Num() : (DecodeTileCoords(Encoded, Count, Tiles) ? Tiles.Num() : -1);
+		if (Held < 0)
+		{
+			UE_LOG(LogVoxelMap, Warning, TEXT("ImportExploredTiles: malformed explored-tile data (%d tiles claimed); map exploration not restored."), Count);
+			return 0;
+		}
+		PendingExploredBlobs.Emplace(Encoded, Count);
+		UE_LOG(LogVoxelMap, Log, TEXT("Explored map tiles (%lld) wait for the map's world."), Held);
+		return static_cast<int32>(FMath::Min<int64>(Held, MAX_int32));
+	}
+	const int32 Held = ApplyExploredBlob(Encoded, Count);
+	if (Held < 0)
 	{
 		UE_LOG(LogVoxelMap, Warning, TEXT("ImportExploredTiles: malformed explored-tile data (%d tiles claimed); map exploration not restored."), Count);
 		return 0;
 	}
-	for (const FIntPoint& Tile : Tiles)
-	{
-		MarkExplored(PackTileKey(Tile));
-	}
-
 	// No image is queued: the views ask for what they show (MAP_PYRAMID_PLAN.md P1). Tiles outside the world (explored
-	// before exploration stopped at the edge, WM-I2) are dropped now; without a resolved world they are dropped when it
-	// resolves.
-	if (ResolveChunkManager())
-	{
-		PruneExploredOutsideWorld();
-	}
-
-	UE_LOG(LogVoxelMap, Log, TEXT("Restored %d explored map tile(s) (%d explored now)."), Tiles.Num(), ExploredTiles.Num());
-	return Tiles.Num();
+	// before exploration stopped at the edge, WM-I2) are dropped.
+	PruneExploredOutsideWorld();
+	UE_LOG(LogVoxelMap, Log, TEXT("Restored %d explored map tile(s) (%lld explored now, %d block(s), %d full)."), Held, ExploredMask.Num(),
+		ExploredMask.NumBlocks(), ExploredMask.NumFullBlocks());
+	return Held;
 }
 
 namespace

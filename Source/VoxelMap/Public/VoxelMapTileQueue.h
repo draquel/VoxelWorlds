@@ -9,13 +9,14 @@
 /**
  * Who asks for a map tile's drawing, in the order the queue serves them (MAP_PYRAMID_PLAN.md P1): the minimap first,
  * then the world map, then the edit refreshes (an edit overlay's rebuild at level 0 and the neighbours its border
- * changed).
+ * changed), then the prefetch (a planet's top levels, drawn when the map resolves its world and kept; P2).
  */
 enum class EVoxelMapRequester : uint8
 {
 	Minimap = 0,
 	WorldMap,
 	Edits,
+	Prefetch,
 	Num
 };
 

@@ -212,7 +212,26 @@ bool FVoxelMapViewRequestsTest::RunTest(const FString& Parameters)
 		const FVoxelMapTileQueue& Queue = Map->GetTileQueue();
 		AddInfo(FString::Printf(TEXT("%d tiles explored; %s"), Explored, *Map->GetDebugStats()));
 		TestTrue(TEXT("The island has hundreds of tiles"), Explored > 300);
-		TestEqual(TEXT("Exploration is kept whole"), Map->GetExploredTiles().Num(), Explored);
+		TestEqual(TEXT("Exploration is kept whole"), Map->GetNumExploredTiles(), static_cast<int64>(Explored));
+		// The island's whole footprint, by the mask (MAP_PYRAMID_PLAN.md P2): every tile of its box inside the world, none
+		// outside (WM-I2).
+		{
+			const FBox2D Box = Map->GetWorldBounds().GetBox2D();
+			const FIntPoint Lo = Map->WorldToTileCoord(FVector(Box.Min.X, Box.Min.Y, 0.0)) - FIntPoint(2, 2);
+			const FIntPoint Hi = Map->WorldToTileCoord(FVector(Box.Max.X, Box.Max.Y, 0.0)) + FIntPoint(2, 2);
+			int32 Inside = 0, Wrong = 0;
+			for (int32 Y = Lo.Y; Y <= Hi.Y; ++Y)
+			{
+				for (int32 X = Lo.X; X <= Hi.X; ++X)
+				{
+					const bool bInside = Map->IsTileInsideWorld(FIntPoint(X, Y));
+					Inside += bInside ? 1 : 0;
+					Wrong += Map->IsTileExplored(FIntPoint(X, Y)) != bInside ? 1 : 0;
+				}
+			}
+			TestEqual(TEXT("ExploreAll: the island's tiles"), Inside, Explored);
+			TestEqual(TEXT("... explored inside the world and only there"), Wrong, 0);
+		}
 		TestEqual(TEXT("ExploreAll queues no image"), Queue.NumWaiting() + Queue.NumDrawing(), 0);
 		TestEqual(TEXT("... and draws none"), Store.Num(), 0);
 
@@ -273,27 +292,20 @@ bool FVoxelMapViewRequestsTest::RunTest(const FString& Parameters)
 }
 
 /**
- * World modes review WM-MP9 (§23): voxel.Map.ExploreAllMaxTiles caps a heightmap world's ExploreAll as it caps a
- * planet's (spherical Phase 6, WM-BP11): the tiles nearest the centre, in square rings, up to the cap. On a plane (whose
- * tiles are unbounded) ExploreAll within 8,000 uu of a point over 1,600 uu tiles covers an 11 x 11 square: with the cap
- * at 30 it explores 30 tiles, the centre tile, its first and second rings and five of the third, none farther; with the
- * cap past the count it explores all 121, the same set the raster walk explored before.
+ * ExploreAll and the saves on a plane (world modes review WM-MP9; MAP_PYRAMID_PLAN.md P2 retired its cap). On a plane
+ * (whose tiles are unbounded) ExploreAll within 8,000 uu of a point over 1,600 uu tiles explores the 11 x 11 square
+ * around it, out to the fifth ring, and again explores nothing new. Before that, a save from before the explored mask
+ * (coordinate pairs, negative and far ones among them) converts into the mask, and the mask's blob round-trips through
+ * a second import, merging.
  */
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelMapExploreAllCapPlaneTest,
-	"VoxelWorlds.Map.ExploreAllCap.Plane",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelMapExploreAllPlaneTest,
+	"VoxelWorlds.Map.ExploreAll.Plane",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FVoxelMapExploreAllCapPlaneTest::RunTest(const FString& Parameters)
+bool FVoxelMapExploreAllPlaneTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelMapTileStoreTest;
-	IConsoleVariable* CapVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Map.ExploreAllMaxTiles"));
-	if (!TestNotNull(TEXT("The cap cvar"), CapVar))
-	{
-		return true;
-	}
-	const FString OldCap = CapVar->GetString();
-
-	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelMapExploreAllCapWorld"));
+	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, TEXT("VoxelMapExploreAllPlaneWorld"));
 	FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Game);
 	WorldContext.SetCurrentWorld(World);
 	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
@@ -318,48 +330,51 @@ bool FVoxelMapExploreAllCapPlaneTest::RunTest(const FString& Parameters)
 	UVoxelMapSubsystem* Map = World->GetSubsystem<UVoxelMapSubsystem>();
 	if (TestNotNull(TEXT("The game world has a map"), Map))
 	{
-		const FVector Center(12345.0, -6789.0, 0.0);
-		auto Unpack = [](uint64 PackedKey) { return FIntPoint(static_cast<int32>(static_cast<uint32>(PackedKey >> 32)), static_cast<int32>(static_cast<uint32>(PackedKey & 0xFFFFFFFF))); };
-
-		CapVar->Set(TEXT("30"), ECVF_SetByCode);
-		const int64 Capped = Map->ExploreAllTiles(Center, 8000.0f);
-		TestTrue(TEXT("Nothing is queued"), DrainMap(Map));
-		// The centre tile once the map has resolved its world (its tile grid is the chunk manager's; before the first call
-		// the coordinate is not the grid's).
-		const FIntPoint CenterTile = Map->WorldToTileCoord(Center);
-		auto RingOf = [&CenterTile](const FIntPoint& Tile) { return FMath::Max(FMath::Abs(Tile.X - CenterTile.X), FMath::Abs(Tile.Y - CenterTile.Y)); };
-		// 30 tiles are the centre, its first ring (8), its second (16) and five of the third.
-		int32 Ring0 = 0, Ring1 = 0, Ring2 = 0, PastRing3 = 0;
-		for (const uint64 PackedKey : Map->GetExploredTiles())
+		// A save from before the mask: coordinate pairs, the QA player's negative tiles and a far one among them.
+		const TArray<FIntPoint> OldSave = { FIntPoint(-128, -13), FIntPoint(-1, 1), FIntPoint(0, 0), FIntPoint(2000000, -3000000), FIntPoint(-129, -13) };
+		TestEqual(TEXT("A coordinate-pair save imports"), Map->ImportExploredTiles(UVoxelMapSubsystem::EncodeTileCoords(OldSave), OldSave.Num()), OldSave.Num());
+		int32 Converted = 0;
+		for (const FIntPoint& Tile : OldSave)
 		{
-			const int32 Ring = RingOf(Unpack(PackedKey));
-			Ring0 += Ring == 0 ? 1 : 0;
-			Ring1 += Ring == 1 ? 1 : 0;
-			Ring2 += Ring == 2 ? 1 : 0;
-			PastRing3 += Ring > 3 ? 1 : 0;
+			Converted += Map->IsTileExplored(Tile) ? 1 : 0;
 		}
-		AddInfo(FString::Printf(TEXT("Cap 30: %lld tiles explored (%d kept), the centre tile %d, its first ring %d, its second %d, past the third ring %d"), Capped, Map->GetExploredTiles().Num(), Ring0, Ring1, Ring2, PastRing3));
-		TestEqual(TEXT("With the cap at 30, 30 tiles are explored"), Capped, int64(30));
-		TestEqual(TEXT("... the centre tile among them"), Ring0, 1);
-		TestEqual(TEXT("... its whole first ring"), Ring1, 8);
-		TestEqual(TEXT("... its whole second ring"), Ring2, 16);
-		TestEqual(TEXT("... none past the third ring (the nearest first)"), PastRing3, 0);
+		TestEqual(TEXT("... every tile in the mask"), Converted, OldSave.Num());
+		TestEqual(TEXT("... and no other"), Map->GetNumExploredTiles(), static_cast<int64>(OldSave.Num()));
+		TestFalse(TEXT("... a neighbour stays unexplored"), Map->IsTileExplored(FIntPoint(-127, -13)));
+		TestEqual(TEXT("A load queues nothing"), Map->GetTileQueue().NumWaiting() + Map->GetTileQueue().NumDrawing(), 0);
 
-		CapVar->Set(TEXT("1000000"), ECVF_SetByCode);
+		// The mask's blob round-trips: exported, imported again (merging: nothing new).
+		int32 Count = 0;
+		const FString Blob = Map->ExportExploredTiles(Count);
+		TestEqual(TEXT("The blob reports the explored tiles"), Count, OldSave.Num());
+		TestEqual(TEXT("The blob imports"), Map->ImportExploredTiles(Blob, Count), OldSave.Num());
+		TestEqual(TEXT("... merging"), Map->GetNumExploredTiles(), static_cast<int64>(OldSave.Num()));
+
+		const FVector Center(12345.0, -6789.0, 0.0);
 		const int64 All = Map->ExploreAllTiles(Center, 8000.0f);
 		TestTrue(TEXT("Nothing is queued"), DrainMap(Map));
-		int32 MaxRing = 0;
-		for (const uint64 PackedKey : Map->GetExploredTiles())
+		const FIntPoint CenterTile = Map->WorldToTileCoord(Center);
+		auto RingOf = [&CenterTile](const FIntPoint& Tile) { return FMath::Max(FMath::Abs(Tile.X - CenterTile.X), FMath::Abs(Tile.Y - CenterTile.Y)); };
+		TArray<FIntPoint> Explored;
+		Map->GetExploredTiles(Explored);
+		int32 MaxRing = 0, InSquare = 0;
+		for (const FIntPoint& Tile : Explored)
 		{
-			MaxRing = FMath::Max(MaxRing, RingOf(Unpack(PackedKey)));
+			const int32 Ring = RingOf(Tile);
+			InSquare += Ring <= 5 ? 1 : 0;
+			MaxRing = FMath::Max(MaxRing, Ring <= 5 ? Ring : 0);
 		}
-		AddInfo(FString::Printf(TEXT("Cap lifted: %lld tiles explored, %d kept, out to ring %d"), All, Map->GetExploredTiles().Num(), MaxRing));
-		TestEqual(TEXT("With the cap lifted the 11 x 11 square is explored"), All, int64(121));
-		TestEqual(TEXT("... and kept"), Map->GetExploredTiles().Num(), 121);
+		AddInfo(FString::Printf(TEXT("ExploreAll: %lld tiles in the square, %lld explored (%d in the square), out to ring %d"), All, Map->GetNumExploredTiles(), InSquare, MaxRing));
+		TestEqual(TEXT("ExploreAll explores the 11 x 11 square"), All, int64(121));
+		TestEqual(TEXT("... every tile of it"), InSquare, 121);
 		TestEqual(TEXT("... out to the fifth ring"), MaxRing, 5);
+		TestEqual(TEXT("... beside the saved tiles"), Map->GetNumExploredTiles(), static_cast<int64>(121 + OldSave.Num()));
+		const uint64 Revision = Map->GetExplorationRevision();
+		Map->ExploreAllTiles(Center, 8000.0f);
+		TestEqual(TEXT("Again: nothing new"), Map->GetNumExploredTiles(), static_cast<int64>(121 + OldSave.Num()));
+		TestEqual(TEXT("... and the fog stands"), Map->GetExplorationRevision(), Revision);
 	}
 
-	CapVar->Set(*OldCap, ECVF_SetByCode);
 	Manager->Shutdown();
 	Owner->Destroy();
 	GEngine->DestroyWorldContext(World);
