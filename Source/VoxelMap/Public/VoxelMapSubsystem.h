@@ -6,6 +6,7 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "VoxelMapTypes.h"
 #include "VoxelMapEditOverlay.h"
+#include "VoxelMapExploredMask.h"
 #include "VoxelMapTileFrame.h"
 #include "VoxelMapTileQueue.h"
 #include "VoxelMapTileStore.h"
@@ -21,29 +22,6 @@ class IVoxelWorldMode;
 class UVoxelChunkManager;
 class UVoxelEditManager;
 class UVoxelBiomeConfiguration;
-struct FVoxelFarFieldSurface;
-
-/**
- * A planet's coarse albedo for the world map's globe zoomed out (spherical Phase 6, WM-BP11): a cube-sphere grid of at
- * most UVoxelMapSubsystem::GlobeAlbedoCellsPerEdge cells a face edge, each the colour of the surface at its centre as a
- * tile pixel draws it (water by depth under the sea; land the surface material, shaded by elevation and a hillshade),
- * sampled from the analytic surface the far field draws (FVoxelFarFieldSurface). Where a pixel of the globe spans many
- * tiles, the world map reads this instead of one tile pixel each.
- */
-struct VOXELMAP_API FVoxelMapGlobeAlbedo
-{
-	/** The albedo's cells (the same faces and warp as the tile grid, coarser) */
-	FVoxelCubeSphereGrid Grid;
-
-	/** One colour per cell, atlas order: Y * 6N + X */
-	TArray<FColor> Colors;
-
-	/** Time the build took (s, on its thread) */
-	double BuildSeconds = 0.0;
-
-	/** The colour of a cell (atlas coordinate). */
-	const FColor& At(const FIntPoint& Cell) const { return Colors[Cell.Y * 6 * Grid.GetCellsPerEdge() + Cell.X]; }
-};
 
 /**
  * World subsystem that manages 2D map tile data for voxel terrain.
@@ -69,6 +47,12 @@ struct VOXELMAP_API FVoxelMapGlobeAlbedo
  * centre first; a new view replaces that view's last request. The images live in one least-recently-used store of every
  * level under one budget (FVoxelMapTileStore, voxel.Map.TileBudgetMB). Exploration is separate and never evicted, and
  * marking a tile explored draws nothing.
+ *
+ * The explored mask (MAP_PYRAMID_PLAN.md P2): exploration is an FVoxelMapExploredMask over level-0 tiles (bitmap blocks
+ * of 64 x 64 tiles, full blocks collapsed), so a whole explored planet costs kilobytes, ExploreAll fills a world at once,
+ * and a view's fog of war is read from it per texel at any level. On a planet the top levels of the pyramid (the
+ * coarsest with at most 4 x 4 tiles a face, and those above it) are drawn when the map resolves its world and kept
+ * (EVoxelMapRequester::Prefetch, pinned in the store), so the globe zoomed out always has an image.
  *
  * Planets (spherical Phase 4, WORLD_MODES_REVIEW_PLAN.md §18, WM-SY8): a tile is a cell of the cube-sphere grid
  * (FVoxelCubeSphereGrid, N = ceil((pi / 2) * R / chunk size) cells a face edge, so a tile is about a chunk across),
@@ -136,43 +120,27 @@ public:
 
 	/**
 	 * Debug (voxel.Map.ExploreAll): mark every tile that overlaps the world's bounds explored, as a fully explored save
-	 * restores it. Unbounded worlds: the tiles within Radius of Center. A planet (spherical Phase 6, WM-BP11): its whole
-	 * atlas up to voxel.Map.ExploreAllMaxTiles tiles (16 million on a 50 km planet, 6.4 billion at 1,000 km), else that
-	 * many nearest Center. No image is queued: the views ask for what they show (MAP_PYRAMID_PLAN.md P1).
-	 * @return Number of tiles explored
+	 * restores it, filling the explored mask with no cap (MAP_PYRAMID_PLAN.md P2): a planet's six faces (16 million tiles on
+	 * a 50 km planet, whole blocks at once), an island's bounds; on an unbounded world the square of tiles within Radius of
+	 * Center. No image is queued: the views ask for what they show (P1).
+	 * @param Center The pawn (an unbounded world's square is around it)
+	 * @param Radius An unbounded world's half square (uu)
+	 * @return Number of tiles of the area, explored now (those explored before included)
 	 */
 	int64 ExploreAllTiles(const FVector& Center, float Radius);
 
-	// --- The globe zoomed out (spherical Phase 6, WM-BP11) ---
+	// --- The globe zoomed out (MAP_PYRAMID_PLAN.md P2) ---
 
-	/** Most cells along a globe albedo's face edge (never more than the tile grid has). */
-	static constexpr int32 GlobeAlbedoCellsPerEdge = 256;
-
-	/**
-	 * A planet's coarse albedo for the globe zoomed out (FVoxelMapGlobeAlbedo). The first call starts the build on a
-	 * worker thread (about a second at 256 cells a face edge); OnGlobeAlbedoReady fires when it is ready.
-	 * @return The albedo, or null until it is built (and in heightmap worlds)
-	 */
-	const FVoxelMapGlobeAlbedo* GetGlobeAlbedo();
+	/** A planet's top levels are prefetched from the coarsest with at most this many tiles along a face's edge. */
+	static constexpr int32 PrefetchTilesPerFaceEdge = 4;
 
 	/**
-	 * Whether any explored tile lies in a cell of the globe albedo's grid: the globe's fog of war zoomed out.
-	 * @param AlbedoCell Atlas coordinate in the albedo's grid
-	 * @return True when explored (false without an albedo)
+	 * The finest of the pyramid levels drawn when the map resolves a planet and kept (pinned in the store; with the levels
+	 * above it, 6 x 16 + 6 x 4 + 6 tiles from level 9 on the 50 km planet): the globe zoomed out always has an image. They
+	 * replace the globe albedo (spherical Phase 6's WM-BP11).
+	 * @return The level, or INDEX_NONE (a heightmap world, or before the map has resolved its world)
 	 */
-	bool IsGlobeCellExplored(const FIntPoint& AlbedoCell);
-
-	/**
-	 * Pure: build a planet's globe albedo (any thread): every cell's colour from the analytic surface at its centre.
-	 * @param Surface The planet's analytic surface
-	 * @param CellsPerEdge Cells along a face edge
-	 * @param MaterialPalette Colour per material id (256)
-	 * @param AltitudeMin Lowest terrain altitude over the datum (the depth shading)
-	 * @param AltitudeMax Highest (the elevation shading)
-	 * @return The albedo
-	 */
-	static TSharedPtr<FVoxelMapGlobeAlbedo> BuildGlobeAlbedo(const FVoxelFarFieldSurface& Surface, int32 CellsPerEdge,
-		const TArray<FColor>& MaterialPalette, float AltitudeMin, float AltitudeMax);
+	int32 GetPrefetchLevel() const { return PrefetchLevel; }
 
 	// --- Exploration ---
 
@@ -185,8 +153,28 @@ public:
 	 */
 	void RequestTilesInRadius(const FVector& WorldPos, float Radius);
 
-	/** Check if a tile has been explored. */
+	/** Check if a level-0 tile has been explored (one lookup in the explored mask). */
 	bool IsTileExplored(FIntPoint TileCoord) const;
+
+	/**
+	 * The exploration (MAP_PYRAMID_PLAN.md P2): a mask over level-0 tiles by face, (Face, U, V) the cell of the cube-sphere
+	 * grid's face on a planet (TileToMaskTile), (0, X, Y) the chunk column on a heightmap world. A view reads its fog of war
+	 * from it per texel (FVoxelMapExploredMask::FReader::IsAnyExplored at the view's level).
+	 */
+	const FVoxelMapExploredMask& GetExploredMask() const { return ExploredMask; }
+
+	/**
+	 * A level-0 tile's place in the explored mask.
+	 * @param TileCoord The tile (a planet's atlas coordinate; a chunk column)
+	 * @param OutFace The face (0 on a heightmap world)
+	 * @param OutU The tile along the face (X on a heightmap world)
+	 * @param OutV The tile across it (Y)
+	 * @return False for a tile outside a planet's atlas
+	 */
+	bool TileToMaskTile(FIntPoint TileCoord, int32& OutFace, int32& OutU, int32& OutV) const;
+
+	/** @return The number of explored level-0 tiles */
+	int64 GetNumExploredTiles() const { return ExploredMask.Num(); }
 
 	/** A count bumped whenever a tile is newly explored: a view whose fog of war may have changed draws again. */
 	uint64 GetExplorationRevision() const { return ExplorationRevision; }
@@ -211,33 +199,52 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
 	FVoxelWorldBounds GetWorldBounds() const { return CachedWorldBounds; }
 
-	/** Get all explored tile coords. */
-	const TSet<uint64>& GetExploredTiles() const { return ExploredTiles; }
+	/**
+	 * Every explored tile's coordinate (a planet's atlas coordinate; a chunk column). O(explored): tests and diagnostics.
+	 * @param OutTiles Receives the tiles (emptied first)
+	 */
+	void GetExploredTiles(TArray<FIntPoint>& OutTiles) const;
 
 	/**
-	 * The explored tiles as a compact blob for a save: zlib-compressed int32 (X, Y) pairs, base64-encoded. A string
-	 * keeps it JSON-safe (packed 64-bit keys would lose precision as JSON numbers) and small (neighbouring tiles
-	 * compress well).
-	 * @param OutCount Receives the number of tiles encoded (needed to decode)
-	 * @return The encoded tiles; empty when nothing is explored
+	 * The explored tiles as a compact blob for a save (MAP_PYRAMID_PLAN.md P2): the explored mask's blocks, full ones by
+	 * coordinate and partial ones by their bits (EncodeExploredMask), a few kilobytes for a whole explored planet. A string
+	 * keeps it JSON-safe.
+	 * @param OutCount Receives the number of tiles explored (at most MAX_int32; 0 when nothing is)
+	 * @return The encoded mask; empty when nothing is explored
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
 	FString ExportExploredTiles(int32& OutCount) const;
 
 	/**
-	 * Restore explored tiles saved by ExportExploredTiles. Queues no image: the views ask for what they show (MAP_PYRAMID_PLAN.md
-	 * P1). Merges into the current set:
-	 * exploration only grows, and tiles already explored this session (the spawn area streams in before a save
-	 * loads) stay explored.
+	 * Restore explored tiles saved by ExportExploredTiles: the mask's blob, or the coordinate pairs saves held before the
+	 * mask (EncodeTileCoords), converted. Queues no image: the views ask for what they show (MAP_PYRAMID_PLAN.md P1).
+	 * Merges into the current exploration: it only grows, and tiles already explored this session (the spawn area streams
+	 * in before a save loads) stay explored. Before the map has resolved its world the blob waits for it.
 	 * @param Encoded The blob from ExportExploredTiles
-	 * @param Count   The tile count ExportExploredTiles reported
-	 * @return Number of tiles restored (0 for an empty or malformed blob)
+	 * @param Count   The tile count ExportExploredTiles reported (the coordinate pairs need it to decode)
+	 * @return Number of tiles the blob holds (0 for an empty or malformed blob)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
 	int32 ImportExploredTiles(const FString& Encoded, int32 Count);
 
 	/**
-	 * Pure: encode tile coordinates (see ExportExploredTiles).
+	 * Pure: encode an explored mask (see ExportExploredTiles). Binary: magic 'VMXM' and the uncompressed size, then the
+	 * zlib-compressed FVoxelMapExploredMask::Save data; base64-encoded.
+	 * @param Mask The mask
+	 * @return The blob; empty for an empty mask or a compression failure
+	 */
+	static FString EncodeExploredMask(const FVoxelMapExploredMask& Mask);
+
+	/**
+	 * Pure: decode EncodeExploredMask output.
+	 * @param Encoded The blob
+	 * @param OutMask Receives the mask (its configuration too)
+	 * @return False when the blob is not a mask blob or is malformed (OutMask left empty)
+	 */
+	static bool DecodeExploredMask(const FString& Encoded, FVoxelMapExploredMask& OutMask);
+
+	/**
+	 * Pure: encode tile coordinates, the explored blob before the mask (ImportExploredTiles still reads it).
 	 * @param Tiles Tile coordinates to encode
 	 * @return Base64 of the zlib-compressed int32 (X, Y) pairs; empty for no tiles or a compression failure
 	 */
@@ -383,9 +390,6 @@ public:
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnMapTileReady, const FVoxelMapTileId&);
 	FOnMapTileReady OnMapTileReady;
 
-	/** Fired on game thread when the planet's globe albedo (GetGlobeAlbedo) is built. */
-	FSimpleMulticastDelegate OnGlobeAlbedoReady;
-
 protected:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
@@ -406,7 +410,13 @@ private:
 	void HandleTerrainConditioningChanged();
 
 	/** Mark a level-0 tile explored (ExplorationRevision counts the new ones). */
-	void MarkExplored(uint64 TileKey);
+	void MarkExplored(FIntPoint TileCoord);
+
+	/** Apply an explored blob to the mask (the world resolved). @return Tiles the blob holds, -1 when malformed */
+	int32 ApplyExploredBlob(const FString& Encoded, int32 Count);
+
+	/** On a planet: ask for the top levels' tiles and pin them (GetPrefetchLevel), when the map resolves its world. */
+	void PrefetchTopLevels();
 
 	/**
 	 * A tile's image is stale (an edit or the terrain conditioning changed under it): a drawing running is discarded, the
@@ -536,10 +546,16 @@ private:
 	 */
 	FVoxelMapTileFrame TileFrame;
 
-	// Tile storage: images of every level under one budget (MAP_PYRAMID_PLAN.md P1), and the exploration set (level-0
-	// keys, never evicted; saved)
+	// Tile storage: images of every level under one budget (MAP_PYRAMID_PLAN.md P1), and the exploration (level-0 tiles,
+	// never evicted; saved; P2)
 	FVoxelMapTileStore TileStore;
-	TSet<uint64> ExploredTiles;
+	FVoxelMapExploredMask ExploredMask;
+
+	/** Explored blobs imported before the map resolved its world (the mask's faces come from the world): applied then. */
+	TArray<TPair<FString, int32>> PendingExploredBlobs;
+
+	/** The finest prefetched level (GetPrefetchLevel), INDEX_NONE without. */
+	int32 PrefetchLevel = INDEX_NONE;
 
 	/** Bumped when a tile is newly explored (GetExplorationRevision). */
 	uint64 ExplorationRevision = 0;
@@ -584,15 +600,6 @@ private:
 	/** One-shot coalescing timer for FlushOverlayRefresh. */
 	FTimerHandle OverlayRefreshTimer;
 
-	// --- Planets (WM-SY8) ---
-
-	/** The globe albedo (GetGlobeAlbedo), whether its build is in flight, and the albedo cells holding an explored tile. */
-	TSharedPtr<const FVoxelMapGlobeAlbedo> GlobeAlbedo;
-	bool bGlobeAlbedoBuilding = false;
-	TSet<uint64> GlobeExploredCells;
-	int32 GlobeExploredFromCount = -1;
-	double GlobeExploredRefreshedSeconds = 0.0;
-
 	/**
 	 * Drawing counters since the last ResetDebugStats (voxel.Map.Stats; the map scaling plan's M0, G163): how fast tiles
 	 * draw, how many drawings replaced an image the store still held, and how many images a view asked for.
@@ -609,10 +616,6 @@ private:
 		int32 WaitingPeak = 0;
 		/** Worker seconds spent drawing the stored tiles. */
 		double DrawSeconds = 0.0;
-		/** The globe's fog-of-war rebuilds (IsGlobeCellExplored), their game-thread seconds and the longest. */
-		int64 FogRebuilds = 0;
-		double FogSeconds = 0.0;
-		double FogMaxSeconds = 0.0;
 		/** FPlatformTime::Seconds() at the last reset. */
 		double SinceSeconds = 0.0;
 	};

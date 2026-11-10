@@ -74,12 +74,22 @@ namespace VoxelMapPlanetTest
 	 */
 	void RequestExploredImages(UVoxelMapSubsystem* Map)
 	{
+		TArray<FIntPoint> Explored;
+		Map->GetExploredTiles(Explored);
 		TArray<FVoxelMapTileId> View;
-		for (const uint64 Key : Map->GetExploredTiles())
+		for (const FIntPoint& Tile : Explored)
 		{
-			View.Emplace(FIntPoint(static_cast<int32>(static_cast<uint32>(Key >> 32)), static_cast<int32>(static_cast<uint32>(Key & 0xFFFFFFFF))));
+			View.Emplace(Tile);
 		}
 		Map->RequestView(EVoxelMapRequester::WorldMap, View);
+	}
+
+	/** The explored tiles' atlas coordinates (the explored mask, MAP_PYRAMID_PLAN.md P2). */
+	TArray<FIntPoint> ExploredOf(const UVoxelMapSubsystem* Map)
+	{
+		TArray<FIntPoint> Explored;
+		Map->GetExploredTiles(Explored);
+		return Explored;
 	}
 
 	FVector RandomDirection(FRandomStream& Random)
@@ -500,12 +510,11 @@ bool FVoxelMapPlanetExplorationTest::RunTest(const FString& Parameters)
 		Map->RequestTilesInRadius(Center + Site * (Radius + 200.0), RequestRadius);
 		TestTrue(TEXT("The map is a planet's"), Map->IsPlanetMap());
 		const FVoxelCubeSphereGrid& Grid = Map->GetPlanetTileGrid();
-		auto Unpack = [](uint64 Key) { return FIntPoint(static_cast<int32>(static_cast<uint32>(Key >> 32)), static_cast<int32>(static_cast<uint32>(Key & 0xFFFFFFFF))); };
 		const double TileAngle = Map->GetTileWorldSize() / Radius;
 		int32 TooFar = 0, Southern = 0;
-		for (const uint64 Key : Map->GetExploredTiles())
+		for (const FIntPoint& Key : ExploredOf(Map))
 		{
-			const FVector TileCentre = Grid.CellCentreDirection(Unpack(Key));
+			const FVector TileCentre = Grid.CellCentreDirection(Key);
 			TooFar += FMath::Acos(FMath::Clamp(FVector::DotProduct(TileCentre, Site), -1.0, 1.0)) > RequestRadius / Radius + TileAngle + 1.0e-6 ? 1 : 0;
 			Southern += TileCentre.Z < 0.0 ? 1 : 0;
 		}
@@ -521,38 +530,50 @@ bool FVoxelMapPlanetExplorationTest::RunTest(const FString& Parameters)
 				}
 			}
 		}
-		AddInfo(FString::Printf(TEXT("The minimap's request explored %d tiles"), Map->GetExploredTiles().Num()));
-		TestTrue(TEXT("Some tiles explored"), Map->GetExploredTiles().Num() >= 4);
+		AddInfo(FString::Printf(TEXT("The minimap's request explored %lld tiles"), Map->GetNumExploredTiles()));
+		TestTrue(TEXT("Some tiles explored"), Map->GetNumExploredTiles() >= 4);
 		TestEqual(TEXT("Every tile within the radius is explored"), MissedNear, 0);
 		TestEqual(TEXT("No explored tile beyond the radius and a tile"), TooFar, 0);
 		TestEqual(TEXT("Nothing explored on the other hemisphere"), Southern, 0);
-		TestTrue(TEXT("Every explored tile is inside the world"), Algo::AllOf(Map->GetExploredTiles(), [&](uint64 Key) { return Map->IsTileInsideWorld(Unpack(Key)); }));
+		TestTrue(TEXT("Every explored tile is inside the world"), Algo::AllOf(ExploredOf(Map), [&](const FIntPoint& Key) { return Map->IsTileInsideWorld(Key); }));
 
-		// Save: the explored atlas keys round-trip through the blob.
+		// Save: the explored tiles round-trip through the blob, the explored mask's by face (MAP_PYRAMID_PLAN.md P2).
 		int32 Count = 0;
 		const FString Blob = Map->ExportExploredTiles(Count);
-		TArray<FIntPoint> Decoded;
-		TestTrue(TEXT("The explored blob decodes"), UVoxelMapSubsystem::DecodeTileCoords(Blob, Count, Decoded));
-		TSet<FIntPoint> DecodedSet(Decoded);
-		TestTrue(TEXT("The blob holds the explored tiles"), Count == Map->GetExploredTiles().Num()
-			&& Algo::AllOf(Map->GetExploredTiles(), [&](uint64 Key) { return DecodedSet.Contains(Unpack(Key)); }));
+		FVoxelMapExploredMask Decoded;
+		TestTrue(TEXT("The explored blob decodes (the mask's)"), UVoxelMapSubsystem::DecodeExploredMask(Blob, Decoded));
+		TestTrue(TEXT("The blob holds the explored tiles"), Count == Map->GetNumExploredTiles() && Decoded.Num() == Count
+			&& Algo::AllOf(ExploredOf(Map), [&](const FIntPoint& Key)
+			{
+				int32 Face = 0, U = 0, V = 0;
+				return Map->TileToMaskTile(Key, Face, U, V) && Decoded.IsExplored(Face, U, V);
+			}));
+		// A save from before the mask (atlas coordinate pairs) converts: tiles on the far side come back by their atlas keys.
+		const TArray<FIntPoint> OldSave = { Grid.CellOfDirection(-Site), Grid.CellOfDirection(FVector(0, 0, -1)) };
+		const int64 BeforeOld = Map->GetNumExploredTiles();
+		TestEqual(TEXT("A coordinate-pair blob imports"), Map->ImportExploredTiles(UVoxelMapSubsystem::EncodeTileCoords(OldSave), OldSave.Num()), OldSave.Num());
+		TestTrue(TEXT("... its tiles explored, by atlas key"), Map->IsTileExplored(OldSave[0]) && Map->IsTileExplored(OldSave[1])
+			&& Map->GetNumExploredTiles() == BeforeOld + 2);
+		// And a mask blob merges (exploration only grows): the session's own blob changes nothing.
+		TestEqual(TEXT("A mask blob imports"), Map->ImportExploredTiles(Blob, Count), Count);
+		TestEqual(TEXT("... merging into what is explored"), Map->GetNumExploredTiles(), BeforeOld + 2);
 
 		// Streaming at the equator explores the tiles of the chunks it generates there, still none on the far side.
 		TestTrue(TEXT("The first tiles drew"), DrainMap(Map, nullptr));
-		const TSet<uint64> BeforeStreaming = Map->GetExploredTiles();
+		const TSet<FIntPoint> BeforeStreaming(ExploredOf(Map));
 		const FVector Equator(0, 1, 0);
 		W.SetViewer(Center + Equator * (Radius + 300.0));
 		TestTrue(TEXT("Streaming settles"), W.Settle());
 		TestTrue(TEXT("The streamed tiles drew"), DrainMap(Map, nullptr));
 		int32 FarSide = 0;
-		for (const uint64 Key : Map->GetExploredTiles())
+		for (const FIntPoint& Key : ExploredOf(Map))
 		{
 			if (!BeforeStreaming.Contains(Key))
 			{
-				FarSide += FVector::DotProduct(Grid.CellCentreDirection(Unpack(Key)), Equator) < 0.0 ? 1 : 0;
+				FarSide += FVector::DotProduct(Grid.CellCentreDirection(Key), Equator) < 0.0 ? 1 : 0;
 			}
 		}
-		AddInfo(FString::Printf(TEXT("Streaming explored %d more tiles"), Map->GetExploredTiles().Num() - BeforeStreaming.Num()));
+		AddInfo(FString::Printf(TEXT("Streaming explored %lld more tiles"), Map->GetNumExploredTiles() - BeforeStreaming.Num()));
 		TestTrue(TEXT("Streaming explored the tiles under the viewer"), Map->IsTileExplored(Map->WorldToTileCoord(Center + Equator * Radius)));
 		TestEqual(TEXT("Streaming explored nothing on the far side"), FarSide, 0);
 		TestEqual(TEXT("Exploring queues no image: the views ask (MAP_PYRAMID_PLAN.md P1)"), Map->GetTileQueue().NumWaiting(), 0);
@@ -863,15 +884,15 @@ bool FVoxelMapPlanetEditOverlayTest::RunTest(const FString& Parameters)
 }
 
 /**
- * Spherical Phase 6, WM-BP11: the world map at scale, the map's side (the zoom range and the sampler are the character
- * plugin's VoxelCharacter.Planet.MapZoomAtScale).
- * - The globe albedo: one colour per cell of a coarse cube-sphere grid (as many cells as tiles on the small planet, 256 a
- *   face edge at most), from the analytic surface at the cell's centre: the sea's blue where the surface is under the sea,
- *   elsewhere the cell's surface material scaled by the elevation and hillshade factors a tile pixel uses.
- * - Its fog of war: an albedo cell is explored once a tile in it is, none before; the far side stays dark.
- * - ExploreAll at scale: on a planet of R 10^6 (5.8 million tiles) with the cap at 20,000, exactly the cap is explored, the
- *   tiles nearest the pawn (all within the cap's angle and a tile), counted in an int64; on the small planet every tile.
- *   A 1,000 km planet's atlas (6.4 billion tiles) is counted without overflow.
+ * The globe zoomed out and ExploreAll at scale (spherical Phase 6, WM-BP11; MAP_PYRAMID_PLAN.md P2 retired the globe
+ * albedo and the explore cap; the character side is VoxelCharacter.Planet.MapZoomAtScale).
+ * - The top levels: when the map resolves the small planet it asks for every tile from the coarsest level with at most
+ *   4 x 4 tiles a face up, pins and draws them; a tiny budget then trims the store under a view of level-0 tiles, and
+ *   every top tile stays.
+ * - ExploreAll on the small planet: every tile of the atlas, in full blocks; no image queued.
+ * - ExploreAll at scale: on a planet of R 10^6 (5.8 million tiles) every tile with no cap (the cap of 1,000,000 explored
+ *   6.2% of the 50 km planet, G163), in milliseconds, every block full, the save blob under 100 KB, and the blob restores
+ *   the same exploration. A 1,000 km planet's atlas (6.4 billion tiles) is counted without overflow.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelMapPlanetZoomAtScaleTest,
 	"VoxelWorlds.Map.Planet.ZoomAtScale",
@@ -880,117 +901,97 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelMapPlanetZoomAtScaleTest,
 bool FVoxelMapPlanetZoomAtScaleTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelMapPlanetTest;
-	auto Unpack = [](uint64 Key) { return FIntPoint(static_cast<int32>(static_cast<uint32>(Key >> 32)), static_cast<int32>(static_cast<uint32>(Key & 0xFFFFFFFF))); };
 
-	// The small planet: the albedo and its fog of war.
+	// The small planet: the top levels kept, then ExploreAll.
 	{
 		VoxelTesting::FTestChunkWorld W;
 		W.Create(TEXT("VoxelMapPlanetZoomAtScale"));
 		W.ConfigureSmallPlanet();
-		UVoxelBiomeConfiguration* Biomes = ConfigureBiomesAndSea(W);
 		W.StartManager();
 		UVoxelMapSubsystem* Map = W.World->GetSubsystem<UVoxelMapSubsystem>();
 		if (TestNotNull(TEXT("The game world has a map"), Map))
 		{
-			const FVoxelMapGlobeAlbedo* Albedo = Map->GetGlobeAlbedo(); // resolves the world on first use
-			TestTrue(TEXT("A planet's map"), Map->IsPlanetMap());
-			const double Deadline = FPlatformTime::Seconds() + 60.0;
-			while (!Albedo && FPlatformTime::Seconds() < Deadline)
+			Map->RequestView(EVoxelMapRequester::WorldMap, {}); // resolves the world on first use
+			const FVoxelMapTileFrame& Frame = Map->GetTileFrame();
+			const FVoxelMapTileStore& Store = Map->GetTileStore();
+			const int32 Top = Map->GetPrefetchLevel();
+			const int32 MaxLevel = Frame.GetMaxLevel();
+			TestTrue(TEXT("A planet's map prefetches its top levels"), Map->IsPlanetMap() && Top >= 0 && Top <= MaxLevel);
+			TestTrue(TEXT("... from the coarsest level with at most 4 tiles a face edge"),
+				Frame.TilesPerFaceEdgeAt(Top) <= UVoxelMapSubsystem::PrefetchTilesPerFaceEdge
+				&& (Top == 0 || Frame.TilesPerFaceEdgeAt(Top - 1) > UVoxelMapSubsystem::PrefetchTilesPerFaceEdge));
+			TArray<FVoxelMapTileId> TopTiles;
+			for (int32 Level = Top; Level <= MaxLevel; ++Level)
 			{
-				FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
-				FPlatformProcess::Sleep(0.01f);
-				Albedo = Map->GetGlobeAlbedo();
+				const int32 NL = Frame.TilesPerFaceEdgeAt(Level);
+				for (int32 V = 0; V < NL; ++V)
+				{
+					for (int32 X = 0; X < 6 * NL; ++X)
+					{
+						TopTiles.Emplace(FIntPoint(X, V), Level);
+					}
+				}
 			}
-			if (TestNotNull(TEXT("The globe albedo builds"), Albedo))
+			auto CountTop = [&](int32& OutPinned)
 			{
-				const int32 N = Albedo->Grid.GetCellsPerEdge();
-				TestEqual(TEXT("As many cells as tiles on the small planet (at most 256)"), N, FMath::Min(256, Map->GetPlanetTileGrid().GetCellsPerEdge()));
-				TestEqual(TEXT("A colour per cell"), Albedo->Colors.Num(), 6 * N * N);
+				int32 Stored = 0;
+				OutPinned = 0;
+				for (const FVoxelMapTileId& Id : TopTiles)
+				{
+					Stored += Map->FindTile(Id, /*bTouch*/ false) ? 1 : 0;
+					OutPinned += Store.IsPinned(Id) ? 1 : 0;
+				}
+				return Stored;
+			};
+			TestTrue(TEXT("The top tiles drew"), DrainMap(Map, nullptr, 120.0));
+			int32 Pinned = 0;
+			const int32 StoredFirst = CountTop(Pinned);
+			AddInfo(FString::Printf(TEXT("Top levels %d-%d: %d tiles, %d stored, %d pinned; %s"), Top, MaxLevel, TopTiles.Num(), StoredFirst, Pinned, *Map->GetDebugStats()));
+			TestEqual(TEXT("Every top tile is stored"), StoredFirst, TopTiles.Num());
+			TestEqual(TEXT("... and pinned"), Pinned, TopTiles.Num());
 
-				// Every cell against the analytic surface at its centre.
-				TSharedPtr<const FVoxelFarFieldSurface> Surface = FVoxelFarFieldSurface::Make(*W.Config, FVoxelWorldModeFactory::Create(*W.Config));
-				const double Radius = W.Config->WorldRadius;
-				const double SeaAltitude = W.Config->WaterRadius - Radius;
-				const FColor SeaBlue(20, 80, 180);
-				int32 Sea = 0, Land = 0, BadSea = 0, BadLand = 0;
-				const TArray<FVoxelConditioningZone> NoZones;
-				for (int32 Y = 0; Y < N; ++Y)
-				{
-					for (int32 X = 0; X < 6 * N; ++X)
-					{
-						const FIntPoint Cell(X, Y);
-						const FVector Direction = Albedo->Grid.CellCentreDirection(Cell);
-						float Continentalness = 0.0f;
-						const float Altitude = Surface->SampleAltitude(FVoxelFarFieldSample::OfDirection(Direction), NoZones, &Continentalness);
-						const FColor Got = Albedo->At(Cell);
-						if (Altitude < SeaAltitude)
-						{
-							++Sea;
-							BadSea += IsScaledColor(Got, SeaBlue, 0.3f, 1.0f) ? 0 : 1;
-						}
-						else
-						{
-							++Land;
-							uint8 Material = 0, Biome = 0;
-							Surface->SampleConditions(FVoxelFarFieldSample::OfDirection(Direction), Altitude, Continentalness, Material, Biome);
-							BadLand += IsScaledColor(Got, FVoxelMaterialRegistry::GetMaterialColor(Material), 0.75f * 0.55f, 1.0f * 1.25f) ? 0 : 1;
-						}
-					}
-				}
-				AddInfo(FString::Printf(TEXT("Globe albedo: %d cells a face edge in %.3f s; %d sea cells (%d off), %d land cells (%d off)"),
-					N, Albedo->BuildSeconds, Sea, BadSea, Land, BadLand));
-				TestTrue(TEXT("Both sea and land"), Sea > 0 && Land > 0);
-				TestEqual(TEXT("Sea cells are the sea's blue by depth"), BadSea, 0);
-				TestEqual(TEXT("Land cells are their material, shaded"), BadLand, 0);
-
-				// The fog of war: nothing explored, then the minimap's request at 45 degrees.
-				int32 ExploredBefore = 0;
-				for (int32 Y = 0; Y < N; ++Y)
-				{
-					for (int32 X = 0; X < 6 * N; ++X)
-					{
-						ExploredBefore += Map->IsGlobeCellExplored(FIntPoint(X, Y)) ? 1 : 0;
-					}
-				}
-				const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
-				const FVector Site(C45, 0, C45);
-				Map->RequestTilesInRadius(W.Config->WorldOrigin + Site * (Radius + 200.0), 3000.0f);
-				int32 ExploredAfter = 0, ExploredFar = 0;
-				for (int32 Y = 0; Y < N; ++Y)
-				{
-					for (int32 X = 0; X < 6 * N; ++X)
-					{
-						if (Map->IsGlobeCellExplored(FIntPoint(X, Y)))
-						{
-							++ExploredAfter;
-							ExploredFar += FVector::DotProduct(Albedo->Grid.CellCentreDirection(FIntPoint(X, Y)), Site) < 0.0 ? 1 : 0;
-						}
-					}
-				}
-				AddInfo(FString::Printf(TEXT("Fog of war: %d albedo cells explored before, %d after the request (%d on the far side); %d tiles explored"),
-					ExploredBefore, ExploredAfter, ExploredFar, Map->GetExploredTiles().Num()));
-				TestEqual(TEXT("Nothing explored before"), ExploredBefore, 0);
-				TestTrue(TEXT("The site's cell explored after"), Map->IsGlobeCellExplored(Albedo->Grid.CellOfDirection(Site)));
-				TestEqual(TEXT("Nothing on the far side"), ExploredFar, 0);
+			// A budget of about 50 tiles of 32 x 32 under a view of 300 level-0 tiles: the store trims, the top tiles stay.
+			IConsoleVariable* BudgetVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Map.TileBudgetMB"));
+			const FString OldBudget = BudgetVar ? BudgetVar->GetString() : FString();
+			if (BudgetVar)
+			{
+				BudgetVar->Set(TEXT("0.2"), ECVF_SetByConsole);
+				Map->ApplyTileBudgets();
 			}
+			const int32 N = Map->GetPlanetTileGrid().GetCellsPerEdge();
+			TArray<FVoxelMapTileId> View;
+			for (int32 Y = 0; Y < N && View.Num() < 300; ++Y)
+			{
+				for (int32 X = 0; X < 6 * N && View.Num() < 300; ++X)
+				{
+					View.Emplace(FIntPoint(X, Y));
+				}
+			}
+			Map->RequestView(EVoxelMapRequester::WorldMap, View);
+			TestTrue(TEXT("The view drew"), DrainMap(Map, nullptr, 120.0));
+			const int32 StoredAfter = CountTop(Pinned);
+			AddInfo(FString::Printf(TEXT("After a view of %d level-0 tiles under a 0.2 MB budget: %d top tiles stored, %lld evicted"), View.Num(), StoredAfter, Store.GetEvictions()));
+			TestTrue(TEXT("The budget binds"), Store.GetEvictions() > 0);
+			TestEqual(TEXT("Every top tile kept through the trimming"), StoredAfter, TopTiles.Num());
+			if (BudgetVar)
+			{
+				BudgetVar->Set(*OldBudget, ECVF_SetByConsole);
+				Map->ApplyTileBudgets();
+			}
+			Map->RequestView(EVoxelMapRequester::WorldMap, {});
 
 			// ExploreAll on the small planet: every tile.
 			const int64 Explored = Map->ExploreAllTiles(W.Config->WorldOrigin + FVector(0, 0, 1) * (W.Config->WorldRadius + 300.0), 0.0f);
 			TestEqual(TEXT("ExploreAll: every tile of the small planet"), Explored, Map->GetPlanetTileGrid().GetNumCells());
-			TestTrue(TEXT("The images drew"), DrainMap(Map, nullptr, 120.0));
+			TestEqual(TEXT("... all in the mask"), Map->GetNumExploredTiles(), Map->GetPlanetTileGrid().GetNumCells());
+			TestEqual(TEXT("... every block full"), Map->GetExploredMask().NumFullBlocks(), Map->GetExploredMask().NumBlocks());
+			TestEqual(TEXT("ExploreAll queues no image"), Map->GetTileQueue().NumWaiting() + Map->GetTileQueue().NumDrawing(), 0);
 		}
 		W.Stop();
-		Biomes->RemoveFromRoot();
 	}
 
-	// ExploreAll at scale: R 10^6, the cap at 20,000.
+	// ExploreAll at scale: R 10^6, no cap.
 	{
-		IConsoleVariable* CapVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Map.ExploreAllMaxTiles"));
-		const int32 SavedCap = CapVar ? CapVar->GetInt() : 0;
-		if (CapVar)
-		{
-			CapVar->Set(20000, ECVF_SetByCode);
-		}
 		VoxelTesting::FTestChunkWorld W;
 		W.Create(TEXT("VoxelMapPlanetExploreAllAtScale"));
 		W.ConfigureSmallPlanet(1.0e6f);
@@ -998,28 +999,39 @@ bool FVoxelMapPlanetZoomAtScaleTest::RunTest(const FString& Parameters)
 		UVoxelMapSubsystem* Map = W.World->GetSubsystem<UVoxelMapSubsystem>();
 		if (TestNotNull(TEXT("The game world has a map"), Map))
 		{
+			Map->RequestView(EVoxelMapRequester::WorldMap, {}); // resolves the world on first use
 			const FVoxelCubeSphereGrid& Grid = Map->GetPlanetTileGrid();
 			const FVector Site = FVector(0.3, -0.5, 0.8).GetSafeNormal();
+			const double Start = FPlatformTime::Seconds();
 			const int64 Explored = Map->ExploreAllTiles(W.Config->WorldOrigin + Site * (W.Config->WorldRadius + 300.0), 0.0f);
-			// The cap's angle: a cap of the sphere holding 20,000 of its tiles.
-			const double CapAngle = FMath::Acos(1.0 - 2.0 * 20000.0 / static_cast<double>(Grid.GetNumCells()));
-			double Farthest = 0.0;
-			for (const uint64 Key : Map->GetExploredTiles())
+			const double ExploreMs = 1000.0 * (FPlatformTime::Seconds() - Start);
+			const double ExportStart = FPlatformTime::Seconds();
+			int32 Count = 0;
+			const FString Blob = Map->ExportExploredTiles(Count);
+			const double ExportMs = 1000.0 * (FPlatformTime::Seconds() - ExportStart);
+			const FVoxelMapExploredMask& Mask = Map->GetExploredMask();
+			AddInfo(FString::Printf(TEXT("ExploreAll at R 1e6: %lld of %lld tiles in %.2f ms; the mask %d blocks (%d full), %.1f KB; the blob %d chars in %.2f ms"),
+				Explored, Grid.GetNumCells(), ExploreMs, Mask.NumBlocks(), Mask.NumFullBlocks(), Mask.GetAllocatedSize() / 1024.0, Blob.Len(), ExportMs));
+			TestEqual(TEXT("ExploreAll at scale: every tile, no cap"), Explored, Grid.GetNumCells());
+			TestEqual(TEXT("... all in the mask"), Map->GetNumExploredTiles(), Grid.GetNumCells());
+			TestEqual(TEXT("... every block full"), Mask.NumFullBlocks(), Mask.NumBlocks());
+			TestTrue(TEXT("... in milliseconds (50 ms headless; the 50 km planet's target is 10 ms)"), ExploreMs < 50.0);
+			TestTrue(TEXT("... in kilobytes"), Mask.GetAllocatedSize() < 1024 * 1024);
+			TestTrue(TEXT("The save blob under 100 KB"), Blob.Len() < 100 * 1024);
+			TestEqual(TEXT("... reporting every tile"), static_cast<int64>(Count), Grid.GetNumCells());
+			FRandomStream Random(163);
+			int32 Missed = 0;
+			for (int32 I = 0; I < 2000; ++I)
 			{
-				Farthest = FMath::Max(Farthest, FMath::Acos(FMath::Clamp(FVector::DotProduct(Grid.CellCentreDirection(Unpack(Key)), Site), -1.0, 1.0)));
+				Missed += Map->IsTileExplored(Grid.CellOfDirection(Random.GetUnitVector())) ? 0 : 1;
 			}
-			const double TileAngle = Map->GetTileWorldSize() / W.Config->WorldRadius;
-			AddInfo(FString::Printf(TEXT("ExploreAll at R 1e6: %lld of %lld tiles explored, farthest %.3f deg from the pawn (a cap of 20,000 tiles: %.3f deg)"),
-				Explored, Grid.GetNumCells(), FMath::RadiansToDegrees(Farthest), FMath::RadiansToDegrees(CapAngle)));
-			TestEqual(TEXT("ExploreAll at scale: exactly the cap"), Explored, static_cast<int64>(20000));
-			TestEqual(TEXT("... all of them in the exploration"), static_cast<int64>(Map->GetExploredTiles().Num()), static_cast<int64>(20000));
-			TestTrue(TEXT("... the nearest to the pawn (a flood fill: a diamond of the grid, sqrt(pi / 2) times the round cap)"), Farthest <= 1.4 * CapAngle + 2.0 * TileAngle);
+			TestEqual(TEXT("Tiles anywhere on the sphere are explored"), Missed, 0);
+			FVoxelMapExploredMask Restored;
+			TestTrue(TEXT("The blob decodes"), UVoxelMapSubsystem::DecodeExploredMask(Blob, Restored));
+			TestTrue(TEXT("... to the same exploration"), Restored.Num() == Mask.Num() && Restored.NumFullBlocks() == Mask.NumFullBlocks()
+				&& Restored.GetFaces() == 6 && Restored.GetFaceTiles() == Grid.GetCellsPerEdge());
 		}
 		W.Stop();
-		if (CapVar)
-		{
-			CapVar->Set(SavedCap, ECVF_SetByCode);
-		}
 		// A 1,000 km planet's atlas, counted.
 		const FVoxelCubeSphereGrid L(FVoxelCubeSphereGrid::CellsPerEdgeFor(1.0e8, 2400.0));
 		AddInfo(FString::Printf(TEXT("A 1,000 km planet's map: %d tiles a face edge, %lld in all"), L.GetCellsPerEdge(), L.GetNumCells()));

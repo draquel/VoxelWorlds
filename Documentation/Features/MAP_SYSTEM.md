@@ -1,6 +1,6 @@
 # Map System
 
-> State as of 2026-11-09 (MAP_PYRAMID_PLAN.md P1, the tile pyramid). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-09 (MAP_PYRAMID_PLAN.md P1, the tile pyramid; P2, the explored mask). Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelMap
 **Dependencies**: VoxelCore, VoxelGeneration, VoxelStreaming
@@ -11,21 +11,22 @@ The Map System generates 2D top-down map tile data from voxel terrain. A level-0
 
 The system lives entirely within the VoxelWorlds plugin and has zero knowledge of players, characters, or UI. External consumers (such as minimap or world map widgets in VoxelCharacterPlugin) drive exploration via `RequestTilesInRadius()` and ask for the images they show via `RequestView()`.
 
-Images are drawn for the views, not for exploration: each view asks for the tiles it shows at the level matching its texels, about 300 for the world map at any zoom, and one least-recently-used store of every level keeps them under one budget. Exploration is kept whole and saved, and marking a tile explored draws nothing. Player and system edits show on the map through per-tile edit overlays ([Edit Overlays](#edit-overlays-r22)), read under the pixels of every level.
+Images are drawn for the views, not for exploration: each view asks for the tiles it shows at the level matching its texels, about 300 for the world map at any zoom, and one least-recently-used store of every level keeps them under one budget. Exploration is a compact mask over level-0 tiles ([The Explored Mask](#the-explored-mask-map_pyramid_planmd-p2)), kept whole and saved: a whole explored planet costs kilobytes, and marking a tile explored draws nothing. Player and system edits show on the map through per-tile edit overlays ([Edit Overlays](#edit-overlays-r22)), read under the pixels of every level.
 
 ## Architecture
 
 ```
 UVoxelMapSubsystem (UWorldSubsystem)
 ├── Tile Store: FVoxelMapTileStore (every pyramid level, one LRU under one budget)
-├── Exploration: TSet<uint64> of level-0 keys (never evicted; saved)
+├── Exploration: FVoxelMapExploredMask over level-0 tiles (64 x 64-tile blocks; never evicted; saved)
 ├── Draw Queue: FVoxelMapTileQueue (by requester, then each view's order: minimap, world map, edits)
 │
 ├── Exploration ──→ UVoxelChunkManager::OnChunkGenerated, RequestTilesInRadius(), ExploreAllTiles(), a save
 │   (marks tiles explored; draws nothing)
 │
 ├── View Requests ──→ RequestView(requester, tiles nearest first)
-│   (the minimap's and the world map's tiles at their levels; each replaces that view's last)
+│   (the minimap's and the world map's tiles at their levels; each replaces that view's last; a planet's top levels,
+│   prefetched and pinned)
 │
 ├── Edit Overlays: FVoxelMapEditOverlay per edited tile (R22; saved)
 │
@@ -73,11 +74,15 @@ World subsystem that manages tile generation, caching, and exploration tracking.
 | `RequestView(EVoxelMapRequester, tiles)` | A view's request: the tiles it shows at its level, nearest its centre first. Queues those without an image (or with a stale one) and replaces the requester's last request (an empty one clears it) |
 | `LevelForTexel(double)` | The pyramid level whose pixels match a texel of that size: the coarsest whose pixels are at most the texel apart (BlueprintCallable) |
 | `GetTileStore()` / `GetTileQueue()` | The images and their budget; the draw queue (diagnostics, tests) |
-| `ExploreAllTiles(FVector, float)` | Debug (`voxel.Map.ExploreAll`): explore every tile of a bounded world (an unbounded one: within Radius of Center), as a fully explored save restores it, at most `voxel.Map.ExploreAllMaxTiles`; queues no image |
+| `ExploreAllTiles(FVector, float)` | Debug (`voxel.Map.ExploreAll`): explore every tile of a bounded world (a planet's six faces, an island's bounds; an unbounded one: the square within Radius of Center), as a fully explored save restores it, with no cap (P2); queues no image |
 | `RequestTilesInRadius(FVector, float)` | Mark tiles as explored (the minimap's area); draws nothing |
 | `GetExplorationRevision()` | A count bumped when a tile is newly explored (a view redraws its fog of war when it moves on) |
-| `IsTileExplored(FIntPoint)` | Check if a tile is in the explored set |
-| `GetExploredTiles()` | Get all explored tile coordinates |
+| `IsTileExplored(FIntPoint)` | Whether a level-0 tile is explored (one lookup in the mask) |
+| `GetExploredMask()` | The explored mask by face (`FVoxelMapExploredMask`): the views read their fog from it at their level |
+| `TileToMaskTile(FIntPoint, ...)` | A tile's face and place in the mask (a planet's face and cell; face 0 and the chunk column on a plane) |
+| `GetNumExploredTiles()` / `GetExploredTiles(TArray&)` | The explored count; every explored tile's coordinate (O(explored): tests, diagnostics) |
+| `ExportExploredTiles` / `ImportExploredTiles` | The save's blob (the mask; the coordinate pairs saved before P2 still import) |
+| `GetPrefetchLevel()` | The finest of a planet's prefetched, pinned top levels (INDEX_NONE on a heightmap world) |
 | `WorldToTileCoord(FVector)` | Convert world position to tile coordinate |
 | `TileCoordToWorld(FIntPoint)` | Convert tile coordinate to world origin |
 | `GetTileWorldSize()` | World size of one tile edge (ChunkSize * VoxelSize) |
@@ -89,7 +94,6 @@ World subsystem that manages tile generation, caching, and exploration tracking.
 | Delegate | Description |
 |----------|-------------|
 | `OnMapTileReady(FVoxelMapTileId)` | Fired on game thread when a tile's image (at any level) is stored |
-| `OnGlobeAlbedoReady` | Fired on game thread when a planet's globe albedo is built |
 
 ## Tile Generation Pipeline
 
@@ -180,8 +184,7 @@ tiles) asked for half a million images at one zoom. The tile pyramid (D84) bound
   texel (VoxelCharacterPlugin's `FVCPlaneMapSampler`, `FVCPlanetMapSampler`), so a zoom or a pan shows the old image
   scaled up, then sharpens.
 
-Exploration is still the key set (`ExploredTiles`) and `ExploreAll` keeps its cap: the explored mask that replaces both is
-P2. A load and `ExploreAll` queue nothing, since only the views ask. Tests: `VoxelWorlds.Map.Pyramid.Levels` (the
+A load and `ExploreAll` queue nothing, since only the views ask (exploration became the explored mask in P2, below). Tests: `VoxelWorlds.Map.Pyramid.Levels` (the
 arithmetic on a plane and on a planet of 37 tiles a face edge), `.ViewRequests` (an island through the subsystem),
 `VoxelWorlds.Map.Tiles.ViewRequestsReplace` (the queue), `VoxelWorlds.Map.TileStore.Budget`, and
 `VoxelWorlds.Map.Planet.EditOverlay` (a dig under a level-1 tile in view redraws it). The results against the map
@@ -191,9 +194,47 @@ Drawing: a 64 × 64 tile takes about 7-13 ms of background work (four run at a t
 runs); all generation is async, with no game-thread cost beyond storing the result. `voxel.Map.Stats [reset]` reports
 the queue (waiting, drawing, the most waiting since the reset, by requester), the drawing since its last reset: tiles
 drawn, their rate and the worker ms a tile, the drawings that replaced an image the store held, the images the views
-asked for (`RequestView`), and the globe's fog-of-war rebuilds with their game-thread ms; then the images by level. Insights shows `ExploreAll`, the view requests, the drawing and
-its completion, the store's trimming, the fog-of-war rebuild and the explored tiles' save and load as `VoxelMap_*` scopes
-(the map scaling plan's M0, G163).
+asked for (`RequestView`); then the images by level, and the explored mask (tiles, blocks, full blocks, its kilobytes).
+Insights shows `ExploreAll`, the view requests, the drawing and its completion, the store's trimming and the explored
+tiles' save and load as `VoxelMap_*` scopes (the map scaling plan's M0, G163).
+
+### The Explored Mask (MAP_PYRAMID_PLAN.md P2)
+
+Exploration was a `TSet<uint64>`, a key per explored tile: 22 MB a million keys, `ExploreAll` capped at a million (6.2% of
+the 50 km planet's 16,078,614 tiles, G163), a save of coordinate pairs, and a globe fog of war rebuilt from every key
+(G170). Since P2 it is `FVoxelMapExploredMask` (`VoxelMapExploredMask.h`, world-free and unit-tested):
+
+- **Blocks.** Level-0 tiles by face, (Face, U, V): a planet's cube face and its cell (`TileToMaskTile`), face 0 and the
+  chunk column on a plane (unbounded, negative too). A block is 64 × 64 tiles, a 512-byte bitmap with a count; a block
+  whose tiles are all explored collapses to its count (a planet face's last blocks hold fewer tiles, and are full when
+  those are). A fully explored 50 km planet is 4,056 full blocks.
+- **Every level in one lookup.** Each partial block keeps an "any explored" bit per aligned square of 2^k tiles (k 1-5),
+  and above the blocks a sparse count per aligned square of 2^m blocks (m 1-12). Whether anything under a level-L pixel
+  is explored (a square of 2^(L - 6) level-0 tiles at 64-pixel tiles) is so one lookup at any level: the tile's bit at
+  levels 0-6, the block's squares to level 11, the block summaries above. `FVoxelMapExploredMask::FReader` caches the last
+  block and summary, so most of a fill's texels skip the hash.
+- **`ExploreAll` without a cap**: a planet's six faces, an island's bounds (each row's run of tiles inside the world), a
+  plane's square, as rectangles that fill whole blocks at once.
+- **The fog of war from the mask.** The samplers (VoxelCharacterPlugin) read each texel's exploration from it at the view's
+  level; `IsGlobeCellExplored` and its once-a-second rebuild over every key are gone (G170).
+- **The save.** `ExportExploredTiles` writes the mask (`EncodeExploredMask`: magic `VMXM` and the uncompressed size, then
+  the zlib-compressed blocks, full ones by coordinate and partial ones by their 64 rows; base64) and reports the explored
+  count. `ImportExploredTiles` reads it, or the coordinate pairs saves held before (`EncodeTileCoords`, told apart by the
+  magic), converting them; both merge into the mask. A blob imported before the map resolves its world waits for it (the
+  mask's faces come from the world). A load queues no image (P1). VoxelWorldSave's calls are unchanged.
+- **The top levels instead of the globe albedo.** On a planet the map asks, when it resolves the world, for every tile from
+  the coarsest level with at most 4 × 4 tiles a face up (`PrefetchTilesPerFaceEdge`; levels 9-11 on the 50 km planet,
+  6 × 16 + 6 × 4 + 6 tiles), as the `Prefetch` requester (after the edits), and pins them in the store
+  (`FVoxelMapTileStore::Pin`: trimming passes them by). The samplers fall back on them, so the zoomed-out globe always has
+  an image, drawn by the same drawer as every other zoom. `FVoxelMapGlobeAlbedo`, `GetGlobeAlbedo` and `BuildGlobeAlbedo`
+  retired, and with the key set `voxel.Map.ExploreAllMaxTiles`.
+
+Tests: `VoxelWorlds.Map.ExploredMask.Levels` (every square size from a tile to 2^14 tiles on a plane and a planet against a
+brute force), `.Collapse` (full blocks, a face's last blocks, rectangles, removal), `.Blobs` (the blob's round trip and
+refusals; a fully explored 50 km planet's fill and blob), `VoxelWorlds.Map.ExploreAll.Plane` (a pre-mask save converted,
+the square explored), `VoxelWorlds.Map.Planet.Exploration` (the mask's blob and an old one on a planet), `.ZoomAtScale`
+(the top levels kept through trimming; `ExploreAll` over 5.8 million tiles). The results are in
+`Documentation/MAP_PYRAMID_PLAN.md` §6.
 
 ## Configuration
 
@@ -214,7 +255,7 @@ All configuration is cached on first resolve (`ResolveChunkManager()`) and treat
 
 ## Exploration System
 
-The `ExploredTiles` set tracks which tile coordinates the player has visited or observed. Tiles are marked explored when:
+The explored mask (above) tracks which tiles the player has visited or observed. Tiles are marked explored when:
 
 1. `RequestTilesInRadius()` is called (minimap/world map visibility)
 2. `OnChunkGenerated` fires (chunk streaming proximity)
@@ -224,13 +265,14 @@ Only tiles that overlap the world mode's bounds are explored (`IsTileInsideWorld
 island, exploration stops at `R + FalloffWidth`, and the ring of floor chunks the island streams past its edge is not
 mapped. Explored tiles restored from a save that lie outside (explored before 2026-10-15) are dropped when the map
 resolves its world. `GetWorldBounds()` returns the bounds the map resolved; `UVCWorldMapWidget` clamps its pan to their
-box. `voxel.Map.Stats` reports how many explored tiles lie outside the world (0 once this applies).
+box.
 
 The world map widget uses exploration state for fog of war — unexplored tiles render as dark areas. Exploring draws
 no image.
 
-`voxel.Map.ExploreAll` explores at most `voxel.Map.ExploreAllMaxTiles` (1,000,000) tiles, nearest the pawn first, in
-every world mode (a plane's tiles are unbounded; world modes review MP1, test `VoxelWorlds.Map.ExploreAllCap.Plane`).
+`voxel.Map.ExploreAll` explores the whole world with no cap since P2 (a planet's 16 million tiles in milliseconds; on a
+plane the square within its radius, world modes review MP1; test `VoxelWorlds.Map.ExploreAll.Plane`). Its cap,
+`voxel.Map.ExploreAllMaxTiles` (1,000,000 tiles, nearest the pawn first), retired with the key set.
 
 ## The Widgets (VoxelCharacterPlugin)
 
@@ -310,27 +352,22 @@ face edge, 6.4 billion tiles, so the map works on what is near the player and dr
 - **The zoom range from R** (`UVCWorldMapWidget::GetPlanetZoomRange`, `GetZoomRange`, `SetZoom`): zoomed out to the
   whole globe with a tenth of the view to spare at any radius (`MinZoom` 0.25 showed it only up to R ≈ 5 × 10⁵: 0.0276 on
   a 50 km planet, 0.00138 on a 1,000 km one), zoomed in to `MaxZoom` as before.
-- **The globe albedo** (`FVoxelMapGlobeAlbedo`, `UVoxelMapSubsystem::GetGlobeAlbedo`): a cube-sphere grid of at most
-  `GlobeAlbedoCellsPerEdge` (256) cells a face edge, never more than the tile grid, each the colour of the surface at
-  its centre as a tile pixel draws it (the sea's blue by depth; land its surface material shaded by elevation and a
-  hillshade from the neighbouring cells), sampled from the far field's analytic surface (`FVoxelFarFieldSurface`) on a
-  worker thread when first asked for (`OnMapTileReady` fires with (-1, -1) when it lands). Zoomed out until a texel spans
-  more than two tiles (`UVCWorldMapWidget::GlobeAlbedoTexelsPerTile`) the world map draws it (`FVCPlanetMapSampler::
-  bUseGlobeAlbedo`) instead of one tile pixel per texel, asking for no tile image; its fog of war is the albedo cells
-  holding an explored tile (`IsGlobeCellExplored`, refreshed when the exploration changes, at most once a second past
-  100,000 explored tiles).
+- **The globe zoomed out** draws from the pyramid at the level of its texels like every other zoom, falling back on the
+  planet's top levels while those draw (prefetched and kept, above); its fog of war is the explored mask at that level.
+  Until MAP_PYRAMID_PLAN.md P2 it was a separate albedo (`FVoxelMapGlobeAlbedo`, at most 256 cells a face edge from the far
+  field's analytic surface, drawn where a texel spanned more than two tiles), whose fog rebuilt from every explored tile
+  (G170).
 - **`voxel.Map.ExploreAll`** counts in `int64` (6 N² overflowed `int32` from about 50 million tiles) and explores at most
   `voxel.Map.ExploreAllMaxTiles` tiles, nearest the pawn first (`GatherWithinAngle`'s flood fill); since the pyramid
-  (P1) it queues no image. The small planet (40,000 tiles) is explored whole as before.
+  (P1) it queues no image, and since the mask (P2) it explores the whole atlas, 16 million tiles on the 50 km planet.
 - **Markers and redraws** on a zoomed-out globe follow the widget rules above (G50, G51); the last marker query's POIs
-  are reused by the half-second refresh, and the albedo's own arrival redraws at once.
+  are reused by the half-second refresh.
 - `vox.Map [zoom|min|0]` (the game module, QA) opens the world map at a zoom.
 
 Tests: `VoxelWorlds.Map.Planet.TileKeys`, `.TileMatchesGeneration` (1,000 pixels at five sites, each the generated
-surface voxel's material or the sea), `.Exploration`, `.EditOverlay`, `.ZoomAtScale` (the albedo against the analytic
-surface cell by cell, its fog of war, `ExploreAll` capped on a planet of 5.8 million tiles); `VoxelCharacter.Planet.MinimapFrame`,
-`.WorldMapProjection`, `.MapSampler`, `.MapZoomAtScale` (the zoom range on the 2.5, 50 and 1,000 km planets; the
-globe zoomed out drawn from the albedo).
+surface voxel's material or the sea), `.Exploration`, `.EditOverlay`, `.ZoomAtScale` (the top levels kept, `ExploreAll` over a
+planet of 5.8 million tiles); `VoxelCharacter.Planet.MinimapFrame`, `.WorldMapProjection`, `.MapSampler`, `.MapZoomAtScale`
+(the zoom range on the 2.5, 50 and 1,000 km planets; the globe zoomed out drawn from the top levels, its fog the mask's).
 
 ## File Listing
 
@@ -347,8 +384,8 @@ globe zoomed out drawn from the albedo).
 | `Source/VoxelMap/Public/VoxelMapSubsystem.h` | UVoxelMapSubsystem declaration |
 | `Source/VoxelMap/Private/VoxelMapSubsystem.cpp` | Subsystem: exploration, queue, budgets, edit refresh |
 | `Source/VoxelMap/Private/VoxelMapTileDrawing.cpp` | The tile task (`GenerateTileAsync`) and its completion |
-| `Source/VoxelMap/Private/VoxelMapGlobe.cpp` | The planet globe albedo |
-| `Source/VoxelMap/Private/VoxelMapPersistence.cpp` | Explored tiles and edit overlays to and from saves |
+| `Source/VoxelMap/Public/VoxelMapExploredMask.h` | FVoxelMapExploredMask: exploration as 64 x 64-tile blocks by face, every level in one lookup (P2) |
+| `Source/VoxelMap/Private/VoxelMapPersistence.cpp` | The explored mask and edit overlays to and from saves |
 
 ## See Also
 

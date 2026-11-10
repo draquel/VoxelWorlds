@@ -67,14 +67,6 @@ static TAutoConsoleVariable<float> CVarMapTileBudgetMB(
 	FConsoleVariableDelegate::CreateStatic(&ApplyMapBudgetsToAll),
 	ECVF_Default);
 
-static TAutoConsoleVariable<int32> CVarMapExploreAllMaxTiles(
-	TEXT("voxel.Map.ExploreAllMaxTiles"),
-	1000000,
-	TEXT("voxel.Map.ExploreAll marks at most this many tiles explored, nearest the pawn first, in every world mode (a ")
-	TEXT("planet's atlas is 6 N^2 tiles: 40,000 on a 2.5 km planet, 16 million at 50 km, 6.4 billion at 1,000 km; ")
-	TEXT("a plane's are unbounded)."),
-	ECVF_Default);
-
 static TAutoConsoleVariable<int32> CVarMapEditRefreshMaxTiles(
 	TEXT("voxel.Map.EditRefreshMaxTiles"),
 	8,
@@ -142,8 +134,9 @@ namespace
 
 	FAutoConsoleCommandWithWorldAndArgs GVoxelMapExploreAllCmd(
 		TEXT("voxel.Map.ExploreAll"),
-		TEXT("Mark every map tile of a bounded world explored (as a fully explored save restores it); the views draw what they show. ")
-		TEXT("Args: [radius=200000] (unbounded worlds: the tiles within this radius of the pawn)."),
+		TEXT("Mark every map tile of a bounded world explored (as a fully explored save restores it), a planet's whole atlas ")
+		TEXT("with no cap; the views draw what they show. Args: [radius=200000] (unbounded worlds: the square of tiles within ")
+		TEXT("this radius of the pawn)."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			UWorld* Target = FindPlayWorld(World);
@@ -292,7 +285,9 @@ void UVoxelMapSubsystem::Deinitialize()
 	CachedWorldBounds = FVoxelWorldBounds();
 
 	TileStore.Reset();
-	ExploredTiles.Empty();
+	ExploredMask.Reset();
+	PendingExploredBlobs.Empty();
+	PrefetchLevel = INDEX_NONE;
 	TileQueue.Reset();
 	for (TSet<FVoxelMapTileId>& View : ViewTiles)
 	{
@@ -421,8 +416,17 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 		CachedWorldMode->GetAltitudeBounds(TileFrame.MinAltitude, TileFrame.MaxAltitude);
 	}
 
+	// The explored mask's faces (MAP_PYRAMID_PLAN.md P2): a planet's six of N tiles a side; a heightmap world's one,
+	// unbounded. Nothing is explored before the world resolves; saves imported before it are applied now.
+	ExploredMask.Configure(TileFrame.bPlanet ? 6 : 1, TileFrame.bPlanet ? TileFrame.Grid.GetCellsPerEdge() : 0);
+
 	bCacheResolved = true;
 	ApplyTileBudgets();
+	for (const TPair<FString, int32>& Blob : PendingExploredBlobs)
+	{
+		ApplyExploredBlob(Blob.Key, Blob.Value);
+	}
+	PendingExploredBlobs.Empty();
 	PruneExploredOutsideWorld();
 
 	// Bind to chunk generation events
@@ -461,7 +465,43 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 				TileFrame.Grid.GetNumCells(), GetTileWorldSize())
 			: TEXT(""));
 
+	// The globe's top levels, drawn now and kept (P2: they replace the globe albedo).
+	PrefetchTopLevels();
 	return true;
+}
+
+void UVoxelMapSubsystem::PrefetchTopLevels()
+{
+	PrefetchLevel = INDEX_NONE;
+	if (!TileFrame.bPlanet || !TileFrame.Grid.IsValid())
+	{
+		return;
+	}
+	// The coarsest levels down to the first with at most PrefetchTilesPerFaceEdge tiles a face edge (level 9 on the 50 km
+	// planet, 4 x 4 a face), coarsest first so the whole globe has an image soonest; each pinned, so trimming keeps them.
+	const int32 MaxLevel = TileFrame.GetMaxLevel();
+	int32 Level = MaxLevel;
+	while (Level > 0 && TileFrame.TilesPerFaceEdgeAt(Level - 1) <= PrefetchTilesPerFaceEdge)
+	{
+		--Level;
+	}
+	PrefetchLevel = Level;
+	TArray<FVoxelMapTileId> Ids;
+	for (int32 L = MaxLevel; L >= Level; --L)
+	{
+		const int32 NL = TileFrame.TilesPerFaceEdgeAt(L);
+		for (int32 V = 0; V < NL; ++V)
+		{
+			for (int32 X = 0; X < 6 * NL; ++X)
+			{
+				const FVoxelMapTileId Id(FIntPoint(X, V), L);
+				TileStore.Pin(Id);
+				Ids.Add(Id);
+			}
+		}
+	}
+	const int32 Queued = RequestView(EVoxelMapRequester::Prefetch, Ids);
+	UE_LOG(LogVoxelMap, Log, TEXT("The globe's top levels %d-%d prefetched: %d tile(s), %d queued, kept."), Level, MaxLevel, Ids.Num(), Queued);
 }
 
 // ---------------------------------------------------------------------------
@@ -522,11 +562,36 @@ void UVoxelMapSubsystem::ApplyTileBudgets()
 	TileStore.SetBudget(static_cast<int64>(FMath::Max(0.0f, CVarMapTileBudgetMB.GetValueOnGameThread()) * MB));
 }
 
-void UVoxelMapSubsystem::MarkExplored(uint64 TileKey)
+void UVoxelMapSubsystem::MarkExplored(FIntPoint TileCoord)
 {
-	bool bAlready = false;
-	ExploredTiles.Add(TileKey, &bAlready);
-	ExplorationRevision += bAlready ? 0 : 1;
+	int32 Face = 0, U = 0, V = 0;
+	if (TileToMaskTile(TileCoord, Face, U, V) && ExploredMask.Set(Face, U, V))
+	{
+		++ExplorationRevision;
+	}
+}
+
+bool UVoxelMapSubsystem::TileToMaskTile(FIntPoint TileCoord, int32& OutFace, int32& OutU, int32& OutV) const
+{
+	if (TileFrame.bPlanet)
+	{
+		return TileFrame.Grid.FromAtlas(TileCoord, OutFace, OutU, OutV);
+	}
+	OutFace = 0;
+	OutU = TileCoord.X;
+	OutV = TileCoord.Y;
+	return true;
+}
+
+void UVoxelMapSubsystem::GetExploredTiles(TArray<FIntPoint>& OutTiles) const
+{
+	OutTiles.Reset(static_cast<int32>(FMath::Min<int64>(ExploredMask.Num(), MAX_int32)));
+	const bool bPlanet = TileFrame.bPlanet;
+	const FVoxelCubeSphereGrid& Grid = TileFrame.Grid;
+	ExploredMask.ForEach([&OutTiles, bPlanet, &Grid](int32 Face, int32 U, int32 V)
+	{
+		OutTiles.Add(bPlanet ? Grid.ToAtlas(Face, U, V) : FIntPoint(U, V));
+	});
 }
 
 bool UVoxelMapSubsystem::InvalidateTile(const FVoxelMapTileId& Id)
@@ -592,104 +657,66 @@ int64 UVoxelMapSubsystem::ExploreAllTiles(const FVector& Center, float Radius)
 	{
 		return 0;
 	}
+	// The explored mask takes whole rectangles, a block of 64 x 64 tiles at a time (MAP_PYRAMID_PLAN.md P2): no cap, no
+	// order (the views ask for what they show, nearest their centre, P1), and a fully explored block costs a few bytes.
+	int64 InArea = 0;
+	int64 Added = 0;
 	if (TileFrame.bPlanet)
 	{
-		// A planet: every tile of the atlas, up to the cap (spherical Phase 6, WM-BP11): 6 N^2 overflowed an int32 from
-		// about 50 million tiles, and a 1,000 km planet has 6.4 billion. Past the cap the tiles nearest Center.
-		const FVoxelCubeSphereGrid& PlanetGrid = TileFrame.Grid;
-		const int64 N = PlanetGrid.GetCellsPerEdge();
-		const int64 Total = 6 * N * N;
-		const int64 Cap = FMath::Max<int64>(1, CVarMapExploreAllMaxTiles.GetValueOnGameThread());
-		FVector Direction = (Center - TileFrame.Center).GetSafeNormal();
-		if (Direction.IsNearlyZero())
+		// A planet: the six faces of the atlas (16 million tiles on the 50 km planet; the cap of world modes review WM-BP11
+		// explored the million nearest the pawn, G163).
+		const int32 N = TileFrame.Grid.GetCellsPerEdge();
+		for (int32 Face = 0; Face < 6; ++Face)
 		{
-			Direction = FVector::UpVector;
+			Added += ExploredMask.SetRect(Face, FIntRect(0, 0, N, N));
 		}
-		TArray<FIntPoint> Tiles;
-		if (Total <= Cap)
+		InArea = TileFrame.Grid.GetNumCells();
+	}
+	else
+	{
+		// A heightmap world: the tiles of the area, an island's bounds (each row's runs of tiles inside the world, WM-I2) or
+		// the square within Radius of Center on a plane.
+		const FBox2D Area = CachedWorldBounds.IsBounded() ? CachedWorldBounds.GetBox2D()
+			: FBox2D(FVector2D(Center.X - Radius, Center.Y - Radius), FVector2D(Center.X + Radius, Center.Y + Radius));
+		const FIntPoint Lo = WorldToTileCoord(FVector(Area.Min.X, Area.Min.Y, 0.0));
+		const FIntPoint Hi = WorldToTileCoord(FVector(Area.Max.X, Area.Max.Y, 0.0));
+		if (!CachedWorldBounds.IsBounded())
 		{
-			// Nearest first, so the images that draw first are the ones around the player. The keys are computed once (a
-			// projection sort recomputed each tile's direction per comparison: 79 s for the 16 million tiles of a 50 km
-			// planet with the cap raised).
-			TArray<TPair<double, FIntPoint>> Keyed;
-			Keyed.Reserve(static_cast<int32>(Total));
-			for (int32 Y = 0; Y < N; ++Y)
-			{
-				for (int32 X = 0; X < 6 * N; ++X)
-				{
-					const FIntPoint Tile(X, Y);
-					Keyed.Emplace(-FVector::DotProduct(PlanetGrid.CellCentreDirection(Tile), Direction), Tile);
-				}
-			}
-			Keyed.Sort([](const TPair<double, FIntPoint>& A, const TPair<double, FIntPoint>& B) { return A.Key < B.Key; });
-			Tiles.Reserve(Keyed.Num());
-			for (const TPair<double, FIntPoint>& Entry : Keyed)
-			{
-				Tiles.Add(Entry.Value);
-			}
+			Added = ExploredMask.SetRect(0, FIntRect(Lo, Hi + FIntPoint(1, 1)));
+			InArea = static_cast<int64>(Hi.X - Lo.X + 1) * (Hi.Y - Lo.Y + 1);
 		}
 		else
 		{
-			PlanetGrid.GatherWithinAngle(Direction, UE_DOUBLE_PI, static_cast<int32>(FMath::Min<int64>(Cap, MAX_int32)), Tiles);
-		}
-		int64 PlanetCount = 0;
-		for (const FIntPoint& Tile : Tiles)
-		{
-			MarkExplored(PackTileKey(Tile));
-			++PlanetCount;
-		}
-		// No image is queued: the views ask for what they show (MAP_PYRAMID_PLAN.md P1).
-		UE_LOG(LogVoxelMap, Log, TEXT("ExploreAllTiles: %lld of the planet's %lld tiles explored (cap %lld); no image queued (the views ask)."),
-			PlanetCount, Total, Cap);
-		return PlanetCount;
-	}
-	// A heightmap world: the tiles of the area (an island's bounds, or Radius around Center on a plane), nearest Center
-	// first in square rings so the cap keeps the tiles around the player (world modes review WM-MP9, the planet's rule).
-	FBox2D Area = CachedWorldBounds.IsBounded() ? CachedWorldBounds.GetBox2D()
-		: FBox2D(FVector2D(Center.X - Radius, Center.Y - Radius), FVector2D(Center.X + Radius, Center.Y + Radius));
-	const FIntPoint Lo = WorldToTileCoord(FVector(Area.Min.X, Area.Min.Y, 0.0));
-	const FIntPoint Hi = WorldToTileCoord(FVector(Area.Max.X, Area.Max.Y, 0.0));
-	const FIntPoint CenterTile(FMath::Clamp(WorldToTileCoord(Center).X, Lo.X, Hi.X), FMath::Clamp(WorldToTileCoord(Center).Y, Lo.Y, Hi.Y));
-	const int64 Cap = FMath::Max<int64>(1, CVarMapExploreAllMaxTiles.GetValueOnGameThread());
-	const int32 MaxRing = FMath::Max(FMath::Max(CenterTile.X - Lo.X, Hi.X - CenterTile.X), FMath::Max(CenterTile.Y - Lo.Y, Hi.Y - CenterTile.Y));
-	int64 Count = 0;
-	auto Explore = [this, &Count, Cap, &Lo, &Hi](const FIntPoint& Tile)
-	{
-		if (Count >= Cap || Tile.X < Lo.X || Tile.X > Hi.X || Tile.Y < Lo.Y || Tile.Y > Hi.Y || !IsTileInsideWorld(Tile))
-		{
-			return;
-		}
-		MarkExplored(PackTileKey(Tile));
-		++Count;
-	};
-	for (int32 Ring = 0; Ring <= MaxRing && Count < Cap; ++Ring)
-	{
-		if (Ring == 0)
-		{
-			Explore(CenterTile);
-			continue;
-		}
-		for (int32 Along = -Ring; Along <= Ring && Count < Cap; ++Along)
-		{
-			Explore(FIntPoint(CenterTile.X + Along, CenterTile.Y - Ring));
-			Explore(FIntPoint(CenterTile.X + Along, CenterTile.Y + Ring));
-			if (Along > -Ring && Along < Ring)
+			for (int32 Y = Lo.Y; Y <= Hi.Y; ++Y)
 			{
-				Explore(FIntPoint(CenterTile.X - Ring, CenterTile.Y + Along));
-				Explore(FIntPoint(CenterTile.X + Ring, CenterTile.Y + Along));
+				int32 RunStart = INDEX_NONE;
+				for (int32 X = Lo.X; X <= Hi.X + 1; ++X)
+				{
+					const bool bInside = X <= Hi.X && IsTileInsideWorld(FIntPoint(X, Y));
+					if (bInside && RunStart == INDEX_NONE)
+					{
+						RunStart = X;
+					}
+					else if (!bInside && RunStart != INDEX_NONE)
+					{
+						Added += ExploredMask.SetRect(0, FIntRect(RunStart, Y, X, Y + 1));
+						InArea += X - RunStart;
+						RunStart = INDEX_NONE;
+					}
+				}
 			}
 		}
 	}
-	if (Count >= Cap)
-	{
-		UE_LOG(LogVoxelMap, Log, TEXT("ExploreAllTiles: %lld tiles explored, the nearest to (%.0f, %.0f): the cap (voxel.Map.ExploreAllMaxTiles)."), Count, Center.X, Center.Y);
-	}
-	return Count;
+	ExplorationRevision += Added > 0 ? 1 : 0;
+	UE_LOG(LogVoxelMap, Log, TEXT("ExploreAllTiles: %lld tiles of the world explored (%lld new); the mask %lld tiles in %d blocks (%d full), %.1f KB; no image queued (the views ask)."),
+		InArea, Added, ExploredMask.Num(), ExploredMask.NumBlocks(), ExploredMask.NumFullBlocks(), ExploredMask.GetAllocatedSize() / 1024.0);
+	return InArea;
 }
 
 bool UVoxelMapSubsystem::IsTileExplored(FIntPoint TileCoord) const
 {
-	return ExploredTiles.Contains(PackTileKey(TileCoord));
+	int32 Face = 0, U = 0, V = 0;
+	return TileToMaskTile(TileCoord, Face, U, V) && ExploredMask.IsExplored(Face, U, V);
 }
 
 bool UVoxelMapSubsystem::IsTileInsideWorld(FIntPoint TileCoord) const
@@ -699,24 +726,21 @@ bool UVoxelMapSubsystem::IsTileInsideWorld(FIntPoint TileCoord) const
 
 int32 UVoxelMapSubsystem::PruneExploredOutsideWorld()
 {
-	if (!CachedWorldBounds.IsBounded())
+	// A planet's mask holds only cells of its faces (FVoxelMapExploredMask::IsInRange); a plane has no outside.
+	if (TileFrame.bPlanet || !CachedWorldBounds.IsBounded())
 	{
 		return 0;
 	}
-	int32 Dropped = 0;
-	for (auto It = ExploredTiles.CreateIterator(); It; ++It)
-	{
-		if (!IsTileInsideWorld(UnpackTileKey(*It)))
-		{
-			It.RemoveCurrent();
-			++Dropped;
-		}
-	}
+	// A heightmap world's bounds (an island's R + falloff; tiles explored before exploration stopped at the edge): tile by
+	// tile, a bounded world's mask being small.
+	const int64 Dropped = ExploredMask.RemoveIf(
+		[](int32 Face, const FIntRect& BlockTiles) { return true; },
+		[this](int32 Face, int32 U, int32 V) { return !IsTileInsideWorld(FIntPoint(U, V)); });
 	if (Dropped > 0)
 	{
-		UE_LOG(LogVoxelMap, Log, TEXT("Dropped %d explored map tile(s) outside the world's bounds (%d explored now)."), Dropped, ExploredTiles.Num());
+		UE_LOG(LogVoxelMap, Log, TEXT("Dropped %lld explored map tile(s) outside the world's bounds (%lld explored now)."), Dropped, ExploredMask.Num());
 	}
-	return Dropped;
+	return static_cast<int32>(FMath::Min<int64>(Dropped, MAX_int32));
 }
 
 // ---------------------------------------------------------------------------
@@ -778,7 +802,7 @@ void UVoxelMapSubsystem::RequestTilesInRadius(const FVector& WorldPos, float Rad
 	TileFrame.TilesWithinRadius(WorldPos, Radius, Tiles);
 	for (const FIntPoint& TileCoord : Tiles)
 	{
-		MarkExplored(PackTileKey(TileCoord));
+		MarkExplored(TileCoord);
 	}
 }
 
@@ -803,7 +827,7 @@ void UVoxelMapSubsystem::OnChunkGenerated(FIntVector ChunkCoord)
 		const uint64 TileKey = PackTileKey(Tile);
 		if (IsTileInsideWorld(Tile))
 		{
-			MarkExplored(TileKey);
+			MarkExplored(Tile);
 		}
 		// A tile whose overlay waits for its chunks: this may be one of them.
 		if (OverlayAwaitingTiles.Contains(TileKey))
@@ -874,11 +898,6 @@ FString UVoxelMapSubsystem::GetDebugStats() const
 				+ Pair.Value->Materials.GetAllocatedSize() + Pair.Value->Flags.GetAllocatedSize();
 		}
 	}
-	int32 ExploredOutside = 0;
-	for (const uint64 Key : ExploredTiles)
-	{
-		ExploredOutside += IsTileInsideWorld(UnpackTileKey(Key)) ? 0 : 1;
-	}
 	constexpr double MB = 1024.0 * 1024.0;
 	// The drawing since the last reset (the map scaling plan's M0, G163): the rate, the worker time a tile takes, and how
 	// many drawings replaced images the store still held or answered a view's requests.
@@ -899,13 +918,11 @@ FString UVoxelMapSubsystem::GetDebugStats() const
 		Levels += FString::Printf(TEXT("%sL%d:%d"), Levels.IsEmpty() ? TEXT("") : TEXT(" "), Pair.Key, Pair.Value);
 	}
 	return FString::Printf(
-		TEXT("tiles cached=%d explored=%d (outside the world %d) waiting=%d drawing=%d waiting-peak=%d (minimap %d, world map %d, edits %d) | drawn=%lld (%.0f/s over %.0f s, %.2f ms a tile on a worker) replaced=%lld image-requests=%lld fog-rebuilds=%lld (mean %.1f ms, max %.1f ms) | images=%d %.1f/%.0f MB [%s] evicted=%lld | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d"),
-		TileStore.Num(), ExploredTiles.Num(), ExploredOutside, TileQueue.NumWaiting(), TileQueue.NumDrawing(), DrawStats.WaitingPeak,
+		TEXT("tiles cached=%d explored=%lld (mask %d blocks, %d full, %.1f KB) waiting=%d drawing=%d waiting-peak=%d (minimap %d, world map %d, edits %d, prefetch %d) | drawn=%lld (%.0f/s over %.0f s, %.2f ms a tile on a worker) replaced=%lld image-requests=%lld | images=%d %.1f/%.0f MB [%s] evicted=%lld | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d"),
+		TileStore.Num(), ExploredMask.Num(), ExploredMask.NumBlocks(), ExploredMask.NumFullBlocks(), ExploredMask.GetAllocatedSize() / 1024.0, TileQueue.NumWaiting(), TileQueue.NumDrawing(), DrawStats.WaitingPeak,
 		TileQueue.NumWaitingFor(EVoxelMapRequester::Minimap), TileQueue.NumWaitingFor(EVoxelMapRequester::WorldMap),
-		TileQueue.NumWaitingFor(EVoxelMapRequester::Edits),
+		TileQueue.NumWaitingFor(EVoxelMapRequester::Edits), TileQueue.NumWaitingFor(EVoxelMapRequester::Prefetch),
 		DrawStats.Drawn, static_cast<double>(DrawStats.Drawn) / Elapsed, Elapsed, MsPerTile, DrawStats.Replaced, DrawStats.ImageRequests,
-		DrawStats.FogRebuilds, DrawStats.FogRebuilds > 0 ? 1000.0 * DrawStats.FogSeconds / static_cast<double>(DrawStats.FogRebuilds) : 0.0,
-		1000.0 * DrawStats.FogMaxSeconds,
 		TileStore.Num(), TileStore.GetBytes() / MB, TileStore.GetBudget() / MB, *Levels, TileStore.GetEvictions(),
 		EditOverlays.Num(), MaskedColumns, Bytes, TileEditedChunks.Num(), OverlayDirtyTiles.Num(),
 		OverlayAwaitingTiles.Num(), OverlayRebuildTiles.Num());

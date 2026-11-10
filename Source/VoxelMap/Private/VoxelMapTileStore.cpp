@@ -77,6 +77,7 @@ void FVoxelMapTileStore::Remove(const FVoxelMapTileId& Id)
 void FVoxelMapTileStore::Reset()
 {
 	Entries.Empty();
+	Pinned.Empty();
 	UseClock = 0;
 	Bytes = 0;
 	Evictions = 0;
@@ -90,12 +91,15 @@ int32 FVoxelMapTileStore::Enforce()
 	}
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_StoreEnforce);
 	// The least recently used images go, at every level alike: the views read what they show at each fill, so what they
-	// show (and the coarser tiles they fall back on) stays.
+	// show (and the coarser tiles they fall back on) stays. Pinned images (a planet's top levels) are never dropped.
 	TArray<TPair<uint64, FVoxelMapTileId>> Order; // (last use, id)
 	Order.Reserve(Entries.Num());
 	for (const TPair<FVoxelMapTileId, FEntry>& Pair : Entries)
 	{
-		Order.Emplace(Pair.Value.LastUse, Pair.Key);
+		if (!Pinned.Contains(Pair.Key))
+		{
+			Order.Emplace(Pair.Value.LastUse, Pair.Key);
+		}
 	}
 	Order.Sort([](const TPair<uint64, FVoxelMapTileId>& A, const TPair<uint64, FVoxelMapTileId>& B) { return A.Key < B.Key; });
 	const int64 Target = BudgetBytes * 9 / 10;
