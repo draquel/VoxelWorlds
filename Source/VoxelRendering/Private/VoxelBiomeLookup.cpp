@@ -53,7 +53,10 @@ UTexture2D* FVoxelBiomeLookup::Build(const UVoxelBiomeConfiguration* Config, con
 	Texture->Filter = TF_Nearest;
 	Texture->SRGB = false;
 	Texture->CompressionSettings = TC_VectorDisplacementmap; // uncompressed RGBA8, read as data
+#if WITH_EDITORONLY_DATA
+	// Editor-only data: a Game build has no mip generation to turn off (the transient texture has one mip either way)
 	Texture->MipGenSettings = TMGS_NoMipmaps;
+#endif
 	Texture->NeverStream = true;
 	Texture->AddressX = TA_Clamp;
 	Texture->AddressY = TA_Clamp;
