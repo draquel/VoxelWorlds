@@ -407,6 +407,12 @@ struct VOXELSTREAMING_API FVoxelFarFieldFrame
 	/** The region a conditioning zone reaches (its inner radius plus its falloff): invalid when the zone's kind is not this frame's. */
 	FVoxelFarFieldRegion RegionOfZone(const FVoxelConditioningZone& Zone) const;
 
+	/**
+	 * The region a conditioning line reaches (its bounds grown by its reach: a box on a heightmap world, a cap on a
+	 * planet): invalid when the line's kind is not this frame's or the line has no segment.
+	 */
+	FVoxelFarFieldRegion RegionOfLine(const FVoxelConditioningLine& Line) const;
+
 	/** Whether a footprint meets a region. */
 	bool Intersects(const FVoxelFarFieldFootprint& Footprint, const FVoxelFarFieldRegion& Region) const;
 
@@ -653,6 +659,9 @@ struct VOXELSTREAMING_API FVoxelFarFieldPatchMesh
 	/** Conditioning zones the build applied */
 	int32 ZoneCount = 0;
 
+	/** Conditioning lines the build applied */
+	int32 LineCount = 0;
+
 	/** Time the build took (ms, on its thread) */
 	double BuildMs = 0.0;
 
@@ -868,11 +877,12 @@ public:
 	}
 
 	/**
-	 * Rebuild every built patch narrow enough to take zones that a conditioning zone reaches (it was added or removed). The
-	 * old meshes keep drawing until the new ones arrive. A zone of the other kind of surface (a radial zone on a heightmap
-	 * world) reaches nothing.
+	 * Rebuild every built patch narrow enough to take conditioning that a region of changed conditioning meets (a zone or
+	 * a line was added, or a conditioner worked a line out late): FVoxelFarFieldFrame::RegionOfZone, RegionOfLine, or the
+	 * region a conditioner names. The old meshes keep drawing until the new ones arrive. An invalid region (a shape of
+	 * the other kind of surface) reaches nothing.
 	 */
-	void InvalidateZone(const FVoxelConditioningZone& Zone);
+	void InvalidateRegion(const FVoxelFarFieldRegion& Region);
 
 	/**
 	 * Heightmap worlds: whether the voxel water tile of a chunk column (chunk X, Y) is drawn. An edge patch (one chunk column)

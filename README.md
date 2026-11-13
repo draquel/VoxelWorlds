@@ -21,7 +21,7 @@ block (cubic) terrain. The plugin depends on no other project plugin.
 - **Rendering**: one scene proxy per render region (16³ chunks), double-precision region origins, mesh-swap crossfades,
   water tiles.
 - **Generation**: hashed split-origin noise (`FVoxelNoise`), biomes with dithered blending, caves, ore veins, water,
-  conditioning zones for POI pads, voxel trees.
+  conditioning zones for POI pads and conditioning lines (a polyline that levels the terrain along it), voxel trees.
 - **Editing**: a sparse edit layer with brushes, undo and redo, water that floods digs, binary persistence.
 - **Materials**: a material registry and atlas (saved texture arrays for smooth triplanar, a packed atlas for cubic)
   behind one master material.

@@ -5,6 +5,7 @@
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelWorldsSettings.h"
 #include "VoxelChunkManagerPrivate.h"
+#include "Diagnostics/VoxelConsoleHelpers.h"
 #include "VoxelStreaming.h"
 #include "VoxelSeamRegistry.h"
 #include "VoxelBoundedDrain.h"
@@ -1323,6 +1324,11 @@ void UVoxelChunkManager::Initialize(
 	RebuildFarField(CVarFarField.GetValueOnGameThread() != 0);
 	RebuildPlanetOcean();
 	ApplyPlanetKillZ();
+
+#if !UE_BUILD_SHIPPING
+	// The test lines of voxel.World.TestLines (a fixture for shots and benches), before any generation request is built.
+	VoxelStreamingDiagnostics::AddTestConditioningLines(*this);
+#endif
 
 	// Dump biome configuration for diagnostics
 	if (Configuration->BiomeConfiguration)
@@ -2831,8 +2837,12 @@ void UVoxelChunkManager::BuildChunkGenerationRequest(const FIntVector& ChunkCoor
 	OutRequest.WaterLevel = WaterLevels.IsRadial() ? 0.0f : static_cast<float>(Water.GetLevel());
 	OutRequest.WaterRadius = WaterLevels.IsRadial() ? Water.GetLevel() : 0.0;
 
-	// The terrain conditioning over this chunk (Phase 6c: flatten under POIs/claims)
+	// The terrain conditioning over this chunk (Phase 6c: flatten under POIs/claims, level along lines)
 	GatherConditioningForChunk(ChunkCoord, OutRequest.Conditioning);
+	if (OutRequest.Conditioning.Lines.Num() > 0)
+	{
+		++LineConditionedRequests;
+	}
 }
 
 // ==================== World Bounds and Local Frame (WM-A2) ====================
@@ -3681,8 +3691,8 @@ void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 	ConditioningSources.AddZone(Zone);
 	if (FarField)
 	{
-		// The far field's patches narrow enough to take zones rebuild with it (their old meshes draw until then).
-		FarField->InvalidateZone(Zone);
+		// The far field's patches narrow enough to take conditioning rebuild with it (their old meshes draw until then).
+		FarField->InvalidateRegion(FarField->GetFrame().RegionOfZone(Zone));
 	}
 	if (Zone.IsRadial())
 	{
@@ -3702,6 +3712,111 @@ void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 	{
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("AddConditioningZone: a %s zone in a %s world has no effect (planet zones need a Direction, FVoxelConditioningZone::MakeRadial)."),
 			Zone.IsRadial() ? TEXT("planet") : TEXT("heightmap"), bPlanet ? TEXT("planet") : TEXT("heightmap"));
+	}
+	OnTerrainConditioningChanged.Broadcast();
+}
+
+void UVoxelChunkManager::AddConditioningLine(const FVoxelConditioningLineParams& Line)
+{
+	AddConditioningLine(FVoxelConditioningLine::Make(Line));
+}
+
+void UVoxelChunkManager::AddConditioningLine(const FVoxelConditioningLineRef& Line)
+{
+	ConditioningSources.AddLine(Line);
+	const bool bPlanet = Configuration && Configuration->WorldMode == EWorldMode::SphericalPlanet;
+	const double PlanetRadius = bPlanet ? FVoxelWorldModeFactory::MakePlanetParams(*Configuration).PlanetRadius : 0.0;
+
+	// The far field's patches narrow enough to take conditioning rebuild with the line (their old meshes draw until
+	// then), and the readers that cache analytic heights hear of it.
+	if (Line->IsRadial())
+	{
+		FVector CapDirection;
+		double CapAngle = 0.0;
+		if (bPlanet && Line->GetCap(PlanetRadius, CapDirection, CapAngle))
+		{
+			NotifyTerrainConditioningChangedOnSphere(CapDirection, CapAngle);
+		}
+	}
+	else
+	{
+		const FBox2D Bounds = Line->GetBounds2D();
+		if (!bPlanet && Bounds.bIsValid)
+		{
+			NotifyTerrainConditioningChanged(Bounds);
+		}
+	}
+
+	UE_LOG(LogVoxelStreaming, Log,
+		TEXT("Added %s conditioning line %lld: %d segments, falloff=%.0f strength=%.2f blend=%s reach=%.0f; %d total."),
+		Line->IsRadial() ? TEXT("planet") : TEXT("terrain"), Line->GetId(), Line->NumSegments(), Line->GetFalloffWidth(), Line->GetStrength(),
+		*UEnum::GetDisplayValueAsText(Line->GetBlend()).ToString(), Line->GetReach(), ConditioningSources.NumLines());
+
+	if (!Configuration)
+	{
+		return;
+	}
+	// A line of the other kind is kept but never applies (each kind's gather and blend skip the other).
+	if (Line->IsRadial() != bPlanet)
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("AddConditioningLine: a %s line in a %s world has no effect (planet lines carry directions, FVoxelConditioningLineParams::bRadial)."),
+			Line->IsRadial() ? TEXT("planet") : TEXT("heightmap"), bPlanet ? TEXT("planet") : TEXT("heightmap"));
+		return;
+	}
+
+	// The limits a line must respect (TERRAIN_LINES_PLAN.md section 4.1), checked where it is made: warned about, not
+	// enforced. The cut and fill cap is half a chunk, a third of the 1.5 chunks the LOD strategy's surface slab allows
+	// conditioning (it does not look at lines).
+	FVoxelConditioningLineLimits Limits;
+	Limits.VoxelSize = Configuration->VoxelSize;
+	Limits.bBlockWorld = FVoxelBlockSurface::UsesBlockSurface(*Configuration);
+	Limits.PlanetRadius = PlanetRadius;
+	Limits.MaxCutFill = 0.5f * Configuration->ChunkSize * Configuration->VoxelSize;
+	if (const IVoxelWorldMode* WM = GetWorldMode())
+	{
+		const FVoxelNoiseParams NoiseParams = Configuration->GetNoiseParams();
+		if (bPlanet)
+		{
+			const FSphericalPlanetWorldMode* Planet = static_cast<const FSphericalPlanetWorldMode*>(WM);
+			Limits.NaturalHeight = [Planet, NoiseParams](const FVector& Direction)
+			{
+				return Planet->GetTerrainAltitude(Direction, NoiseParams);
+			};
+		}
+		else
+		{
+			Limits.NaturalHeight = [WM, NoiseParams](const FVector& Position)
+			{
+				return static_cast<float>(WM->GetSurfaceOnUpLine(FVector(Position.X, Position.Y, 0.0), NoiseParams).Position.Z);
+			};
+		}
+	}
+	for (const FString& Warning : Line->GetWarnings(Limits))
+	{
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("AddConditioningLine: line %lld: %s."), Line->GetId(), *Warning);
+	}
+}
+
+void UVoxelChunkManager::NotifyTerrainConditioningChanged(const FBox2D& Region)
+{
+	if (FarField && Region.bIsValid && !(Configuration && Configuration->WorldMode == EWorldMode::SphericalPlanet))
+	{
+		FVoxelFarFieldRegion FarRegion;
+		FarRegion.Box = Region;
+		FarField->InvalidateRegion(FarRegion);
+	}
+	OnTerrainConditioningChanged.Broadcast();
+}
+
+void UVoxelChunkManager::NotifyTerrainConditioningChangedOnSphere(const FVector& Direction, double AngularRadius)
+{
+	if (FarField && Configuration && Configuration->WorldMode == EWorldMode::SphericalPlanet)
+	{
+		FVoxelFarFieldRegion FarRegion;
+		FarRegion.bCap = true;
+		FarRegion.Direction = Direction.GetSafeNormal();
+		FarRegion.AngularRadius = AngularRadius;
+		FarField->InvalidateRegion(FarRegion);
 	}
 	OnTerrainConditioningChanged.Broadcast();
 }
@@ -5058,6 +5173,44 @@ void UVoxelChunkManager::GetWorldReport(const FVoxelWorldReportNotes& Notes, TAr
 				Far.TotalBuilt, Far.BuildMsMean, Far.UpdateMs, Far.MemoryMB, Far.bDrawsSea ? TEXT(", with the sea") : TEXT(""),
 				*GetFarFieldDebugString())
 				: TEXT("none (voxel.World.FarField 0: nothing is drawn past the voxel window)")));
+	}
+
+	// The terrain conditioning: what was added to the manager, and what a gather finds over the voxel window (the lines
+	// at hand: a report computes none).
+	if (!ConditioningSources.IsEmpty())
+	{
+		int32 StaticSegments = 0;
+		for (const FVoxelConditioningLineRef& Line : ConditioningSources.GetLines())
+		{
+			StaticSegments += Line->NumSegments();
+		}
+		FVoxelConditioning Window;
+		if (bPlanet)
+		{
+			const FSphericalPlanetParams Params = FVoxelWorldModeFactory::MakePlanetParams(*Configuration);
+			GatherConditioningOnSphere(FSphericalPlanetWorldMode::GetDirectionFromCenter(Residency.Viewer, Params.PlanetCenter),
+				Configuration->ViewDistance / FMath::Max(Params.PlanetRadius, 1.0), EVoxelConditioningGather::Ready, Window);
+		}
+		else
+		{
+			const FVector2D Viewer(Residency.Viewer.X, Residency.Viewer.Y);
+			const FVector2D Reach(Configuration->ViewDistance, Configuration->ViewDistance);
+			GatherConditioningForRegion(FBox2D(Viewer - Reach, Viewer + Reach), EVoxelConditioningGather::Ready, Window);
+		}
+		int32 WindowSegments = 0;
+		for (const FVoxelConditioningLineRef& Line : Window.Lines)
+		{
+			WindowSegments += Line->NumSegments();
+		}
+		OutLines.Add(FString::Printf(
+			TEXT("conditioning: %d zones and %d lines (%d segments) added to the world%s; within the view distance of the streaming viewer %d zones and %d lines (%d segments); %lld generation requests carried a line"),
+			ConditioningSources.NumZones(), ConditioningSources.NumLines(), StaticSegments,
+			ConditioningSources.HasConditioner() ? TEXT(", and a conditioner") : TEXT(""),
+			Window.Zones.Num(), Window.Lines.Num(), WindowSegments, LineConditionedRequests));
+	}
+	else
+	{
+		OutLines.Add(TEXT("conditioning: none (no zone, no line, no conditioner)"));
 	}
 
 	// Orbit and back (spherical Phase 6, WM-BP10; on heightmap worlds WM-MP2): the cut-over and the descent prefetch.

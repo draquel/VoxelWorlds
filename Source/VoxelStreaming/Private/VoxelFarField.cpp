@@ -536,6 +536,22 @@ FVoxelFarFieldRegion FVoxelFarFieldFrame::RegionOfZone(const FVoxelConditioningZ
 	return Region;
 }
 
+FVoxelFarFieldRegion FVoxelFarFieldFrame::RegionOfLine(const FVoxelConditioningLine& Line) const
+{
+	FVoxelFarFieldRegion Region;
+	if (Settings.bHeightmap)
+	{
+		// Invalid for a planet line or an empty one.
+		Region.Box = Line.GetBounds2D();
+		return Region;
+	}
+	if (Settings.Radius > 0.0 && Line.GetCap(Settings.Radius, Region.Direction, Region.AngularRadius))
+	{
+		Region.bCap = true;
+	}
+	return Region;
+}
+
 bool FVoxelFarFieldFrame::Intersects(const FVoxelFarFieldFootprint& Footprint, const FVoxelFarFieldRegion& Region) const
 {
 	if (Settings.bHeightmap)
@@ -754,6 +770,7 @@ void FVoxelFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, const FV
 	Out = FVoxelFarFieldPatchMesh();
 	Out.Key = Key;
 	Out.ZoneCount = Conditioning.Zones.Num();
+	Out.LineCount = Conditioning.Lines.Num();
 
 	const int32 Q = FMath::Max(Settings.PatchQuads, 2);
 	const int32 Row = Q + 1;
@@ -1376,9 +1393,8 @@ void FVoxelFarField::ReleaseMesh(uint64 PackedKey)
 	}
 }
 
-void FVoxelFarField::InvalidateZone(const FVoxelConditioningZone& Zone)
+void FVoxelFarField::InvalidateRegion(const FVoxelFarFieldRegion& Region)
 {
-	const FVoxelFarFieldRegion Region = Frame.RegionOfZone(Zone);
 	if (!Region.IsValid())
 	{
 		return;

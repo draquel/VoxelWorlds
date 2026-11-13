@@ -5,7 +5,7 @@
 // per-voxel pipeline of FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet, in the same order, so GPU and CPU planets
 // match (VoxelWorlds.Generation.GPUvsCPUSphericalParity). Any change here must be mirrored there.
 //
-// Include AFTER the generation globals (GenerateVoxelDensity.usf), BiomeMaterial.ush, VoxelNoise.ush and the shared
+// Include AFTER the generation globals (GenerateVoxelDensity.usf), BiomeMaterial.ush, ConditioningLines.ush, VoxelNoise.ush and the shared
 // helpers MakePlanetVoxelFrame / GpuContinentalnessCurves / GpuCaveCarve (caves along local up): this file reads the
 // Planet*, Cave*, biome, ore and water globals.
 //
@@ -196,7 +196,12 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseLacunarity, NoisePersistence, NoiseRidged);
     float TerrainAltitude = EffectiveBaseHeight + TerrainNoise * EffectiveHeightScale * 0.5f;
 
-    // Terrain conditioning (SP-B10): the planet zones blend the altitude along this direction before the SDF, as on the CPU.
+    // Terrain conditioning (SP-B10): the planet lines (the chunk's segment list, relative to the anchor's datum point),
+    // then the planet zones, blend the altitude along this direction before the SDF, as on the CPU.
+    if (ConditioningLineSegmentCount > 0)
+    {
+        TerrainAltitude = GpuApplyConditioningLines(SurfaceOffset, TerrainAltitude, PlanetRadius);
+    }
     if (ConditioningZoneCount > 0)
     {
         TerrainAltitude = PlanetApplyConditioning(SurfaceOffset, TerrainAltitude);

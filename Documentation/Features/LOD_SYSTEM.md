@@ -381,7 +381,7 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   `voxel.World.FarFieldDistance` of the camera (2,000,000 uu, the island far ocean's reach; about 10 x 10 tiles about
   the camera, made as it moves and dropped with their trees past it) and, on a bounded world, only over the island's bounds box, which
   they never leave; a patch is culled past the far distance or wholly outside the box (there is no horizon on a plane).
-  The surface is the generated height (`IVoxelWorldMode::GetTerrainHeightAt` with the heightmap conditioning zones, as
+  The surface is the generated height (`IVoxelWorldMode::GetTerrainHeightAt` with the heightmap conditioning lines and zones, as
   `GetGeneratedSurfaceHeight` reads it; in a cubic world the block top of the column, `FVoxelBlockSurface`, so the far
   field meets the blocks at the window's edge without a step), local up is +Z, the materials
   `FVoxelSurfaceQuery::QuerySurfaceConditions` and its mix (`QuerySurfaceMaterialMix`, G45's rule with the heightmap
@@ -397,8 +397,9 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   against a planet's 29-56 MB): heightmap worlds take their own budget, `voxel.World.FarFieldHeightmapError` (4 px; 0 =
   `voxel.World.FarFieldError`). An island's far ocean is its open sea past the bounds box and its static seabed (D37: two
   seas inside the bounds would z-fight; the grid water that stood in for unloaded columns while the far field was off
-  went in code review CR1, D-CR13). Heightmap conditioning zones rebuild the patches they meet
-  (`InvalidateBox`), a planet's radial ones the caps. The build queue's priority offset for non-root patches is 1e12
+  went in code review CR1, D-CR13). A conditioning zone or line that is added, and a region a conditioner
+  names, rebuild the patches they meet that take conditioning (`FVoxelFarField::InvalidateRegion`: a box on a heightmap
+  world, a cap on a planet; `FVoxelFarFieldFrame::RegionOfZone`, `RegionOfLine`). The build queue's priority offset for non-root patches is 1e12
   (it was 1e30, which a double adds a distance to without change, so with six builds a tick the patches under the
   camera could starve behind thousands of far ones: found on the plane, the planet's six roots and horizon hid it).
 

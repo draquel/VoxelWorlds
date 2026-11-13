@@ -14,6 +14,7 @@
 #include "IVoxelWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelTerrainConditioning.h"
+#include "VoxelChunkLineSegments.h"
 #include "RenderingThread.h"
 #include "RHI.h"             // GUsingNullRHI: GPU tests skip under -nullrhi
 
@@ -1939,5 +1940,284 @@ bool FVoxelWaterFillSubmergedChunkTest::RunTest(const FString& Parameters)
 	int32 SeaAir, SeaWet, CaveAir, CaveWet, SolidWet, CaveFlags;
 	Count(Dry, SeaAir, SeaWet, CaveAir, CaveWet, SolidWet, CaveFlags);
 	TestEqual(TEXT("A chunk above the water level takes no water"), SeaWet + CaveWet + SolidWet, 0);
+	return true;
+}
+
+// Conditioning lines on the GPU (Documentation/TERRAIN_LINES_PLAN.md, L2): the chunk's segment list
+// (FVoxelChunkLineSegments) is uploaded as ConditioningLineData and walked by GpuApplyConditioningLines
+// (ConditioningLines.ush) before the zones, in the heightmap branch and in the planet branch, and gives what the CPU
+// generator gives from the same list, at LOD 0/1/2. On a plane far from the world's origin: a diagonal line on a grade,
+// a line through a chunk corner (the four chunks around it), and a lower-only and a raise-only line that cross under a
+// zone. On a planet: a diagonal line at latitude 45, a line across a cube-face edge, and a line through a chunk corner
+// (those of the eight chunks around it that the surface passes through). A CPU run without the lines shows they move
+// the voxels of each chunk (non-vacuous).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPULineParityTest, "VoxelWorlds.Generation.GPUvsCPULineParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelGPUvsCPULineParityTest::RunTest(const FString& Parameters)
+{
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+	using namespace VoxelSphericalParity;
+	using EBlend = EVoxelConditioningLineBlend;
+
+	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
+	BiomeConfig->AddToRoot();
+	BiomeConfig->InitializeDefaults();
+	BiomeConfig->BuildGpuData();
+
+	FVoxelGPUNoiseGenerator GPUGenerator;
+	GPUGenerator.Initialize();
+	FVoxelCPUNoiseGenerator CPUGenerator;
+	CPUGenerator.Initialize();
+
+	struct FSite
+	{
+		FString Name;
+		FVoxelNoiseGenerationRequest Request;
+	};
+	TArray<FSite> Sites;
+	const float VoxelSize = 75.0f;
+	const int32 ChunkSize = 32;
+	const double ChunkWorldSize = ChunkSize * VoxelSize;
+	const float HalfWidth = 3.0f * VoxelSize;
+	const float Falloff = 4.0f * VoxelSize;
+	const double Spacing = 2.0 * VoxelSize;
+
+	// ---- The plane, its grid origin 1,000 km from the world's: a float world position is 0.06 uu coarse there, and
+	// the segment list is in the chunk's frame.
+	const FVector PlaneOrigin(1.0e6 + 37.5, -2.0e6 + 112.5, 0.0);
+	auto MakePlaneRequest = [&](const FIntVector& ChunkCoord)
+	{
+		FVoxelNoiseGenerationRequest Request;
+		Request.ChunkCoord = ChunkCoord;
+		Request.ChunkSize = ChunkSize;
+		Request.VoxelSize = VoxelSize;
+		Request.WorldOrigin = PlaneOrigin;
+		Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+		Request.NoiseParams.Seed = 4325;
+		Request.NoiseParams.Frequency = 0.0006f;
+		Request.NoiseParams.Octaves = 4;
+		Request.NoiseParams.Lacunarity = 2.0f;
+		Request.NoiseParams.Persistence = 0.5f;
+		Request.WorldMode = EWorldMode::InfinitePlane;
+		Request.SeaLevel = 0.0f;
+		Request.HeightScale = 1400.0f;
+		Request.BaseHeight = 1200.0f;
+		Request.bEnableBiomes = true;
+		Request.BiomeConfiguration = BiomeConfig;
+		return Request;
+	};
+	// A straight line between two points given relative to the grid origin.
+	auto PlaneLine = [&](const FVector2D& A, const FVector2D& B, float TargetA, float TargetB, EBlend Blend, int64 Id)
+	{
+		FVoxelConditioningLineParams Params;
+		Params.FalloffWidth = Falloff;
+		Params.Blend = Blend;
+		Params.Id = Id;
+		const int32 Steps = FMath::Max(1, FMath::CeilToInt32((B - A).Size() / Spacing));
+		for (int32 Step = 0; Step <= Steps; ++Step)
+		{
+			const double T = static_cast<double>(Step) / Steps;
+			const FVector2D P = FMath::Lerp(A, B, T);
+			Params.Vertices.Add(FVoxelConditioningLineVertex(FVector(PlaneOrigin.X + P.X, PlaneOrigin.Y + P.Y, 0.0), FMath::Lerp(TargetA, TargetB, static_cast<float>(T)), HalfWidth));
+		}
+		return FVoxelConditioningLine::Make(Params);
+	};
+	{
+		// Chunk (3, 1, 0): X 7,200 to 9,600, Y 2,400 to 4,800, Z 0 to 2,400 from the grid origin.
+		FSite& Diagonal = Sites.AddDefaulted_GetRef();
+		Diagonal.Name = TEXT("Line plane diagonal on a grade");
+		Diagonal.Request = MakePlaneRequest(FIntVector(3, 1, 0));
+		Diagonal.Request.Conditioning.Lines.Add(PlaneLine(FVector2D(6600.0, 1900.0), FVector2D(10200.0, 5300.0), 700.0f, 1700.0f, EBlend::Level, 1));
+
+		// A line through the corner (7,200, 2,400) the four chunks (2..3, 0..1, 0) share.
+		const FVoxelConditioningLineRef Corner = PlaneLine(FVector2D(5700.0, 3650.0), FVector2D(8700.0, 1150.0), 1250.0f, 1250.0f, EBlend::Level, 1);
+		for (const FIntVector& Chunk : { FIntVector(3, 1, 0), FIntVector(2, 0, 0), FIntVector(2, 1, 0), FIntVector(3, 0, 0) })
+		{
+			FSite& Site = Sites.AddDefaulted_GetRef();
+			Site.Name = FString::Printf(TEXT("Line plane through a chunk corner, chunk (%d, %d)"), Chunk.X, Chunk.Y);
+			Site.Request = MakePlaneRequest(Chunk);
+			Site.Request.Conditioning.Lines.Add(Corner);
+		}
+
+		// A lower-only and a raise-only line that cross, and a zone on top: lines in id order, then the zone.
+		FSite& Blends = Sites.AddDefaulted_GetRef();
+		Blends.Name = TEXT("Line plane lower-only and raise-only under a zone");
+		Blends.Request = MakePlaneRequest(FIntVector(3, 1, 0));
+		Blends.Request.Conditioning.Lines.Add(PlaneLine(FVector2D(6900.0, 3000.0), FVector2D(9900.0, 4300.0), 900.0f, 900.0f, EBlend::LowerOnly, 1));
+		Blends.Request.Conditioning.Lines.Add(PlaneLine(FVector2D(7500.0, 5100.0), FVector2D(9300.0, 2100.0), 1500.0f, 1500.0f, EBlend::RaiseOnly, 2));
+		Blends.Request.Conditioning.Zones.Add(FVoxelConditioningZone(FVector2D(PlaneOrigin.X + 8400.0, PlaneOrigin.Y + 3600.0), 300.0f, 500.0f, 1200.0f, 1.0f));
+	}
+
+	// ---- The planet: Review_Planet's size and terrain, off the world origin, biomes and a sea.
+	UVoxelBiomeConfiguration* PlanetBiomes = NewObject<UVoxelBiomeConfiguration>();
+	PlanetBiomes->AddToRoot();
+	PlanetBiomes->InitializeDefaults();
+	PlanetBiomes->bEnableContinentalness = true;
+	PlanetBiomes->RebuildCaches();
+	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+	Config->AddToRoot();
+	Config->WorldMode = EWorldMode::SphericalPlanet;
+	Config->WorldOrigin = FVector(12345.0, 54321.0, 0.0);
+	Config->WorldRadius = Radius;
+	Config->PlanetHeightScale = 6000.0f;
+	Config->BaseHeight = 0.0f;
+	Config->PlanetMaxTerrainHeight = 6500.0f;
+	Config->PlanetMaxTerrainDepth = 6500.0f;
+	Config->VoxelSize = VoxelSize;
+	Config->ChunkSize = ChunkSize;
+	Config->NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	Config->NoiseParams.Seed = 248675;
+	Config->NoiseParams.Octaves = 3;
+	Config->NoiseParams.Frequency = 0.000025f;
+	Config->NoiseParams.Lacunarity = 1.681f;
+	Config->NoiseParams.Persistence = 0.5f;
+	Config->BiomeConfiguration = PlanetBiomes;
+	Config->bEnableBiomes = true;
+	Config->bEnableCaves = false;
+	Config->bEnableWaterLevel = true;
+	Config->WaterRadius = WaterRadius;
+	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
+	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*Mode);
+	const FVector Origin = Config->WorldOrigin;
+	auto MakePlanetRequest = [&](const FIntVector& ChunkCoord)
+	{
+		FVoxelNoiseGenerationRequest Request;
+		Request.ChunkCoord = ChunkCoord;
+		Request.ChunkSize = Config->ChunkSize;
+		Request.VoxelSize = Config->VoxelSize;
+		Request.NoiseParams = Config->NoiseParams;
+		FVoxelWorldModeFactory::FillGenerationRequest(*Config, Request);
+		Request.bEnableBiomes = true;
+		Request.BiomeConfiguration = Config->BiomeConfiguration;
+		Request.bEnableWaterLevel = true;
+		Request.WaterRadius = Config->WaterRadius;
+		return Request;
+	};
+	auto ChunkAt = [&](const FVector& WorldPos)
+	{
+		const FVector Local = (WorldPos - Origin) / ChunkWorldSize;
+		return FIntVector(FMath::FloorToInt(Local.X), FMath::FloorToInt(Local.Y), FMath::FloorToInt(Local.Z));
+	};
+	// An arc through a direction, 2,400 uu each way along a heading given as a second direction, its target an offset
+	// from the natural altitude along it at each end.
+	auto PlanetLine = [&](const FVector& Through, const FVector& Toward, float OffsetA, float OffsetB, EBlend Blend)
+	{
+		const FVector Tangent = (Toward - Through * FVector::DotProduct(Toward, Through)).GetSafeNormal();
+		const float Natural = Planet.GetTerrainAltitude(Through, Config->NoiseParams);
+		FVoxelConditioningLineParams Params;
+		Params.bRadial = true;
+		Params.FalloffWidth = Falloff;
+		Params.Blend = Blend;
+		const int32 HalfSteps = 16;
+		for (int32 Step = -HalfSteps; Step <= HalfSteps; ++Step)
+		{
+			const double Angle = Step * Spacing / Radius;
+			const FVector Direction = (Through * FMath::Cos(Angle) + Tangent * FMath::Sin(Angle)).GetSafeNormal();
+			Params.Vertices.Add(FVoxelConditioningLineVertex(Direction, Natural + FMath::Lerp(OffsetA, OffsetB, 0.5f + 0.5f * Step / HalfSteps), HalfWidth));
+		}
+		return FVoxelConditioningLine::Make(Params);
+	};
+	{
+		// Latitude 45: a line diagonal to the chunk grid, climbing.
+		const FVector Dir45 = LatLonDirection(45.0, 3.0);
+		FSite& Diagonal = Sites.AddDefaulted_GetRef();
+		Diagonal.Name = TEXT("Line planet diagonal at latitude 45");
+		const FVoxelConditioningLineRef DiagonalLine = PlanetLine(Dir45, FVector(0.3, 1.0, 0.6).GetSafeNormal(), 0.0f, 500.0f, EBlend::Level);
+		Diagonal.Request = MakePlanetRequest(ChunkAt(Origin + Dir45 * (Radius + Planet.GetTerrainAltitude(Dir45, Config->NoiseParams) + 250.0f)));
+		Diagonal.Request.Conditioning.Lines.Add(DiagonalLine);
+
+		// Across a cube-face edge, lowered.
+		const FVector DirEdge = LatLonDirection(0.0, 45.0);
+		FSite& Edge = Sites.AddDefaulted_GetRef();
+		Edge.Name = TEXT("Line planet lower-only across a cube-face edge");
+		Edge.Request = MakePlanetRequest(ChunkAt(Origin + DirEdge * (Radius + Planet.GetTerrainAltitude(DirEdge, Config->NoiseParams) - 300.0f)));
+		Edge.Request.Conditioning.Lines.Add(PlanetLine(DirEdge, FVector(1.0, -1.0, 0.7).GetSafeNormal(), -300.0f, -300.0f, EBlend::LowerOnly));
+
+		// Through a chunk corner: the corner of the chunk under the surface at a site, its direction the line's middle.
+		const FVector DirSite = LatLonDirection(20.0, 100.0);
+		const FIntVector SiteChunk = ChunkAt(Origin + DirSite * (Radius + Planet.GetTerrainAltitude(DirSite, Config->NoiseParams)));
+		const FVector Corner = Origin + FVector(SiteChunk) * ChunkWorldSize;
+		const FVector DirCorner = (Corner - Origin).GetSafeNormal();
+		const float CornerAltitude = static_cast<float>((Corner - Origin).Size() - Radius);
+		// Level with the corner itself, so the surface passes through it in each chunk around it.
+		const FVoxelConditioningLineRef CornerLine = PlanetLine(DirCorner, FVector(-1.0, 0.2, 1.0).GetSafeNormal(),
+			CornerAltitude - Planet.GetTerrainAltitude(DirCorner, Config->NoiseParams), CornerAltitude - Planet.GetTerrainAltitude(DirCorner, Config->NoiseParams), EBlend::Level);
+		// Of the eight chunks that share the corner, those the surface passes through: where the line moves 50 voxels
+		// or more (the others hold the corner in the air or under the ground).
+		int32 CornerChunks = 0;
+		for (int32 Index = 0; Index < 8; ++Index)
+		{
+			const FIntVector Offset(-(Index & 1), -((Index >> 1) & 1), -((Index >> 2) & 1));
+			FVoxelNoiseGenerationRequest Request = MakePlanetRequest(SiteChunk + Offset);
+			TArray<FVoxelData> With, Without;
+			CPUGenerator.GenerateChunkCPU(Request, Without);
+			Request.Conditioning.Lines.Add(CornerLine);
+			CPUGenerator.GenerateChunkCPU(Request, With);
+			int32 Differ = 0;
+			for (int32 Voxel = 0; Voxel < With.Num() && Voxel < Without.Num(); ++Voxel)
+			{
+				Differ += With[Voxel].Density != Without[Voxel].Density ? 1 : 0;
+			}
+			if (Differ < 50)
+			{
+				continue;
+			}
+			++CornerChunks;
+			FSite& Site = Sites.AddDefaulted_GetRef();
+			Site.Name = FString::Printf(TEXT("Line planet through a chunk corner, chunk offset (%d, %d, %d)"), Offset.X, Offset.Y, Offset.Z);
+			Site.Request = Request;
+		}
+		TestTrue(TEXT("The surface passes through three or more of the chunks around the planet's corner"), CornerChunks >= 3);
+	}
+
+	// Non-vacuous: the lines move each chunk's voxels on the CPU, and each chunk's segment list is not empty.
+	bool bAllMoved = true;
+	for (const FSite& Site : Sites)
+	{
+		FVoxelNoiseGenerationRequest Natural = Site.Request;
+		Natural.Conditioning.Reset();
+		TArray<FVoxelData> With, Without;
+		CPUGenerator.GenerateChunkCPU(Site.Request, With);
+		CPUGenerator.GenerateChunkCPU(Natural, Without);
+		int32 Differ = 0;
+		for (int32 Index = 0; Index < With.Num() && Index < Without.Num(); ++Index)
+		{
+			Differ += With[Index].Density != Without[Index].Density ? 1 : 0;
+		}
+		FVoxelChunkLineSegments Segments;
+		FVoxelChunkLineSegments::Build(Site.Request, Segments);
+		AddInfo(FString::Printf(TEXT("%s: chunk (%d, %d, %d), %d segments in its list, %d voxels' density moved by the conditioning"),
+			*Site.Name, Site.Request.ChunkCoord.X, Site.Request.ChunkCoord.Y, Site.Request.ChunkCoord.Z, Segments.Num(), Differ));
+		if (Segments.Num() == 0 || Differ < 50)
+		{
+			AddError(FString::Printf(TEXT("%s: the line does not move the chunk (%d segments, %d voxels)"), *Site.Name, Segments.Num(), Differ));
+			bAllMoved = false;
+		}
+	}
+	CPUGenerator.Shutdown();
+
+	// The planet's thresholds are the spherical parity test's; the plane's 32^3 chunks take them too (a voxel is 0.003 %).
+	VoxelParityHarness::FParityThresholds Thresholds;
+	Thresholds.DensityClose = 99.5f;
+	Thresholds.Mat = 99.0f;
+	Thresholds.Biome = 99.9f;
+	Thresholds.Meta = 99.9f;
+	Thresholds.MatWhenDensEq = 99.5f;
+	bool bAllPass = true;
+	for (const FSite& Site : Sites)
+	{
+		if (!VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Site.Request, *Site.Name, Thresholds))
+		{
+			bAllPass = false;
+		}
+	}
+
+	GPUGenerator.Shutdown();
+	BiomeConfig->RemoveFromRoot();
+	PlanetBiomes->RemoveFromRoot();
+	Config->RemoveFromRoot();
+	TestTrue(TEXT("The lines move every test chunk"), bAllMoved);
+	TestTrue(TEXT("GPU==CPU parity with conditioning lines, plane and planet, across LOD 0/1/2"), bAllPass);
 	return true;
 }

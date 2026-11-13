@@ -23,7 +23,7 @@ section true on its date); the Features docs are the current truth.
 | Module | What it holds |
 |--------|---------------|
 | `VoxelCore` | Voxel and chunk types, the world configuration and `UVoxelWorldsSettings`, material and biome registries, the edit manager, the sea surface and the water levels, cube-sphere and render-region math; no dependency on another voxel module |
-| `VoxelGeneration` | CPU and GPU generation, the noise (`FVoxelNoise`), world modes behind `IVoxelWorldMode` and `FVoxelWorldModeFactory`, surface queries, conditioning zones, the tree injector |
+| `VoxelGeneration` | CPU and GPU generation, the noise (`FVoxelNoise`), world modes behind `IVoxelWorldMode` and `FVoxelWorldModeFactory`, surface queries, conditioning zones and lines, the tree injector |
 | `VoxelLOD` | `IVoxelLODStrategy` and `FDistanceBandLODStrategy`: the voxel window, bands, horizons, the cut-over |
 | `VoxelMeshing` | `IVoxelMesher`: the CPU cubic, Marching Cubes and Dual Contouring meshers (chunk meshes and seams), the water mesher |
 | `VoxelRendering` | `IVoxelMeshRenderer` and `FVoxelMeshRenderer`: a `UVoxelRegionComponent` per render region, `FVoxelSceneProxy`, the crossfades |
@@ -57,7 +57,7 @@ section true on its date); the Features docs are the current truth.
   `GetSea` for geometry drawn at the sea), and `FVoxelWaterLevels::FromConfig` is the only reader of the
   configuration's `WaterLevel` and `WaterRadius` (WATER_SYSTEM.md, "The water levels").
 - **The surface ladder.** `UVoxelChunkManager::QuerySurfacePoint` with `EVoxelSurfaceLayer`: `Natural` (the world
-  mode's), `Generated` (zones applied, block tops on a cubic world; `GetGeneratedSurfacePoint`) or `EditMerged`
+  mode's), `Generated` (conditioning lines and zones applied, block tops on a cubic world; `GetGeneratedSurfacePoint`) or `EditMerged`
   (the loaded voxels; `QueryEditMergedSurfacePoint`). Pick the rung you mean; `GetTerrainHeightAt` is a heightmap's
   natural height and degrades on a planet.
 - **Precision.** Planets are precise to about 1,000 km and heightmaps to the double range of a position: never hold a

@@ -412,3 +412,103 @@ bool FVoxelHeightBoundsContainmentTest::RunTest(const FString& Parameters)
 
 	return true;
 }
+
+// ---------------------------------------------------------------------------
+// HT5: along a conditioning line the analytic conditioned height (base + continentalness, then
+// FVoxelConditioning::ApplyToHeight, whose lines are evaluated from the line itself) matches the real generated
+// surface (the generator evaluates the chunk's segment list) within a voxel: on the core, at its edge, across the
+// falloff and beyond the reach, for the three blends. The conditioning-zone test's twin (TERRAIN_LINES_PLAN.md, L2).
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelHeightConditioningLineParityTest,
+	"VoxelWorlds.Generation.HeightParity.ConditioningLine",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelHeightConditioningLineParityTest::RunTest(const FString& Parameters)
+{
+	UVoxelBiomeConfiguration* Config = MakeContinentalnessConfig();
+	const FVoxelNoiseParams Noise = MakeTerrainNoise();
+	const FWorldModeTerrainParams Base = MakeBaseParams();
+
+	FInfinitePlaneWorldMode Analytic(Base);
+	Analytic.SetBiomeContext(Config);
+
+	FVoxelCPUNoiseGenerator Generator;
+	Generator.Initialize();
+
+	// A diagonal line far from the origin (continentalness in play), a vertex every 2 voxels, its target a set offset
+	// from the natural height at its middle and climbing 10 % along it.
+	const FVector2D Middle(150000.0, 150000.0);
+	const FVector2D Direction = FVector2D(0.8, 0.6);
+	const FVector2D Across(-0.6, 0.8);
+	const float NaturalAtMiddle = Analytic.GetTerrainHeightAt(Middle.X, Middle.Y, Noise);
+	const float HalfWidth = 3.0f * kVoxelSize;
+	const float Falloff = 4.0f * kVoxelSize;
+	const double Spacing = 2.0 * kVoxelSize;
+	const int32 HalfSteps = 40;
+
+	struct FCase
+	{
+		const TCHAR* Name;
+		EVoxelConditioningLineBlend Blend;
+		float Offset;
+	};
+	const FCase Cases[] = {
+		{ TEXT("Level"), EVoxelConditioningLineBlend::Level, 900.0f },
+		{ TEXT("LowerOnly"), EVoxelConditioningLineBlend::LowerOnly, -700.0f },
+		{ TEXT("RaiseOnly"), EVoxelConditioningLineBlend::RaiseOnly, 700.0f },
+	};
+	for (const FCase& Case : Cases)
+	{
+		FVoxelConditioningLineParams Params;
+		Params.FalloffWidth = Falloff;
+		Params.Blend = Case.Blend;
+		for (int32 Step = -HalfSteps; Step <= HalfSteps; ++Step)
+		{
+			const FVector2D P = Middle + Direction * (Step * Spacing);
+			Params.Vertices.Add(FVoxelConditioningLineVertex(FVector(P.X, P.Y, 0.0), NaturalAtMiddle + Case.Offset + 0.1f * static_cast<float>(Step * Spacing), HalfWidth));
+		}
+		FVoxelConditioning Conditioning;
+		Conditioning.Lines.Add(FVoxelConditioningLine::Make(Params));
+
+		// Along the line at several places, across it from the centre to beyond the reach.
+		int32 Checked = 0;
+		int32 Moved = 0;
+		double Worst = 0.0;
+		for (const double AlongUU : { -1500.0, -333.0, 0.0, 777.0, 1900.0 })
+		{
+			for (const double AcrossUU : { 0.0, 120.0, -150.0, 200.0, -250.0, 330.0, -400.0 })
+			{
+				// On the voxel grid, where the generator samples a column: across the falloff the conditioned height
+				// changes by voxels per voxel sideways, so a point between two columns matches neither.
+				FVector2D P = Middle + Direction * AlongUU + Across * AcrossUU;
+				P.X = FMath::RoundToDouble(P.X / kVoxelSize) * kVoxelSize;
+				P.Y = FMath::RoundToDouble(P.Y / kVoxelSize) * kVoxelSize;
+				const float Natural = Analytic.GetTerrainHeightAt(P.X, P.Y, Noise);
+				const float AnalyticConditioned = Conditioning.ApplyToHeight(P.X, P.Y, Natural);
+				const float RealZ = GenerateRealSurfaceZ(Generator, P.X, P.Y, AnalyticConditioned, Config, &Conditioning);
+				if (!TestTrue(FString::Printf(TEXT("%s: found a real surface at (%.0f, %.0f)"), Case.Name, P.X, P.Y), RealZ != FLT_MAX))
+				{
+					continue;
+				}
+				++Checked;
+				Moved += FMath::Abs(AnalyticConditioned - Natural) > kVoxelSize ? 1 : 0;
+				Worst = FMath::Max(Worst, static_cast<double>(FMath::Abs(AnalyticConditioned - RealZ)));
+				TestTrue(FString::Printf(TEXT("%s: analytic conditioned height matches the real surface at along %.0f, across %.0f: |%.1f - %.1f| < 1 voxel"),
+					Case.Name, AlongUU, AcrossUU, AnalyticConditioned, RealZ), FMath::Abs(AnalyticConditioned - RealZ) < kVoxelSize);
+			}
+		}
+		AddInfo(FString::Printf(TEXT("%s: %d points, %d moved by the line by more than a voxel, worst |analytic - real| %.2f voxels"),
+			Case.Name, Checked, Moved, Worst / kVoxelSize));
+		TestTrue(FString::Printf(TEXT("%s: the line moves the ground at some points"), Case.Name), Moved >= 10);
+
+		// On the centre line a levelled line is at its target.
+		if (Case.Blend == EVoxelConditioningLineBlend::Level)
+		{
+			TestEqual(TEXT("Level: on the centre line the analytic height is the target"),
+				Conditioning.ApplyToHeight(Middle.X, Middle.Y, NaturalAtMiddle), NaturalAtMiddle + Case.Offset, 0.05f);
+		}
+	}
+
+	Config->RemoveFromRoot();
+	return true;
+}
