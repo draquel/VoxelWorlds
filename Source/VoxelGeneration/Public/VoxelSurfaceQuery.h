@@ -122,14 +122,14 @@ public:
 
 	/**
 	 * The generated surface on the local up-line through a position, one sample (the surface ladder's generated rung,
-	 * GLOSSARY.md): the natural surface (IVoxelWorldMode::GetSurfaceOnUpLine) with the conditioning zones there layered
-	 * on as generation does (FVoxelTerrainConditioning::ApplyToHeight on a heightmap, ApplyToAltitude on a planet). The
+	 * GLOSSARY.md): the natural surface (IVoxelWorldMode::GetSurfaceOnUpLine) with the conditioning there layered
+	 * on as generation does (FVoxelConditioning::ApplyToHeight on a heightmap, ApplyToAltitude on a planet). The
 	 * normal is local up; the block top of a cubic world is the chunk manager's (SnapToBlockTop), not applied here.
 	 *
 	 * @param WorldMode World mode
 	 * @param WorldPos Any position on the up-line
 	 * @param NoiseParams Terrain noise
-	 * @param Zones The conditioning zones there (gathered for the place), or null / empty for the natural surface
+	 * @param Conditioning The conditioning there (gathered for the place), or null / empty for the natural surface
 	 * @param OutContinentalness Optional: on a planet the continentalness its height sampled (what its conditions reuse);
 	 *        0 on a heightmap world (its conditions sample their own)
 	 * @return The surface point, with Normal = local up
@@ -138,7 +138,7 @@ public:
 		const IVoxelWorldMode& WorldMode,
 		const FVector& WorldPos,
 		const FVoxelNoiseParams& NoiseParams,
-		const TArray<struct FVoxelConditioningZone>* Zones,
+		const struct FVoxelConditioning* Conditioning,
 		float* OutContinentalness = nullptr);
 
 	/**
@@ -199,7 +199,7 @@ public:
 	 * @param WorldPos Any position on the up-line
 	 * @param NoiseParams Terrain noise (its seed derives the climate seeds)
 	 * @param BiomeSnapshot Value-captured biome data (FVoxelBiomeSnapshot::FromConfig)
-	 * @param Zones The conditioning zones there, or null / empty for the natural surface
+	 * @param Conditioning The conditioning there, or null / empty for the natural surface
 	 * @param OutSample The climate; invalid with the fields 0 when the snapshot is invalid (the up and the surface still filled)
 	 * @return OutSample.bValid
 	 */
@@ -208,7 +208,7 @@ public:
 		const FVector& WorldPos,
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
-		const TArray<struct FVoxelConditioningZone>* Zones,
+		const struct FVoxelConditioning* Conditioning,
 		FVoxelClimateSample& OutSample);
 
 	/**
@@ -269,7 +269,7 @@ public:
 	 * @param BiomeSnapshot The biome snapshot (bIsValid picks the pipeline)
 	 * @param bUseBiomes Whether the world's biomes are on
 	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig)
-	 * @param Zones The planet conditioning zones there for the biome pipeline, or null
+	 * @param Conditioning The conditioning there (its planet zones) for the biome pipeline, or null
 	 * @param FallbackTempNoise The fallback climate's temperature field (the generators' hardcoded one)
 	 * @param FallbackMoistureNoise The fallback climate's moisture field
 	 * @return Surface material ID
@@ -284,7 +284,7 @@ public:
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
 		bool bUseBiomes,
 		const FVoxelSeaSurface& Sea,
-		const TArray<struct FVoxelConditioningZone>* Zones,
+		const struct FVoxelConditioning* Conditioning,
 		const FVoxelNoiseParams& FallbackTempNoise,
 		const FVoxelNoiseParams& FallbackMoistureNoise);
 
@@ -299,7 +299,7 @@ public:
 	 * @param WorldPos The voxel's sample position, as generation samples it
 	 * @param VoxelSize Voxel size (depths are in voxels)
 	 * @param NoiseParams Terrain noise
-	 * @param Zones The conditioning zones there, or null (used only when Surface is null)
+	 * @param Conditioning The conditioning there, or null (used only when Surface is null)
 	 * @param Caves The world's cave configuration when its caves are on, else null
 	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig)
 	 * @param bEnableBiomes Whether the world's biomes are on (the planet's biome for the cave overrides)
@@ -307,7 +307,7 @@ public:
 	 *        -1: on a planet derived from its climate when a cave override needs it, behind
 	 *        UVoxelCaveConfiguration::AnyLayerReachesDepth; 0 on a heightmap
 	 * @param Surface The generated surface on the position's up-line when the caller has it (its height sampled where
-	 *        the caller sampled it), else sampled here with Zones
+	 *        the caller sampled it), else sampled here with Conditioning
 	 * @param Continentalness What GetGeneratedSurface returned with Surface (a planet's biome reuses it)
 	 * @return The voxel's density (the material 0)
 	 */
@@ -316,7 +316,7 @@ public:
 		const FVector& WorldPos,
 		float VoxelSize,
 		const FVoxelNoiseParams& NoiseParams,
-		const TArray<struct FVoxelConditioningZone>* Zones,
+		const struct FVoxelConditioning* Conditioning,
 		const UVoxelCaveConfiguration* Caves,
 		const FVoxelSeaSurface& Sea,
 		bool bEnableBiomes,
@@ -376,9 +376,9 @@ public:
 	 * Computes the height gradient once and derives both slope and normal from it.
 	 * BiomeSnapshot as in QuerySurfaceConditions — hoist one per batch via FromConfig.
 	 *
-	 * @param Zones Optional heightmap conditioning zones there (POI pads and their falloff rings; gather them for the place,
-	 *              e.g. UVoxelChunkManager::GatherConditioningZones): the generated surface, as the generator layers them
-	 *              onto the natural height (FVoxelTerrainConditioning::ApplyToHeight), for the height, the gradient and the
+	 * @param Conditioning Optional conditioning there (POI pads and their falloff rings; gather it for the place,
+	 *              e.g. UVoxelChunkManager::GatherConditioning): the generated surface, as the generator layers it
+	 *              onto the natural height (FVoxelConditioning::ApplyToHeight), for the height, the gradient and the
 	 *              material's water and height rules (world modes review G23). Planet zones are ignored. Null or empty:
 	 *              the natural surface.
 	 */
@@ -389,7 +389,7 @@ public:
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
 		int32 WorldSeed,
 		bool bEnableWaterLevel, float WaterLevel,
-		const TArray<struct FVoxelConditioningZone>* Zones = nullptr);
+		const struct FVoxelConditioning* Conditioning = nullptr);
 
 	/**
 	 * Material and biome on a planet as GenerateChunkSphericalPlanet writes them for a voxel at a position, before caves
@@ -405,7 +405,7 @@ public:
 	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig): a sphere on a planet
 	 * @param OutSurfaceMaterial Surface material ID (0 when the snapshot is invalid)
 	 * @param OutBiomeID Dominant biome ID (0 when the snapshot is invalid)
-	 * @param Zones Optional planet conditioning zones there (spherical SP-B10): the terrain's radius is the conditioned one,
+	 * @param Conditioning Optional conditioning there (its planet zones, spherical SP-B10): the terrain's radius is the conditioned one,
 	 *              as generation's, so a pad's surface point reads the surface material at depth 0
 	 */
 	static void QueryPlanetSurfaceConditions(
@@ -416,7 +416,7 @@ public:
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
 		const FVoxelSeaSurface& Sea,
 		uint8& OutSurfaceMaterial, uint8& OutBiomeID,
-		const TArray<struct FVoxelConditioningZone>* Zones = nullptr);
+		const struct FVoxelConditioning* Conditioning = nullptr);
 
 	/**
 	 * QueryPlanetSurfaceConditions from a terrain altitude the caller has already sampled (spherical Phase 6, WM-BP9: the
@@ -503,8 +503,8 @@ public:
 	 * @param NoiseParams Terrain noise
 	 * @param BiomeSnapshot Value-captured biome data
 	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig): the WaterLevel plane, or a planet's sphere
-	 * @param Zones Optional conditioning zones there: the generated surface and its conditions. On a planet its zones
-	 *              (spherical SP-B10, GetConditionedSurfacePoint); in heightmap modes its zones (SampleSurface's, G23)
+	 * @param Conditioning Optional conditioning there: the generated surface and its conditions. On a planet its planet zones
+	 *              (spherical SP-B10, GetConditionedSurfacePoint); in heightmap modes its heightmap zones (SampleSurface's, G23)
 	 * @return The surface sample
 	 */
 	static FVoxelSurfaceSample SampleSurfacePoint(
@@ -513,7 +513,7 @@ public:
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
 		const FVoxelSeaSurface& Sea,
-		const TArray<struct FVoxelConditioningZone>* Zones = nullptr);
+		const struct FVoxelConditioning* Conditioning = nullptr);
 
 	/**
 	 * Find the topmost terrain surface in a vertical voxel column (index 0 = lowest Z, ascending).

@@ -240,12 +240,11 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 						WorldPos.X, WorldPos.Y, TerrainHeight, *IslandParams);
 				}
 
-				// Phase 6c: blend the natural height toward any terrain conditioning zones
+				// Phase 6c: blend the natural height toward the chunk's terrain conditioning
 				// (flatten under POIs / claims). Deterministic — the base terrain IS flat here.
-				if (Request.ConditioningZones.Num() > 0)
+				if (!Request.Conditioning.IsEmpty())
 				{
-					TerrainHeight = FVoxelTerrainConditioning::ApplyToHeight(
-						WorldPos.X, WorldPos.Y, TerrainHeight, Request.ConditioningZones);
+					TerrainHeight = Request.Conditioning.ApplyToHeight(WorldPos.X, WorldPos.Y, TerrainHeight);
 				}
 
 				// Calculate signed distance to surface
@@ -504,9 +503,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				// Terrain conditioning (spherical SP-B10, D15): the planet zones (caps on the datum sphere) blend the altitude
 				// along this direction toward their targets before the SDF, as the heightmap generators blend the column
 				// height, so density, depth, the underwater test, caves and materials all follow the flattened ground.
-				if (Request.ConditioningZones.Num() > 0)
+				if (!Request.Conditioning.IsEmpty())
 				{
-					TerrainAltitude = FVoxelTerrainConditioning::ApplyToAltitude(Direction, PlanetRadius, TerrainAltitude, Request.ConditioningZones);
+					TerrainAltitude = Request.Conditioning.ApplyToAltitude(Direction, PlanetRadius, TerrainAltitude);
 				}
 				// The voxel's altitude above the datum, |P - C| - R in double (WM-BP4): the signed distance, the depth and
 				// the height rules all read altitudes, quantities of the relief's size, so nothing of size R cancels in

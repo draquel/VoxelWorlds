@@ -391,7 +391,7 @@ bool FVoxelCubicBlockSurfaceSmoothUnchangedTest::RunTest(const FString& Paramete
 
 		// GetGeneratedSurfacePoint: the world mode's height with the zones blended in, bit for bit.
 		const float Natural = static_cast<float>(WM->GetSurfaceOnUpLine(FVector(X, Y, 0.0), Config->NoiseParams).Position.Z);
-		const float Expected = FVoxelTerrainConditioning::ApplyToHeight(X, Y, Natural, { Pad });
+		const float Expected = FVoxelConditioning::OfZones({ Pad }).ApplyToHeight(X, Y, Natural);
 		Generated += Manager->GetGeneratedSurfacePoint(FVector(X, Y, 0.0)).Z == Expected ? 1 : 0;
 
 		// QueryEditMergedSurfacePoint: the four voxel-grid columns around (X, Y) from one chunk under the estimate to one

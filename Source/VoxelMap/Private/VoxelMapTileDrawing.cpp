@@ -88,10 +88,10 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 
 	// Terrain conditioning over the tile's area and its apron (POI pads, campsites): generation layers these onto the
 	// base height, so the map must too (QA W-05). Gathered here on the game thread; plain data.
-	TArray<FVoxelConditioningZone> Zones;
+	FVoxelConditioning Conditioning;
 	if (UVoxelChunkManager* ChunkMgr = CachedChunkManagerWeak.Get())
 	{
-		Frame.GatherZones(*ChunkMgr, Id, Zones);
+		Frame.GatherConditioning(*ChunkMgr, Id, Conditioning);
 	}
 
 	// Edit overlays (R22), all level 0's. A level-0 tile: its own and its neighbours' (the hillshade apron reads their
@@ -160,7 +160,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
 		[WeakThis, Id, Generation, WorldMode, Frame, NoiseParams, bUseBiomes, BiomeSnapshot,
 		 FallbackTempNoiseParams, FallbackMoistureNoiseParams, MaterialPalette = MoveTemp(MaterialPalette),
-		 Zones = MoveTemp(Zones), OwnOverlay, SourceOverlays = MoveTemp(SourceOverlays), RebuildInput, bRebuild]() mutable
+		 Conditioning = MoveTemp(Conditioning), OwnOverlay, SourceOverlays = MoveTemp(SourceOverlays), RebuildInput, bRebuild]() mutable
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_DrawTile);
 		const double DrawStart = FPlatformTime::Seconds();
@@ -185,7 +185,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 			{
 				const int32 G = GY * GridSize + GX;
 				Samples[G] = Frame.SampleAt(Id, GX, GY);
-				Altitudes[G] = Frame.Altitude(*WorldMode, Samples[G], NoiseParams, Zones);
+				Altitudes[G] = Frame.Altitude(*WorldMode, Samples[G], NoiseParams, Conditioning);
 			}
 		}
 
@@ -194,7 +194,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 		auto AnalyticMaterialAt = [&](const FVoxelMapTileSample& Sample, float Altitude) -> uint8
 		{
 			return FVoxelSurfaceQuery::QueryMapSurfaceMaterial(*WorldMode, Frame.PositionAt(Sample, Altitude), Sample.Direction, Altitude,
-				Frame.VoxelSize, NoiseParams, BiomeSnapshot, bUseBiomes, Frame.Sea, &Zones, FallbackTempNoiseParams, FallbackMoistureNoiseParams);
+				Frame.VoxelSize, NoiseParams, BiomeSnapshot, bUseBiomes, Frame.Sea, &Conditioning, FallbackTempNoiseParams, FallbackMoistureNoiseParams);
 		};
 
 		// The tile's own pixels: the overlay build compares against them, and the game thread keeps a level-0 tile's

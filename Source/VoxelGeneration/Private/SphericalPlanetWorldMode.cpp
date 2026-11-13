@@ -107,9 +107,9 @@ FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetSurfacePoint(const FVect
 }
 
 FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetConditionedSurfacePoint(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams,
-	const TArray<FVoxelConditioningZone>& Zones) const
+	const FVoxelConditioning& Conditioning) const
 {
-	if (Zones.Num() == 0)
+	if (Conditioning.IsEmpty())
 	{
 		return GetSurfacePoint(WorldPos, NoiseParams);
 	}
@@ -117,7 +117,7 @@ FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetConditionedSurfacePoint(
 	const double Radius = PlanetParams.PlanetRadius;
 	auto SurfaceAt = [&](const FVector& Direction)
 	{
-		return Center + Direction * (Radius + static_cast<double>(GetConditionedTerrainAltitude(Direction, NoiseParams, Zones)));
+		return Center + Direction * (Radius + static_cast<double>(GetConditionedTerrainAltitude(Direction, NoiseParams, Conditioning)));
 	};
 
 	// GetSurfacePoint's construction over the conditioned surface.
@@ -139,10 +139,10 @@ FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetConditionedSurfacePoint(
 }
 
 float FSphericalPlanetWorldMode::GetConditionedTerrainAltitude(const FVector& Direction, const FVoxelNoiseParams& NoiseParams,
-	const TArray<FVoxelConditioningZone>& Zones) const
+	const FVoxelConditioning& Conditioning) const
 {
 	const float Natural = GetTerrainAltitude(Direction, NoiseParams);
-	return Zones.Num() > 0 ? FVoxelTerrainConditioning::ApplyToAltitude(Direction, PlanetParams.PlanetRadius, Natural, Zones) : Natural;
+	return !Conditioning.IsEmpty() ? Conditioning.ApplyToAltitude(Direction, PlanetParams.PlanetRadius, Natural) : Natural;
 }
 
 float FSphericalPlanetWorldMode::GetDensityAt(

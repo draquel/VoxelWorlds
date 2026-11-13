@@ -11,7 +11,7 @@
 class IVoxelWorldMode;
 class UVoxelCaveConfiguration;
 class FVoxelMaterialTable;
-struct FVoxelConditioningZone;
+struct FVoxelConditioning;
 
 /**
  * Global signals used to classify extracted surface points as underground / underwater — the things a
@@ -49,15 +49,15 @@ struct FScatterExtractionContext
 	 */
 	FVoxelSeaSurface Sea;
 	/**
-	 * The terrain conditioning zones over the chunk (POI pads and their falloff rings), so the analytic surface the
+	 * The terrain conditioning over the chunk (POI pads and their falloff rings), so the analytic surface the
 	 * extractors compare with is the generated ground, not the natural one. Heightmap worlds: the buried-chunk test
-	 * compares the chunk's top with the natural height plus these zones (FVoxelTerrainConditioning::ApplyToHeight;
+	 * compares the chunk's top with the natural height plus this conditioning (FVoxelConditioning::ApplyToHeight;
 	 * world modes review G23). Planets (spherical SP-B10): the voxels past a chunk's +X, +Y and +Z faces
 	 * (GetVoxelOutsideChunk) are generated on the flattened ground (ApplyToAltitude). Each kind of zone applies only
 	 * in its own kind of world.
 	 * Null or empty: the world mode's natural surface.
 	 */
-	TSharedPtr<const TArray<FVoxelConditioningZone>> ConditioningZones;
+	TSharedPtr<const FVoxelConditioning> Conditioning;
 
 	/**
 	 * The world's cave configuration when its caves are on, so the voxels a chunk's extraction reads past its own data are
@@ -90,7 +90,7 @@ struct FScatterExtractionContext
 
 	/**
 	 * Heightmap worlds: the generated terrain height at a world X,Y, the world mode's natural height with
-	 * ConditioningZones layered on as the generator does. Requires a heightmap WorldMode.
+	 * Conditioning layered on as the generator does. Requires a heightmap WorldMode.
 	 * @param WorldX World X
 	 * @param WorldY World Y
 	 * @return The generated surface's world Z

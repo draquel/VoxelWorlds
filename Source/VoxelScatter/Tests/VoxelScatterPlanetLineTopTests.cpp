@@ -84,7 +84,7 @@ namespace VoxelScatterLineTopTestUtils
 
 	/** A CPU-generated planet chunk with its edit layer merged in, as the chunk manager hands scatter its voxels. */
 	TArray<FVoxelData> GenerateChunk(FVoxelCPUNoiseGenerator& Generator, const UVoxelWorldConfiguration* Config, const FIntVector& Coord,
-		const TArray<FVoxelConditioningZone>& Zones, const FChunkEditLayer* Layer)
+		const FVoxelConditioning& Zones, const FChunkEditLayer* Layer)
 	{
 		FVoxelNoiseGenerationRequest Request;
 		Request.ChunkCoord = Coord;
@@ -92,7 +92,7 @@ namespace VoxelScatterLineTopTestUtils
 		Request.VoxelSize = VoxelSize;
 		Request.NoiseParams = Config->NoiseParams;
 		FVoxelWorldModeFactory::FillGenerationRequest(*Config, Request);
-		Request.ConditioningZones = Zones;
+		Request.Conditioning = Zones;
 		TArray<FVoxelData> Voxels;
 		Generator.GenerateChunkCPU(Request, Voxels);
 		if (Layer)
@@ -145,7 +145,7 @@ namespace VoxelScatterLineTopTestUtils
 	 * all-air shell.
 	 */
 	TArray<FChunkPoints> ExtractChunks(const UVoxelWorldConfiguration* Config, const IVoxelWorldMode& Mode, const TArray<FIntVector>& Coords,
-		const TArray<FVoxelConditioningZone>& GenerationZones, const TArray<FVoxelConditioningZone>& ContextZones,
+		const FVoxelConditioning& GenerationZones, const FVoxelConditioning& ContextZones,
 		const TMap<FIntVector, FChunkEditLayer>& Edits, EVoxelAbove Above)
 	{
 		FVoxelCPUNoiseGenerator Generator;
@@ -157,9 +157,9 @@ namespace VoxelScatterLineTopTestUtils
 			Context.WorldMode = &Mode;
 			Context.NoiseParams = Config->NoiseParams;
 			Context.Sea = FVoxelSeaSurface::FromConfig(*Config);
-			if (ContextZones.Num() > 0)
+			if (!ContextZones.IsEmpty())
 			{
-				Context.ConditioningZones = MakeShared<const TArray<FVoxelConditioningZone>>(ContextZones);
+				Context.Conditioning = MakeShared<const FVoxelConditioning>(ContextZones);
 			}
 			Context.OutsideEdits = Above == EVoxelAbove::AllAir
 				? AllAirTouching()
@@ -412,7 +412,7 @@ namespace VoxelScatterLineTopTestUtils
 	TArray<FChunkPoints> ExtractPad(const UVoxelWorldConfiguration* Config, const IVoxelWorldMode& Mode, const FVoxelConditioningZone& Pad,
 		const TMap<FIntVector, FChunkEditLayer>& Edits, EVoxelAbove Above, bool bEditsInContext = true)
 	{
-		const TArray<FVoxelConditioningZone> Zones = { Pad };
+		const FVoxelConditioning Zones = FVoxelConditioning::OfZones({ Pad });
 		if (bEditsInContext)
 		{
 			return ExtractChunks(Config, Mode, TArray<FIntVector>(PadChunks, UE_ARRAY_COUNT(PadChunks)), Zones, Zones, Edits, Above);
@@ -701,7 +701,7 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 	{
 		FVoxelCPUNoiseGenerator Generator;
 		Generator.Initialize();
-		const TArray<FVoxelConditioningZone> NoZones;
+		const FVoxelConditioning NoZones;
 		for (const TPair<const TCHAR*, FVector>& Site : Sites())
 		{
 			const FVoxelTerrainSurfacePoint SiteSurface = Mode->GetSurfacePoint(Config->WorldOrigin + Site.Value, Config->NoiseParams);
@@ -822,7 +822,7 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 		TMap<FIntVector, TArray<FVoxelData>> Voxels;
 		for (const FIntVector& Coord : PadChunks)
 		{
-			Voxels.Add(Coord, GenerateChunk(Generator, Config, Coord, { Pad }, Edits.Find(Coord)));
+			Voxels.Add(Coord, GenerateChunk(Generator, Config, Coord, FVoxelConditioning::OfZones({ Pad }), Edits.Find(Coord)));
 		}
 		Generator.Shutdown();
 		return Voxels;
@@ -876,13 +876,13 @@ bool FVoxelScatterPlanetLineTopEditsTest::RunTest(const FString& Parameters)
 		const FIntVector Lower(0, 0, LowerLayer);
 		FVoxelCPUNoiseGenerator Generator;
 		Generator.Initialize();
-		const TArray<FVoxelData> LowerVoxels = GenerateChunk(Generator, Config, Lower, { Pad }, nullptr);
+		const TArray<FVoxelData> LowerVoxels = GenerateChunk(Generator, Config, Lower, FVoxelConditioning::OfZones({ Pad }), nullptr);
 		Generator.Shutdown();
 		for (const bool bSource : { true, false })
 		{
 			FPlanetHarness Harness(Config);
 			Harness.Manager->SetWorldMode(Mode);
-			Harness.Manager->SetConditioningGatherer([&Pad](const FBox&, TArray<FVoxelConditioningZone>& OutZones) { OutZones.Add(Pad); });
+			Harness.Manager->SetConditioningGatherer([&Pad](const FBox&, FVoxelConditioning& Out) { Out.Zones.Add(Pad); });
 			if (bSource)
 			{
 				Harness.Manager->SetEditLayerSource([&Dig](const FIntVector& ChunkCoord) { return Dig.Find(ChunkCoord); });

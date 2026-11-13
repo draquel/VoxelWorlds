@@ -286,12 +286,13 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 			Sites.Num(), MinX, MaxX, MinY, MaxY));
 	}
 
-	// The conditioning zones over the bounds (POI pads and their falloff rings, SP-B10): the far points stand on the
-	// generated ground, as the near band's loaded voxels do (world modes review G23).
-	TArray<FVoxelConditioningZone> Zones;
+	// The conditioning over the bounds (POI pads and their falloff rings, SP-B10): the far points stand on the
+	// generated ground, as the near band's loaded voxels do (world modes review G23). Complete: the points must agree
+	// with the voxels generated there, and nothing runs the sampler again when a line arrives later.
+	FVoxelConditioning Conditioning;
 	if (VoxelCtx.ChunkManager)
 	{
-		VoxelCtx.ChunkManager->GatherConditioningZones(Bounds, Zones);
+		VoxelCtx.ChunkManager->GatherConditioning(Bounds, EVoxelConditioningGather::Complete, Conditioning);
 	}
 
 	Transforms.Reserve(Sites.Num());
@@ -307,7 +308,7 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 		if (!bNear)
 		{
 			Sample = FVoxelSurfaceQuery::SampleSurfacePoint(*VoxelCtx.WorldMode, Site.Query, VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
-				BiomeSnapshot, VoxelCtx.Sea, &Zones);
+				BiomeSnapshot, VoxelCtx.Sea, &Conditioning);
 		}
 		if (bClipToBounds && !Bounds.IsInsideOrOn(Sample.Position))
 		{

@@ -395,7 +395,7 @@ bool FVoxelGPUvsCPUMaterialParityTest::RunTest(const FString& Parameters)
 	Request.bEnableBiomes = true;
 	Request.BiomeConfiguration = BiomeConfig;
 	// Conditioning zone overlapping the chunk (exercise the GPU height-flatten before the SDF).
-	Request.ConditioningZones.Add(FVoxelConditioningZone(FVector2D(4800.0, 1600.0), 800.0f, 1200.0f, 500.0f, 1.0f));
+	Request.Conditioning.Zones.Add(FVoxelConditioningZone(FVector2D(4800.0, 1600.0), 800.0f, 1200.0f, 500.0f, 1.0f));
 
 	// Density near-identical (Phase A). Material/biome/meta exact except at density boundaries; when the
 	// density is identical, material must match almost exactly (isolates logic errors from FP boundaries).
@@ -1230,7 +1230,7 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 		FString Name;
 		FIntVector Chunk;
 		/** Planet conditioning zones on the request (spherical Phase 5, SP-B10); none for the earlier sites. */
-		TArray<FVoxelConditioningZone> Zones;
+		FVoxelConditioning Zones;
 	};
 	TArray<FSite> Sites;
 
@@ -1413,7 +1413,7 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 		{
 			const FVector Dir = Pad.Direction;
 			const float Target = Planet.GetTerrainAltitude(Dir, Config->NoiseParams) + Pad.Shift;
-			const TArray<FVoxelConditioningZone> Zones = { FVoxelConditioningZone::MakeRadial(Dir, Inner, Falloff, Target) };
+			const FVoxelConditioning Zones = FVoxelConditioning::OfZones({ FVoxelConditioningZone::MakeRadial(Dir, Inner, Falloff, Target) });
 			Sites.Add({ Pad.Key, ChunkAt(Origin + Dir * (Radius + Target)), Zones });
 			const FVector RingDir = AlongSurface(Dir, FVector::CrossProduct(FVector(0, 0, 1), Dir).IsNearlyZero() ? FVector(1, 0, 0) : FVector::CrossProduct(FVector(0, 0, 1), Dir), Inner + 0.5 * Falloff);
 			const float RingAltitude = FMath::Lerp(Planet.GetTerrainAltitude(RingDir, Config->NoiseParams), Target, 0.5f);
@@ -1447,7 +1447,7 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 	{
 		const FString Label = FString::Printf(TEXT("Planet %s"), *Site.Name);
 		FVoxelNoiseGenerationRequest Request = MakeRequest(Site.Chunk);
-		Request.ConditioningZones = Site.Zones;
+		Request.Conditioning = Site.Zones;
 		if (!VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Request, *Label, PlanetThresholds))
 		{
 			bAllPass = false;
@@ -1516,10 +1516,10 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 		};
 		FVoxelCPUNoiseGenerator LCPU;
 		LCPU.Initialize();
-		auto LCount = [&](const FIntVector& Chunk, const TArray<FVoxelConditioningZone>& Zones = TArray<FVoxelConditioningZone>())
+		auto LCount = [&](const FIntVector& Chunk, const FVoxelConditioning& Zones = FVoxelConditioning())
 		{
 			FVoxelNoiseGenerationRequest Request = MakeLRequest(Chunk);
-			Request.ConditioningZones = Zones;
+			Request.Conditioning = Zones;
 			TArray<FVoxelData> Data;
 			LCPU.GenerateChunkCPU(Request, Data);
 			return Count(Data);
@@ -1547,7 +1547,7 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 		{
 			const FVector Dir = LatLonDirection(45.0, 3.0);
 			const float Target = LPlanet.GetTerrainAltitude(Dir, LConfig->NoiseParams) + 300.0f;
-			const TArray<FVoxelConditioningZone> Zones = { FVoxelConditioningZone::MakeRadial(Dir, 1500.0f, 1000.0f, Target) };
+			const FVoxelConditioning Zones = FVoxelConditioning::OfZones({ FVoxelConditioningZone::MakeRadial(Dir, 1500.0f, 1000.0f, Target) });
 			LSites.Add({ TEXT("L Pad raised at latitude 45"), LChunkAt(LOrigin + Dir * (RL + Target)), Zones });
 			const FVector Tangent = FVector::CrossProduct(FVector(0, 0, 1), Dir).GetSafeNormal();
 			const FVector RingDir = (Dir * FMath::Cos(2000.0 / RL) + Tangent * FMath::Sin(2000.0 / RL)).GetSafeNormal();
@@ -1602,7 +1602,7 @@ bool FVoxelGPUvsCPUSphericalParityTest::RunTest(const FString& Parameters)
 		{
 			const FString Label = FString::Printf(TEXT("Planet %s"), *Site.Name);
 			FVoxelNoiseGenerationRequest Request = MakeLRequest(Site.Chunk);
-			Request.ConditioningZones = Site.Zones;
+			Request.Conditioning = Site.Zones;
 			if (!VoxelParityHarness::RunGpuCpuParity(*this, LGPU, Request, *Label, PlanetThresholds))
 			{
 				bAllPass = false;

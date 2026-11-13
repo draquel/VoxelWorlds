@@ -41,7 +41,7 @@ namespace VoxelFarFieldMaterialTestUtils
 		TSharedPtr<IVoxelWorldMode> Mode;
 		TSharedPtr<const FVoxelFarFieldSurface> Surface;
 		FVoxelFarFieldSettings Settings;
-		const TArray<FVoxelConditioningZone> NoZones;
+		const FVoxelConditioning NoZones;
 
 		FRig()
 		{

@@ -179,19 +179,19 @@ FVoxelMapTileSample FVoxelMapTileFrame::SampleAt(FIntPoint Tile, int32 GX, int32
 }
 
 float FVoxelMapTileFrame::Altitude(const IVoxelWorldMode& WorldMode, const FVoxelMapTileSample& Sample, const FVoxelNoiseParams& NoiseParams,
-	const TArray<FVoxelConditioningZone>& Zones) const
+	const FVoxelConditioning& Conditioning) const
 {
 	if (bPlanet)
 	{
-		return static_cast<const FSphericalPlanetWorldMode&>(WorldMode).GetConditionedTerrainAltitude(Sample.Direction, NoiseParams, Zones);
+		return static_cast<const FSphericalPlanetWorldMode&>(WorldMode).GetConditionedTerrainAltitude(Sample.Direction, NoiseParams, Conditioning);
 	}
 	// TRUE generated surface height: the standalone mode carries a value-captured biome snapshot, so this applies the same
 	// continentalness modulation (offset + height-scale) and per-mode composition (e.g. IslandBowl falloff) as chunk
 	// generation.
 	float Height = static_cast<float>(WorldMode.GetSurfaceOnUpLine(FVector(Sample.X, Sample.Y, 0.0), NoiseParams).Position.Z);
-	if (Zones.Num() > 0)
+	if (!Conditioning.IsEmpty())
 	{
-		Height = FVoxelTerrainConditioning::ApplyToHeight(Sample.X, Sample.Y, Height, Zones);
+		Height = Conditioning.ApplyToHeight(Sample.X, Sample.Y, Height);
 	}
 	return Height;
 }
@@ -299,12 +299,13 @@ void FVoxelMapTileFrame::ApronPixel(FIntPoint Tile, int32 GX, int32 GY, const FV
 	OutPY = PY - DY * Resolution;
 }
 
-void FVoxelMapTileFrame::GatherZones(const UVoxelChunkManager& ChunkManager, FIntPoint Tile, TArray<FVoxelConditioningZone>& OutZones) const
+void FVoxelMapTileFrame::GatherConditioning(const UVoxelChunkManager& ChunkManager, FIntPoint Tile, FVoxelConditioning& Out) const
 {
 	if (bPlanet)
 	{
 		// The tile's cap: its centre's direction and 1.5 tile widths of angle (spherical SP-B10).
-		ChunkManager.GatherConditioningZonesOnSphere(Grid.CellCentreDirection(Tile), 1.5 * GetTileWorldSize() / FMath::Max(Radius, 1.0), OutZones);
+		ChunkManager.GatherConditioningOnSphere(Grid.CellCentreDirection(Tile), 1.5 * GetTileWorldSize() / FMath::Max(Radius, 1.0),
+			EVoxelConditioningGather::Ready, Out);
 		return;
 	}
 	// The tile and its 1-voxel apron.
@@ -312,7 +313,7 @@ void FVoxelMapTileFrame::GatherZones(const UVoxelChunkManager& ChunkManager, FIn
 		(Tile.X * ChunkSize - 1) * VoxelSize + WorldOrigin.X,
 		(Tile.Y * ChunkSize - 1) * VoxelSize + WorldOrigin.Y);
 	const FVector2D TileMax = TileMin + FVector2D((ChunkSize + 2) * VoxelSize);
-	ChunkManager.GatherConditioningZones(FBox2D(TileMin, TileMax), OutZones);
+	ChunkManager.GatherConditioning(FBox2D(TileMin, TileMax), EVoxelConditioningGather::Ready, Out);
 }
 
 // ---------------------------------------------------------------------------
@@ -556,11 +557,11 @@ void FVoxelMapTileFrame::SourcePixel(const FVoxelMapTileId& Id, int32 GX, int32 
 	OutPY = static_cast<int32>(PY - TY * Res);
 }
 
-void FVoxelMapTileFrame::GatherZones(const UVoxelChunkManager& ChunkManager, const FVoxelMapTileId& Id, TArray<FVoxelConditioningZone>& OutZones) const
+void FVoxelMapTileFrame::GatherConditioning(const UVoxelChunkManager& ChunkManager, const FVoxelMapTileId& Id, FVoxelConditioning& Out) const
 {
 	if (Id.Level == 0)
 	{
-		GatherZones(ChunkManager, Id.Coord, OutZones);
+		GatherConditioning(ChunkManager, Id.Coord, Out);
 		return;
 	}
 	const double Scale = static_cast<double>(1 << Id.Level);
@@ -568,7 +569,8 @@ void FVoxelMapTileFrame::GatherZones(const UVoxelChunkManager& ChunkManager, con
 	{
 		// The tile's cap: its centre's direction and 1.5 of its widths of angle.
 		const FVector Centre = Grid.DirectionAt(FirstLevel0Tile(Id), 0.5 * Scale, 0.5 * Scale);
-		ChunkManager.GatherConditioningZonesOnSphere(Centre, 1.5 * Scale * GetTileWorldSize() / FMath::Max(Radius, 1.0), OutZones);
+		ChunkManager.GatherConditioningOnSphere(Centre, 1.5 * Scale * GetTileWorldSize() / FMath::Max(Radius, 1.0),
+			EVoxelConditioningGather::Ready, Out);
 		return;
 	}
 	// The tile and its one-pixel apron.
@@ -576,5 +578,5 @@ void FVoxelMapTileFrame::GatherZones(const UVoxelChunkManager& ChunkManager, con
 		(static_cast<double>(Id.Coord.X) * ChunkSize - 1.0) * Scale * VoxelSize + WorldOrigin.X,
 		(static_cast<double>(Id.Coord.Y) * ChunkSize - 1.0) * Scale * VoxelSize + WorldOrigin.Y);
 	const FVector2D TileMax = TileMin + FVector2D((ChunkSize + 2) * Scale * VoxelSize);
-	ChunkManager.GatherConditioningZones(FBox2D(TileMin, TileMax), OutZones);
+	ChunkManager.GatherConditioning(FBox2D(TileMin, TileMax), EVoxelConditioningGather::Ready, Out);
 }

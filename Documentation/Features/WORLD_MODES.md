@@ -67,6 +67,23 @@ zones applied, block tops on a block world), `QueryEditMergedSurfacePoint` (the 
 local up in every mode. `FVoxelSurfaceQuery` answers the same without a chunk manager (`SampleSurfacePoint`, the
 conditions at the surface).
 
+**The conditioning at a place.** What turns the natural surface into the generated one travels as one value,
+`FVoxelConditioning` (`VoxelGeneration/Public/VoxelTerrainConditioning.h`): the conditioning zones there (`Zones`, in
+the order they are applied) and the conditioning lines there (`Lines`, shared references). A generation request carries
+it (`FVoxelNoiseGenerationRequest::Conditioning`), and every reader of the generated surface takes it and asks it for
+the height on a heightmap world (`ApplyToHeight`) or the altitude on a planet (`ApplyToAltitude`); none takes a list of
+zones, so a new shape adds no parameter anywhere. The chunk manager fills it: `GatherConditioning` for an XY region or
+a world box, `GatherConditioningOnSphere` for a cap, from its sources (`FVoxelConditioningSources`: the zones added
+with `AddConditioningZone` and the game's `IVoxelTerrainConditioner`). Each gather states what it is for
+(`EVoxelConditioningGather`): `Complete` for a chunk's generation request, a point query, a chunk's scatter and the PCG
+sampler, which must agree with the generated voxels and so take every line (a conditioner may compute one then and
+there); `Ready` for the far field and the map, whose regions are too wide to wait for a line, and which draw again
+when the conditioning changes (`OnTerrainConditioningChanged`). Zones are always complete. A conditioner supplies zones
+through `GatherConditioning` and `GatherConditioningOnSphere` and lines through `GatherConditioningLines` and
+`GatherConditioningLinesOnSphere`, which default to none. The line itself (`FVoxelConditioningLine`) is declared and
+nothing more: it has no vertices, nothing makes one and nothing evaluates one, so every world generates what its zones
+alone make (`Documentation/TERRAIN_LINES_PLAN.md` at the project root, phase L1; the line arrives with L2).
+
 In the heightmap modes `QueryEditMergedSurfacePoint` reads the edit-merged voxels on the voxel grid: voxel g holds the
 density at `WorldOrigin + g * VoxelSize`, where the generator samples it and the meshers place it. The query takes the
 four grid columns around (X, Y), one chunk under the generated estimate to one above, finds each column's top crossing
@@ -309,7 +326,7 @@ Voxel tree injection never runs on a planet (cubic only).
 
 | System | On a planet | Where |
 |--------|-------------|-------|
-| Conditioning zones | A planet zone is a cap on the datum sphere: `FVoxelConditioningZone::Direction` (zero = a heightmap zone), `InnerRadius` and `FalloffWidth` as great-circle distances, `TargetHeight` an altitude, weighted with the heightmap's smoothstep (`GetWeightAtDirection`) and blended into the terrain's altitude along each direction (`FVoxelTerrainConditioning::ApplyToAltitude`) on the CPU and the GPU (`PlanetApplyConditioning`). The chunk manager gathers a chunk's zones by the cap its box subtends (`GatherConditioningZones` with a box, `GetPlanetCapOfBox`); conditioners answer `IVoxelTerrainConditioner::GatherConditioningOnSphere`. A zone of the other kind does nothing (with a warning) | `VoxelGeneration/VoxelTerrainConditioning.h`, `SphericalPlanet.ush` |
+| Conditioning zones | A planet zone is a cap on the datum sphere: `FVoxelConditioningZone::Direction` (zero = a heightmap zone), `InnerRadius` and `FalloffWidth` as great-circle distances, `TargetHeight` an altitude, weighted with the heightmap's smoothstep (`GetWeightAtDirection`) and blended into the terrain's altitude along each direction (`FVoxelConditioning::ApplyToAltitude`) on the CPU and the GPU (`PlanetApplyConditioning`). The chunk manager gathers a chunk's conditioning by the cap its box subtends (`GatherConditioning` with a box, `GetPlanetCapOfBox`); conditioners answer `IVoxelTerrainConditioner::GatherConditioningOnSphere`. A zone of the other kind does nothing (with a warning) | `VoxelGeneration/VoxelTerrainConditioning.h`, `SphericalPlanet.ush` |
 | The generated surface | The natural surface plus the zones: `UVoxelChunkManager::GetGeneratedSurfacePoint`, the start of `QueryEditMergedSurfacePoint`'s walk, the spawn, the map's planet tiles, scatter's ray tops, PCG's far points; `GetSurfacePointAt` stays the natural surface | `VoxelChunkManager` |
 | POIs | Placed on the cube-sphere grid's cells (`FPOIPlacement::GeneratePlanetPOIs`: the site survey on the tangent plane in altitudes, the sea's altitude as the water line); each POI has a pad space, the tangent frame at its centre (x east, y north, z local up), in which its claims, structures and dungeon are composed with the plane's arithmetic; structures are draped onto the pad's cap; streaming, `poi.Find` and the map markers by 3D distance | `VoxelWorldPOI` |
 | Campsites | Generated campsites stand on the draped pad and respawn the player along their own up | `VoxelWorldPOI` |

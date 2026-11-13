@@ -254,7 +254,7 @@ layers, `SetEditLayerSource`). Tests can supply the neighbours' real voxels inst
 
 What that rule fixed:
 - **The generated surface, not the natural one** (G23). A buried chunk's test and the planet's outside voxels use the
-  ground generation makes, POI pads and their falloff rings included (`ConditioningZones`, gathered by the chunk manager,
+  ground generation makes, POI pads and their falloff rings included (`Conditioning`, gathered by the chunk manager,
   `SetConditioningGatherer`). Before, a pad cut below a chunk's top left its ground points underground, and the chunk
   under a raised pad read as open surface.
 - **The voxel over a heightmap chunk's top layer** (G26, G28). Solid, the chunk's top voxel is no surface (the chunk above

@@ -72,28 +72,28 @@ namespace VoxelScatterConditioningTestUtils
 	/** A pad raised over the slope (natural -20,400..-15,600 under it) to -15,000, inside chunk layer -5. */
 	FVoxelConditioningZone FillZone() { return FVoxelConditioningZone(FVector2D(-30000.0, 0.0), 4000.0f, 6000.0f, -15000.0f, 1.0f); }
 
-	float GeneratedHeight(double X, double Y, const TArray<FVoxelConditioningZone>& Zones)
+	float GeneratedHeight(double X, double Y, const FVoxelConditioning& Zones)
 	{
-		return FVoxelTerrainConditioning::ApplyToHeight(X, Y, Slope * static_cast<float>(X), Zones);
+		return Zones.ApplyToHeight(X, Y, Slope * static_cast<float>(X));
 	}
 
 	FVector ChunkOrigin(const FIntVector& Coord) { return FVector(Coord) * ChunkWorldSize; }
 
 	/** A chunk generated from the generated height, as the heightmap generator's SDF makes it (grass, no caves). */
-	TArray<FVoxelData> MakeChunk(const FIntVector& Coord, const TArray<FVoxelConditioningZone>& Zones)
+	TArray<FVoxelData> MakeChunk(const FIntVector& Coord, const FVoxelConditioning& Zones)
 	{
 		return MakeHeightmapChunk(ChunkOrigin(Coord), ChunkSize, VoxelSize,
 			[&Zones](double X, double Y) { return GeneratedHeight(X, Y, Zones); },
 			[](int32, int32) { return static_cast<uint8>(EVoxelMaterial::Grass); });
 	}
 
-	FScatterExtractionContext MakeContext(const IVoxelWorldMode& Mode, const TArray<FVoxelConditioningZone>* Zones)
+	FScatterExtractionContext MakeContext(const IVoxelWorldMode& Mode, const FVoxelConditioning* Zones)
 	{
 		FScatterExtractionContext Context;
 		Context.WorldMode = &Mode;
 		if (Zones)
 		{
-			Context.ConditioningZones = MakeShared<const TArray<FVoxelConditioningZone>>(*Zones);
+			Context.Conditioning = MakeShared<const FVoxelConditioning>(*Zones);
 		}
 		return Context;
 	}
@@ -113,7 +113,7 @@ namespace VoxelScatterConditioningTestUtils
 	}
 
 	/** The chunks of a zone's footprint: every column under it, the layers from below the lower of the two heights to above the higher. */
-	TArray<FIntVector> FootprintChunks(const FVoxelConditioningZone& Zone, const TArray<FVoxelConditioningZone>& Zones)
+	TArray<FIntVector> FootprintChunks(const FVoxelConditioningZone& Zone, const FVoxelConditioning& Zones)
 	{
 		const double Reach = Zone.InnerRadius + Zone.FalloffWidth;
 		const int32 MinX = FMath::FloorToInt((Zone.Center.X - Reach) / ChunkWorldSize);
@@ -186,10 +186,10 @@ bool FVoxelScatterConditionedCutTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelScatterConditioningTestUtils;
 	const FSlopeWorldMode Mode;
-	const TArray<FVoxelConditioningZone> Zones = { CutZone() };
+	const FVoxelConditioning Zones = FVoxelConditioning::OfZones({ CutZone() });
 	const FScatterExtractionContext Generated = MakeContext(Mode, &Zones);
 	const FScatterExtractionContext Natural = MakeContext(Mode, nullptr);
-	const TArray<FIntVector> Chunks = FootprintChunks(Zones[0], Zones);
+	const TArray<FIntVector> Chunks = FootprintChunks(Zones.Zones[0], Zones);
 
 	for (const EPath Path : { EPath::Column, EPath::Cubic })
 	{
@@ -243,7 +243,7 @@ bool FVoxelScatterConditionedFillTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelScatterConditioningTestUtils;
 	const FSlopeWorldMode Mode;
-	const TArray<FVoxelConditioningZone> Zones = { FillZone() };
+	const FVoxelConditioning Zones = FVoxelConditioning::OfZones({ FillZone() });
 	const FScatterExtractionContext Generated = MakeContext(Mode, &Zones);
 	const FScatterExtractionContext Natural = MakeContext(Mode, nullptr);
 
@@ -307,7 +307,7 @@ bool FVoxelScatterConditioningWiringTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelScatterConditioningTestUtils;
 	const TSharedRef<const FSlopeWorldMode> Mode = MakeShared<FSlopeWorldMode>();
-	const TArray<FVoxelConditioningZone> Zones = { CutZone() };
+	const FVoxelConditioning Zones = FVoxelConditioning::OfZones({ CutZone() });
 
 	// X 6,400-9,600 under the cut: the pad (X <= 9,000, ground 3,000) and the ring's first 600 uu (ground <= ~3,080) lie in
 	// layer 0 ([0, 3,200]); the natural height, 3,840-5,760, puts its top 490-2,410 uu below the old test's line.
@@ -321,13 +321,13 @@ bool FVoxelScatterConditioningWiringTest::RunTest(const FString& Parameters)
 		if (bGatherer)
 		{
 			// What the chunk manager installs (its region gather over the chunk's XY footprint).
-			Harness.Manager->SetConditioningGatherer([&Zones](const FBox& ChunkBox, TArray<FVoxelConditioningZone>& OutZones)
+			Harness.Manager->SetConditioningGatherer([&Zones](const FBox& ChunkBox, FVoxelConditioning& Out)
 			{
-				for (const FVoxelConditioningZone& Zone : Zones)
+				for (const FVoxelConditioningZone& Zone : Zones.Zones)
 				{
 					if (Zone.GetBounds2D().Intersect(FBox2D(FVector2D(ChunkBox.Min.X, ChunkBox.Min.Y), FVector2D(ChunkBox.Max.X, ChunkBox.Max.Y))))
 					{
-						OutZones.Add(Zone);
+						Out.Zones.Add(Zone);
 					}
 				}
 			});
