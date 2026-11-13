@@ -1,6 +1,7 @@
 # Water System Architecture
 
-> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-13 (the water plan's W1: the material paragraphs; the rest as of code review CR5, 2026-11-02).
+> Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelCore (flags, the sea), VoxelGeneration (fill pass), VoxelMeshing (water mesher), VoxelStreaming (propagation, tiles, the far ocean), VoxelRendering (rendering)
 
@@ -31,7 +32,7 @@ The water system renders water surfaces where water-flagged air voxels exist in 
 - 2D tile-based water meshing (decoupled from 3D terrain chunks)
 - 3-cell dilation at shorelines to tuck water under terrain
 - Greedy rectangle merging for minimal quad count
-- Separate water material (translucent / Single Layer Water)
+- Separate water material (Single Layer Water; a translucent one draws too)
 
 ---
 
@@ -41,7 +42,7 @@ The water system renders water surfaces where water-flagged air voxels exist in 
 UVoxelWorldConfiguration
     ├── bEnableWaterLevel
     ├── WaterLevel (world Z height)
-    └── WaterMeshMaterial (translucent/SLW material)
+    └── WaterMeshMaterial (a Single Layer Water material)
 
 FVoxelData::Metadata (per-voxel)
     └── Bit 4: VOXEL_FLAG_WATER
@@ -258,8 +259,9 @@ map and the PCG sampler read it too.
 sphere (32 to 160 quads along a face edge; 160 on the 250,000 uu review planet, 153,600 quads), UVs in voxels along
 each face (as the tiles count voxels), the water material id in UV1, drawn with `WaterMeshMaterial`. Two sections: the
 top faces outward and always shows; the underside faces inward and shows only while the viewer is inside the sea radius
-(the far ocean's rule). With a one-sided material no ray meets the shell twice from either side, so it needs no sorting
-and no rebuild. `voxel.World.PlanetOcean 0` hides it. Where the analytic sea passes through dry ground (a cave below
+(the far ocean's rule). The underside keeps the top's outward normal, so a material tells "seen from below" by the view
+direction against that normal, as it does on a tile's back face; no ray meets the shell twice from either side, so it
+needs no sorting and no rebuild. `voxel.World.PlanetOcean 0` hides it. Where the analytic sea passes through dry ground (a cave below
 sea level), the shell shows there too: it is a sphere, not a per-chunk surface.
 
 **The far field's sea (spherical Phase 6, WM-BP9).** Where the shell's 160 quads a face edge would sag more than 8 uu
@@ -463,10 +465,12 @@ FMaterialRelevance WaterMaterialRelevance;
 **GetDynamicMeshElements**: After the terrain chunk loop, a second pass iterates `WaterTileRenderData` using the water material proxy:
 - Same frustum culling as terrain
 - `MeshBatch.CastShadow = false` (water doesn't cast shadows)
-- `MeshBatch.bUseAsOccluder = false` (water is translucent)
+- `MeshBatch.bUseAsOccluder = false` (what is under the water shows through it)
 - Counts toward the same mesh batch limit (`MaxMeshBatchesPerFrame`, 2,000)
 
-**GetViewRelevance**: Water material relevance is OR'd with terrain relevance so the scene proxy correctly reports translucency support.
+**GetViewRelevance**: Water material relevance is OR'd with terrain relevance, so the scene proxy reports what the water
+material needs: the Single Layer Water pass for such a material, the translucent pass for a translucent one. Nothing is
+set by hand, and the water batch needs nothing of its own.
 
 **Buffer creation**: Water vertices go through the same `FVoxelVertex → FVoxelLocalVertex` conversion pipeline as terrain, creating identical GPU buffer structures (the vertex stream, the positions alone under manual vertex fetch (G120), color SRV, tangent SRV, texcoord SRV, index buffer, FLocalVertexFactory).
 
@@ -479,27 +483,54 @@ FMaterialRelevance WaterMaterialRelevance;
 | `bEnableWaterLevel` | bool | false | Master toggle for the water system |
 | `WaterLevel` | float | 0.0 | Water surface Z height (InfinitePlane/IslandBowl modes) |
 | `WaterRadius` | float | 100000.0 | Water sphere radius (SphericalPlanet mode): the sea for generation and gameplay, and the sea sphere's radius |
-| `WaterMeshMaterial` | UMaterialInterface* | nullptr | Material for water tile rendering (should be translucent or Single Layer Water) |
+| `WaterMeshMaterial` | UMaterialInterface* | nullptr | Material for every sea surface the engine draws: the tiles, the far-field sea, the island's far ocean, a planet's ocean shell (Single Layer Water, or translucent) |
 
 ### Material Requirements
 
-The `WaterMeshMaterial` should be:
-- **Single Layer Water** shader model (preferred) — for realistic water rendering with refraction
-- **Translucent** blend mode — for simple transparent water
-- Should NOT be opaque — water tiles render as a second pass and need correct translucency sorting
+The `WaterMeshMaterial` is one of:
+- **Single Layer Water** (what this project draws, the water plan's D110): blend mode Opaque, the Single Layer Water
+  shading model with its output node (absorption and scattering). It draws in the engine's water pass through the scene
+  proxy's `FLocalVertexFactory` batches and through the procedural mesh and far-field patch components alike, with no
+  code of its own (the proxy's combined relevance carries the flag).
+- **Translucent**: draws in the translucent pass; lit by the translucency volume, it reflects less, and it sorts against
+  rain and other translucent effects.
+
+What such a material can and cannot rely on here:
+
+- **The surface's normal is the up normal on every face it is seen from.** The tiles draw with back-face culling off
+  (their back faces show from below), and the far-field sea's, the far ocean's and the shell's undersides are separate
+  sections with reversed winding and the top's normal. "Seen from below" is the view direction against the vertex
+  normal, not the two-sided sign.
+- **There is no spare vertex channel.** The mesher's UV1 is dropped by `FVoxelMeshRenderer::ConvertToVoxelVertices` and
+  rebuilt on the GPU from the material id; shore distance per vertex would need a vertex format change. Scene depth
+  gives the shore per pixel: a Single Layer Water material reads the depth under the water with
+  `SceneDepthWithoutWater` (an opaque material cannot read `SceneDepth`), and may sample custom depth and custom
+  stencil, the only scene textures open to it.
+- **The opacity pin of a Single Layer Water material is its top layer's coverage.** Left unconnected the sea is an opaque
+  sheet of the base colour: foam goes in the base colour with its mask in opacity.
+- **A planet's sea is 5 x 10^6 uu from the origin** (the 50 km planet): take a texture coordinate from the world position
+  modulo a tile while it is still a large-world value (`frac(position / tile)` in graph nodes), not inside a Custom
+  node, whose inputs are single precision; and project on the three world planes by the normal, since there is no one
+  plane.
+- **Geometry stays flat** (D109): swimming, the shoreline and the underwater test read the sea's level, so a material
+  moves the normal, never the vertices.
 
 When `WaterMeshMaterial` is null no water is drawn; the game module's demo actor (`AVoxelDemoActor::bShowWaterPlane`) draws a static plane at `WaterLevel` for such a world.
 
-The demo's `M_VoxelWater` (parent content, `/Game/PluginTesting/Materials/`; rebuilt by the parent's
-`Scripts/setup_weather_materials.py` for the weather plan's P3, 2026-11-07) is translucent, surface-lit, with a
-world-space normal from a Custom node, **WindRipples**: three sine waves along and across `MPC_VoxelMaterial`'s
-`WindDirection` on the surface's own tangent plane (the mesh normal is the base, so a planet's sphere ripples too),
-their slope by `RippleStrength`, which the weather fills with its wind intensity. No texture; a calm sea is near flat,
-a storm's is choppy.
+This project's water is the parent's content: the master `M_VoxelWater` (`/Game/PluginTesting/Materials/`) and its
+instances `MI_VoxelWater_Demo`, `_Megascans` and `_Cubic` (`/Game/PluginTesting/Materials/Water/`), built by the parent's
+`Scripts/setup_water_material.py` (the water plan's W1, 2026-11-13; before it every world drew the engine's Datasmith
+`M_Water` and none the project's own, G184). Every world configuration under `/Game/PluginTesting` names an instance.
+The master: two detail normals scrolled along `MPC_VoxelMaterial`'s `WindDirection` in two cross-faded phases, their
+slope by `RippleStrength` (the weather fills both), fading with distance; shore foam from the water's depth, skipped
+over a swimmer's body by custom depth; from below, no absorption inside Snell's window and an underside colour outside
+it. The parent's `Documentation/WATER_EPIC_PLAN.md` (W1's result) has the look's parameters and the shots.
 
 ### Lumen: Translucency Reflections
 
-With Lumen and a translucent water material (the default `M_Water` is translucent, default lit), the water's reflections come
+This applies to a translucent water material only (the engine's Datasmith `M_Water`, which every world drew before the
+water plan's W1, is translucent, default lit); a Single Layer Water material takes its reflections in the water pass and
+shows no such lines. With Lumen and a translucent water material, the water's reflections come
 from Lumen's radiance cache unless front-layer translucency reflections are on. Lumen marks the probes translucent surfaces
 need in a pass at 1/`r.Lumen.TranslucencyReflections.MarkDownsampleFactor` of the screen; at the engine default (4) a sea
 seen at grazing angles skips probe cells along the view and shows thin dark lines under its horizon, at fixed screen rows,
@@ -616,11 +647,11 @@ Details, cvars (`voxel.World.FarOcean`, `voxel.World.FarOceanStats`) and the tra
 **Decision**: Water uses a dedicated material, separate from terrain.
 
 **Rationale**:
-- Water requires translucent or Single Layer Water shading
+- Water requires Single Layer Water (or translucent) shading
 - Terrain uses opaque materials with triplanar projection
 - Separate materials allow independent optimization
-- GPU renderer needs separate render passes for correct translucency sorting
-- Material relevance (opaque vs translucent) must be reported correctly to the renderer
+- The water draws in its own pass (the engine's water pass, or the translucent pass for a translucent material)
+- Material relevance (opaque, Single Layer Water, translucent) must be reported correctly to the renderer
 
 ### Why Bounded BFS Propagation?
 
