@@ -10,6 +10,7 @@
 #include "VoxelDownLines.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelNoise.h"
+#include "VoxelChunkLineSegments.h"
 #include "SphericalPlanetWorldMode.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphResources.h"
@@ -40,7 +41,7 @@ static void GetPlanetChunkAnchor(const FVoxelNoiseGenerationRequest& Request, FV
 {
 	const float Half = static_cast<float>(Request.ChunkSize / 2) * Request.VoxelSize;
 	OutLocal = FVector3f(Half, Half, Half);
-	OutRelative = (Request.GetChunkWorldPosition() - Request.SphericalPlanetParams.PlanetCenter) + FVector(OutLocal);
+	OutRelative = Request.GetPlanetAnchorRelative();
 }
 
 /**
@@ -594,7 +595,6 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	// (SphericalPlanet.ush PlanetApplyConditioning) relative to the chunk (WM-BP6): [the zone's datum point minus the
 	// anchor's, in double, InnerRadius][FalloffWidth, TargetAltitude, Strength, 0], so the shader measures a short chord.
 	// Each world mode uploads only its own kind of zone, as the CPU's ApplyToHeight / ApplyToAltitude skip the other.
-	// The request's lines are not uploaded: nothing evaluates a line, on either side.
 	const bool bPlanetZones = Request.WorldMode == EWorldMode::SphericalPlanet;
 	TArray<FVector4f> ConditioningData;
 	ConditioningData.Reserve(Request.Conditioning.Zones.Num() * 2);
@@ -620,6 +620,14 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	}
 	Parameters->ConditioningZoneCount = UploadedZones;
 	Parameters->ConditioningZoneData = CreateFloat4StructuredSRV(GraphBuilder, ConditioningData, TEXT("VoxelConditioningData"));
+
+	// Terrain conditioning lines: the chunk's segment list, the same float4s the CPU generator evaluates
+	// (FVoxelChunkLineSegments), walked by GpuApplyConditioningLines (ConditioningLines.ush) before the zones. A chunk no
+	// line reaches uploads a count of 0.
+	FVoxelChunkLineSegments LineSegments;
+	FVoxelChunkLineSegments::Build(Request, LineSegments);
+	Parameters->ConditioningLineSegmentCount = LineSegments.Num();
+	Parameters->ConditioningLineData = CreateFloat4StructuredSRV(GraphBuilder, LineSegments.Data, TEXT("VoxelConditioningLineData"));
 
 	// IslandBowl world-mode params (Phase C) — from the request; ignored by the shader unless WorldMode==IslandBowl.
 	Parameters->IslandShape = static_cast<int32>(Request.IslandParams.Shape);

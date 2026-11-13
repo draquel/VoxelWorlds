@@ -115,6 +115,9 @@ public:
 		// [CenterX,CenterY,InnerRadius,FalloffWidth][TargetHeight,Strength,0,0]
 		SHADER_PARAMETER(int32, ConditioningZoneCount)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ConditioningZoneData)
+		// The chunk's conditioning line segments (FVoxelChunkLineSegments): 4 float4s a segment, 0 for most chunks
+		SHADER_PARAMETER(int32, ConditioningLineSegmentCount)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ConditioningLineData)
 		// IslandBowl world-mode params (Phase C) — applied when WorldMode == ISLAND_BOWL (2): edge falloff
 		// on the continentalness-modulated height. IslandShape 0=circular/1=rectangle;
 		// IslandFalloffType 0=Linear/1=Smooth/2=Squared/3=Exponential.

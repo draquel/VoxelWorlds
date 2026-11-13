@@ -126,9 +126,10 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 	// ==================== Terrain Conditioning (Phase 6c) ====================
 
 	/**
-	 * The terrain conditioning over this chunk (its zones and lines) — gen-time height flattening under POIs /
-	 * claims. Gathered (game thread) by VoxelChunkManager when the request is built; applied by the
-	 * generators. Empty for most chunks (no per-chunk cost when there's no conditioning).
+	 * The terrain conditioning over this chunk (its lines and zones) — gen-time height flattening under POIs /
+	 * claims and along roads. Gathered (game thread) by VoxelChunkManager when the request is built; applied by the
+	 * generators: the lines from the chunk's segment list (FVoxelChunkLineSegments::Build), then the zones. Empty for
+	 * most chunks (no per-chunk cost when there's no conditioning).
 	 */
 	UPROPERTY()
 	FVoxelConditioning Conditioning;
@@ -142,6 +143,18 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 		// LOD only affects voxel resolution within the chunk, not chunk position
 		float ChunkWorldSize = ChunkSize * VoxelSize;
 		return WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
+	}
+
+	/**
+	 * A planet chunk's anchor relative to the planet centre, in double (spherical Phase 6, WM-BP5 / WM-BP6): the chunk's
+	 * centre, (ChunkSize / 2) x VoxelSize in on each axis. The planet shaders work in its frame (PlanetFrame.ush), and
+	 * the chunk's conditioning (zones and line segments) is stored relative to its point on the datum sphere. A centre,
+	 * not a corner, so it is never the planet centre itself (chunk corners lie on the grid through it).
+	 */
+	FVector GetPlanetAnchorRelative() const
+	{
+		const float Half = static_cast<float>(ChunkSize / 2) * VoxelSize;
+		return (GetChunkWorldPosition() - SphericalPlanetParams.PlanetCenter) + FVector(FVector3f(Half, Half, Half));
 	}
 
 	/** Get the effective voxel size at this LOD level */

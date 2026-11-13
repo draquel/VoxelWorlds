@@ -4,6 +4,7 @@
 #include "VoxelHash.h"
 #include "VoxelGeneration.h"
 #include "VoxelTerrainConditioning.h"
+#include "VoxelChunkLineSegments.h"
 #include "InfinitePlaneWorldMode.h"
 #include "IslandBowlWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
@@ -204,6 +205,19 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 		MoistureNoiseParams.Frequency = 0.00007f;
 	}
 
+	// Terrain conditioning. The lines: the chunk's segment list (the floats the GPU uploads), evaluated once per XY
+	// column here, since a line depends on (X, Y) alone and the loop below computes the height for every voxel. A chunk
+	// no line reaches pays the count test. The zones after them, per voxel as before.
+	FVoxelChunkLineColumns LineColumns;
+	if (Request.Conditioning.Lines.Num() > 0)
+	{
+		FVoxelChunkLineSegments LineSegments;
+		FVoxelChunkLineSegments::Build(Request, LineSegments);
+		LineSegments.EvaluateColumns(ChunkSize, VoxelSize, LineColumns);
+	}
+	const bool bLines = !LineColumns.IsEmpty();
+	const bool bZones = Request.Conditioning.Zones.Num() > 0;
+
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
 		for (int32 Y = 0; Y < ChunkSize; ++Y)
@@ -240,11 +254,16 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 						WorldPos.X, WorldPos.Y, TerrainHeight, *IslandParams);
 				}
 
-				// Phase 6c: blend the natural height toward the chunk's terrain conditioning
-				// (flatten under POIs / claims). Deterministic — the base terrain IS flat here.
-				if (!Request.Conditioning.IsEmpty())
+				// Phase 6c: blend the natural height toward the chunk's terrain conditioning (level along lines, flatten
+				// under POIs / claims): the lines' blends at this column, then the zones. Deterministic — the base
+				// terrain IS flat here.
+				if (bLines)
 				{
-					TerrainHeight = Request.Conditioning.ApplyToHeight(WorldPos.X, WorldPos.Y, TerrainHeight);
+					TerrainHeight = LineColumns.Apply(X + Y * ChunkSize, TerrainHeight);
+				}
+				if (bZones)
+				{
+					TerrainHeight = Request.Conditioning.ApplyZonesToHeight(WorldPos.X, WorldPos.Y, TerrainHeight);
 				}
 
 				// Calculate signed distance to surface
@@ -475,6 +494,18 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 		? FVoxelNoise::MakeFieldParams(Request.NoiseParams.Seed + BiomeConfig->MoistureSeedOffset, BiomeConfig->MoistureNoiseFrequency)
 		: FVoxelNoise::MakeFieldParams(Request.NoiseParams.Seed + 5678, 0.00007f);
 
+	// Terrain conditioning. The lines: the chunk's segment list (the floats the GPU uploads), in the frame of the chunk's
+	// anchor. A planet has no columns, so a voxel first tests the list's bounds, then walks the list. A chunk no line
+	// reaches pays the count test. The zones after them.
+	FVoxelChunkLineSegments LineSegments;
+	if (Request.Conditioning.Lines.Num() > 0)
+	{
+		FVoxelChunkLineSegments::Build(Request, LineSegments);
+	}
+	const bool bLines = LineSegments.Num() > 0;
+	const bool bZones = Request.Conditioning.Zones.Num() > 0;
+	const FVector AnchorDirection = FSphericalPlanetWorldMode::GetDirectionFromCenter(Request.GetPlanetAnchorRelative(), FVector::ZeroVector);
+
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
 		for (int32 Y = 0; Y < ChunkSize; ++Y)
@@ -500,12 +531,22 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				float TerrainAltitude = FSphericalPlanetWorldMode::SampleRadialDisplacement(
 					Direction, PlanetRadius, WorldMode.GetTerrainParams(), Request.NoiseParams, &BiomeSnapshot, &Continentalness);
 
-				// Terrain conditioning (spherical SP-B10, D15): the planet zones (caps on the datum sphere) blend the altitude
-				// along this direction toward their targets before the SDF, as the heightmap generators blend the column
-				// height, so density, depth, the underwater test, caves and materials all follow the flattened ground.
-				if (!Request.Conditioning.IsEmpty())
+				// Terrain conditioning (spherical SP-B10, D15): the planet lines, then the planet zones (caps on the datum
+				// sphere), blend the altitude along this direction toward their targets before the SDF, as the heightmap
+				// generators blend the column height, so density, depth, the underwater test, caves and materials all
+				// follow the conditioned ground. A line reads the voxel's point on the datum sphere less the anchor's,
+				// the shader's SurfaceOffset, formed in double.
+				if (bLines)
 				{
-					TerrainAltitude = Request.Conditioning.ApplyToAltitude(Direction, PlanetRadius, TerrainAltitude);
+					const FVector3f SurfaceOffset((Direction - AnchorDirection) * PlanetRadius);
+					if (LineSegments.MayReach(SurfaceOffset))
+					{
+						TerrainAltitude = LineSegments.Apply(SurfaceOffset, TerrainAltitude);
+					}
+				}
+				if (bZones)
+				{
+					TerrainAltitude = Request.Conditioning.ApplyZonesToAltitude(Direction, PlanetRadius, TerrainAltitude);
 				}
 				// The voxel's altitude above the datum, |P - C| - R in double (WM-BP4): the signed distance, the depth and
 				// the height rules all read altitudes, quantities of the relief's size, so nothing of size R cancels in

@@ -104,6 +104,9 @@ uint CaveWallMaterialID;
 float CaveWallMaterialMinDepth;
 int ConditioningZoneCount;
 StructuredBuffer<float4> ConditioningZoneData;
+// The chunk's conditioning line segments (FVoxelChunkLineSegments), 4 float4s a segment; layout in ConditioningLines.ush.
+int ConditioningLineSegmentCount;
+StructuredBuffer<float4> ConditioningLineData;
 
 // IslandBowl world-mode params (Phase C) — see IslandFalloff.ush.
 int IslandShape;
@@ -161,6 +164,7 @@ RWStructuredBuffer<uint> OutputVoxelData;
 
 // Per-voxel biome selection + material pipeline (references the biome globals declared above).
 #include "/Plugin/VoxelWorlds/Private/BiomeMaterial.ush"
+#include "/Plugin/VoxelWorlds/Private/ConditioningLines.ush"
 // The planet noise (references NoiseOrigins) and the chunk frame.
 #include "/Plugin/VoxelWorlds/Private/VoxelNoise.ush"
 #include "/Plugin/VoxelWorlds/Private/PlanetFrame.ush"
@@ -455,6 +459,11 @@ void MainCS(
         if (WorldMode == VOXELGEN_WORLD_MODE_ISLAND_BOWL)
         {
             TerrainHeight = ApplyIslandFalloffToHeight(WorldPos.x, WorldPos.y, TerrainHeight);
+        }
+        // Terrain conditioning: the lines (the chunk's segment list, in the chunk's frame), then the zones, as on the CPU.
+        if (ConditioningLineSegmentCount > 0)
+        {
+            TerrainHeight = GpuApplyConditioningLines(Offset2D, TerrainHeight, 0.0f);
         }
         if (ConditioningZoneCount > 0)
         {

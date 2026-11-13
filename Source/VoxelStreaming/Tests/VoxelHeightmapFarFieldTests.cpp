@@ -1383,4 +1383,120 @@ bool FFarFieldPlaneCameraAfterCutTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// The far field and a conditioning line (Documentation/TERRAIN_LINES_PLAN.md, L2): the region a line reaches, a patch
+// built with the line following its height, and the invalidation: when the conditioning over a region changes, the
+// built patches that take conditioning and meet the region rebuild, and no other does.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlaneConditioningLineTest,
+	"VoxelWorlds.FarField.Plane.ConditioningLine",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFarFieldPlaneConditioningLineTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelHeightmapFarFieldTestUtils;
+
+	FRig Rig(MakePlaneConfig(), 64, 150000.0, /*bSea=*/true);
+	const FVoxelFarFieldSettings& Settings = Rig.Settings;
+	const int32 Band = Settings.EdgeLevel;
+	const FVector2D Site = GetSites()[1];
+
+	// A level line through the site, 250 uu over the natural ground there.
+	const float Target = static_cast<float>(Rig.Height(Site.X, Site.Y)) + 250.0f;
+	FVoxelConditioningLineParams Params;
+	Params.FalloffWidth = 200.0f;
+	for (int32 Step = 0; Step <= 72; ++Step)
+	{
+		const FVector2D P = Site + FVector2D(-3000.0, -2000.0) + FVector2D(6000.0, 4000.0) * (Step / 72.0);
+		Params.Vertices.Add(FVoxelConditioningLineVertex(FVector(P.X, P.Y, 0.0), Target, 150.0f));
+	}
+	const FVoxelConditioningLineRef Line = FVoxelConditioningLine::Make(Params);
+	FVoxelConditioning Conditioning;
+	Conditioning.Lines.Add(Line);
+
+	// The region: the line's bounds with its reach. A planet line reaches nothing on a heightmap world.
+	const FVoxelFarFieldRegion Region = Rig.Frame().RegionOfLine(*Line);
+	TestTrue(TEXT("A line's region is a valid box"), Region.IsValid() && !Region.bCap);
+	TestTrue(TEXT("The region is the line's bounds grown by its reach"),
+		Region.Box.Min.Equals(Site + FVector2D(-3350.0, -2350.0), 0.01) && Region.Box.Max.Equals(Site + FVector2D(3350.0, 2350.0), 0.01));
+	{
+		FVoxelConditioningLineParams Radial;
+		Radial.bRadial = true;
+		Radial.Vertices.Add(FVoxelConditioningLineVertex(FVector(1.0, 0.0, 0.0), 0.0f, 150.0f));
+		Radial.Vertices.Add(FVoxelConditioningLineVertex(FVector(1.0, 0.01, 0.0), 0.0f, 150.0f));
+		TestFalse(TEXT("A planet line has no region on a heightmap world"), Rig.Frame().RegionOfLine(*FVoxelConditioningLine::Make(Radial)).IsValid());
+	}
+
+	// A patch over the site built with the line: every surface vertex at the conditioned height.
+	for (const int32 Level : { Band, Band - 2 })
+	{
+		const FVoxelFarFieldPatchKey Key = KeyAt(Settings, Level, Site);
+		FVoxelFarFieldPatchMesh Mesh;
+		FVoxelFarField::BuildPatch(Settings, *Rig.Surface, Conditioning, Key, Mesh);
+		TestEqual(TEXT("The build counts the line"), Mesh.LineCount, 1);
+		double Worst = 0.0;
+		int32 Moved = 0;
+		for (int32 V = 0; V < Mesh.TerrainSurfaceVertices; ++V)
+		{
+			const FVector World = Mesh.Origin + FVector(Mesh.Terrain.Positions[V]);
+			const float Natural = static_cast<float>(Rig.Height(World.X, World.Y));
+			const float Expected = Conditioning.ApplyToHeight(World.X, World.Y, Natural);
+			Worst = FMath::Max(Worst, FMath::Abs(World.Z - (Expected - Settings.Sink)));
+			Moved += FMath::Abs(Expected - Natural) > 50.0f ? 1 : 0;
+		}
+		AddInfo(FString::Printf(TEXT("Level %d: %d surface vertices, %d moved by the line by more than a voxel, the worst offset from the conditioned height %.3f uu"),
+			Level, Mesh.TerrainSurfaceVertices, Moved, Worst));
+		TestTrue(FString::Printf(TEXT("Level %d: the patch's vertices are at the conditioned height"), Level), Worst < 1.0);
+		TestTrue(FString::Printf(TEXT("Level %d: the line moves some of the patch's vertices"), Level), Moved > 0);
+	}
+
+	// The invalidation. The patches build with no line (the gatherer has none yet); then the line arrives: the built
+	// patches that take conditioning and meet its region rebuild with it, and every other patch keeps its build.
+	bool bLineKnown = false;
+	Rig.FarField.SetConditioningGatherer([&bLineKnown, &Line](const FVoxelFarFieldRegion& InRegion, FVoxelConditioning& Out)
+	{
+		if (bLineKnown && Line->MeetsRegion(InRegion.Box))
+		{
+			Out.Lines.Add(Line);
+		}
+	});
+	const FVoxelFarFieldView View = Rig.MakeView(Rig.SurfacePoint(Site) + FVector(0.0, 0.0, 300.0));
+	auto NoChunk = [](const FIntVector&) { return false; };
+	TestTrue(TEXT("The far field settles"), Rig.Converge(View, NoChunk) > 0);
+	TMap<uint64, uint32> Serials;
+	int32 Meeting = 0;
+	Rig.FarField.ForEachPatch([&](const FVoxelFarField::FPatchState& Patch)
+	{
+		if (Patch.bBuilt)
+		{
+			Serials.Add(Patch.Key.Pack(), Patch.BuildSerial);
+			Meeting += (Rig.Frame().TakesZones(Patch) && Rig.Frame().Intersects(Patch, Region)) ? 1 : 0;
+		}
+	});
+	TestTrue(TEXT("Built patches meet the line's region"), Meeting > 0);
+	bLineKnown = true;
+	Rig.FarField.InvalidateRegion(Region);
+	TestTrue(TEXT("The far field settles after the invalidation"), Rig.Converge(View, NoChunk) > 0);
+	int32 Rebuilt = 0, RebuiltElsewhere = 0, NotRebuilt = 0, Kept = 0;
+	Rig.FarField.ForEachPatch([&](const FVoxelFarField::FPatchState& Patch)
+	{
+		const uint32* Serial = Serials.Find(Patch.Key.Pack());
+		if (!Serial || !Patch.bBuilt)
+		{
+			return;
+		}
+		const bool bMeets = Rig.Frame().TakesZones(Patch) && Rig.Frame().Intersects(Patch, Region);
+		const bool bRebuilt = Patch.BuildSerial != *Serial;
+		Rebuilt += (bMeets && bRebuilt) ? 1 : 0;
+		NotRebuilt += (bMeets && !bRebuilt) ? 1 : 0;
+		RebuiltElsewhere += (!bMeets && bRebuilt) ? 1 : 0;
+		Kept += (!bMeets && !bRebuilt) ? 1 : 0;
+	});
+	AddInfo(FString::Printf(TEXT("Invalidation: %d patches met the line's region and rebuilt, %d met it and did not, %d rebuilt elsewhere, %d kept their build"),
+		Rebuilt, NotRebuilt, RebuiltElsewhere, Kept));
+	TestEqual(TEXT("Every built patch that meets the region rebuilt"), NotRebuilt, 0);
+	TestTrue(TEXT("Patches rebuilt"), Rebuilt > 0);
+	TestEqual(TEXT("No patch outside the region rebuilt"), RebuiltElsewhere, 0);
+	TestTrue(TEXT("Patches outside the region kept their build"), Kept > 0);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

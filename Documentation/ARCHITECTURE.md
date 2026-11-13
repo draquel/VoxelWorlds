@@ -18,7 +18,7 @@ Ten runtime modules and one editor module, in `Source/` (the empty `VoxelWorlds`
 | Module | Loading phase | Depends on (voxel modules) | Holds |
 |--------|---------------|----------------------------|-------|
 | `VoxelCore` | Default | none | `FVoxelData`, `FChunkDescriptor` and its residency, `UVoxelWorldConfiguration`, `UVoxelWorldsSettings`, the material and biome registries and `UVoxelMaterialAtlas`, `UVoxelEditManager`, `FVoxelSeaSurface`, `FVoxelCubeSphere`, `FVoxelRenderRegions`, the chunk codec |
-| `VoxelGeneration` | PostConfigInit (global shaders) | Core | `FVoxelGPUNoiseGenerator` / `FVoxelCPUNoiseGenerator`, `FVoxelNoise`, `IVoxelWorldMode` and the three modes, `FVoxelWorldModeFactory`, `FVoxelSurfaceQuery`, `FVoxelBlockSurface`, conditioning zones, `FVoxelTreeInjector` |
+| `VoxelGeneration` | PostConfigInit (global shaders) | Core | `FVoxelGPUNoiseGenerator` / `FVoxelCPUNoiseGenerator`, `FVoxelNoise`, `IVoxelWorldMode` and the three modes, `FVoxelWorldModeFactory`, `FVoxelSurfaceQuery`, `FVoxelBlockSurface`, conditioning zones and lines, `FVoxelTreeInjector` |
 | `VoxelLOD` | Default | Core, Generation | `IVoxelLODStrategy`, `FDistanceBandLODStrategy` |
 | `VoxelMeshing` | PostConfigInit | Core | `IVoxelMesher`: `FVoxelCPUCubicMesher`, `FVoxelCPUMarchingCubesMesher`, `FVoxelCPUDualContourMesher`; `FVoxelWaterMesher` |
 | `VoxelRendering` | PostConfigInit (vertex factory, shader directory) | Core | `IVoxelMeshRenderer`, `FVoxelMeshRenderer`, `UVoxelRegionComponent`, `FVoxelSceneProxy`, `FVoxelFadeScheduler` |
@@ -93,7 +93,7 @@ made it).
 ### Surfaces
 
 One ladder of surfaces serves every consumer (`UVoxelChunkManager::QuerySurfacePoint`, `EVoxelSurfaceLayer`): the
-natural surface of the world mode, the generated surface (conditioning zones applied; block tops in a cubic world), and
+natural surface of the world mode, the generated surface (conditioning lines and zones applied; block tops in a cubic world), and
 the edit-merged surface of the loaded voxels. Every query runs along local up, so the same call works on a planet.
 
 ### Beyond the voxel window

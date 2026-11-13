@@ -1240,6 +1240,45 @@ public:
 	void AddConditioningZone(const FVoxelConditioningZone& Zone);
 
 	/**
+	 * Add a gen-time terrain conditioning line (a polyline that levels, lowers or raises the terrain along it;
+	 * Documentation/TERRAIN_LINES_PLAN.md). The line is made from the values (FVoxelConditioningLine::Make) and the
+	 * limits it breaks are logged as warnings (the cut and fill cap, the widths, the bend bound, a line that comes back
+	 * on itself, a block world's step: FVoxelConditioningLine::GetWarnings); a line that breaks one is still added.
+	 * Affects chunks generated AFTER this call, as a zone does: add lines before streaming starts. A line of the other
+	 * kind of world (a planet line on a heightmap world) is kept and never applies.
+	 * @param Line The line's vertices and values
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Conditioning")
+	void AddConditioningLine(const FVoxelConditioningLineParams& Line);
+
+	/**
+	 * Add a conditioning line that is already made (shared: the gathers hand out this object). As the overload above,
+	 * with the same warnings.
+	 * @param Line The line
+	 */
+	void AddConditioningLine(const FVoxelConditioningLineRef& Line);
+
+	/** @return How many lines were added to this manager (AddConditioningLine; the conditioner's are not counted) */
+	UFUNCTION(BlueprintPure, Category = "Voxel|ChunkManager|Conditioning")
+	int32 GetNumConditioningLines() const { return ConditioningSources.NumLines(); }
+
+	/**
+	 * Heightmap worlds: tell the readers that the conditioning over a world XY region changed after they may have read
+	 * it. The entry a conditioner calls when it has worked out a line a Ready gather did not get (the far field, the
+	 * map): the far field rebuilds its patches there that take conditioning, and OnTerrainConditioningChanged fires.
+	 * Chunks generated earlier keep their terrain.
+	 * @param Region The region whose conditioning changed (a line's bounds with its reach)
+	 */
+	void NotifyTerrainConditioningChanged(const FBox2D& Region);
+
+	/**
+	 * Planets: NotifyTerrainConditioningChanged for a cap on the sphere.
+	 * @param Direction     Unit direction from the planet centre to the cap's centre
+	 * @param AngularRadius The cap's half-angle in radians
+	 */
+	void NotifyTerrainConditioningChangedOnSphere(const FVector& Direction, double AngularRadius);
+
+	/**
 	 * Register a dynamic terrain conditioner (game-side, boundary-safe — e.g. supplying zones from POI
 	 * claims). Queried per chunk at generation-request build time. Not owned; caller manages lifetime.
 	 * Broadcasts OnTerrainConditioningChanged.
@@ -1251,8 +1290,8 @@ public:
 	}
 
 	/**
-	 * Append the conditioning (the static zones and the dynamic conditioner's zones and lines) whose influence overlaps
-	 * a world XY region — what generation layers onto the base height there (apply with FVoxelConditioning::
+	 * Append the conditioning (the static zones and lines and the dynamic conditioner's zones and lines) whose influence
+	 * overlaps a world XY region — what generation layers onto the base height there (apply with FVoxelConditioning::
 	 * ApplyToHeight). Game thread. Used by height consumers outside chunk generation, e.g. map tiles.
 	 * @param Region World-space XY region
 	 * @param Need   What the gather is for (EVoxelConditioningGather): Complete for a reader that must agree with the
@@ -1277,8 +1316,8 @@ public:
 	void GatherConditioning(const FBox& Box, EVoxelConditioningGather Need, FVoxelConditioning& Out) const;
 
 	/**
-	 * Planets (spherical SP-B10): append the conditioning (the static planet zones, with a Direction, and the dynamic
-	 * conditioner's GatherConditioningOnSphere and GatherConditioningLinesOnSphere) whose influence reaches a cap on the
+	 * Planets (spherical SP-B10): append the conditioning (the static planet zones, with a Direction, the static planet
+	 * lines and the dynamic conditioner's GatherConditioningOnSphere and GatherConditioningLinesOnSphere) whose influence reaches a cap on the
 	 * sphere: what generation layers onto the radial height there (apply with FVoxelConditioning::ApplyToAltitude). Game
 	 * thread. The map, scatter and PCG use it for their analytic planet surfaces; generation gathers each chunk's by the
 	 * cap its box subtends. Nothing on a heightmap world.
@@ -1301,7 +1340,8 @@ public:
 	bool GetPlanetCapOfBox(const FBox& Box, FVector& OutDirection, double& OutAngle) const;
 
 	/**
-	 * Fired when the terrain conditioning changes (a conditioner registered or zones added / cleared). Chunks
+	 * Fired when the terrain conditioning changes (a conditioner registered, a zone or a line added, or a conditioner's
+	 * NotifyTerrainConditioningChanged). Chunks
 	 * generated earlier keep their terrain; caches of analytic heights (map tiles) should rebuild.
 	 */
 	FSimpleMulticastDelegate OnTerrainConditioningChanged;
@@ -2502,8 +2542,11 @@ private:
 	 */
 	TSharedPtr<const FVoxelMaterialTable> MaterialTable;
 
-	/** The static terrain conditioning zones (gen-time flattening under POIs/claims; Phase 6c) and the game's conditioner */
+	/** The static terrain conditioning zones and lines (gen-time flattening under POIs/claims; Phase 6c) and the game's conditioner */
 	FVoxelConditioningSources ConditioningSources;
+
+	/** Generation requests built with at least one conditioning line gathered over the chunk (the world report) */
+	mutable int64 LineConditionedRequests = 0;
 
 	/** A chunk's world box: the bounds a per-chunk reader of the water levels asks its range over. */
 	FBox GetChunkWorldBox(const FIntVector& ChunkCoord) const;

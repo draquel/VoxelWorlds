@@ -1,0 +1,137 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+//
+// Terrain conditioning lines on the GPU (Documentation/TERRAIN_LINES_PLAN.md, L2): a polyline that levels, lowers or
+// raises the terrain height along it, applied before the conditioning zones in the heightmap branch
+// (GenerateVoxelDensity.usf) and in the planet branch (SphericalPlanet.ush). Mirrors FVoxelChunkLineSegments::ForEachLine
+// and FinishLine (VoxelChunkLineSegments.h) operation for operation: the CPU generator evaluates the same float4s, so
+// GPU and CPU match (VoxelWorlds.Generation.GPUvsCPULineParity). Any change here must be mirrored there.
+//
+// Include AFTER the generation globals: this file reads ConditioningLineSegmentCount and ConditioningLineData.
+//
+// ConditioningLineData is the chunk's segment list, 4 float4s a segment, in the chunk's frame (relative to the chunk's
+// origin corner on a heightmap world, to the anchor's point on the datum sphere on a planet), the lines in the order they
+// are applied and each line's segments in order along it:
+//   [A.xyz, target at A] [B.xyz, target at B] [half width at A, half width at B, falloff, strength] [line index, blend, 0, 0]
+// blend: 0 Level, 1 LowerOnly, 2 RaiseOnly (EVoxelConditioningLineBlend).
+
+#pragma once
+
+/**
+ * One line's blend of a height, from its nearest segment (FVoxelChunkLineSegments::FinishLine): the distance (the arc
+ * under the chord on a planet, 2 R asin(chord / 2R), asin by its series below 0.1 as PlanetApplyConditioning takes it),
+ * the half width and the target interpolated along the segment, the zone's weight profile, the line's blend.
+ *
+ * @param Segment The nearest segment's index in ConditioningLineData
+ * @param T Where along the segment the nearest place is, 0 at A to 1 at B
+ * @param DistSq The squared distance to it, in the chunk's frame
+ * @param Height The height (or altitude) so far
+ * @param ArcRadius The datum radius on a planet, 0 on a heightmap world
+ */
+float GpuBlendConditioningLine(int Segment, float T, float DistSq, float Height, float ArcRadius)
+{
+    const float4 s0 = ConditioningLineData[Segment * 4 + 0];
+    const float4 s1 = ConditioningLineData[Segment * 4 + 1];
+    const float4 s2 = ConditioningLineData[Segment * 4 + 2];
+    const float4 s3 = ConditioningLineData[Segment * 4 + 3];
+
+    float dist = sqrt(DistSq);
+    if (ArcRadius > 0.0f)
+    {
+        const float x = min(1.0f, dist / (2.0f * ArcRadius));
+        const float x2 = x * x;
+        const float asinX = (x < 0.1f) ? x * (1.0f + x2 * (1.0f / 6.0f + x2 * (3.0f / 40.0f + x2 * (5.0f / 112.0f)))) : asin(x);
+        dist = 2.0f * ArcRadius * asinX;
+    }
+
+    const float halfWidth = s2.x + T * (s2.y - s2.x);
+    const float target = s0.w + T * (s1.w - s0.w);
+
+    // FVoxelConditioningLine::WeightAtDistance: the strength on the core, a smoothstep to zero across the falloff.
+    float w;
+    if (dist <= halfWidth)
+    {
+        w = s2.w;
+    }
+    else
+    {
+        const float falloff = max(1.0f, s2.z);
+        if (dist >= halfWidth + falloff)
+        {
+            w = 0.0f;
+        }
+        else
+        {
+            const float t = (dist - halfWidth) / falloff;
+            const float s = 1.0f - (t * t * (3.0f - 2.0f * t));
+            w = s2.w * s;
+        }
+    }
+    if (w <= 0.0f)
+    {
+        return Height;
+    }
+
+    // FVoxelConditioningLine::BlendHeight.
+    const int blend = (int)s3.y;
+    float toward = target;
+    if (blend == 1)
+    {
+        toward = min(Height, target);
+    }
+    else if (blend == 2)
+    {
+        toward = max(Height, target);
+    }
+    return Height + w * (toward - Height);
+}
+
+/**
+ * A height with the chunk's conditioning lines applied (FVoxelChunkLineSegments::ForEachLine): one flat loop over the
+ * segments; a segment carries its line's index, and when the index changes the line before it blends, from the nearest
+ * of its segments. Call only when ConditioningLineSegmentCount > 0.
+ *
+ * @param P The point in the chunk's frame: (X, Y, 0) from the origin corner on a heightmap world, the voxel's point on
+ *          the datum sphere less the anchor's (SurfaceOffset) on a planet
+ * @param BaseHeight The natural height (or altitude) there
+ * @param ArcRadius The datum radius on a planet, 0 on a heightmap world
+ */
+float GpuApplyConditioningLines(float3 P, float BaseHeight, float ArcRadius)
+{
+    float H = BaseHeight;
+    int currentLine = -1;
+    int bestSegment = 0;
+    float bestT = 0.0f;
+    float bestDistSq = 3.402823466e+38f;
+    for (int s = 0; s < ConditioningLineSegmentCount; ++s)
+    {
+        const float4 s0 = ConditioningLineData[s * 4 + 0];
+        const float4 s1 = ConditioningLineData[s * 4 + 1];
+        const int lineIndex = (int)ConditioningLineData[s * 4 + 3].x;
+        if (lineIndex != currentLine)
+        {
+            if (currentLine >= 0)
+            {
+                H = GpuBlendConditioningLine(bestSegment, bestT, bestDistSq, H, ArcRadius);
+            }
+            currentLine = lineIndex;
+            bestDistSq = 3.402823466e+38f;
+        }
+        const float3 ab = s1.xyz - s0.xyz;
+        const float3 ap = P - s0.xyz;
+        const float lengthSq = dot(ab, ab);
+        const float t = (lengthSq > 1.0e-6f) ? clamp(dot(ap, ab) / lengthSq, 0.0f, 1.0f) : 0.0f;
+        const float3 d = ap - ab * t;
+        const float distSq = dot(d, d);
+        if (distSq < bestDistSq)
+        {
+            bestDistSq = distSq;
+            bestT = t;
+            bestSegment = s;
+        }
+    }
+    if (currentLine >= 0)
+    {
+        H = GpuBlendConditioningLine(bestSegment, bestT, bestDistSq, H, ArcRadius);
+    }
+    return H;
+}

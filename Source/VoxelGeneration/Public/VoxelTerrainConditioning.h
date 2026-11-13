@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelConditioningLine.h"
 #include "VoxelTerrainConditioning.generated.h"
 
 /**
@@ -171,22 +172,6 @@ struct VOXELGENERATION_API FVoxelConditioningZone
 };
 
 /**
- * A conditioning line: a polyline that levels, lowers or raises the generated terrain and paints a band of material along
- * it, the second conditioning shape beside the zone's disc (Documentation/TERRAIN_LINES_PLAN.md, section 4.1).
- *
- * Declared here so the conditioning at a place (FVoxelConditioning) and the conditioner's line gathers can name it. It
- * has no vertices and no values yet, nothing makes one and nothing evaluates one: a world generates what it generates
- * without the type. A line is a shared, immutable object: a gather appends references (FVoxelConditioningLineRef), never
- * copies, and a reference is safe to carry on a generation request and to read on a worker.
- */
-struct FVoxelConditioningLine
-{
-};
-
-/** A reference to a shared, immutable conditioning line. */
-using FVoxelConditioningLineRef = TSharedRef<const FVoxelConditioningLine>;
-
-/**
  * What a gather of conditioning is for, which decides how a conditioner answers for its lines. Zones are always complete:
  * a conditioner has them at hand. A line may have to be computed first (a road's route), and a caller either waits for
  * it or does not.
@@ -209,7 +194,7 @@ enum class EVoxelConditioningGather : uint8
 };
 
 /**
- * The conditioning at a place: every shape that reshapes the generated terrain there, the zones and the lines, as one
+ * The conditioning at a place: every shape that reshapes the generated terrain there, the lines and the zones, as one
  * value. The gathers fill it for a region, a cap or a chunk (UVoxelChunkManager::GatherConditioning); a generation
  * request carries it; every reader of the generated surface takes it and asks it for the height on a heightmap world
  * (ApplyToHeight) or the altitude on a planet (ApplyToAltitude), so a reader never names a shape. Pure data: safe to copy
@@ -224,7 +209,10 @@ struct VOXELGENERATION_API FVoxelConditioning
 	UPROPERTY()
 	TArray<FVoxelConditioningZone> Zones;
 
-	/** The conditioning lines there. Gathered and carried; nothing evaluates a line yet (FVoxelConditioningLine). */
+	/**
+	 * The conditioning lines there, in the order they are applied: by id (SortLines; the gathers leave them so). A line is
+	 * applied before every zone, so a POI's pad wins where a road arrives at it.
+	 */
 	TArray<FVoxelConditioningLineRef> Lines;
 
 	/**
@@ -250,10 +238,17 @@ struct VOXELGENERATION_API FVoxelConditioning
 	}
 
 	/**
-	 * A heightmap world's generated height: BaseHeight blended toward each heightmap zone's TargetHeight by the zone's
-	 * weight at (X, Y). Zones layer in order (a later zone blends on top of the earlier ones); planet zones are skipped.
-	 * The heightmap generators (CPU and GPU) and every reader of the generated heightmap surface apply it to the natural
-	 * height.
+	 * Put the lines in the order they are applied in, by id, and drop a line gathered twice. The chunk manager's gathers
+	 * end with it; a set filled by hand from more than one line calls it.
+	 */
+	void SortLines();
+
+	/**
+	 * A heightmap world's generated height: BaseHeight blended toward each heightmap line's target (one blend a line,
+	 * from its nearest segment; in id order), then toward each heightmap zone's TargetHeight by the zone's weight at
+	 * (X, Y). Zones layer in order (a later zone blends on top of the earlier ones); planet lines and zones are skipped.
+	 * Every reader of the generated heightmap surface applies it to the natural height; the generators (CPU and GPU)
+	 * apply the same lines from the chunk's segment list (FVoxelChunkLineSegments) and then ApplyZonesToHeight.
 	 *
 	 * @param X World X
 	 * @param Y World Y
@@ -261,6 +256,54 @@ struct VOXELGENERATION_API FVoxelConditioning
 	 * @return The conditioned height
 	 */
 	float ApplyToHeight(double X, double Y, float BaseHeight) const
+	{
+		return ApplyZonesToHeight(X, Y, Lines.Num() > 0 ? ApplyLinesToHeight(X, Y, BaseHeight) : BaseHeight);
+	}
+
+	/**
+	 * Planets (spherical SP-B10): the terrain's generated altitude along a direction: BaseAltitude blended toward each
+	 * planet line's target altitude, then toward each planet zone's TargetHeight (an altitude) by its weight there,
+	 * layered in order like ApplyToHeight; heightmap lines and zones are skipped. Every reader of the generated planet
+	 * surface applies it to the radial displacement; the generators apply the same lines from the chunk's segment list
+	 * and then ApplyZonesToAltitude.
+	 *
+	 * @param Direction Unit direction from the planet centre
+	 * @param PlanetRadius The datum radius (distances are measured on it)
+	 * @param BaseAltitude The natural terrain's altitude along Direction
+	 * @return The conditioned altitude
+	 */
+	float ApplyToAltitude(const FVector& Direction, double PlanetRadius, float BaseAltitude) const
+	{
+		return ApplyZonesToAltitude(Direction, PlanetRadius, Lines.Num() > 0 ? ApplyLinesToAltitude(Direction, PlanetRadius, BaseAltitude) : BaseAltitude);
+	}
+
+	/**
+	 * The lines' part of ApplyToHeight: each heightmap line's blend, in order, evaluated from the lines themselves in
+	 * double (the generators evaluate the chunk's segment list instead, in the chunk's frame).
+	 * @param X World X
+	 * @param Y World Y
+	 * @param BaseHeight The height before the lines
+	 * @return The height after them
+	 */
+	float ApplyLinesToHeight(double X, double Y, float BaseHeight) const;
+
+	/**
+	 * The lines' part of ApplyToAltitude, as ApplyLinesToHeight.
+	 * @param Direction Unit direction from the planet centre
+	 * @param PlanetRadius The datum radius
+	 * @param BaseAltitude The altitude before the lines
+	 * @return The altitude after them
+	 */
+	float ApplyLinesToAltitude(const FVector& Direction, double PlanetRadius, float BaseAltitude) const;
+
+	/**
+	 * The zones' part of ApplyToHeight: the height blended toward each heightmap zone's target, in order.
+	 * @param X World X
+	 * @param Y World Y
+	 * @param BaseHeight The height before the zones (the natural height with the lines applied)
+	 * @return The height after them
+	 */
+	float ApplyZonesToHeight(double X, double Y, float BaseHeight) const
 	{
 		float H = BaseHeight;
 		for (const FVoxelConditioningZone& Zone : Zones)
@@ -279,17 +322,13 @@ struct VOXELGENERATION_API FVoxelConditioning
 	}
 
 	/**
-	 * Planets (spherical SP-B10): the terrain's generated altitude along a direction: BaseAltitude blended toward each
-	 * planet zone's TargetHeight (an altitude) by its weight there, layered in order like ApplyToHeight; heightmap zones
-	 * are skipped. The planet generators (CPU and GPU) and every reader of the generated planet surface apply it to the
-	 * radial displacement.
-	 *
+	 * The zones' part of ApplyToAltitude: the altitude blended toward each planet zone's target, in order.
 	 * @param Direction Unit direction from the planet centre
-	 * @param PlanetRadius The datum radius (zone distances are measured on it)
-	 * @param BaseAltitude The natural terrain's altitude along Direction
-	 * @return The conditioned altitude
+	 * @param PlanetRadius The datum radius
+	 * @param BaseAltitude The altitude before the zones (the natural altitude with the lines applied)
+	 * @return The altitude after them
 	 */
-	float ApplyToAltitude(const FVector& Direction, double PlanetRadius, float BaseAltitude) const
+	float ApplyZonesToAltitude(const FVector& Direction, double PlanetRadius, float BaseAltitude) const
 	{
 		float A = BaseAltitude;
 		for (const FVoxelConditioningZone& Zone : Zones)

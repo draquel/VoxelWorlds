@@ -16,11 +16,19 @@ void FVoxelConditioningSources::GatherOnSphere(const FVector& Direction, double 
 			Out.Zones.Add(Zone);
 		}
 	}
+	for (const FVoxelConditioningLineRef& Line : Lines)
+	{
+		if (Line->MeetsCap(Direction, AngularRadius, PlanetRadius))
+		{
+			Out.Lines.Add(Line);
+		}
+	}
 	if (Conditioner)
 	{
 		Conditioner->GatherConditioningOnSphere(Direction, AngularRadius, Out.Zones);
 		Conditioner->GatherConditioningLinesOnSphere(Direction, AngularRadius, Need, Out.Lines);
 	}
+	Out.SortLines();
 }
 
 void FVoxelConditioningSources::GatherForRegion(const FBox2D& Region, EVoxelConditioningGather Need, FVoxelConditioning& Out) const
@@ -39,10 +47,20 @@ void FVoxelConditioningSources::GatherForRegion(const FBox2D& Region, EVoxelCond
 		}
 	}
 
+	// Static lines whose reach meets the region (heightmap lines, by the blocks of their segments).
+	for (const FVoxelConditioningLineRef& Line : Lines)
+	{
+		if (Line->MeetsRegion(Region))
+		{
+			Out.Lines.Add(Line);
+		}
+	}
+
 	// Dynamic (game-supplied) zones and lines for this region.
 	if (Conditioner)
 	{
 		Conditioner->GatherConditioning(Region, Out.Zones);
 		Conditioner->GatherConditioningLines(Region, Need, Out.Lines);
 	}
+	Out.SortLines();
 }
