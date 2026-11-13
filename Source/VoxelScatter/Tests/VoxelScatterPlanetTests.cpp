@@ -47,7 +47,7 @@ namespace VoxelScatterPlanetTestUtils
 		FScatterExtractionContext Context;
 		Context.WorldMode = &Mode;
 		Context.NoiseParams = Config->NoiseParams;
-		Context.Sea = FVoxelSeaSurface::FromConfig(*Config);
+		Context.Water = FVoxelSeaSurface::FromConfig(*Config);
 		if (!ContextZones.IsEmpty())
 		{
 			Context.Conditioning = MakeShared<const FVoxelConditioning>(ContextZones);

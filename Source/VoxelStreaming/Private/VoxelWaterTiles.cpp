@@ -92,7 +92,7 @@ void FVoxelWaterTiles::ProcessDirty(int32 MaxTiles, const FVoxelWaterTileGrid& G
 		FChunkMeshData WaterMeshData;
 		FVoxelWaterMesher::GenerateWaterMeshFromMask(
 			CombinedMask, CS, Grid.VoxelSize,
-			TileWorldPos, Grid.WaterLevel, WaterMeshData);
+			TileWorldPos, Grid.GetTileLevel(TileCoord), WaterMeshData);
 
 		if (WaterMeshData.IsValid())
 		{

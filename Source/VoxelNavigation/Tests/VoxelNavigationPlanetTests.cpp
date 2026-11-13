@@ -395,9 +395,9 @@ bool FVoxelNavPlaneSeaWithOriginTest::RunTest(const FString& Parameters)
 			const double X = W.Config->WorldOrigin.X, Y = W.Config->WorldOrigin.Y;
 			const float Deep = W.Config->WaterLevel - Params.MaxWadeDepth - 10.0f;
 			const float Shallow = W.Config->WaterLevel - Params.MaxWadeDepth + 10.0f;
-			AddInfo(FString::Printf(TEXT("%s: navigation's sea %.0f (WaterLevel %.0f), wade depth %.0f"), *Name, Params.Sea.PlaneZ,
+			AddInfo(FString::Printf(TEXT("%s: navigation's sea %.0f (WaterLevel %.0f), wade depth %.0f"), *Name, Params.Water.GetSea().PlaneZ,
 				W.Config->WaterLevel, Params.MaxWadeDepth));
-			TestEqual(*FString::Printf(TEXT("%s: navigation's sea is the WaterLevel plane"), *Name), Params.Sea.PlaneZ, static_cast<double>(W.Config->WaterLevel));
+			TestEqual(*FString::Printf(TEXT("%s: navigation's sea is the WaterLevel plane"), *Name), Params.Water.GetSea().PlaneZ, static_cast<double>(W.Config->WaterLevel));
 			TestTrue(*FString::Printf(TEXT("%s: ground deeper than a wade is water"), *Name), Params.IsUnderwater(X, Y, Deep));
 			TestFalse(*FString::Printf(TEXT("%s: ground short of it is not"), *Name), Params.IsUnderwater(X, Y, Shallow));
 		}

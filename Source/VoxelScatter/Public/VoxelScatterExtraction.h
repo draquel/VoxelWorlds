@@ -5,7 +5,7 @@
 #include "CoreMinimal.h"
 #include "VoxelData.h"
 #include "VoxelCoreTypes.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelEditTypes.h"
 
 class IVoxelWorldMode;
@@ -43,11 +43,11 @@ struct FScatterExtractionContext
 	/** Noise params for IVoxelWorldMode::GetTerrainHeightAt. */
 	FVoxelNoiseParams NoiseParams;
 	/**
-	 * The sea (generation's: FVoxelSeaSurface::FromConfig): points below it that are not underground are underwater.
-	 * The WaterLevel plane in heightmap modes, the sphere of WaterRadius on a planet (spherical SP-E1). Disabled (no
-	 * underwater class from it) when water is off.
+	 * The world's water levels (generation's): a point under the water's surface over it that is not underground is
+	 * underwater. The sea's plane in heightmap modes, its sphere on a planet (spherical SP-E1). No water: no
+	 * underwater class from it.
 	 */
-	FVoxelSeaSurface Sea;
+	FVoxelWaterLevels Water;
 	/**
 	 * The terrain conditioning over the chunk (POI pads and their falloff rings), so the analytic surface the
 	 * extractors compare with is the generated ground, not the natural one. Heightmap worlds: the buried-chunk test

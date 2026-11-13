@@ -107,15 +107,19 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 
 	// ==================== Water Level Parameters ====================
 
-	/** Whether water level is enabled for this request */
+	// The water over the chunk, as one level: what the chunk manager copies from the water levels' range over the
+	// chunk's bounds (FVoxelWaterLevels::GetRange, UVoxelChunkManager::BuildChunkGenerationRequest; the water plan's
+	// W2). A request is for one chunk, so the level it carries holds over that chunk and nowhere else.
+
+	/** Whether water lies over this chunk's columns */
 	bool bEnableWaterLevel = false;
 
-	/** Water level height for InfinitePlane/IslandBowl modes (world units) */
+	/** The water's level for InfinitePlane/IslandBowl modes (world Z) */
 	float WaterLevel = 0.0f;
 
 	/**
-	 * Water radius for SphericalPlanet mode (world units from planet center). Double (WM-BP4): it meets R-sized values;
-	 * generation compares the sea as the altitude WaterRadius - PlanetRadius, formed in double.
+	 * The water's level for SphericalPlanet mode (world units from the planet centre). Double (WM-BP4): it meets R-sized
+	 * values; generation compares the sea as the altitude WaterRadius - PlanetRadius, formed in double.
 	 */
 	double WaterRadius = 0.0;
 

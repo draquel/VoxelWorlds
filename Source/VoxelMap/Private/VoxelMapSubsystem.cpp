@@ -3,7 +3,7 @@
 #include "VoxelMapSubsystem.h"
 #include "VoxelMap.h"
 #include "VoxelChunkManager.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelBiomeRegistry.h"
@@ -378,7 +378,7 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 	TileFrame.ChunkSize = CachedChunkSize;
 	TileFrame.VoxelSize = CachedVoxelSize;
 	TileFrame.WorldOrigin = CachedWorldOrigin;
-	TileFrame.Sea = FVoxelSeaSurface::FromConfig(*Config);
+	TileFrame.Water = ChunkMgr->GetWaterLevels();
 	TileFrame.bPlanet = CachedWorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet;
 
 	// Elevation/depth shading ranges from the world mode's own height bounds (the generation
@@ -1240,8 +1240,10 @@ TSharedPtr<FVoxelMapOverlayBuildInput> UVoxelMapSubsystem::GatherOverlayInput(FI
 	Input->ChunkSize = CS;
 	Input->VoxelSize = CachedVoxelSize;
 	Input->WorldOriginZ = CachedWorldOrigin.Z;
-	Input->bUseWater = TileFrame.Sea.bEnabled;
-	Input->WaterLevel = static_cast<float>(TileFrame.Sea.PlaneZ);
+	// The tile's water: the levels' range over the tile (a heightmap tile's level is a world Z).
+	const FVoxelWaterLevelRange TileWater = TileFrame.GetTileWater(FVoxelMapTileId(TileCoord, 0));
+	Input->bUseWater = TileWater.bAny;
+	Input->WaterLevel = static_cast<float>(TileWater.GetLevel());
 
 	const int32 VolumeSize = CS * CS * CS;
 	auto Snapshot = [ChunkMgr, VolumeSize](const FIntVector& Coord) -> TSharedPtr<const TArray<FVoxelData>>
@@ -1327,8 +1329,10 @@ TSharedPtr<FVoxelMapPlanetOverlayInput> UVoxelMapSubsystem::GatherPlanetOverlayI
 	Input->Origin = CachedWorldOrigin;
 	Input->Center = TileFrame.Center;
 	Input->PlanetRadius = TileFrame.Radius;
-	Input->bUseWater = TileFrame.Sea.bEnabled && TileFrame.Sea.bRadial;
-	Input->WaterRadius = TileFrame.Sea.Radius;
+	// The tile's water: the levels' range over the tile (a planet's level is a distance from the centre).
+	const FVoxelWaterLevelRange TileWater = TileFrame.GetTileWater(FVoxelMapTileId(TileCoord, 0));
+	Input->bUseWater = TileWater.bAny && TileFrame.Water.IsRadial();
+	Input->WaterRadius = TileWater.GetLevel();
 
 	const TArray<FIntVector>* EditedChunks = TileEditedChunks.Find(PackTileKey(TileCoord));
 	if (!EditedChunks)

@@ -194,7 +194,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 		auto AnalyticMaterialAt = [&](const FVoxelMapTileSample& Sample, float Altitude) -> uint8
 		{
 			return FVoxelSurfaceQuery::QueryMapSurfaceMaterial(*WorldMode, Frame.PositionAt(Sample, Altitude), Sample.Direction, Altitude,
-				Frame.VoxelSize, NoiseParams, BiomeSnapshot, bUseBiomes, Frame.Sea, &Conditioning, FallbackTempNoiseParams, FallbackMoistureNoiseParams);
+				Frame.VoxelSize, NoiseParams, BiomeSnapshot, bUseBiomes, Frame.Water, &Conditioning, FallbackTempNoiseParams, FallbackMoistureNoiseParams);
 		};
 
 		// The tile's own pixels: the overlay build compares against them, and the game thread keeps a level-0 tile's
@@ -314,9 +314,11 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 
 		// Shading ranges from the world's own height bounds (see ResolveChunkManager): land from the water (or the lowest
 		// terrain) to the highest, water depth from the water down to the lowest.
+		// The tile's water: the levels' range over the tile's own bounds, one level a tile.
+		const FVoxelWaterLevelRange TileWater = Frame.GetTileWater(Id);
 		float LandBase = 0.0f, LandSpan = 1.0f, DepthSpan = 1.0f;
-		Frame.GetShadingSpans(LandBase, LandSpan, DepthSpan);
-		const float WaterAltitude = Frame.GetWaterAltitude();
+		Frame.GetShadingSpans(TileWater, LandBase, LandSpan, DepthSpan);
+		const float WaterAltitude = Frame.GetWaterAltitude(TileWater);
 
 		// --- Pass 2: colour ---
 		TArray<FColor> PixelData;
@@ -345,7 +347,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 				else
 				{
 					MaterialID = AnalyticMaterialAt(Samples[G], Altitude);
-					bWater = Frame.IsWater(Altitude);
+					bWater = Frame.IsWater(TileWater, Altitude);
 				}
 
 				FColor Color;

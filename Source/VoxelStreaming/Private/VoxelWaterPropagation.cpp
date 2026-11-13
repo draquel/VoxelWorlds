@@ -2,7 +2,7 @@
 
 #include "VoxelWaterPropagation.h"
 #include "VoxelChunkManager.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelEditManager.h"
 #include "VoxelEditTypes.h"
 #include "VoxelData.h"
@@ -23,11 +23,11 @@ namespace
 	};
 }
 
-void UVoxelWaterPropagation::Initialize(UVoxelChunkManager* InChunkManager, UVoxelEditManager* InEditManager, float InWaterLevel)
+void UVoxelWaterPropagation::Initialize(UVoxelChunkManager* InChunkManager, UVoxelEditManager* InEditManager, const FVoxelWaterLevels& InWater)
 {
 	ChunkManager = InChunkManager;
 	EditManager = InEditManager;
-	Sea = FVoxelSeaSurface::MakePlane(InWaterLevel);
+	Water = InWater;
 
 	if (InChunkManager)
 	{
@@ -36,11 +36,10 @@ void UVoxelWaterPropagation::Initialize(UVoxelChunkManager* InChunkManager, UVox
 			ChunkSize = Config->ChunkSize;
 			VoxelSize = Config->VoxelSize;
 			WorldOrigin = Config->WorldOrigin;
-			Sea = FVoxelSeaSurface::FromConfig(*Config);
-			Sea.bEnabled = true; // created only when water is on
 		}
 	}
 
+	const FVoxelSeaSurface& Sea = Water.GetSea();
 	if (Sea.bRadial)
 	{
 		UE_LOG(LogVoxelWaterPropagation, Log, TEXT("Water propagation initialized (sea radius %.0f around (%.0f, %.0f, %.0f), ChunkSize=%d, VoxelSize=%.0f)"),
@@ -83,18 +82,16 @@ void UVoxelWaterPropagation::OnChunkEdited(const FIntVector& ChunkCoord, EEditSo
 	// Only voxels below the sea can take water. The plane clips the box's top; a sphere drops a box wholly above it. Both
 	// in world space, as generation floods (a voxel's world Z is WorldOrigin.Z plus its grid Z, G19).
 	const FIntVector Base = ChunkCoord * ChunkSize;
-	if (!Sea.bRadial)
+	const FBox Box(WorldOrigin + FVector(Base + Min) * VoxelSize, WorldOrigin + FVector(Base + Max) * VoxelSize);
+	if (!Water.IsRadial())
 	{
-		const int32 TopBelow = FMath::FloorToInt32((Sea.PlaneZ - WorldOrigin.Z) / VoxelSize) - Base.Z;
+		// World Z levels: the highest water level over the box clips its top.
+		const int32 TopBelow = FMath::FloorToInt32((Water.GetRange(Box).MaxLevel - WorldOrigin.Z) / VoxelSize) - Base.Z;
 		Max.Z = FMath::Min(Max.Z, TopBelow);
 	}
-	else
+	else if (Water.IsAbove(Box))
 	{
-		const FBox Box(WorldOrigin + FVector(Base + Min) * VoxelSize, WorldOrigin + FVector(Base + Max) * VoxelSize);
-		if (Sea.IsAbove(Box))
-		{
-			return;
-		}
+		return;
 	}
 	if (Min.X > Max.X || Min.Y > Max.Y || Min.Z > Max.Z)
 	{
@@ -193,11 +190,11 @@ bool UVoxelWaterPropagation::FaceReachesBelowSea(const FIntVector& ChunkCoord, i
 	FIntVector Min = Base, Max = Base + FIntVector(ChunkSize - 1);
 	Min[Layers.Axis] = FMath::Min(Base[Layers.Axis] + Layers.OwnLayer, NeighbourBase[Layers.Axis] + Layers.NeighbourLayer);
 	Max[Layers.Axis] = FMath::Max(Base[Layers.Axis] + Layers.OwnLayer, NeighbourBase[Layers.Axis] + Layers.NeighbourLayer);
-	if (!Sea.bRadial)
+	if (!Water.IsRadial())
 	{
 		return IsBelowSea(Min);
 	}
-	return !Sea.IsAbove(FBox(WorldOrigin + FVector(Min) * VoxelSize, WorldOrigin + FVector(Max) * VoxelSize));
+	return !Water.IsAbove(FBox(WorldOrigin + FVector(Min) * VoxelSize, WorldOrigin + FVector(Max) * VoxelSize));
 }
 
 namespace
@@ -540,7 +537,7 @@ FIntVector UVoxelWaterPropagation::VoxelKeyToChunk(const FIntVector& Key) const
 bool UVoxelWaterPropagation::IsBelowSea(const FIntVector& Key) const
 {
 	// The voxel's sample point in world space, the plane's too (G19: generation's fill pass tests world Z).
-	return Sea.IsBelow(WorldOrigin + FVector(Key) * VoxelSize);
+	return Water.IsUnder(WorldOrigin + FVector(Key) * VoxelSize);
 }
 
 bool UVoxelWaterPropagation::ReadVoxel(const FIntVector& Key, FVoxelData& OutVoxel) const

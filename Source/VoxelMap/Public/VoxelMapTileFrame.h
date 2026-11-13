@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "VoxelCubeSphere.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelWorldModeTypes.h"
 #include "VoxelCoreTypes.h"
 #include "VoxelTerrainConditioning.h"
@@ -52,16 +52,25 @@ struct VOXELMAP_API FVoxelMapTileFrame
 	/** Heightmap worlds: the world's bounds (exploration stops at an island's edge, WM-I2) */
 	FVoxelWorldBounds Bounds;
 
-	/** The world's sea (FVoxelSeaSurface::FromConfig): the heightmap's WaterLevel plane, the planet's water sphere */
-	FVoxelSeaSurface Sea;
+	/** The world's water levels (UVoxelChunkManager::GetWaterLevels): each tile draws its water at the range over its own bounds */
+	FVoxelWaterLevels Water;
 
 	/** The terrain's extent for the elevation and depth shading: a heightmap's height bounds, a planet's altitude bounds */
 	float MinAltitude = 0.0f;
 	float MaxAltitude = 0.0f;
 
-	/** Whether the frame draws water, and the water's altitude (the WaterLevel; the sea radius less the datum radius) */
-	bool HasWater() const;
-	float GetWaterAltitude() const;
+	/**
+	 * A tile's world bounds, from its grid's corner samples at the terrain's lowest and highest altitude: what a tile
+	 * asks the water levels' range over (GetTileWater).
+	 */
+	FBox GetTileBounds(const FVoxelMapTileId& Id) const;
+
+	/** The water levels' range over a tile: the one level the tile's water is drawn and tested at. */
+	FVoxelWaterLevelRange GetTileWater(const FVoxelMapTileId& Id) const { return Water.GetRange(GetTileBounds(Id)); }
+
+	/** Whether a tile with that range draws water, and the water's altitude (the level; on a planet the level less the datum radius) */
+	bool HasWater(const FVoxelWaterLevelRange& TileWater) const;
+	float GetWaterAltitude(const FVoxelWaterLevelRange& TileWater) const;
 
 	// ---- The grid ----
 
@@ -122,11 +131,11 @@ struct VOXELMAP_API FVoxelMapTileFrame
 	/** The world point of a sample at an altitude: (X, Y, altitude); centre + direction x (radius + altitude). */
 	FVector PositionAt(const FVoxelMapTileSample& Sample, float InAltitude) const;
 
-	/** Whether the surface at an altitude is under water (the WaterLevel; the sea radius). */
-	bool IsWater(float InAltitude) const;
+	/** Whether the surface at an altitude is under a tile's water (its range's level). */
+	bool IsWater(const FVoxelWaterLevelRange& TileWater, float InAltitude) const;
 
-	/** The shading ranges: land from the water (or the lowest terrain) to the highest, water depth from the water down to the lowest. */
-	void GetShadingSpans(float& OutLandBase, float& OutLandSpan, float& OutDepthSpan) const;
+	/** A tile's shading ranges: land from its water (or the lowest terrain) to the highest, water depth from the water down to the lowest. */
+	void GetShadingSpans(const FVoxelWaterLevelRange& TileWater, float& OutLandBase, float& OutLandSpan, float& OutDepthSpan) const;
 
 	/**
 	 * The hillshade at a grid point: the surface normal from its four neighbours' altitudes (central differences on a

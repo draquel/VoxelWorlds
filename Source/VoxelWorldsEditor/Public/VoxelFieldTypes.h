@@ -5,7 +5,7 @@
 #include "CoreMinimal.h"
 #include "VoxelCoreTypes.h"   // FVoxelNoiseParams, EVoxelNoiseType, EWorldMode
 #include "VoxelBiomeSnapshot.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelSurfaceQuery.h" // FVoxelSurfaceSample
 
 class IVoxelWorldMode;
@@ -69,11 +69,8 @@ struct FVoxelFieldSampleContext
 	const UVoxelCaveConfiguration* CaveConfig = nullptr;
 	bool bEnableCaves = false;
 
-	bool bEnableWaterLevel = false;
-	float WaterLevel = 0.0f;
-
-	/** The world's sea (FVoxelSeaSurface::FromConfig): the WaterLevel plane, or a planet's sphere */
-	FVoxelSeaSurface Sea;
+	/** The configuration's water levels (FVoxelWaterLevels::FromConfig: the viewer has no running world): the sea's plane, or a planet's sphere */
+	FVoxelWaterLevels Water;
 
 	/**
 	 * The world is a planet (spherical Phase 4, SP-A3): the 2D fields then show the surface on the upper hemisphere

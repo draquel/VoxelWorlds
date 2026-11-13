@@ -8,7 +8,7 @@
 #include "Diagnostics/VoxelConsoleHelpers.h"
 #include "VoxelTreeInjector.h"
 #include "VoxelSurfaceQuery.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelWorldConfiguration.h"
 #include "GameFramework/PlayerController.h"
@@ -94,7 +94,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBiomeCoverageCmd(
 				continue;
 			}
 			const FVoxelWorldBounds Bounds = CM->GetWorldBounds();
-			const FVoxelSeaSurface Sea = CM->GetSeaSurface();
+			const FVoxelWaterLevels& Water = CM->GetWaterLevels();
 			const bool bPlanet = Bounds.Shape == EVoxelWorldBoundsShape::Shell;
 
 			// The sample points on the up-lines: the lattice on the sphere, else a grid over the footprint's box
@@ -146,7 +146,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBiomeCoverageCmd(
 				++Sampled;
 				FBiomeCount& C = Counts.FindOrAdd(Surface.BiomeID);
 				++C.All;
-				if (Sea.bEnabled && Sea.IsBelow(Surface.Position))
+				if (Water.IsUnder(Surface.Position))
 				{
 					continue;
 				}
@@ -155,7 +155,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelBiomeCoverageCmd(
 				const float Altitude = bPlanet ? Surface.Altitude : static_cast<float>(Surface.Position.Z);
 				C.AltitudeSum += Altitude;
 				C.AltitudeMax = FMath::Max(C.AltitudeMax, Altitude);
-				const float OverSea = Sea.bEnabled ? -static_cast<float>(Sea.GetDepth(Surface.Position)) : 1.0e6f;
+				const float OverSea = Water.HasWater() ? -static_cast<float>(Water.GetDepth(Surface.Position)) : 1.0e6f;
 				if (OverSea >= 200.0f && Surface.SlopeDegrees < C.SiteSlope)
 				{
 					C.SiteSlope = Surface.SlopeDegrees;

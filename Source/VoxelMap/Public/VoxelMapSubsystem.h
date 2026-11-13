@@ -14,7 +14,7 @@
 #include "VoxelEditTypes.h"
 #include "VoxelWorldModeTypes.h"
 #include "VoxelCubeSphere.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "TimerManager.h"
 #include "VoxelMapSubsystem.generated.h"
 

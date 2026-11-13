@@ -1111,7 +1111,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 					MeshBatch.DepthPriorityGroup = SDPG_World;
 					MeshBatch.bCanApplyViewModeOverrides = true;
 					MeshBatch.bUseWireframeSelectionColoring = IsSelected();
-					MeshBatch.bUseAsOccluder = false;  // Water is translucent
+					MeshBatch.bUseAsOccluder = false;  // Water is seen through (Single Layer Water since the water plan's W1)
 					MeshBatch.bWireframe = bWireframe;
 					MeshBatch.CastShadow = false;       // Water doesn't cast shadows
 					MeshBatch.bUseForMaterial = true;

@@ -5,22 +5,35 @@
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelChunkManager.h"
 
-bool FVoxelMapTileFrame::HasWater() const
+FBox FVoxelMapTileFrame::GetTileBounds(const FVoxelMapTileId& Id) const
 {
-	if (bPlanet)
+	FBox TileBounds(ForceInit);
+	const int32 Last = ChunkSize + 1;
+	for (const FIntPoint Corner : { FIntPoint(1, 1), FIntPoint(Last, 1), FIntPoint(1, Last), FIntPoint(Last, Last) })
 	{
-		return Sea.bEnabled && Sea.bRadial;
+		const FVoxelMapTileSample Sample = SampleAt(Id, Corner.X, Corner.Y);
+		TileBounds += PositionAt(Sample, MinAltitude);
+		TileBounds += PositionAt(Sample, MaxAltitude);
 	}
-	return Sea.bEnabled;
+	return TileBounds;
 }
 
-float FVoxelMapTileFrame::GetWaterAltitude() const
+bool FVoxelMapTileFrame::HasWater(const FVoxelWaterLevelRange& TileWater) const
 {
 	if (bPlanet)
 	{
-		return static_cast<float>(Sea.Radius - Radius);
+		return TileWater.bAny && Water.IsRadial();
 	}
-	return static_cast<float>(Sea.PlaneZ);
+	return TileWater.bAny;
+}
+
+float FVoxelMapTileFrame::GetWaterAltitude(const FVoxelWaterLevelRange& TileWater) const
+{
+	if (bPlanet)
+	{
+		return static_cast<float>(TileWater.GetLevel() - Radius);
+	}
+	return static_cast<float>(TileWater.GetLevel());
 }
 
 double FVoxelMapTileFrame::GetTileWorldSize() const
@@ -205,20 +218,20 @@ FVector FVoxelMapTileFrame::PositionAt(const FVoxelMapTileSample& Sample, float 
 	return FVector(Sample.X, Sample.Y, InAltitude);
 }
 
-bool FVoxelMapTileFrame::IsWater(float InAltitude) const
+bool FVoxelMapTileFrame::IsWater(const FVoxelWaterLevelRange& TileWater, float InAltitude) const
 {
 	if (bPlanet)
 	{
-		return HasWater() && Radius + InAltitude < Sea.Radius;
+		return HasWater(TileWater) && Radius + InAltitude < TileWater.GetLevel();
 	}
-	return HasWater() && InAltitude < static_cast<float>(Sea.PlaneZ);
+	return HasWater(TileWater) && InAltitude < static_cast<float>(TileWater.GetLevel());
 }
 
-void FVoxelMapTileFrame::GetShadingSpans(float& OutLandBase, float& OutLandSpan, float& OutDepthSpan) const
+void FVoxelMapTileFrame::GetShadingSpans(const FVoxelWaterLevelRange& TileWater, float& OutLandBase, float& OutLandSpan, float& OutDepthSpan) const
 {
 	// Land spans [the water (or the lowest terrain) .. the highest], water depth [the water .. the lowest]; both guard
 	// against degenerate configurations where the bounds collapse.
-	OutLandBase = HasWater() ? GetWaterAltitude() : MinAltitude;
+	OutLandBase = HasWater(TileWater) ? GetWaterAltitude(TileWater) : MinAltitude;
 	OutLandSpan = FMath::Max(MaxAltitude - OutLandBase, 1.0f);
 	OutDepthSpan = FMath::Max(OutLandBase - MinAltitude, 1.0f);
 }

@@ -1,9 +1,10 @@
 # Water System Architecture
 
-> State as of 2026-11-13 (the water plan's W1: the material paragraphs; the rest as of code review CR5, 2026-11-02).
+> State as of 2026-11-13 (the water plan's W1: the material paragraphs; its W2: "The water levels", under "On a
+> Planet"; the rest as of code review CR5, 2026-11-02).
 > Terms: `Documentation/GLOSSARY.md`.
 
-**Module**: VoxelCore (flags, the sea), VoxelGeneration (fill pass), VoxelMeshing (water mesher), VoxelStreaming (propagation, tiles, the far ocean), VoxelRendering (rendering)
+**Module**: VoxelCore (flags, the sea, the water levels), VoxelGeneration (fill pass), VoxelMeshing (water mesher), VoxelStreaming (propagation, tiles, the far ocean), VoxelRendering (rendering)
 
 ## Table of Contents
 
@@ -33,6 +34,8 @@ The water system renders water surfaces where water-flagged air voxels exist in 
 - 3-cell dilation at shorelines to tuck water under terrain
 - Greedy rectangle merging for minimal quad count
 - Separate water material (Single Layer Water; a translucent one draws too)
+- One query for every reader of the water: the water levels (`FVoxelWaterLevels`: the sample at a position, the range
+  over bounds, the sea), with the sea as their one body until lakes and river reaches exist
 
 ---
 
@@ -243,16 +246,43 @@ flooded them on the game thread when their meshes landed (2.9 ms a frame on aver
 `SmoothTerrain_Planet`'s equator). The 2D water tiles below are XY grids at `WaterLevel`, so they are off on planets
 (`UVoxelChunkManager::UsesWaterTiles`).
 
-**One sea for gameplay (SP-E1, spherical Phase 3).** Everything that asks "how deep under the water is this" goes
-through the same type: `FVoxelSeaSurface::GetDepth(Position)`, the signed depth below the plane (`PlaneZ − Z`) or the
-sphere (`Radius − |P − C|`), positive under the sea. The chunk manager hands it out (`GetSeaSurface`, BlueprintPure
-`GetSeaDepthAt`): swimming and breath (`FVCTerrainQueryHelper`), the underwater post-process's darkening, the spawn
-search, the navigation water check (`FVoxelSurfaceNavParams::IsUnderwater`), the NPC spawner and scatter's underwater
-class. In heightmap worlds the sea is the `WaterLevel` plane in world Z (`FromConfig`), wherever `WorldOrigin` puts the
-chunk grid: the terrain's heights are world Z, generation floods air at or below `WaterLevel`, and the tiles draw there.
-Every plane test works in world space, the water pull and the edit-driven flood included (world modes review G19: some
-consumers used `WaterLevel + WorldOrigin.Z` until 2026-10-23; test `Streaming.Plane.OneSeaPlane`). On a planet it is the sphere; since spherical Phase 4 the
-map and the PCG sampler read it too.
+**The water levels: one query for every reader (the water plan's W2, 2026-11-13; SP-E1 before it).** Nothing reads
+the configuration's `WaterLevel` or `WaterRadius` but the configuration, its validation and one builder. Every reader
+asks the world's water levels, `FVoxelWaterLevels` (VoxelCore): an immutable snapshot of the bodies of water, a value
+cheap to copy to a worker. The chunk manager hands it out (`GetWaterLevels`), built by `FVoxelWaterLevels::FromConfig`
+from the configuration as it is when asked, and that builder is the one caller of `FVoxelSeaSurface::FromConfig`. An
+owner built from a configuration alone calls the same builder (the LOD strategy, a scatter extraction context, the
+editor's field viewer, the POI placement's terrain context, the demo actor's fallback plane), as each builds its world
+mode from the one factory. The snapshot has one body today, the sea, as a record (`FVoxelWaterBody`: id 0, kind `Sea`,
+its level, the bounds it holds over), and three ways in, by what a reader does:
+
+| A reader that | Asks | Who |
+|---|---|---|
+| tests a point | `Sample(Position)`: whether a body covers the column, which body, its surface level there, the position's depth (positive under the surface, `FVoxelSeaSurface::GetDepth`'s sign; `NoWaterDepth`, -1e9, with no water), the surface's normal and, for a reach, its flow. The cheap forms for a reader that runs per voxel or per vertex: `GetDepth`, `IsUnder` (at or below the surface: the flood's own test, exact where a sphere's depth sign is not), `IsAbove` and `Crosses` for a box | swimming, breath, the underwater view and the crossing effects (`FVCTerrainQueryHelper`), the spawn search, the NPC deep-water test, scatter's underwater class, the navigation's cell test (`FVoxelSurfaceNavParams::IsUnderwater`), `GetSurfaceOrSeaLevel`, the descent prefetch, the cut-over's surface under the viewer, the water pull and the edit-driven flood (per voxel), the surface's material in the far field, the map and the PCG sampler (`FVoxelSurfaceQuery`), the debug commands |
+| copies one level for an area | `GetRange(Bounds)`: `bAny` (a body lies over or under a column of the box), `bUniform` (one level over it: the scalar is the truth there), the lowest and highest level, and the bounds asked, so a copy of a level always says where it holds | a chunk's generation request (and through it both generators and the shaders, which did not change), the tree injector and the tree query per chunk, the LOD window's slab per column and a planet's near layers over the near disk, the pull's and the flood's seed clip over their box, a water tile over its column, a map tile and its edit overlay, a navigation region's frame on a planet, the POI placement's water line and the planet's sky over the whole world |
+| draws the sea itself | `GetSea()`: the sea body's surface, `FVoxelSeaSurface` | the far field's sea, the island's far ocean, a planet's ocean shell, the demo actor's fallback plane |
+
+A **water level** is a surface's height in the world's own vertical measure: world Z on a heightmap world, the
+distance from the planet centre on a planet (so the sea's is `WaterLevel` or `WaterRadius`). It is not an altitude,
+which is measured from the world mode's datum; a planet reader that wants the sea as an altitude subtracts the datum
+radius, in double, as it always did. `GetSeaSurface` and BlueprintPure `GetSeaDepthAt` stay as wrappers (the sea of the
+levels; the sample's depth) for Blueprints and the callers that mean the sea.
+
+In heightmap worlds the sea is the plane at its level in world Z, wherever `WorldOrigin` puts the chunk grid: the
+terrain's heights are world Z, generation floods air at or below the level, and the tiles draw there. Every plane test
+works in world space, the water pull and the edit-driven flood included (world modes review G19: some consumers used
+`WaterLevel + WorldOrigin.Z` until 2026-10-23; test `Streaming.Plane.OneSeaPlane`). On a planet it is the sphere.
+
+W2 changed no output: with the sea alone every range is uniform and every sample is the sea's own arithmetic (tests
+`Core.WaterLevels.SeaOnPlaneAndPlanet`, `Core.WaterLevels.NoWater`, `Streaming.Water.LevelsQuery`; the gates in
+`Documentation/WATER_EPIC_PLAN.md`, W2's result). What it is for is the hydrology plan: a lake or a river reach is one
+more body in the snapshot, and a reader that asks the sample or the range needs no change to see it. Two rules keep a
+later change of a body's level possible (the plan's D112; no invalidation path is built): a reader holds a body as a
+record or asks again, never a level it has baked in for good, and every copy of a level names the bounds it was taken
+over (a request is one chunk's, a tile's level is its column's, the LOD slab's is cached per column). The source of
+further bodies is declared and unused: `IVoxelWaterBodySource` (`GatherWaterBodies(Bounds, OutBodies)` and
+`GatherWaterBodiesOnSphere`), the twin of `IVoxelTerrainConditioner`, with a reach as a polyline whose vertices carry a
+position, a bed level, a surface level and a half width (`FVoxelWaterReach`).
 
 **The sea sphere (SP-E2).** A planet's sea surface is the chunk manager's `FVoxelPlanetOcean`: a cube sphere at
 `WaterRadius` on the surface coordinate's tangent warp, its resolution set so no quad sags more than 8 uu under the

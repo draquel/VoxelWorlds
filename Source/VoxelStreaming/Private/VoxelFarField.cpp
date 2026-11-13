@@ -136,7 +136,8 @@ int32 FVoxelFarFieldSettings::ComputeHeightmapRootChunks(double Reach, double In
 
 // ==================== FVoxelFarFieldSurface ====================
 
-TSharedPtr<const FVoxelFarFieldSurface> FVoxelFarFieldSurface::Make(const UVoxelWorldConfiguration& Config, const TSharedPtr<IVoxelWorldMode>& InWorldMode)
+TSharedPtr<const FVoxelFarFieldSurface> FVoxelFarFieldSurface::Make(const UVoxelWorldConfiguration& Config, const TSharedPtr<IVoxelWorldMode>& InWorldMode,
+	const FVoxelWaterLevels& InWater)
 {
 	if (!InWorldMode.IsValid())
 	{
@@ -154,14 +155,12 @@ TSharedPtr<const FVoxelFarFieldSurface> FVoxelFarFieldSurface::Make(const UVoxel
 	{
 		Surface->Biomes = FVoxelBiomeSnapshot::FromConfig(Config.BiomeConfiguration);
 	}
-	Surface->Sea = FVoxelSeaSurface::FromConfig(Config);
+	Surface->Water = InWater;
 	Surface->VoxelSize = Config.VoxelSize;
 	// A heightmap world (WM-MP1): the generated height at (X, Y), the climate from the terrain's seed, the block top in a
 	// cubic world (WM-C5: the walking surface up to a block over the isosurface).
 	Surface->bHeightmap = Mode != EWorldMode::SphericalPlanet;
 	Surface->WorldSeed = Config.GetNoiseParams().Seed;
-	Surface->bWater = Config.bEnableWaterLevel;
-	Surface->WaterLevel = Config.WaterLevel;
 	Surface->bBlockSurface = Surface->bHeightmap && FVoxelBlockSurface::UsesBlockSurface(Config);
 	Surface->WorldOrigin = Config.WorldOrigin;
 	return Surface;
@@ -193,8 +192,11 @@ void FVoxelFarFieldSurface::SampleConditionsXY(double WorldX, double WorldY, flo
 {
 	if (Biomes.bIsValid)
 	{
+		// The water over this column (a heightmap world's level is a world Z).
+		FVoxelWaterSample Over;
+		const bool bWater = Water.Sample(FVector(WorldX, WorldY, Height), Over);
 		FVoxelSurfaceQuery::QuerySurfaceConditions(static_cast<float>(WorldX), static_cast<float>(WorldY), Height, VoxelSize, Biomes, WorldSeed,
-			bWater, WaterLevel, OutMaterial, OutBiome);
+			bWater, static_cast<float>(Over.SurfaceLevel), OutMaterial, OutBiome);
 		return;
 	}
 	// No biomes: generation's material by depth (the surface's at depth 0).
@@ -206,8 +208,10 @@ FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMixXY(double World
 {
 	if (Biomes.bIsValid)
 	{
+		FVoxelWaterSample Over;
+		const bool bWater = Water.Sample(FVector(WorldX, WorldY, Height), Over);
 		return FVoxelSurfaceQuery::QuerySurfaceMaterialMix(static_cast<float>(WorldX), static_cast<float>(WorldY), Height, Biomes, WorldSeed,
-			bWater, WaterLevel);
+			bWater, static_cast<float>(Over.SurfaceLevel));
 	}
 	FVoxelSurfaceMaterialMix Mix;
 	uint8 Biome = 0;
@@ -247,7 +251,7 @@ void FVoxelFarFieldSurface::SampleConditions(const FVector& Direction, float Alt
 	if (Biomes.bIsValid)
 	{
 		FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(Planet, Direction, Altitude, Continentalness, Altitude, VoxelSize, NoiseParams,
-			Biomes, Sea, OutMaterial, OutBiome);
+			Biomes, Water, OutMaterial, OutBiome);
 		return;
 	}
 	// No biomes: generation's material by depth (the surface's at depth 0).
@@ -261,7 +265,7 @@ FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMix(const FVector&
 	const FSphericalPlanetWorldMode& Planet = GetPlanet();
 	if (Biomes.bIsValid)
 	{
-		return FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(Planet, Direction, Altitude, Continentalness, NoiseParams, Biomes, Sea);
+		return FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(Planet, Direction, Altitude, Continentalness, NoiseParams, Biomes, Water);
 	}
 	FVoxelSurfaceMaterialMix Mix;
 	uint8 Biome = 0;

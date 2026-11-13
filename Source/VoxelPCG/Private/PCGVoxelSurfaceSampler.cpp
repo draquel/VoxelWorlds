@@ -20,7 +20,7 @@
 #include "VoxelNoiseTypes.h"
 #include "IVoxelWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "PCGVoxelPlanetSurfaceGrid.h"
 
 #include "EngineUtils.h"
@@ -60,10 +60,8 @@ namespace
 		const UVoxelBiomeConfiguration* BiomeConfig = nullptr;
 		int32 WorldSeed = 0;
 		float VoxelSize = 100.0f;
-		bool bWaterEnabled = false;
-		float WaterLevel = 0.0f;
-		// The sea as generation sees it (a planet's sphere of WaterRadius; the WaterLevel plane otherwise).
-		FVoxelSeaSurface Sea;
+		// The world's water levels, as generation sees them (UVoxelChunkManager::GetWaterLevels).
+		FVoxelWaterLevels Water;
 		// Live chunk manager for the edit-aware near band (edit-merged voxel surface query).
 		const UVoxelChunkManager* ChunkManager = nullptr;
 		bool bValid = false;
@@ -103,9 +101,7 @@ namespace
 		Out.NoiseParams = Config->GetNoiseParams();
 		Out.WorldSeed = Config->WorldSeed;
 		Out.VoxelSize = Config->VoxelSize;
-		Out.bWaterEnabled = Config->bEnableWaterLevel;
-		Out.WaterLevel = Config->WaterLevel;
-		Out.Sea = FVoxelSeaSurface::FromConfig(*Config);
+		Out.Water = ChunkMgr->GetWaterLevels();
 		Out.BiomeConfig = Config->bEnableBiomes ? Config->BiomeConfiguration : nullptr;
 		Out.ChunkManager = ChunkMgr;
 		Out.bValid = true;
@@ -308,7 +304,7 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 		if (!bNear)
 		{
 			Sample = FVoxelSurfaceQuery::SampleSurfacePoint(*VoxelCtx.WorldMode, Site.Query, VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
-				BiomeSnapshot, VoxelCtx.Sea, &Conditioning);
+				BiomeSnapshot, VoxelCtx.Water, &Conditioning);
 		}
 		if (bClipToBounds && !Bounds.IsInsideOrOn(Sample.Position))
 		{

@@ -5,10 +5,10 @@
 #include "CoreMinimal.h"
 #include "VoxelData.h"
 #include "VoxelWorldModeTypes.h"
+#include "VoxelWaterLevels.h"
 
 struct FVoxelBiomeSnapshot;
 struct FVoxelNoiseParams;
-struct FVoxelSeaSurface;
 class IVoxelWorldMode;
 class FSphericalPlanetWorldMode;
 class UVoxelCaveConfiguration;
@@ -153,7 +153,7 @@ public:
 	 * @param VoxelSize Voxel size (the dither's key)
 	 * @param NoiseParams Terrain noise (its seed derives the climate seeds)
 	 * @param BiomeSnapshot Value-captured biome data (FVoxelBiomeSnapshot::FromConfig)
-	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig)
+	 * @param Water The world's water levels (UVoxelChunkManager::GetWaterLevels), sampled at the position
 	 * @param OutSurfaceMaterial Surface material ID (0 when the snapshot is invalid)
 	 * @param OutBiomeID Dominant biome ID (0 when the snapshot is invalid)
 	 */
@@ -164,7 +164,7 @@ public:
 		float VoxelSize,
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
-		const FVoxelSeaSurface& Sea,
+		const FVoxelWaterLevels& Water,
 		uint8& OutSurfaceMaterial, uint8& OutBiomeID);
 
 	/**
@@ -177,7 +177,7 @@ public:
 	 * @param Continentalness On a planet, what GetGeneratedSurface returned for it; ignored elsewhere
 	 * @param NoiseParams Terrain noise
 	 * @param BiomeSnapshot Value-captured biome data
-	 * @param Sea The world's sea
+	 * @param Water The world's water levels, sampled at the position
 	 * @return The mix (material 0 and weight 0 when the snapshot is invalid)
 	 */
 	static FVoxelSurfaceMaterialMix QuerySurfaceMaterialMixAt(
@@ -186,7 +186,7 @@ public:
 		float Continentalness,
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
-		const FVoxelSeaSurface& Sea);
+		const FVoxelWaterLevels& Water);
 
 	/**
 	 * The climate at a position, in any world mode (the weather plan's P2): the generated surface on the position's
@@ -268,7 +268,7 @@ public:
 	 * @param NoiseParams Terrain noise
 	 * @param BiomeSnapshot The biome snapshot (bIsValid picks the pipeline)
 	 * @param bUseBiomes Whether the world's biomes are on
-	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig)
+	 * @param Water The world's water levels (UVoxelChunkManager::GetWaterLevels), sampled at the position
 	 * @param Conditioning The conditioning there (its planet zones) for the biome pipeline, or null
 	 * @param FallbackTempNoise The fallback climate's temperature field (the generators' hardcoded one)
 	 * @param FallbackMoistureNoise The fallback climate's moisture field
@@ -283,7 +283,7 @@ public:
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
 		bool bUseBiomes,
-		const FVoxelSeaSurface& Sea,
+		const FVoxelWaterLevels& Water,
 		const struct FVoxelConditioning* Conditioning,
 		const FVoxelNoiseParams& FallbackTempNoise,
 		const FVoxelNoiseParams& FallbackMoistureNoise);
@@ -301,7 +301,7 @@ public:
 	 * @param NoiseParams Terrain noise
 	 * @param Conditioning The conditioning there, or null (used only when Surface is null)
 	 * @param Caves The world's cave configuration when its caves are on, else null
-	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig)
+	 * @param Water The world's water levels (UVoxelChunkManager::GetWaterLevels), sampled at the position
 	 * @param bEnableBiomes Whether the world's biomes are on (the planet's biome for the cave overrides)
 	 * @param BiomeHint The biome generation gives the position (a heightmap column's, which its chunk's voxels carry), or
 	 *        -1: on a planet derived from its climate when a cave override needs it, behind
@@ -318,7 +318,7 @@ public:
 		const FVoxelNoiseParams& NoiseParams,
 		const struct FVoxelConditioning* Conditioning,
 		const UVoxelCaveConfiguration* Caves,
-		const FVoxelSeaSurface& Sea,
+		const FVoxelWaterLevels& Water,
 		bool bEnableBiomes,
 		int32 BiomeHint = -1,
 		const FVoxelTerrainSurfacePoint* Surface = nullptr,
@@ -402,7 +402,7 @@ public:
 	 * @param VoxelSize Voxel size (generation measures the depth in voxels)
 	 * @param NoiseParams Terrain noise (the radial height; its seed derives the climate seeds)
 	 * @param BiomeSnapshot Value-captured biome data (FVoxelBiomeSnapshot::FromConfig)
-	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig): a sphere on a planet
+	 * @param Water The world's water levels (UVoxelChunkManager::GetWaterLevels): a sphere's on a planet
 	 * @param OutSurfaceMaterial Surface material ID (0 when the snapshot is invalid)
 	 * @param OutBiomeID Dominant biome ID (0 when the snapshot is invalid)
 	 * @param Conditioning Optional conditioning there (its planet zones, spherical SP-B10): the terrain's radius is the conditioned one,
@@ -414,7 +414,7 @@ public:
 		float VoxelSize,
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
-		const FVoxelSeaSurface& Sea,
+		const FVoxelWaterLevels& Water,
 		uint8& OutSurfaceMaterial, uint8& OutBiomeID,
 		const struct FVoxelConditioning* Conditioning = nullptr);
 
@@ -431,7 +431,7 @@ public:
 	 * @param VoxelSize Voxel size (generation measures the depth in voxels)
 	 * @param NoiseParams Terrain noise (its seed derives the climate seeds)
 	 * @param BiomeSnapshot Value-captured biome data
-	 * @param Sea The world's sea
+	 * @param Water The world's water levels, sampled at the position
 	 * @param OutSurfaceMaterial Surface material ID (0 when the snapshot is invalid)
 	 * @param OutBiomeID Dominant biome ID (0 when the snapshot is invalid)
 	 */
@@ -444,7 +444,7 @@ public:
 		float VoxelSize,
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
-		const FVoxelSeaSurface& Sea,
+		const FVoxelWaterLevels& Water,
 		uint8& OutSurfaceMaterial, uint8& OutBiomeID);
 
 	/**
@@ -459,7 +459,7 @@ public:
 	 * @param Continentalness The continentalness SampleRadialDisplacement returned for Direction
 	 * @param NoiseParams Terrain noise (its seed derives the climate seeds)
 	 * @param BiomeSnapshot Value-captured biome data
-	 * @param Sea The world's sea
+	 * @param Water The world's water levels, sampled at the position
 	 * @return The mix (material 0 and weight 0 when the snapshot is invalid)
 	 */
 	static FVoxelSurfaceMaterialMix QueryPlanetSurfaceMaterialMixAt(
@@ -469,7 +469,7 @@ public:
 		float Continentalness,
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
-		const FVoxelSeaSurface& Sea);
+		const FVoxelWaterLevels& Water);
 
 	/**
 	 * The surface material mix at a heightmap world's surface point (world modes review WM-MP1, the heightmap far field):
@@ -502,7 +502,7 @@ public:
 	 * @param VoxelSize Voxel size (the heightmap gradient's step)
 	 * @param NoiseParams Terrain noise
 	 * @param BiomeSnapshot Value-captured biome data
-	 * @param Sea The world's sea (FVoxelSeaSurface::FromConfig): the WaterLevel plane, or a planet's sphere
+	 * @param Water The world's water levels (UVoxelChunkManager::GetWaterLevels): the sea's plane, or a planet's sphere
 	 * @param Conditioning Optional conditioning there: the generated surface and its conditions. On a planet its planet zones
 	 *              (spherical SP-B10, GetConditionedSurfacePoint); in heightmap modes its heightmap zones (SampleSurface's, G23)
 	 * @return The surface sample
@@ -512,7 +512,7 @@ public:
 		const FVector& WorldPos, float VoxelSize,
 		const FVoxelNoiseParams& NoiseParams,
 		const FVoxelBiomeSnapshot& BiomeSnapshot,
-		const FVoxelSeaSurface& Sea,
+		const FVoxelWaterLevels& Water,
 		const struct FVoxelConditioning* Conditioning = nullptr);
 
 	/**

@@ -5,7 +5,7 @@
 #include "VoxelBiomeSnapshot.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelNoiseTypes.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelNoise.h"
 #include "VoxelTerrainConditioning.h"
@@ -20,6 +20,24 @@ namespace
 	FORCEINLINE float NaturalHeight(const IVoxelWorldMode& WorldMode, float WorldX, float WorldY, const FVoxelNoiseParams& NoiseParams)
 	{
 		return static_cast<float>(WorldMode.GetSurfaceOnUpLine(FVector(WorldX, WorldY, 0.0), NoiseParams).Position.Z);
+	}
+
+	/** The water over a column, as the material rules take it: whether a body covers it, and that body's level there. */
+	struct FColumnWater
+	{
+		bool bWater = false;
+		/** World Z, or the distance from the planet centre (FVoxelWaterBody::Level) */
+		double Level = 0.0;
+	};
+
+	/** The water levels' sample at a position, reduced to what the surface's material needs. */
+	FORCEINLINE FColumnWater WaterOver(const FVoxelWaterLevels& Water, const FVector& WorldPos)
+	{
+		FVoxelWaterSample Sample;
+		FColumnWater Over;
+		Over.bWater = Water.Sample(WorldPos, Sample);
+		Over.Level = Sample.SurfaceLevel;
+		return Over;
 	}
 }
 
@@ -164,20 +182,21 @@ void FVoxelSurfaceQuery::QuerySurfaceConditionsAt(
 	float VoxelSize,
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
-	const FVoxelSeaSurface& Sea,
+	const FVoxelWaterLevels& Water,
 	uint8& OutSurfaceMaterial, uint8& OutBiomeID)
 {
 	if (WorldMode.GetWorldModeType() != EWorldMode::SphericalPlanet)
 	{
+		const FColumnWater Over = WaterOver(Water, Surface.Position);
 		QuerySurfaceConditions(static_cast<float>(Surface.Position.X), static_cast<float>(Surface.Position.Y),
 			static_cast<float>(Surface.Position.Z), VoxelSize, BiomeSnapshot, NoiseParams.Seed,
-			Sea.bEnabled && !Sea.bRadial, static_cast<float>(Sea.PlaneZ), OutSurfaceMaterial, OutBiomeID);
+			Over.bWater && !Water.IsRadial(), static_cast<float>(Over.Level), OutSurfaceMaterial, OutBiomeID);
 		return;
 	}
 	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode);
 	const FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(Surface.Position, Planet.GetPlanetParams().PlanetCenter);
 	QueryPlanetSurfaceConditionsAt(Planet, Direction, Surface.Altitude, Continentalness, static_cast<double>(Surface.Altitude), VoxelSize,
-		NoiseParams, BiomeSnapshot, Sea, OutSurfaceMaterial, OutBiomeID);
+		NoiseParams, BiomeSnapshot, Water, OutSurfaceMaterial, OutBiomeID);
 }
 
 FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QuerySurfaceMaterialMixAt(
@@ -186,16 +205,17 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QuerySurfaceMaterialMixAt(
 	float Continentalness,
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
-	const FVoxelSeaSurface& Sea)
+	const FVoxelWaterLevels& Water)
 {
 	if (WorldMode.GetWorldModeType() != EWorldMode::SphericalPlanet)
 	{
+		const FColumnWater Over = WaterOver(Water, Surface.Position);
 		return QuerySurfaceMaterialMix(static_cast<float>(Surface.Position.X), static_cast<float>(Surface.Position.Y),
-			static_cast<float>(Surface.Position.Z), BiomeSnapshot, NoiseParams.Seed, Sea.bEnabled && !Sea.bRadial, static_cast<float>(Sea.PlaneZ));
+			static_cast<float>(Surface.Position.Z), BiomeSnapshot, NoiseParams.Seed, Over.bWater && !Water.IsRadial(), static_cast<float>(Over.Level));
 	}
 	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode);
 	const FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(Surface.Position, Planet.GetPlanetParams().PlanetCenter);
-	return QueryPlanetSurfaceMaterialMixAt(Planet, Direction, Surface.Altitude, Continentalness, NoiseParams, BiomeSnapshot, Sea);
+	return QueryPlanetSurfaceMaterialMixAt(Planet, Direction, Surface.Altitude, Continentalness, NoiseParams, BiomeSnapshot, Water);
 }
 
 uint8 FVoxelSurfaceQuery::QueryMapSurfaceMaterial(
@@ -207,7 +227,7 @@ uint8 FVoxelSurfaceQuery::QueryMapSurfaceMaterial(
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
 	bool bUseBiomes,
-	const FVoxelSeaSurface& Sea,
+	const FVoxelWaterLevels& Water,
 	const FVoxelConditioning* Conditioning,
 	const FVoxelNoiseParams& FallbackTempNoise,
 	const FVoxelNoiseParams& FallbackMoistureNoise)
@@ -221,14 +241,15 @@ uint8 FVoxelSurfaceQuery::QueryMapSurfaceMaterial(
 		uint8 BiomeID = 0;
 		if (bPlanet)
 		{
-			QueryPlanetSurfaceConditions(static_cast<const FSphericalPlanetWorldMode&>(WorldMode), Position, VoxelSize, NoiseParams, BiomeSnapshot, Sea,
+			QueryPlanetSurfaceConditions(static_cast<const FSphericalPlanetWorldMode&>(WorldMode), Position, VoxelSize, NoiseParams, BiomeSnapshot, Water,
 				MaterialID, BiomeID, Conditioning);
 		}
 		else
 		{
+			const FColumnWater Over = WaterOver(Water, Position);
 			QuerySurfaceConditions(
 				static_cast<float>(Position.X), static_cast<float>(Position.Y), SurfaceAltitude, VoxelSize,
-				BiomeSnapshot, NoiseParams.Seed, Sea.bEnabled, static_cast<float>(Sea.PlaneZ),
+				BiomeSnapshot, NoiseParams.Seed, Over.bWater, static_cast<float>(Over.Level),
 				MaterialID, BiomeID);
 		}
 	}
@@ -270,7 +291,7 @@ FVoxelData FVoxelSurfaceQuery::GenerateVoxelAt(
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelConditioning* Conditioning,
 	const UVoxelCaveConfiguration* Caves,
-	const FVoxelSeaSurface& Sea,
+	const FVoxelWaterLevels& Water,
 	bool bEnableBiomes,
 	int32 BiomeHint,
 	const FVoxelTerrainSurfacePoint* Surface,
@@ -291,13 +312,15 @@ FVoxelData FVoxelSurfaceQuery::GenerateVoxelAt(
 	const FSphericalPlanetParams* PlanetParams = nullptr;
 	FVector Direction = FVector::UpVector;
 	const bool bPlanet = WorldMode.GetWorldModeType() == EWorldMode::SphericalPlanet;
+	// The water over the voxel's column: a level is world Z on a heightmap world, the distance from the centre on a planet.
+	const FColumnWater Over = WaterOver(Water, WorldPos);
 	if (!bPlanet)
 	{
 		const float GeneratedHeight = static_cast<float>(Surface->Position.Z);
 		Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(
 			FInfinitePlaneWorldMode::CalculateSignedDistance(static_cast<float>(WorldPos.Z), GeneratedHeight), VoxelSize);
 		DepthBelowSurface = (GeneratedHeight - static_cast<float>(WorldPos.Z)) / VoxelSize;
-		bUnderwater = Sea.bEnabled && GeneratedHeight < Sea.PlaneZ;
+		bUnderwater = Over.bWater && GeneratedHeight < Over.Level;
 	}
 	else
 	{
@@ -309,7 +332,7 @@ FVoxelData FVoxelSurfaceQuery::GenerateVoxelAt(
 		const float SignedDistance = FSphericalPlanetWorldMode::ShellSignedDistance(Distance, Params.PlanetRadius + Altitude, Params);
 		Density = FInfinitePlaneWorldMode::SignedDistanceToDensity(SignedDistance, VoxelSize);
 		DepthBelowSurface = static_cast<float>((static_cast<double>(Altitude) - (Distance - Params.PlanetRadius)) / VoxelSize);
-		bUnderwater = Sea.bEnabled && static_cast<double>(Altitude) < Sea.Radius - Params.PlanetRadius;
+		bUnderwater = Over.bWater && static_cast<double>(Altitude) < Over.Level - Params.PlanetRadius;
 		PlanetParams = &Params;
 	}
 
@@ -488,7 +511,7 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(
 	float VoxelSize,
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
-	const FVoxelSeaSurface& Sea,
+	const FVoxelWaterLevels& Water,
 	uint8& OutSurfaceMaterial, uint8& OutBiomeID,
 	const FVoxelConditioning* Conditioning)
 {
@@ -516,7 +539,7 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(
 	// Altitudes, formed in double (WM-BP4), as the generator compares them.
 	const double VoxelAltitude = FSphericalPlanetWorldMode::CalculateRadialDistance(Position, Params.PlanetCenter) - Params.PlanetRadius;
 	QueryPlanetSurfaceConditionsAt(Planet, Direction, TerrainAltitude, Continentalness, VoxelAltitude, VoxelSize, NoiseParams,
-		BiomeSnapshot, Sea, OutSurfaceMaterial, OutBiomeID);
+		BiomeSnapshot, Water, OutSurfaceMaterial, OutBiomeID);
 }
 
 void FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(
@@ -528,7 +551,7 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(
 	float VoxelSize,
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
-	const FVoxelSeaSurface& Sea,
+	const FVoxelWaterLevels& Water,
 	uint8& OutSurfaceMaterial, uint8& OutBiomeID)
 {
 	OutSurfaceMaterial = 0;
@@ -551,8 +574,10 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(
 	// Blend zones dithered at the voxel's key (G39): its position along the direction, in double
 	const FVoxelBlendDitherKey Dither(FVoxelBiomeBlendDither::KeyAt(
 		Params.PlanetCenter + Direction * (Params.PlanetRadius + VoxelAltitude), VoxelSize), NoiseParams.Seed);
-	OutSurfaceMaterial = (Sea.bEnabled && Sea.bRadial)
-		? BiomeSnapshot.GetBlendedMaterialWithWater(Blend, DepthBelowSurface, TerrainAltitude, static_cast<float>(Sea.Radius - Params.PlanetRadius), Dither)
+	// The water over the terrain along the direction: its level less the datum radius is the altitude generation compares.
+	const FColumnWater Over = WaterOver(Water, Params.PlanetCenter + Direction * (Params.PlanetRadius + static_cast<double>(TerrainAltitude)));
+	OutSurfaceMaterial = (Over.bWater && Water.IsRadial())
+		? BiomeSnapshot.GetBlendedMaterialWithWater(Blend, DepthBelowSurface, TerrainAltitude, static_cast<float>(Over.Level - Params.PlanetRadius), Dither)
 		: BiomeSnapshot.GetBlendedMaterial(Blend, DepthBelowSurface, Dither);
 	OutSurfaceMaterial = BiomeSnapshot.ApplyHeightMaterialRules(OutSurfaceMaterial, Altitude, DepthBelowSurface);
 }
@@ -564,7 +589,7 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(
 	float Continentalness,
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
-	const FVoxelSeaSurface& Sea)
+	const FVoxelWaterLevels& Water)
 {
 	FVoxelSurfaceMaterialMix Mix;
 	if (!BiomeSnapshot.bIsValid)
@@ -582,9 +607,10 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(
 	// The blend's surface materials and shares, height rules applied to each, merged per material.
 	uint8 Materials[MAX_BIOME_BLEND];
 	float Shares[MAX_BIOME_BLEND];
-	const bool bWater = Sea.bEnabled && Sea.bRadial;
+	const FColumnWater Over = WaterOver(Water, Params.PlanetCenter + Direction * (Params.PlanetRadius + static_cast<double>(TerrainAltitude)));
+	const bool bWater = Over.bWater && Water.IsRadial();
 	const int32 Num = BiomeSnapshot.GetBlendedMaterialShares(Blend, 0.0f, bWater, TerrainAltitude,
-		static_cast<float>(Sea.Radius - Params.PlanetRadius), Materials, Shares);
+		static_cast<float>(Over.Level - Params.PlanetRadius), Materials, Shares);
 	uint8 Merged[MAX_BIOME_BLEND];
 	float MergedShares[MAX_BIOME_BLEND];
 	int32 MergedNum = 0;
@@ -714,14 +740,15 @@ FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurfacePoint(
 	const FVector& WorldPos, float VoxelSize,
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
-	const FVoxelSeaSurface& Sea,
+	const FVoxelWaterLevels& Water,
 	const FVoxelConditioning* Conditioning)
 {
 	if (WorldMode.GetWorldModeType() != EWorldMode::SphericalPlanet)
 	{
-		// Heightmap modes: the (X, Y) sample with the zones there; its sea is the WaterLevel plane.
+		// Heightmap modes: the (X, Y) sample with the zones there, and the water over that column (a level is a world Z).
+		const FColumnWater Over = WaterOver(Water, WorldPos);
 		return SampleSurface(WorldMode, static_cast<float>(WorldPos.X), static_cast<float>(WorldPos.Y), VoxelSize, NoiseParams,
-			BiomeSnapshot, NoiseParams.Seed, Sea.bEnabled && !Sea.bRadial, static_cast<float>(Sea.PlaneZ), Conditioning);
+			BiomeSnapshot, NoiseParams.Seed, Over.bWater && !Water.IsRadial(), static_cast<float>(Over.Level), Conditioning);
 	}
 
 	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode);
@@ -734,7 +761,7 @@ FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurfacePoint(
 	Sample.Up = Planet.GetUpVector(Surface.Position);
 	Sample.Altitude = Surface.Altitude;
 	Sample.SlopeDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(Sample.Normal, Sample.Up), -1.0, 1.0)));
-	QueryPlanetSurfaceConditions(Planet, Surface.Position, VoxelSize, NoiseParams, BiomeSnapshot, Sea, Sample.MaterialID, Sample.BiomeID, Conditioning);
+	QueryPlanetSurfaceConditions(Planet, Surface.Position, VoxelSize, NoiseParams, BiomeSnapshot, Water, Sample.MaterialID, Sample.BiomeID, Conditioning);
 	return Sample;
 }
 

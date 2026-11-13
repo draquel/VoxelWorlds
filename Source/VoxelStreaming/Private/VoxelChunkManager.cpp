@@ -1306,11 +1306,12 @@ void UVoxelChunkManager::Initialize(
 			Configuration->ScatterRadius);
 	}
 
-	// Create water propagation system if water is enabled
-	if (Configuration->bEnableWaterLevel)
+	// Create water propagation system if the world has water
+	const FVoxelWaterLevels WaterLevels = GetWaterLevels();
+	if (WaterLevels.HasWater())
 	{
 		WaterPropagation = NewObject<UVoxelWaterPropagation>(this);
-		WaterPropagation->Initialize(this, EditManager, Configuration->WaterLevel);
+		WaterPropagation->Initialize(this, EditManager, WaterLevels);
 	}
 
 	bIsInitialized = true;
@@ -2535,19 +2536,17 @@ void UVoxelChunkManager::ApplyDescentPrefetch(FLODQueryContext& Context, float D
 		{
 			const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WorldMode);
 			SurfaceHeight = Configuration->WorldRadius + static_cast<double>(Planet.GetTerrainAltitude(Up, Configuration->GetNoiseParams()));
-			if (Configuration->bEnableWaterLevel)
-			{
-				SurfaceHeight = FMath::Max(SurfaceHeight, static_cast<double>(Configuration->WaterRadius));
-			}
 		}
 		else
 		{
 			SurfaceHeight = GetGeneratedSurfacePoint(FVector(Camera.X, Camera.Y, 0.0)).Z;
-			const FVoxelSeaSurface Sea = GetSeaSurface();
-			if (Sea.bEnabled)
-			{
-				SurfaceHeight = FMath::Max(SurfaceHeight, Sea.PlaneZ);
-			}
+		}
+		// The water over the camera's column where it lies higher (a level is a height in the same terms as SurfaceHeight:
+		// the distance from the centre on a planet, world Z otherwise).
+		FVoxelWaterSample Water;
+		if (GetWaterLevels().Sample(Camera, Water))
+		{
+			SurfaceHeight = FMath::Max(SurfaceHeight, Water.SurfaceLevel);
 		}
 		return SurfaceHeight;
 	});
@@ -2823,10 +2822,14 @@ void UVoxelChunkManager::BuildChunkGenerationRequest(const FIntVector& ChunkCoor
 	OutRequest.bEnableCaves = Configuration->bEnableCaves;
 	OutRequest.CaveConfiguration = Configuration->CaveConfiguration;
 
-	// Water level parameters
-	OutRequest.bEnableWaterLevel = Configuration->bEnableWaterLevel;
-	OutRequest.WaterLevel = Configuration->WaterLevel;
-	OutRequest.WaterRadius = Configuration->WaterRadius;
+	// The water over this chunk: the levels' range over the chunk's bounds, which the request copies as one level (the
+	// range is uniform with the sea alone; the per-column form comes with lakes). A level is world Z on a heightmap
+	// world and the distance from the centre on a planet, so each mode fills its own field.
+	const FVoxelWaterLevels WaterLevels = GetWaterLevels();
+	const FVoxelWaterLevelRange Water = WaterLevels.GetRange(GetChunkWorldBox(ChunkCoord));
+	OutRequest.bEnableWaterLevel = Water.bAny;
+	OutRequest.WaterLevel = WaterLevels.IsRadial() ? 0.0f : static_cast<float>(Water.GetLevel());
+	OutRequest.WaterRadius = WaterLevels.IsRadial() ? Water.GetLevel() : 0.0;
 
 	// The terrain conditioning over this chunk (Phase 6c: flatten under POIs/claims)
 	GatherConditioningForChunk(ChunkCoord, OutRequest.Conditioning);
@@ -2911,7 +2914,7 @@ bool UVoxelChunkManager::FindVoxelTreeAt(const FVector& WorldPos, FVoxelTreeInst
 	{
 		return false;
 	}
-	return FVoxelTreeQuery::FindAt(*Configuration, *WorldMode, WorldPos, [this](const FVector& P) { return GetVoxelAt(P); }, OutTree);
+	return FVoxelTreeQuery::FindAt(*Configuration, *WorldMode, GetWaterLevels(), WorldPos, [this](const FVector& P) { return GetVoxelAt(P); }, OutTree);
 }
 
 void UVoxelChunkManager::FindVoxelTreesNear(const FVector& WorldPos, float Radius, TArray<FVoxelTreeInstance>& OutTrees) const
@@ -2921,7 +2924,7 @@ void UVoxelChunkManager::FindVoxelTreesNear(const FVector& WorldPos, float Radiu
 	{
 		return;
 	}
-	FVoxelTreeQuery::FindNear(*Configuration, *WorldMode, WorldPos, Radius, [this](const FVector& P) { return GetVoxelAt(P); }, OutTrees);
+	FVoxelTreeQuery::FindNear(*Configuration, *WorldMode, GetWaterLevels(), WorldPos, Radius, [this](const FVector& P) { return GetVoxelAt(P); }, OutTrees);
 }
 
 void UVoxelChunkManager::GetVoxelTreeBlocks(const FVoxelTreeInstance& Tree, TArray<FVoxelTreeVoxel>& OutBlocks) const
@@ -2974,19 +2977,32 @@ FVector UVoxelChunkManager::GetSpawnPosition() const
 	return Surface + GetUpVectorAt(Surface) * Configuration->PlanetSpawnAltitude;
 }
 
+FVoxelWaterLevels UVoxelChunkManager::GetWaterLevels() const
+{
+	// The one builder (the water plan's W2), from the configuration as it is now: the sea is its one body.
+	return Configuration ? FVoxelWaterLevels::FromConfig(*Configuration) : FVoxelWaterLevels();
+}
+
 FVoxelSeaSurface UVoxelChunkManager::GetSeaSurface() const
 {
-	if (!Configuration)
-	{
-		return FVoxelSeaSurface();
-	}
-	return FVoxelSeaSurface::FromConfig(*Configuration);
+	return GetWaterLevels().GetSea();
 }
 
 float UVoxelChunkManager::GetSeaDepthAt(const FVector& WorldPos) const
 {
-	const FVoxelSeaSurface Sea = GetSeaSurface();
-	return Sea.bEnabled ? static_cast<float>(Sea.GetDepth(WorldPos)) : -1.0e9f;
+	// The sample's depth: FVoxelWaterSample::NoWaterDepth (-1e9) where there is no water.
+	return static_cast<float>(GetWaterLevels().GetDepth(WorldPos));
+}
+
+FBox UVoxelChunkManager::GetChunkWorldBox(const FIntVector& ChunkCoord) const
+{
+	if (!Configuration)
+	{
+		return FBox(ForceInit);
+	}
+	const double ChunkWorldSize = Configuration->GetChunkWorldSize();
+	const FVector ChunkOrigin = Configuration->WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
+	return FBox(ChunkOrigin, ChunkOrigin + FVector(ChunkWorldSize));
 }
 
 double UVoxelChunkManager::ComputePlanetKillZ(double CurrentKillZ, const FVoxelWorldBounds& Bounds, double Margin)
@@ -3086,8 +3102,11 @@ uint8 UVoxelChunkManager::ResolveFarSeabedMaterial(const FIslandBowlParams& Isla
 		if (Configuration->bEnableBiomes && Snapshot.bIsValid)
 		{
 			uint8 Biome = 0;
+			// The water over the seabed sample (an island's sea is a plane: its level is a world Z).
+			FVoxelWaterSample Water;
+			const bool bWater = GetWaterLevels().Sample(FVector(P.X, P.Y, Height), Water);
 			FVoxelSurfaceQuery::QuerySurfaceConditions(P.X, P.Y, Height, Configuration->VoxelSize, Snapshot,
-				Configuration->GetNoiseParams().Seed, Configuration->bEnableWaterLevel, Configuration->WaterLevel, Material, Biome);
+				Configuration->GetNoiseParams().Seed, bWater, static_cast<float>(Water.SurfaceLevel), Material, Biome);
 		}
 		else if (WorldMode)
 		{
@@ -3132,7 +3151,9 @@ void UVoxelChunkManager::RebuildFarOcean()
 	FarOceanSettings.GridOrigin = FVector2D(Configuration->WorldOrigin.X, Configuration->WorldOrigin.Y);
 	FarOceanSettings.ColumnSize = Configuration->GetChunkWorldSize();
 	FarOceanSettings.VoxelSize = Configuration->VoxelSize;
-	FarOceanSettings.WaterZ = Configuration->WaterLevel; // where FVoxelWaterMesher puts the water tiles
+	// The far ocean draws the sea body itself: its plane, where FVoxelWaterMesher puts the water tiles.
+	const FVoxelSeaSurface Sea = GetWaterLevels().GetSea();
+	FarOceanSettings.WaterZ = Sea.PlaneZ;
 	FarOceanSettings.OuterDistance = Configuration->IslandFarOceanDistance;
 	FarOceanSettings.SeabedSlopeWidth = Island.SeabedSlopeWidth;
 	// Half a voxel under the profile: the voxel seabed past the edge is the profile itself (no noise there), which
@@ -3147,7 +3168,7 @@ void UVoxelChunkManager::RebuildFarOcean()
 	FarOceanSettings.SeabedMaterialID = ResolveFarSeabedMaterial(Island);
 
 	// The water needs the water tiles' material (without it the world actor draws its fallback plane).
-	const bool bWater = Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial;
+	const bool bWater = Sea.bEnabled && Configuration->WaterMeshMaterial;
 	FarOcean.Build(Owner, FarOceanSettings, MeshRenderer ? MeshRenderer->GetSurfaceMaterial() : nullptr,
 		bWater ? Configuration->WaterMeshMaterial.Get() : nullptr, CVarFarOcean.GetValueOnGameThread() != 0, CurrentViewerPosition,
 		StartTime);
@@ -3166,9 +3187,10 @@ void UVoxelChunkManager::RebuildPlanetOcean()
 
 	UWorld* World = GetWorld();
 	AActor* Owner = GetOwner();
-	// Visual only: a dedicated server draws nothing.
+	// Visual only: a dedicated server draws nothing. The shell is the sea body itself: a sphere at the sea's radius.
+	const FVoxelSeaSurface Sea = GetWaterLevels().GetSea();
 	if (!Configuration || !World || !World->IsGameWorld() || !Owner || World->GetNetMode() == NM_DedicatedServer
-		|| Configuration->WorldMode != EWorldMode::SphericalPlanet || !Configuration->bEnableWaterLevel)
+		|| Configuration->WorldMode != EWorldMode::SphericalPlanet || !Sea.bEnabled)
 	{
 		return;
 	}
@@ -3178,21 +3200,21 @@ void UVoxelChunkManager::RebuildPlanetOcean()
 		return;
 	}
 	const FVoxelPlanetOceanSettings& PlanetOceanSettings = PlanetOcean.GetSettings();
-	if (FVoxelFarField::ShouldDrawSea(Configuration->WaterRadius, PlanetOceanSettings.MaxSag, PlanetOceanSettings.MinSegments,
+	if (FVoxelFarField::ShouldDrawSea(Sea.Radius, PlanetOceanSettings.MaxSag, PlanetOceanSettings.MinSegments,
 		PlanetOceanSettings.MaxSegments))
 	{
 		// At scale the shell's quads sag past its budget (G40: up to 3,189 uu on a 1,000 km planet, its vertices floats of
 		// size R): the far field's sea patches draw the sea instead, and no shell is built (with voxel.World.FarField 0,
 		// a development switch, a big planet has no sea: code review CR1, D-CR13).
 		UE_LOG(LogVoxelStreaming, Log, TEXT("Planet ocean: drawn by the far field (radius %.0f: the shell would sag %.0f uu at its %d quads a face edge)."),
-			Configuration->WaterRadius, FVoxelPlanetOcean::MeasureMaxSag(Configuration->WaterRadius,
-				FVoxelPlanetOcean::ChooseSegments(Configuration->WaterRadius, PlanetOceanSettings.MaxSag, PlanetOceanSettings.MinSegments,
+			Sea.Radius, FVoxelPlanetOcean::MeasureMaxSag(Sea.Radius,
+				FVoxelPlanetOcean::ChooseSegments(Sea.Radius, PlanetOceanSettings.MaxSag, PlanetOceanSettings.MinSegments,
 					PlanetOceanSettings.MaxSegments)), PlanetOceanSettings.MaxSegments);
 		return;
 	}
 	FVoxelPlanetOceanSettings Settings;
 	Settings.Center = Configuration->WorldOrigin; // the planet centre (FVoxelWorldModeFactory::MakePlanetParams)
-	Settings.Radius = Configuration->WaterRadius;
+	Settings.Radius = Sea.Radius;
 	Settings.VoxelSize = Configuration->VoxelSize;
 	PlanetOcean.Build(Owner, Settings, Configuration->WaterMeshMaterial, CVarPlanetOcean.GetValueOnGameThread() != 0,
 		CurrentViewerPosition);
@@ -3222,7 +3244,10 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 	{
 		return;
 	}
-	TSharedPtr<const FVoxelFarFieldSurface> Surface = FVoxelFarFieldSurface::Make(*Configuration, WorldMode);
+	const FVoxelWaterLevels WaterLevels = GetWaterLevels();
+	TSharedPtr<const FVoxelFarFieldSurface> Surface = FVoxelFarFieldSurface::Make(*Configuration, WorldMode, WaterLevels);
+	// The far field's sea sections are the sea body's own geometry.
+	const FVoxelSeaSurface& Sea = WaterLevels.GetSea();
 	if (!Surface.IsValid())
 	{
 		return;
@@ -3254,9 +3279,9 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 		// The sea is the far field's only at scale, where the sea sphere would sag past its budget (G40); the small planet
 		// keeps its shell.
 		const FVoxelPlanetOceanSettings OceanDefaults;
-		Settings.bSea = Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial
-			&& FVoxelFarField::ShouldDrawSea(Configuration->WaterRadius, OceanDefaults.MaxSag, OceanDefaults.MinSegments, OceanDefaults.MaxSegments);
-		Settings.SeaRadius = Configuration->WaterRadius;
+		Settings.bSea = Sea.bEnabled && Configuration->WaterMeshMaterial
+			&& FVoxelFarField::ShouldDrawSea(Sea.Radius, OceanDefaults.MaxSag, OceanDefaults.MinSegments, OceanDefaults.MaxSegments);
+		Settings.SeaRadius = Sea.Radius;
 		Settings.EdgeLevel = FVoxelFarFieldSettings::ComputeEdgeLevel(Settings.Radius, Settings.ChunkWorldSize);
 		// Zones (POI pads, a few chunks across) only for patches up to 32 chunks in radius: past that they do not show, and a
 		// wide cap would ask the POI system for every POI in it (G37).
@@ -3283,11 +3308,11 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 		const FVoxelWorldBounds HeightBounds = WorldMode->GetWorldBounds();
 		Settings.MinAltitude = HeightBounds.MinZ;
 		Settings.MaxAltitude = HeightBounds.MaxZ;
-		// The sea at WaterLevel wherever the terrain dips near or under it, as the water tiles draw it over the streamed
+		// The sea at its plane wherever the terrain dips near or under it, as the water tiles draw it over the streamed
 		// columns (D37: an island's far ocean keeps its open sea past the bounds and its seabed; its grid water and floor
 		// inside the bounds are the far field's now).
-		Settings.bSea = Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial;
-		Settings.SeaZ = Configuration->WaterLevel;
+		Settings.bSea = Sea.bEnabled && Configuration->WaterMeshMaterial;
+		Settings.SeaZ = Sea.PlaneZ;
 		Settings.EdgeLevel = FVoxelFarFieldSettings::ComputeHeightmapEdgeLevel(Settings.RootChunks);
 		// Zones for patches up to 64 chunks across (a root tile of 64 included): the gather is a box query over the zones.
 		Settings.ZoneGatherMax = 64.0 * Settings.ChunkWorldSize + 1.0;
@@ -3336,7 +3361,7 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 			Settings.Radius, Settings.PatchQuads, Settings.EdgeLevel, Settings.GetPatchArc(Settings.EdgeLevel), Settings.Sink,
 			Settings.MinAltitude, Settings.MaxAltitude,
 			Settings.bSea ? *FString::Printf(TEXT("drawn by the far field (radius %.0f)"), Settings.SeaRadius)
-				: (Configuration->bEnableWaterLevel ? TEXT("drawn by the ocean shell") : TEXT("off")));
+				: (Sea.bEnabled ? TEXT("drawn by the ocean shell") : TEXT("off")));
 	}
 	else
 	{
@@ -3813,7 +3838,7 @@ bool UVoxelChunkManager::QuerySurfacePoint(const FVector& WorldPos, EVoxelSurfac
 	}
 	const FVoxelBiomeSnapshot Snapshot = FVoxelBiomeSnapshot::FromConfig(Configuration->BiomeConfiguration);
 	OutSample = FVoxelSurfaceQuery::SampleSurfacePoint(*WM, WorldPos, Configuration->VoxelSize, Configuration->GetNoiseParams(), Snapshot,
-		GetSeaSurface(), !Conditioning.IsEmpty() ? &Conditioning : nullptr);
+		GetWaterLevels(), !Conditioning.IsEmpty() ? &Conditioning : nullptr);
 	if (Layer == EVoxelSurfaceLayer::Generated && IsBlockSurface())
 	{
 		// A block world's generated surface is the block top GetGeneratedSurfacePoint gives (sampled at the column's corner).
@@ -3914,8 +3939,11 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 		CapturedNoiseParams = Configuration->GetNoiseParams();
 		CapturedWorldMode = WorldMode;
 		CapturedBiomeConfig = Configuration->BiomeConfiguration;
-		CapturedEnableWaterLevel = Configuration->bEnableWaterLevel;
-		CapturedWaterLevel = Configuration->WaterLevel;
+		// The water the trees stay out of: the levels' range over the chunk (trees are a heightmap feature, so the
+		// level is a world Z).
+		const FVoxelWaterLevelRange TreeWater = GetWaterLevels().GetRange(GetChunkWorldBox(ChunkCoord));
+		CapturedEnableWaterLevel = TreeWater.bAny;
+		CapturedWaterLevel = static_cast<float>(TreeWater.GetLevel());
 	}
 
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
@@ -4164,8 +4192,10 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 	const FVoxelNoiseParams CapturedNoiseParams = Configuration->GetNoiseParams();
 	const TSharedPtr<IVoxelWorldMode> CapturedWorldMode = WorldMode; // shared: lives as long as the task (G104)
 	UVoxelBiomeConfiguration* CapturedBiomeConfig = Configuration->BiomeConfiguration;
-	const bool CapturedEnableWaterLevel = Configuration->bEnableWaterLevel;
-	const float CapturedWaterLevel = Configuration->WaterLevel;
+	// The water the trees stay out of: the levels' range over the chunk (a world Z: trees are a heightmap feature).
+	const FVoxelWaterLevelRange TreeWater = GetWaterLevels().GetRange(GetChunkWorldBox(ChunkCoord));
+	const bool CapturedEnableWaterLevel = TreeWater.bAny;
+	const float CapturedWaterLevel = static_cast<float>(TreeWater.GetLevel());
 
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 
@@ -4935,18 +4965,22 @@ void UVoxelChunkManager::GetBenchLoadedByLayer(TMap<int32, int32>& OutByLayer) c
 double UVoxelChunkManager::GetSurfaceOrSeaLevel(const FVector& WorldPos, bool& bOutSea) const
 {
 	bOutSea = false;
-	const FVoxelSeaSurface Sea = GetSeaSurface();
+	// The water over the position's column: its surface level is in the terms this function returns (world Z on a
+	// heightmap world, the distance from the centre on a planet).
+	const FVoxelWaterLevels WaterLevels = GetWaterLevels();
+	FVoxelWaterSample Water;
+	const bool bWater = WaterLevels.Sample(WorldPos, Water);
 	if (GetWorldBounds().Shape != EVoxelWorldBoundsShape::Shell)
 	{
-		// A heightmap world (WM-MP11): the generated ground's Z at (X, Y), or the sea plane where higher.
+		// A heightmap world (WM-MP11): the generated ground's Z at (X, Y), or the water's surface where higher.
 		const double Ground = GetGeneratedSurfacePoint(FVector(WorldPos.X, WorldPos.Y, 0.0)).Z;
-		bOutSea = Sea.bEnabled && !Sea.bRadial && Sea.PlaneZ > Ground;
-		return bOutSea ? Sea.PlaneZ : Ground;
+		bOutSea = bWater && !WaterLevels.IsRadial() && Water.SurfaceLevel > Ground;
+		return bOutSea ? Water.SurfaceLevel : Ground;
 	}
 	const FVector Centre = GetWorldBounds().Center;
 	const double Ground = FVector::Dist(GetGeneratedSurfacePoint(WorldPos), Centre);
-	bOutSea = Sea.bEnabled && Sea.bRadial && Sea.Radius > Ground;
-	return bOutSea ? Sea.Radius : Ground;
+	bOutSea = bWater && WaterLevels.IsRadial() && Water.SurfaceLevel > Ground;
+	return bOutSea ? Water.SurfaceLevel : Ground;
 }
 
 void UVoxelChunkManager::GetWorldReport(const FVoxelWorldReportNotes& Notes, TArray<FString>& OutLines) const
@@ -4957,7 +4991,7 @@ void UVoxelChunkManager::GetWorldReport(const FVoxelWorldReportNotes& Notes, TAr
 		return;
 	}
 	const FVoxelWorldBounds Bounds = GetWorldBounds();
-	const FVoxelSeaSurface Sea = GetSeaSurface();
+	const FVoxelSeaSurface Sea = GetWaterLevels().GetSea();
 	const AWorldSettings* Settings = GetWorld() ? GetWorld()->GetWorldSettings() : nullptr;
 	const bool bPlanet = Bounds.Shape == EVoxelWorldBoundsShape::Shell;
 	if (bPlanet)
@@ -6847,7 +6881,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 		// Propagate water flags from loaded neighbors into this chunk's voxel data
 		// so caves connected across chunk boundaries receive consistent water flags.
-		if (Configuration && Configuration->bEnableWaterLevel)
+		if (Configuration && GetWaterLevels().HasWater())
 		{
 			const double WaterT0 = FPlatformTime::Seconds();
 			uint8 FloodedFaces = 0;
@@ -6924,9 +6958,9 @@ void UVoxelChunkManager::RemeshIfEditedWhileMeshing(const FIntVector& ChunkCoord
 
 bool UVoxelChunkManager::UsesWaterTiles() const
 {
-	// The tiles are XY columns meshed at the WaterLevel plane; a planet's sea is a sphere (its surface is the world
+	// The tiles are XY columns meshed at the sea's plane; a planet's sea is a sphere (its surface is the world
 	// actor's water sphere until SP-E2), so the tiles would draw in the wrong place there.
-	return Configuration && Configuration->bEnableWaterLevel && Configuration->WaterMeshMaterial
+	return Configuration && GetWaterLevels().HasWater() && Configuration->WaterMeshMaterial
 		&& Configuration->WorldMode != EWorldMode::SphericalPlanet;
 }
 
@@ -6941,7 +6975,9 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	{
 		*OutFloodedVoxels = 0;
 	}
-	if (!Configuration || !Configuration->bEnableWaterLevel)
+	// The water levels, taken once for the whole pull (the per-voxel tests below read this copy).
+	const FVoxelWaterLevels Water = GetWaterLevels();
+	if (!Configuration || !Water.HasWater())
 	{
 		return false;
 	}
@@ -6963,26 +6999,29 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 		return false;
 	}
 
-	// "Below the sea" as generation's fill pass tests it: the WaterLevel plane, or a planet's WaterRadius sphere (SP-B8),
-	// in world space (the chunk grid is relative to WorldOrigin; the plane is world Z, as the terrain's heights are, G19).
-	const FVoxelSeaSurface Sea = FVoxelSeaSurface::FromConfig(*Configuration);
+	// "Below the water" as generation's fill pass tests it: under the surface of the body over the voxel (the sea's
+	// plane, or a planet's sea sphere, SP-B8), in world space (the chunk grid is relative to WorldOrigin; a plane's
+	// level is world Z, as the terrain's heights are, G19). The per-voxel test is the sample's cheap form.
 	const FVector VoxelOrigin = ChunkWorldPos + Configuration->WorldOrigin;
-	auto IsBelowSea = [&Sea, &VoxelOrigin, VS](int32 X, int32 Y, int32 Z)
+	auto IsBelowSea = [&Water, &VoxelOrigin, VS](int32 X, int32 Y, int32 Z)
 	{
-		return Sea.IsBelow(VoxelOrigin + FVector(X, Y, Z) * VS);
+		return Water.IsUnder(VoxelOrigin + FVector(X, Y, Z) * VS);
 	};
 
-	// Entirely above the sea — no voxel can qualify as a seed (the per-voxel check
+	// Entirely above the water — no voxel can qualify as a seed (the per-voxel check
 	// below rejects everything), so skip the 6-face boundary scan outright. This runs per
 	// mesh submit and most submitted chunks are above the sea.
-	if (Sea.IsAbove(FBox(VoxelOrigin, VoxelOrigin + FVector((CS - 1) * VS))))
+	const FBox VoxelBox(VoxelOrigin, VoxelOrigin + FVector((CS - 1) * VS));
+	if (Water.IsAbove(VoxelBox))
 	{
 		return false;
 	}
 
-	// Plane: voxels above the water level never seed — clamp the Z iteration up front instead of
-	// rejecting them one by one. For the X/Y faces, loop axis B is Z. A sphere checks every voxel.
-	const int32 MaxSeedZ = Sea.bRadial ? CS - 1 : FMath::Clamp(FMath::FloorToInt32((Sea.PlaneZ - VoxelOrigin.Z) / VS), 0, CS - 1);
+	// World Z levels: voxels above the highest water level over the chunk never seed — clamp the Z iteration up front
+	// instead of rejecting them one by one. For the X/Y faces, loop axis B is Z. A sphere checks every voxel.
+	const bool bLevelsAreZ = !Water.IsRadial();
+	const double TopLevelZ = Water.GetRange(VoxelBox).MaxLevel;
+	const int32 MaxSeedZ = bLevelsAreZ ? FMath::Clamp(FMath::FloorToInt32((TopLevelZ - VoxelOrigin.Z) / VS), 0, CS - 1) : CS - 1;
 
 	// The seed search reads only (G65): a far-compressed chunk without edits through its snapshot (decoded on a worker,
 	// usually prefetched when the chunk was queued), so a chunk no water flows into is neither expanded nor marked
@@ -7026,7 +7065,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 		const int32 MaxIdx = CS - 1;
 
 		// +Z face: the whole plane sits at Z=MaxIdx — skip it when that plane is above water
-		if (!Sea.bRadial && F == 4 && (VoxelOrigin.Z + MaxIdx * VS) > Sea.PlaneZ)
+		if (bLevelsAreZ && F == 4 && (VoxelOrigin.Z + MaxIdx * VS) > TopLevelZ)
 		{
 			continue;
 		}
@@ -7205,14 +7244,14 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 
 void UVoxelChunkManager::QueueWaterRepulls(const FIntVector& ChunkCoord, uint8 FaceMask)
 {
-	if (FaceMask == 0 || !Configuration || !Configuration->bEnableWaterLevel)
+	const FVoxelWaterLevels WaterLevels = GetWaterLevels();
+	if (FaceMask == 0 || !Configuration || !WaterLevels.HasWater())
 	{
 		return;
 	}
 	static const FIntVector FaceOffsets[6] = { {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1} };
 	const int32 CS = Configuration->ChunkSize;
 	const float VS = Configuration->VoxelSize;
-	const FVoxelSeaSurface Sea = FVoxelSeaSurface::FromConfig(*Configuration);
 	for (int32 F = 0; F < 6; ++F)
 	{
 		if (!(FaceMask & (1 << F)))
@@ -7226,9 +7265,9 @@ void UVoxelChunkManager::QueueWaterRepulls(const FIntVector& ChunkCoord, uint8 F
 		{
 			continue;
 		}
-		// Wholly above the sea: nothing to flood (PropagateWaterFromNeighbors' own test).
+		// Wholly above the water: nothing to flood (PropagateWaterFromNeighbors' own test).
 		const FVector VoxelOrigin = FVoxelCoordinates::ChunkToWorld(Neighbour, CS, VS) + Configuration->WorldOrigin;
-		if (Sea.IsAbove(FBox(VoxelOrigin, VoxelOrigin + FVector((CS - 1) * VS))))
+		if (WaterLevels.IsAbove(FBox(VoxelOrigin, VoxelOrigin + FVector((CS - 1) * VS))))
 		{
 			continue;
 		}
@@ -7297,7 +7336,7 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 	if (Configuration)
 	{
 		const FVector ChunkWorldPos = FVoxelCoordinates::ChunkToWorld(ChunkCoord, CS, Configuration->VoxelSize) + Configuration->WorldOrigin;
-		if (ChunkWorldPos.Z > Configuration->WaterLevel)
+		if (ChunkWorldPos.Z > GetWaterTileGrid().GetTileLevel(FIntVector2(ChunkCoord.X, ChunkCoord.Y)))
 		{
 			RemoveWaterTileContribution(ChunkCoord);
 			return;
@@ -7366,7 +7405,8 @@ void UVoxelChunkManager::AuditWaterTiles(int32 MaxList, const FIntPoint& DetailC
 	const int32 CS = Configuration->ChunkSize;
 	const double VS = Configuration->VoxelSize;
 	const double ChunkWorld = CS * VS;
-	const double WaterZ = Configuration->WaterLevel;
+	// The audit compares every tile against the one sea plane (the levels' range over the whole world).
+	const double WaterZ = GetWaterLevels().GetRange(FVoxelWaterLevels::WholeWorld()).GetLevel();
 	const int32 WaterLayer = FMath::FloorToInt32((WaterZ - Configuration->WorldOrigin.Z) / ChunkWorld);
 
 	struct FColumnAudit
@@ -7686,7 +7726,7 @@ FVoxelWaterTileGrid UVoxelChunkManager::GetWaterTileGrid() const
 	Grid.ChunkSize = Configuration->ChunkSize;
 	Grid.VoxelSize = Configuration->VoxelSize;
 	Grid.WorldOrigin = Configuration->WorldOrigin;
-	Grid.WaterLevel = Configuration->WaterLevel;
+	Grid.Water = GetWaterLevels();
 	return Grid;
 }
 

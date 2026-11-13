@@ -12,17 +12,20 @@ FVector FVoxelTreeQuery::GlobalVoxelToWorldCentre(const UVoxelWorldConfiguration
 	return Origin + (FVector(GlobalVoxel) + FVector(0.5)) * VoxelSize;
 }
 
-bool FVoxelTreeQuery::FindAt(const UVoxelWorldConfiguration& Config, const IVoxelWorldMode& WorldMode, const FVector& WorldPos,
+bool FVoxelTreeQuery::FindAt(const UVoxelWorldConfiguration& Config, const IVoxelWorldMode& WorldMode, const FVoxelWaterLevels& Water, const FVector& WorldPos,
 	FReadVoxel ReadVoxel, FVoxelTreeInstance& OutTree)
 {
 	const float VoxelSize = Config.VoxelSize;
 	const FVector Relative = (WorldPos - Config.WorldOrigin) / VoxelSize;
 	const FIntVector GlobalVoxel(FMath::FloorToInt32(Relative.X), FMath::FloorToInt32(Relative.Y), FMath::FloorToInt32(Relative.Z));
 
+	// The water the trees stay out of, as injection has it: the levels' range over the chunk a candidate is planted in,
+	// one level while the range is uniform (it is with the sea alone), so the position's own chunk answers for all.
+	const FVoxelWaterLevelRange TreeWater = Water.GetRange(FBox::BuildAABB(WorldPos, FVector(Config.GetChunkWorldSize())));
 	TArray<FVoxelTreeInstance> Candidates;
 	FVoxelTreeInjector::FindTreesWithTrunkAt(GlobalVoxel, Config.ChunkSize, VoxelSize, Config.WorldOrigin,
 		Config.WorldSeed, Config.TreeTemplates, Config.GetNoiseParams(), WorldMode, Config.TreeDensity,
-		Config.BiomeConfiguration, Config.bEnableWaterLevel, Config.WaterLevel, Candidates);
+		Config.BiomeConfiguration, TreeWater.bAny, static_cast<float>(TreeWater.GetLevel()), Candidates);
 
 	// The voxel must still be that tree's trunk block; where two trunks touch, the tree with more of its trunk left wins.
 	const FVoxelData Voxel = ReadVoxel(GlobalVoxelToWorldCentre(&Config, GlobalVoxel));
@@ -46,7 +49,7 @@ bool FVoxelTreeQuery::FindAt(const UVoxelWorldConfiguration& Config, const IVoxe
 	return BestTrunk > 0;
 }
 
-void FVoxelTreeQuery::FindNear(const UVoxelWorldConfiguration& Config, const IVoxelWorldMode& WorldMode, const FVector& WorldPos, float Radius,
+void FVoxelTreeQuery::FindNear(const UVoxelWorldConfiguration& Config, const IVoxelWorldMode& WorldMode, const FVoxelWaterLevels& Water, const FVector& WorldPos, float Radius,
 	FReadVoxel ReadVoxel, TArray<FVoxelTreeInstance>& OutTrees)
 {
 	OutTrees.Reset();
@@ -67,9 +70,13 @@ void FVoxelTreeQuery::FindNear(const UVoxelWorldConfiguration& Config, const IVo
 			TArray<FIntVector> Positions;
 			TArray<int32> Templates;
 			TArray<uint32> Seeds;
+			// The water the trees stay out of: the levels' range over this chunk column, as injection takes it.
+			const FVector ColumnMin = Config.WorldOrigin + FVector(CX, CY, 0) * ChunkWorldSize;
+			const FVoxelWaterLevelRange TreeWater = Water.GetRange(
+				FBox(FVector(ColumnMin.X, ColumnMin.Y, -UE_LARGE_WORLD_MAX), FVector(ColumnMin.X + ChunkWorldSize, ColumnMin.Y + ChunkWorldSize, UE_LARGE_WORLD_MAX)));
 			FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), ChunkSize, VoxelSize, Config.WorldOrigin,
 				Config.WorldSeed, Config.GetNoiseParams(), WorldMode, Config.TreeDensity, Config.TreeTemplates,
-				Config.BiomeConfiguration, Config.bEnableWaterLevel, Config.WaterLevel, Positions, Templates, Seeds);
+				Config.BiomeConfiguration, TreeWater.bAny, static_cast<float>(TreeWater.GetLevel()), Positions, Templates, Seeds);
 			for (int32 i = 0; i < Positions.Num(); ++i)
 			{
 				FVoxelTreeInstance Tree;
