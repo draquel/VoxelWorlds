@@ -3,10 +3,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelWaterLevels.h"
 
 class IVoxelMeshRenderer;
 
-/** Where the water tiles lie: the chunk grid and the sea plane (UVoxelWorldConfiguration's values). */
+/** Where the water tiles lie: the chunk grid (UVoxelWorldConfiguration's values) and the world's water levels. */
 struct FVoxelWaterTileGrid
 {
 	/** Voxels along a chunk's edge: a tile's mask is ChunkSize x ChunkSize columns */
@@ -18,8 +19,25 @@ struct FVoxelWaterTileGrid
 	/** World position of chunk (0, 0, 0)'s minimum corner */
 	FVector WorldOrigin = FVector::ZeroVector;
 
-	/** World Z of the sea plane the tiles are meshed at (WaterLevel, G19) */
-	double WaterLevel = 0.0;
+	/** The world's water levels (UVoxelChunkManager::GetWaterLevels): each tile is meshed at the level over its column */
+	FVoxelWaterLevels Water;
+
+	/** A tile's bounds: its chunk column, at every height. */
+	FBox GetTileBounds(const FIntVector2& Tile) const
+	{
+		const double Extent = ChunkSize * VoxelSize;
+		const FVector2D Min(WorldOrigin.X + Tile.X * Extent, WorldOrigin.Y + Tile.Y * Extent);
+		return FBox(FVector(Min.X, Min.Y, -UE_LARGE_WORLD_MAX), FVector(Min.X + Extent, Min.Y + Extent, UE_LARGE_WORLD_MAX));
+	}
+
+	/**
+	 * World Z of the water surface a tile is meshed at: the levels' range over the tile's column (G19: world Z, as
+	 * generation floods). One level a tile; a tile is flat.
+	 */
+	double GetTileLevel(const FIntVector2& Tile) const
+	{
+		return Water.GetRange(GetTileBounds(Tile)).GetLevel();
+	}
 };
 
 /**

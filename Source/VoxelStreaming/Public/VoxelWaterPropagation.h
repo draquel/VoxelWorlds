@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelWaterPropagation.generated.h"
 
 class UVoxelChunkManager;
@@ -72,10 +72,10 @@ public:
 	 *
 	 * @param InChunkManager The chunk manager to query voxel data from
 	 * @param InEditManager The edit manager to apply water flag edits through
-	 * @param InWaterLevel The world-space water level (Z coordinate). With a chunk manager the sea comes from its
-	 *        configuration instead (FVoxelSeaSurface::FromConfig: on a planet the WaterRadius sphere, SP-B8)
+	 * @param InWater The world's water levels (UVoxelChunkManager::GetWaterLevels): water spreads below the surface of
+	 *        the body over each voxel (the sea's plane, or a planet's sea sphere, SP-B8)
 	 */
-	void Initialize(UVoxelChunkManager* InChunkManager, UVoxelEditManager* InEditManager, float InWaterLevel);
+	void Initialize(UVoxelChunkManager* InChunkManager, UVoxelEditManager* InEditManager, const FVoxelWaterLevels& InWater);
 
 	/**
 	 * Called when a chunk is edited (UVoxelEditManager::OnChunkEdited, through the chunk manager). Queues the voxels the
@@ -151,8 +151,8 @@ private:
 	UPROPERTY()
 	TWeakObjectPtr<UVoxelEditManager> EditManager;
 
-	/** The sea water spreads below: the WaterLevel plane, or a planet's WaterRadius sphere (SP-B8). */
-	FVoxelSeaSurface Sea;
+	/** The water levels water spreads below: the sea's plane, or a planet's sea sphere (SP-B8). */
+	FVoxelWaterLevels Water;
 
 	/** BFS queue of global voxel keys; entries before QueueHead are done. */
 	TArray<FIntVector> BFSQueue;
@@ -201,8 +201,8 @@ private:
 	FIntVector VoxelKeyToChunk(const FIntVector& Key) const;
 
 	/**
-	 * Whether a voxel is at or below the sea as generation's fill pass tests it: at its sample point (the cell's min
-	 * corner) in world space, against the WaterLevel plane or a planet's sphere (G19).
+	 * Whether a voxel is at or below the water's surface as generation's fill pass tests it: at its sample point (the
+	 * cell's min corner) in world space, against the sea's plane or a planet's sphere (G19; FVoxelWaterLevels::IsUnder).
 	 */
 	bool IsBelowSea(const FIntVector& Key) const;
 

@@ -6,7 +6,7 @@
 #include "VoxelSurfaceQuery.h"
 #include "VoxelCoreTypes.h"
 #include "VoxelBiomeSnapshot.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelTerrainConditioning.h"
 
 class IVoxelWorldMode;
@@ -485,8 +485,8 @@ struct VOXELSTREAMING_API FVoxelFarFieldSurface
 	/** Biomes for the surface material; invalid without biomes (the material then comes from GetMaterialAtDepth) */
 	FVoxelBiomeSnapshot Biomes;
 
-	/** The sea (the material's underwater variant) */
-	FVoxelSeaSurface Sea;
+	/** The world's water levels, sampled at each surface point (the material's underwater variant) */
+	FVoxelWaterLevels Water;
 
 	/** Voxel size (generation's depth in voxels) */
 	float VoxelSize = 100.0f;
@@ -494,10 +494,8 @@ struct VOXELSTREAMING_API FVoxelFarFieldSurface
 	/** A heightmap world (WorldMode is InfinitePlane or IslandBowl) */
 	bool bHeightmap = false;
 
-	/** Heightmap worlds: the terrain noise's seed (the climate seeds derive from it), and the sea as the material rules read it */
+	/** Heightmap worlds: the terrain noise's seed (the climate seeds derive from it) */
 	int32 WorldSeed = 0;
-	bool bWater = false;
-	float WaterLevel = 0.0f;
 
 	/** Heightmap worlds: a cubic world whose surface is block tops (FVoxelBlockSurface::UsesBlockSurface), and the grid's origin */
 	bool bBlockSurface = false;
@@ -508,9 +506,11 @@ struct VOXELSTREAMING_API FVoxelFarFieldSurface
 	 *
 	 * @param Config World configuration
 	 * @param InWorldMode The configuration's world mode (FVoxelWorldModeFactory::Create)
+	 * @param InWater The world's water levels (UVoxelChunkManager::GetWaterLevels)
 	 * @return The surface, or null without a world mode
 	 */
-	static TSharedPtr<const FVoxelFarFieldSurface> Make(const UVoxelWorldConfiguration& Config, const TSharedPtr<IVoxelWorldMode>& InWorldMode);
+	static TSharedPtr<const FVoxelFarFieldSurface> Make(const UVoxelWorldConfiguration& Config, const TSharedPtr<IVoxelWorldMode>& InWorldMode,
+		const FVoxelWaterLevels& InWater);
 
 	/** The planet world mode (planets only). */
 	const FSphericalPlanetWorldMode& GetPlanet() const;

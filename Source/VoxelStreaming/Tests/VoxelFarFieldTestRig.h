@@ -43,7 +43,7 @@ namespace VoxelFarFieldTestRig
 			: Config(InConfig), ViewDistance(InViewDistance), UnloadDistance(InUnloadDistance)
 		{
 			Mode = FVoxelWorldModeFactory::Create(*Config);
-			Surface = FVoxelFarFieldSurface::Make(*Config, Mode);
+			Surface = FVoxelFarFieldSurface::Make(*Config, Mode, FVoxelWaterLevels::FromConfig(*Config));
 			Settings = MakeSettings(*Config, *Mode, *Surface);
 			FarField.Initialize(Settings, Surface);
 			FarField.SetSynchronousBuilds(true);

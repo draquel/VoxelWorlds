@@ -43,7 +43,7 @@ struct VOXELMAP_API FVoxelMapOverlayBuildInput
 	/** World Z of voxel 0 of chunk Z 0 (the world origin's Z). */
 	float WorldOriginZ = 0.0f;
 
-	/** Water is enabled; columns below WaterLevel read as water in the analytic map. */
+	/** The tile has water (the water levels' range over it); columns below WaterLevel, its level, read as water in the analytic map. */
 	bool bUseWater = false;
 	float WaterLevel = 0.0f;
 
@@ -101,7 +101,7 @@ struct VOXELMAP_API FVoxelMapPlanetOverlayInput
 	FVector Center = FVector::ZeroVector;
 	double PlanetRadius = 0.0;
 
-	/** Water is enabled; terrain inside WaterRadius of the centre reads as under the sea in the analytic map. */
+	/** The tile has water (the water levels' range over it); terrain inside WaterRadius, its level, of the centre reads as under water in the analytic map. */
 	bool bUseWater = false;
 	double WaterRadius = 0.0;
 

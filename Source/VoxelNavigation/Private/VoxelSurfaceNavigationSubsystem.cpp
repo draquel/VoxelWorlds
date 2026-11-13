@@ -10,7 +10,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Misc/ScopeExit.h"
 #include "VoxelChunkManager.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelCoordinates.h"
 #include "VoxelEditManager.h"
 #include "VoxelSurfaceQuery.h"
@@ -234,11 +234,14 @@ void UVoxelSurfaceNavigationSubsystem::ApplyCVars()
 				Params.MaxNodes = FMath::Max(Params.MaxNodes, FMath::RoundToInt(Params.MaxNodes * CellsPerConfiguredCell));
 			}
 
-			Params.bHasWater = Config->bEnableWaterLevel;
-			// The test itself goes through the sea (SP-E1): the WaterLevel plane generation floods (G19), the sea sphere
-			// on a planet.
-			Params.Sea = ChunkMgr->GetSeaSurface();
-			Params.WaterLevel = Params.Sea.bRadial ? Config->WaterLevel : static_cast<float>(Params.Sea.PlaneZ);
+			// The test itself goes through the world's water levels (SP-E1): the sea's plane generation floods (G19), its
+			// sphere on a planet.
+			Params.Water = ChunkMgr->GetWaterLevels();
+			Params.bHasWater = Params.Water.HasWater();
+			// The scalar the parameters show (and the fallback reads): the level over the whole world a search may cover,
+			// as a world Z; none where levels are radii.
+			Params.WaterLevel = Params.Water.IsRadial() ? 0.0f
+				: static_cast<float>(Params.Water.GetRange(FVoxelWaterLevels::WholeWorld()).GetLevel());
 
 			// A planet searches in region frames (WM-SY11).
 			const bool bWasPlanet = bPlanet;
@@ -247,7 +250,7 @@ void UVoxelSurfaceNavigationSubsystem::ApplyCVars()
 			{
 				PlanetCenter = Config->WorldOrigin;
 				PlanetRadius = FMath::Max(static_cast<double>(Config->WorldRadius), 1.0);
-				PlanetSea = Params.Sea;
+				PlanetWater = Params.Water;
 				RegionGrid = FVoxelCubeSphereGrid(FVoxelCubeSphereGrid::CellsPerEdgeFor(PlanetRadius, PlanetNavRegionSize));
 				Regions.Reset();
 			}
@@ -689,15 +692,22 @@ FVoxelSurfaceNavParams UVoxelSurfaceNavigationSubsystem::ParamsIn(const FRegionC
 	{
 		return Params;
 	}
-	// A planet: altitudes for heights, the sea the altitude plane WaterRadius - PlanetRadius.
+	// A planet: altitudes for heights, the water over the region the altitude plane level - PlanetRadius.
 	FVoxelSurfaceNavParams FrameParams = Params;
 	FrameParams.bHasWater = false;
-	FrameParams.Sea = FVoxelSeaSurface();
-	if (PlanetSea.bEnabled && PlanetSea.bRadial)
+	FrameParams.Water = FVoxelWaterLevels();
+	const FVoxelWaterLevelRange Range = RegionWater(Region);
+	if (Range.bAny && PlanetWater.IsRadial())
 	{
-		FrameParams.Sea = FVoxelSeaSurface::MakePlane(PlanetSea.Radius - PlanetRadius);
+		FrameParams.Water = FVoxelSeaSurface::MakePlane(Range.GetLevel() - PlanetRadius);
 	}
 	return FrameParams;
+}
+
+FVoxelWaterLevelRange UVoxelSurfaceNavigationSubsystem::RegionWater(const FRegionCache& Region) const
+{
+	// The region's box: its centre on the datum sphere, a region across each way (regions are PlanetNavRegionSize wide).
+	return PlanetWater.GetRange(FBox::BuildAABB(Region.Frame.Center + Region.Frame.Up * Region.Frame.Radius, FVector(PlanetNavRegionSize)));
 }
 
 bool UVoxelSurfaceNavigationSubsystem::IsUnderwaterIn(const FRegionCache& Region, double X, double Y, float Height) const
@@ -706,7 +716,8 @@ bool UVoxelSurfaceNavigationSubsystem::IsUnderwaterIn(const FRegionCache& Region
 	{
 		return Params.IsUnderwater(X, Y, Height);
 	}
-	return PlanetSea.bEnabled && PlanetSea.bRadial && PlanetRadius + Height < PlanetSea.Radius - Params.MaxWadeDepth;
+	const FVoxelWaterLevelRange Range = RegionWater(Region);
+	return Range.bAny && PlanetWater.IsRadial() && PlanetRadius + Height < Range.GetLevel() - Params.MaxWadeDepth;
 }
 
 bool UVoxelSurfaceNavigationSubsystem::CachedHeightForCell(const FRegionCache& Region, const FIntPoint& Cell, float& OutHeight) const

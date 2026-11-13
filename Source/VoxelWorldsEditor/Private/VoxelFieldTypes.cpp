@@ -38,9 +38,7 @@ FVoxelFieldSampleContext FVoxelFieldSampleContext::FromConfiguration(const UVoxe
 	Ctx.BiomeConfig = Config->bEnableBiomes ? Config->BiomeConfiguration : nullptr;
 	Ctx.bEnableCaves = Config->bEnableCaves;
 	Ctx.CaveConfig = Config->bEnableCaves ? Config->CaveConfiguration : nullptr;
-	Ctx.bEnableWaterLevel = Config->bEnableWaterLevel;
-	Ctx.WaterLevel = Config->WaterLevel;
-	Ctx.Sea = FVoxelSeaSurface::FromConfig(*Config);
+	Ctx.Water = FVoxelWaterLevels::FromConfig(*Config);
 	Ctx.bPlanet = Config->WorldMode == EWorldMode::SphericalPlanet;
 	Ctx.PlanetRadius = Config->WorldRadius;
 
@@ -104,7 +102,7 @@ FVector FVoxelFieldSampleContext::PlanetDirectionAbove(double X, double Y) const
 FVoxelSurfaceSample FVoxelFieldSampleContext::PlanetSurfaceAbove(double X, double Y) const
 {
 	return FVoxelSurfaceQuery::SampleSurfacePoint(*WorldMode, WorldOrigin + PlanetDirectionAbove(X, Y) * PlanetRadius, VoxelSize,
-		NoiseParams, BiomeSnapshot, Sea);
+		NoiseParams, BiomeSnapshot, Water);
 }
 
 FVoxelSurfaceSample FVoxelFieldSampleContext::SurfaceAbove(double X, double Y) const
@@ -113,8 +111,8 @@ FVoxelSurfaceSample FVoxelFieldSampleContext::SurfaceAbove(double X, double Y) c
 	{
 		return PlanetSurfaceAbove(X, Y);
 	}
-	// A heightmap world: the sample at (X, Y) (SampleSurface at the float position with the sea as the WaterLevel plane).
-	return FVoxelSurfaceQuery::SampleSurfacePoint(*WorldMode, FVector(X, Y, 0.0), VoxelSize, NoiseParams, BiomeSnapshot, Sea);
+	// A heightmap world: the sample at (X, Y) (SampleSurface at the float position, with the water over that column).
+	return FVoxelSurfaceQuery::SampleSurfacePoint(*WorldMode, FVector(X, Y, 0.0), VoxelSize, NoiseParams, BiomeSnapshot, Water);
 }
 
 FVector FVoxelFieldSampleContext::ClimateSamplePoint(double X, double Y) const
@@ -400,9 +398,13 @@ void FVoxelFieldRegistry::EnsureBuiltinsRegistered()
 			}
 			const float H = FVoxelSurfaceQuery::GetSurfaceHeight(*C.WorldMode, static_cast<float>(X), static_cast<float>(Y), C.NoiseParams);
 			uint8 Mat = 0, Biome = 0;
+			// The water over the column (a heightmap preview: its level is a world Z).
+			FVoxelWaterSample Over;
+			const bool bWater = C.Water.Sample(FVector(X, Y, H), Over);
+			const float WaterLevelZ = static_cast<float>(Over.SurfaceLevel);
 			FVoxelSurfaceQuery::QuerySurfaceConditions(static_cast<float>(X), static_cast<float>(Y), H, C.VoxelSize,
-				C.BiomeSnapshot, C.GetSeed(), C.bEnableWaterLevel, C.WaterLevel, Mat, Biome);
-			const bool bUnderwater = C.bEnableWaterLevel && H < C.WaterLevel;
+				C.BiomeSnapshot, C.GetSeed(), bWater, WaterLevelZ, Mat, Biome);
+			const bool bUnderwater = bWater && H < WaterLevelZ;
 			return FVoxelCaveQuery::SampleCaveDensityAt(FVector(X, Y, Z), H, C.VoxelSize, Biome, C.CaveConfig, C.GetSeed(), bUnderwater);
 		};
 		RegisterField(F);

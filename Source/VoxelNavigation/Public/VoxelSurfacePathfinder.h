@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelSurfacePathfinder.generated.h"
 
 /** Tunables of the surface pathfinder (feature 10). Distances in world units. */
@@ -84,12 +84,12 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavParams
 	int32 PocketCells = 512;
 
 	/**
-	 * The world's sea (spherical SP-E1), set by UVoxelSurfaceNavigationSubsystem from the chunk manager
-	 * (UVoxelChunkManager::GetSeaSurface, the WaterLevel plane generation floods, G19): when enabled it decides
-	 * IsUnderwater instead of bHasWater / WaterLevel, so a planet's cells test the sphere of WaterRadius. Not exposed to
-	 * Blueprint.
+	 * The world's water levels (spherical SP-E1), set by UVoxelSurfaceNavigationSubsystem from the chunk manager
+	 * (UVoxelChunkManager::GetWaterLevels: the sea's plane generation floods, G19, or its sphere on a planet): with
+	 * water they decide IsUnderwater instead of bHasWater / WaterLevel, cell by cell. A sea converts (a search in a
+	 * frame of its own passes the sea in that frame). Not exposed to Blueprint.
 	 */
-	FVoxelSeaSurface Sea;
+	FVoxelWaterLevels Water;
 
 	/**
 	 * The world (X, Y) of a cell's centre.
@@ -116,8 +116,9 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavParams
 	}
 
 	/**
-	 * Whether a cell's surface is deeper under the water than a walker wades (MaxWadeDepth): by Sea when it is enabled,
-	 * else by bHasWater and WaterLevel. On a plane both are Height < WaterLevel - MaxWadeDepth.
+	 * Whether a cell's surface is deeper under the water than a walker wades (MaxWadeDepth): by the water levels'
+	 * sample at the cell when they have water, else by bHasWater and WaterLevel. Where levels are world Z both are
+	 * Height < level - MaxWadeDepth.
 	 *
 	 * @param X World X of the cell's centre
 	 * @param Y World Y of the cell's centre
@@ -126,11 +127,16 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavParams
 	 */
 	bool IsUnderwater(double X, double Y, float Height) const
 	{
-		if (Sea.bEnabled)
+		if (Water.HasWater())
 		{
-			return Sea.bRadial
-				? Sea.GetDepth(FVector(X, Y, Height)) > MaxWadeDepth
-				: Height < static_cast<float>(Sea.PlaneZ) - MaxWadeDepth;
+			FVoxelWaterSample Over;
+			if (!Water.Sample(FVector(X, Y, Height), Over))
+			{
+				return false;
+			}
+			return Water.IsRadial()
+				? Over.Depth > MaxWadeDepth
+				: Height < static_cast<float>(Over.SurfaceLevel) - MaxWadeDepth;
 		}
 		return bHasWater && Height < WaterLevel - MaxWadeDepth;
 	}

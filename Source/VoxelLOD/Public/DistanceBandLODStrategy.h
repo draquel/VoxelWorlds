@@ -8,6 +8,7 @@
 #include "VoxelCoreTypes.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelWorldModeTypes.h"
+#include "VoxelWaterLevels.h"
 
 class IVoxelWorldMode;
 class FSphericalPlanetWorldMode;
@@ -705,10 +706,13 @@ protected:
 	/** Noise params for the per-column analytic surface sample (TerrainWorldMode->GetSurfaceRange). */
 	FVoxelNoiseParams SlabNoiseParams;
 
-	/** Water plane: underwater columns extend their slab up to the water surface (the far ocean
-	 *  must keep the chunks that mesh its surface, not just its floor). */
-	bool bSlabHasWater = false;
-	float SlabWaterLevel = 0.0f;
+	/**
+	 * The world's water levels (the configuration's, from the one builder at Initialize; the water plan's W2). The
+	 * window reads them three ways: a column's slab reaches up to the water over that column (the far ocean must keep
+	 * the chunks that mesh its surface, not just its floor), a planet's near layers reach the water over the near disk,
+	 * and the cut-over is measured over the water under the viewer where it lies above the terrain.
+	 */
+	FVoxelWaterLevels Water;
 
 	/**
 	 * Column (chunk XY) -> [min, max] analytic surface height over the chunk footprint
@@ -809,9 +813,6 @@ protected:
 	/** The configuration's cut-over altitude (VoxelCutoverAltitude, else DefaultCutoverViewDistances view distances); 0 off a planet. */
 	double CutoverConfigured = 0.0;
 
-	/** The sea's radius (0 without a sea): the cut-over is measured over the sea where it lies above the terrain. */
-	double PlanetSeaRadius = 0.0;
-
 	/** The cut-over state (IsWindowSuspended) and the altitude it was decided at (GetViewerSurfaceAltitude). */
 	bool bWindowSuspended = false;
 	double ViewerSurfaceAltitude = 0.0;
@@ -822,10 +823,9 @@ protected:
 
 	/**
 	 * The cut-over applies while the chunk manager has a far field (the last Update's context; WM-MP2, D38, every mode
-	 * since G78). Heightmap worlds: the sea's world Z (lowest double without a sea); the generated ground Z under the viewer the last Update sampled
+	 * since G78). Heightmap worlds: the generated ground Z under the viewer the last Update sampled
 	 */
 	bool bCutoverAllowed = false;
-	double HeightmapSeaZ = TNumericLimits<double>::Lowest();
 	mutable FVector HeightmapGroundViewer = FVector(TNumericLimits<double>::Max());
 	mutable double HeightmapGroundZ = 0.0;
 

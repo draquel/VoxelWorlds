@@ -2617,7 +2617,7 @@ void UVoxelScatterManager::ExtractSurfacePointsByColumn(
 				// Submerged: open water above it (water flag on the air voxel above) OR the point is below
 				// the world water level. The water-level test catches submerged seabeds even where the
 				// per-voxel water flag did not propagate. Underground takes precedence.
-				const bool bBelowWater = Context.Sea.bEnabled && Context.Sea.GetDepth(WorldPos) > 0.0;
+				const bool bBelowWater = Context.Water.GetDepth(WorldPos) > 0.0;
 				Point.bIsUnderwater = (bAirAboveIsWater || bBelowWater) && !Point.bIsUnderground;
 
 				OutSurfaceData.SurfacePoints.Add(Point);
@@ -2676,7 +2676,7 @@ FVoxelData FScatterExtractionContext::GetVoxelOutsideChunk(const FIntVector& Loc
 		Surface = &ColumnSurface;
 	}
 	const FVoxelData Generated = FVoxelSurfaceQuery::GenerateVoxelAt(*WorldMode, WorldPos, VoxelSize, NoiseParams,
-		Conditioning.IsValid() ? Conditioning.Get() : nullptr, CaveConfiguration, Sea, bEnableBiomes, BiomeHint, Surface);
+		Conditioning.IsValid() ? Conditioning.Get() : nullptr, CaveConfiguration, Water, bEnableBiomes, BiomeHint, Surface);
 	if (OutsideEdits.IsValid())
 	{
 		if (const FVoxelEdit* Edit = OutsideEdits->Find(LocalCoord))
@@ -2927,7 +2927,7 @@ void UVoxelScatterManager::ExtractSurfacePointsByRay(
 			// column scan's on any part of the grid.
 			Point.SpawnWeight = static_cast<float>(Omega * Radius * Radius / (CellSize * CellSize));
 			Point.bIsUnderground = bUnder || (bAirIsAir && AirVoxel.HasUndergroundFlag()) || SolidVoxel.HasUndergroundFlag();
-			const bool bBelowWater = Context.Sea.bEnabled && Context.Sea.GetDepth(WorldPos) > 0.0;
+			const bool bBelowWater = Context.Water.GetDepth(WorldPos) > 0.0;
 			Point.bIsUnderwater = ((bAirIsAir && AirVoxel.HasWaterFlag()) || bBelowWater) && !Point.bIsUnderground;
 			OutSurfaceData.SurfacePoints.Add(Point);
 		};
@@ -3137,7 +3137,7 @@ void UVoxelScatterManager::ExtractSurfacePointsByBlockTop(
 
 				// Submerged: open water above (water flag) OR below the world water level (catches
 				// seabeds the water flag missed). Underground takes precedence.
-				const bool bBelowWater = Context.Sea.bEnabled && Context.Sea.GetDepth(WorldPos) > 0.0;
+				const bool bBelowWater = Context.Water.GetDepth(WorldPos) > 0.0;
 				Point.bIsUnderwater = (bAirAboveIsWater || bBelowWater) && !Point.bIsUnderground;
 
 				OutSurfaceData.SurfacePoints.Add(Point);
@@ -3273,7 +3273,8 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 	if (Configuration)
 	{
 		Context.NoiseParams = Configuration->GetNoiseParams();
-		Context.Sea = FVoxelSeaSurface::FromConfig(*Configuration); // bEnabled follows bEnableWaterLevel
+		// The configuration's water levels, from the one builder (what the chunk manager that owns this manager hands out).
+		Context.Water = FVoxelWaterLevels::FromConfig(*Configuration);
 		// The voxels a chunk's extraction reads past its own data are carved as generation carves them (G28, G72).
 		Context.CaveConfiguration = Configuration->bEnableCaves ? Configuration->CaveConfiguration.Get() : nullptr;
 		Context.bEnableBiomes = Configuration->bEnableBiomes;

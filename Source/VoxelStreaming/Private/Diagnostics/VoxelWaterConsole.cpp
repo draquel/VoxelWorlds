@@ -12,13 +12,15 @@
 #include "HAL/IConsoleManager.h"
 
 // Console: voxel.Water.Stats [x y | pawn]
-// World modes review G58 / G59: what edit-driven water propagation has done (UVoxelWaterPropagation::GetStats: edit scans,
+// The world's water levels (the water plan's W2: the bodies, and with a position the sample there), then
+// world modes review G58 / G59: what edit-driven water propagation has done (UVoxelWaterPropagation::GetStats: edit scans,
 // the chunk-arrival face scans and their seeds, floods, flooded voxels), and with a position the water tile's column there:
 // the chunk layers whose voxels hold water in it (edit-merged for a chunk with edits since G59), before the tile's dilation.
 static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 	TEXT("voxel.Water.Stats"),
-	TEXT("Log edit-driven water propagation's counters (world modes review G58 / G59); with 'x y' or 'pawn', also the water ")
-	TEXT("tile's column there (the chunk layers that mark it wet)."),
+	TEXT("Log the world's water bodies (the water levels: each body's id, kind and level) and edit-driven water propagation's ")
+	TEXT("counters (world modes review G58 / G59); with 'x y' or 'pawn', also the water levels' sample at that position and the ")
+	TEXT("water tile's column there (the chunk layers that mark it wet)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		UWorld* TargetWorld = VoxelEditAuditHelpers::FindGameWorld(World);
@@ -49,6 +51,36 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 			{
 				continue;
 			}
+			// The bodies of the world's water levels, and the sample at the position.
+			const FVoxelWaterLevels Levels = CM->GetWaterLevels();
+			auto KindName = [](EVoxelWaterBodyKind Kind)
+			{
+				return Kind == EVoxelWaterBodyKind::Sea ? TEXT("sea") : Kind == EVoxelWaterBodyKind::Lake ? TEXT("lake") : TEXT("reach");
+			};
+			const TCHAR* LevelTerms = Levels.IsRadial() ? TEXT("from the planet centre") : TEXT("world Z");
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: %d water bod%s (levels: %s)"),
+				*TargetWorld->GetName(), Levels.GetBodies().Num(), Levels.GetBodies().Num() == 1 ? TEXT("y") : TEXT("ies"), LevelTerms);
+			for (const FVoxelWaterBody& Body : Levels.GetBodies())
+			{
+				const bool bEverywhere = Body.Bounds == FVoxelWaterLevels::WholeWorld();
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]:   body %u: %s, level %.1f, %s"),
+					*TargetWorld->GetName(), Body.Id, KindName(Body.Kind), Body.Level,
+					bEverywhere ? TEXT("over the whole world") : *FString::Printf(TEXT("bounds %s"), *Body.Bounds.ToString()));
+			}
+			if (bColumn)
+			{
+				FVoxelWaterSample Sample;
+				if (Levels.Sample(Column, Sample))
+				{
+					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: at (%.0f, %.0f, %.0f): body %u (%s), surface level %.1f, depth %.1f (positive under the surface)"),
+						*TargetWorld->GetName(), Column.X, Column.Y, Column.Z, Sample.BodyId, KindName(Sample.Kind), Sample.SurfaceLevel, Sample.Depth);
+				}
+				else
+				{
+					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: at (%.0f, %.0f, %.0f): no water over this position"),
+						*TargetWorld->GetName(), Column.X, Column.Y, Column.Z);
+				}
+			}
 			if (const UVoxelWaterPropagation* Water = CM->GetWaterPropagation())
 			{
 				const UVoxelWaterPropagation::FStats& S = Water->GetStats();
@@ -60,7 +92,7 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 			}
 			else
 			{
-				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: no water propagation (bEnableWaterLevel off)"), *TargetWorld->GetName());
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: no water propagation (the world has no water)"), *TargetWorld->GetName());
 			}
 			const UVoxelChunkManager::FWaterRepullStats R = CM->GetWaterRepullStats();
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: the pull's second passes (G70): %lld queued, %lld run, %lld flooded (%lld voxels), %lld skipped, %d pending"),

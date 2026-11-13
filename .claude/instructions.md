@@ -22,7 +22,7 @@ section true on its date); the Features docs are the current truth.
 
 | Module | What it holds |
 |--------|---------------|
-| `VoxelCore` | Voxel and chunk types, the world configuration and `UVoxelWorldsSettings`, material and biome registries, the edit manager, the sea surface, cube-sphere and render-region math; no dependency on another voxel module |
+| `VoxelCore` | Voxel and chunk types, the world configuration and `UVoxelWorldsSettings`, material and biome registries, the edit manager, the sea surface and the water levels, cube-sphere and render-region math; no dependency on another voxel module |
 | `VoxelGeneration` | CPU and GPU generation, the noise (`FVoxelNoise`), world modes behind `IVoxelWorldMode` and `FVoxelWorldModeFactory`, surface queries, conditioning zones, the tree injector |
 | `VoxelLOD` | `IVoxelLODStrategy` and `FDistanceBandLODStrategy`: the voxel window, bands, horizons, the cut-over |
 | `VoxelMeshing` | `IVoxelMesher`: the CPU cubic, Marching Cubes and Dual Contouring meshers (chunk meshes and seams), the water mesher |
@@ -52,7 +52,10 @@ section true on its date); the Features docs are the current truth.
   a compressed chunk on the game thread.
 - **World modes through `IVoxelWorldMode`.** Build modes and their params only through `FVoxelWorldModeFactory`; game code
   reaches bounds, local up, altitude and the surface coordinate through the chunk manager (`Voxel|World` functions).
-  Never assume +Z is up or compare a Z with `WaterLevel`: the sea is `FVoxelSeaSurface` (`UVoxelChunkManager::GetSeaSurface`).
+  Never assume +Z is up or compare a Z with `WaterLevel`: water is read through the world's water levels
+  (`UVoxelChunkManager::GetWaterLevels`: `Sample` at a position, `GetRange` over the bounds a level is copied for,
+  `GetSea` for geometry drawn at the sea), and `FVoxelWaterLevels::FromConfig` is the only reader of the
+  configuration's `WaterLevel` and `WaterRadius` (WATER_SYSTEM.md, "The water levels").
 - **The surface ladder.** `UVoxelChunkManager::QuerySurfacePoint` with `EVoxelSurfaceLayer`: `Natural` (the world
   mode's), `Generated` (zones applied, block tops on a cubic world; `GetGeneratedSurfacePoint`) or `EditMerged`
   (the loaded voxels; `QueryEditMergedSurfacePoint`). Pick the rung you mean; `GetTerrainHeightAt` is a heightmap's

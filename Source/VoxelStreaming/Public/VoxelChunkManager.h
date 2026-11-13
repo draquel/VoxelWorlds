@@ -21,6 +21,7 @@
 #include "VoxelWaterTiles.h"
 #include "VoxelStreamingViewerPolicy.h"
 #include "VoxelConditioningSources.h"
+#include "VoxelWaterLevels.h"
 #include <atomic>
 #include "VoxelChunkManager.generated.h"
 
@@ -38,7 +39,6 @@ class UVoxelWaterPropagation;
 class FVoxelSeamRegistry;
 class FVoxelStreamingBenchmark;
 struct FVoxelBenchConfig;
-struct FVoxelSeaSurface;
 struct FVoxelSurfaceSample;
 struct FVoxelClimateSample;
 enum class EVoxelSurfaceLayer : uint8;
@@ -868,20 +868,32 @@ public:
 	FVector GetSpawnPosition() const;
 
 	/**
-	 * The sea as the water rules see it (FVoxelSeaSurface::FromConfig): the sphere of WaterRadius on a planet, the plane
-	 * at WaterLevel in heightmap modes, where generation floods and the water tiles draw wherever WorldOrigin is (review
-	 * plan G19). Every consumer reads it: navigation, the character, the NPC spawner. bEnabled is false with water off.
+	 * The world's water levels (the water plan's W2): the bodies of water as an immutable snapshot, with the sea as
+	 * its one body. What every reader of the water asks: Sample at a position (the surface, the depth, the body),
+	 * GetRange over the bounds a reader works on, GetSea for the geometry drawn at the sea. Built from the configuration
+	 * as it is when asked (the one place this component reads the configuration's water), over the whole world; a
+	 * value, safe to hand to a worker. A reader in a loop takes it once.
+	 *
+	 * @return The snapshot (no water before Initialize)
+	 */
+	FVoxelWaterLevels GetWaterLevels() const;
+
+	/**
+	 * The sea body's surface (GetWaterLevels().GetSea()): the sphere of the sea's radius on a planet, the plane at its
+	 * level in heightmap modes, where generation floods and the water tiles draw wherever WorldOrigin is (review plan
+	 * G19). bEnabled is false with water off. Kept for the callers that draw or test the sea itself; a reader of "the
+	 * water here" asks GetWaterLevels.
 	 *
 	 * @return The sea surface (disabled before Initialize)
 	 */
 	FVoxelSeaSurface GetSeaSurface() const;
 
 	/**
-	 * Signed depth of a world position below the sea (spherical SP-E1): along the radius on a planet, along Z under the
-	 * WaterLevel plane in heightmap modes (GetSeaSurface).
+	 * Signed depth of a world position below the water surface over it (the water levels' sample; spherical SP-E1):
+	 * along the radius on a planet, along Z in heightmap modes.
 	 *
 	 * @param WorldPos World position
-	 * @return Positive below the sea, negative above; a large negative value when water is off
+	 * @return Positive below the surface, negative above; a large negative value where there is no water
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
 	float GetSeaDepthAt(const FVector& WorldPos) const;
@@ -1867,8 +1879,8 @@ protected:
 	 * Propagate water flags from loaded neighbor chunks into this chunk.
 	 *
 	 * Checks 6 face-neighbor chunks for water-flagged voxels at their shared
-	 * boundary. Any dry air voxels on this chunk's boundary that are below the sea
-	 * (FVoxelSeaSurface: the WaterLevel plane, or a planet's WaterRadius sphere, SP-B8)
+	 * boundary. Any dry air voxels on this chunk's boundary that are below the water's surface
+	 * (FVoxelWaterLevels::IsUnder: the sea's plane, or a planet's sea sphere, SP-B8)
 	 * and adjacent to a neighbor's water voxel become seeds for an intra-chunk BFS flood fill.
 	 *
 	 * It reads and writes the generated voxels: water an edit-driven flood put in the edit layer crosses chunk faces
@@ -1906,7 +1918,7 @@ protected:
 
 	/**
 	 * Whether the per-chunk water tiles run: water on with a WaterMeshMaterial, in a heightmap world. They are XY
-	 * columns meshed at the WaterLevel plane, so a planet has none: its sea is the sea sphere (FVoxelPlanetOcean).
+	 * columns meshed at the sea's plane, so a planet has none: its sea is the sea sphere (FVoxelPlanetOcean).
 	 *
 	 * @return True when water tiles are built, updated and drawn
 	 */
@@ -2492,6 +2504,9 @@ private:
 
 	/** The static terrain conditioning zones (gen-time flattening under POIs/claims; Phase 6c) and the game's conditioner */
 	FVoxelConditioningSources ConditioningSources;
+
+	/** A chunk's world box: the bounds a per-chunk reader of the water levels asks its range over. */
+	FBox GetChunkWorldBox(const FIntVector& ChunkCoord) const;
 
 	/**
 	 * Collect the conditioning over a chunk into Out (game thread): its XY footprint on a heightmap world, the cap its

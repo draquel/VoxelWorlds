@@ -408,7 +408,7 @@ namespace VoxelFarFieldManagerPrivate
 
 	/**
 	 * Hand a far-field section to a patch component's section, its triangles reversed for an underside; clears it when
-	 * empty. Only the terrain is traced (bRayTracing): the sea is translucent and Lumen's rays pass it.
+	 * empty. Only the terrain is traced (bRayTracing): the sea is water (Single Layer Water) and Lumen's rays pass it.
 	 */
 	void SetPatchSection(UVoxelFarFieldPatchComponent* Component, int32 Section, const FVoxelFarFieldSection& Mesh, bool bReverse,
 		bool bRayTracing, UMaterialInterface* Material)
