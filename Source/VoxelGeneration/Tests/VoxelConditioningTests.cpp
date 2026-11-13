@@ -17,30 +17,30 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelConditioningBlendTest,
 bool FVoxelConditioningBlendTest::RunTest(const FString& Parameters)
 {
 	// Zone centered at origin: full flatten within 100, falloff over the next 100, none beyond 200.
-	TArray<FVoxelConditioningZone> Zones;
-	Zones.Add(FVoxelConditioningZone(FVector2D(0.0, 0.0), 100.0f, 100.0f, 500.0f, 1.0f));
+	FVoxelConditioning Conditioning;
+	Conditioning.Zones.Add(FVoxelConditioningZone(FVector2D(0.0, 0.0), 100.0f, 100.0f, 500.0f, 1.0f));
 
 	// Center: full weight -> reaches target exactly.
 	TestEqual(TEXT("Center blends fully to target"),
-		FVoxelTerrainConditioning::ApplyToHeight(0.0, 0.0, 0.0f, Zones), 500.0f);
+		Conditioning.ApplyToHeight(0.0, 0.0, 0.0f), 500.0f);
 
 	// Inside inner radius: still full weight.
 	TestEqual(TEXT("Inside inner radius blends fully"),
-		FVoxelTerrainConditioning::ApplyToHeight(80.0, 0.0, 0.0f, Zones), 500.0f);
+		Conditioning.ApplyToHeight(80.0, 0.0, 0.0f), 500.0f);
 
 	// Beyond falloff: untouched.
 	TestEqual(TEXT("Beyond falloff is untouched"),
-		FVoxelTerrainConditioning::ApplyToHeight(250.0, 0.0, 100.0f, Zones), 100.0f);
+		Conditioning.ApplyToHeight(250.0, 0.0, 100.0f), 100.0f);
 
 	// In the falloff ring: strictly between base and target.
-	const float Mid = FVoxelTerrainConditioning::ApplyToHeight(150.0, 0.0, 0.0f, Zones);
+	const float Mid = Conditioning.ApplyToHeight(150.0, 0.0, 0.0f);
 	TestTrue(TEXT("Falloff ring is partial (0 < H < target)"), Mid > 0.0f && Mid < 500.0f);
 
 	// Strength scales the reach.
-	TArray<FVoxelConditioningZone> Weak;
-	Weak.Add(FVoxelConditioningZone(FVector2D(0.0, 0.0), 100.0f, 100.0f, 1000.0f, 0.5f));
+	FVoxelConditioning Weak;
+	Weak.Zones.Add(FVoxelConditioningZone(FVector2D(0.0, 0.0), 100.0f, 100.0f, 1000.0f, 0.5f));
 	TestEqual(TEXT("Strength 0.5 reaches halfway to target"),
-		FVoxelTerrainConditioning::ApplyToHeight(0.0, 0.0, 0.0f, Weak), 500.0f);
+		Weak.ApplyToHeight(0.0, 0.0, 0.0f), 500.0f);
 
 	return true;
 }
@@ -105,7 +105,7 @@ bool FVoxelConditioningGenerationTest::RunTest(const FString& Parameters)
 
 	// --- Conditioned: flatten a disc at the chunk center to Z=1200, corner untouched ---
 	const float TargetHeight = 1200.0f;
-	Request.ConditioningZones.Add(FVoxelConditioningZone(FVector2D(800.0, 800.0), 300.0f, 100.0f, TargetHeight, 1.0f));
+	Request.Conditioning.Zones.Add(FVoxelConditioningZone(FVector2D(800.0, 800.0), 300.0f, 100.0f, TargetHeight, 1.0f));
 
 	TArray<FVoxelData> Conditioned;
 	TestTrue(TEXT("Conditioned generation succeeds"), Generator.GenerateChunkCPU(Request, Conditioned));
@@ -173,7 +173,7 @@ bool FVoxelConditioningIslandBowlTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("IslandBowl baseline has a surface inside the chunk"), NaturalInside > 0.0f);
 
 	const float TargetHeight = 1200.0f;
-	Request.ConditioningZones.Add(FVoxelConditioningZone(FVector2D(800.0, 800.0), 300.0f, 100.0f, TargetHeight, 1.0f));
+	Request.Conditioning.Zones.Add(FVoxelConditioningZone(FVector2D(800.0, 800.0), 300.0f, 100.0f, TargetHeight, 1.0f));
 
 	TArray<FVoxelData> Conditioned;
 	TestTrue(TEXT("IslandBowl conditioned generation succeeds"), Generator.GenerateChunkCPU(Request, Conditioned));

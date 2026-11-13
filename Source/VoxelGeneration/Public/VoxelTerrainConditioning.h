@@ -171,7 +171,141 @@ struct VOXELGENERATION_API FVoxelConditioningZone
 };
 
 /**
- * Boundary-safe interface for supplying terrain conditioning zones at generation time.
+ * A conditioning line: a polyline that levels, lowers or raises the generated terrain and paints a band of material along
+ * it, the second conditioning shape beside the zone's disc (Documentation/TERRAIN_LINES_PLAN.md, section 4.1).
+ *
+ * Declared here so the conditioning at a place (FVoxelConditioning) and the conditioner's line gathers can name it. It
+ * has no vertices and no values yet, nothing makes one and nothing evaluates one: a world generates what it generates
+ * without the type. A line is a shared, immutable object: a gather appends references (FVoxelConditioningLineRef), never
+ * copies, and a reference is safe to carry on a generation request and to read on a worker.
+ */
+struct FVoxelConditioningLine
+{
+};
+
+/** A reference to a shared, immutable conditioning line. */
+using FVoxelConditioningLineRef = TSharedRef<const FVoxelConditioningLine>;
+
+/**
+ * What a gather of conditioning is for, which decides how a conditioner answers for its lines. Zones are always complete:
+ * a conditioner has them at hand. A line may have to be computed first (a road's route), and a caller either waits for
+ * it or does not.
+ */
+enum class EVoxelConditioningGather : uint8
+{
+	/**
+	 * Every line that reaches the place, computed then and there if it is not at hand: a chunk's generation request (its
+	 * voxels are generated once) and every reader that must agree with the generated voxels at a place (a surface query
+	 * at a point, a chunk's scatter, the PCG sampler).
+	 */
+	Complete,
+
+	/**
+	 * The lines that are at hand now, without computing any: the readers whose regions are too wide to wait for (the far
+	 * field, the map). The conditioner works out the rest later and announces them through the conditioning-changed
+	 * path (UVoxelChunkManager::OnTerrainConditioningChanged), and the reader draws again.
+	 */
+	Ready
+};
+
+/**
+ * The conditioning at a place: every shape that reshapes the generated terrain there, the zones and the lines, as one
+ * value. The gathers fill it for a region, a cap or a chunk (UVoxelChunkManager::GatherConditioning); a generation
+ * request carries it; every reader of the generated surface takes it and asks it for the height on a heightmap world
+ * (ApplyToHeight) or the altitude on a planet (ApplyToAltitude), so a reader never names a shape. Pure data: safe to copy
+ * onto a request and to read on background threads (the lines are shared and immutable).
+ */
+USTRUCT()
+struct VOXELGENERATION_API FVoxelConditioning
+{
+	GENERATED_BODY()
+
+	/** The conditioning zones there, in the order they are applied (a later zone blends on top of the earlier ones). */
+	UPROPERTY()
+	TArray<FVoxelConditioningZone> Zones;
+
+	/** The conditioning lines there. Gathered and carried; nothing evaluates a line yet (FVoxelConditioningLine). */
+	TArray<FVoxelConditioningLineRef> Lines;
+
+	/**
+	 * The conditioning of a list of zones and no line.
+	 * @param InZones The zones, in the order they are applied
+	 * @return The conditioning
+	 */
+	static FVoxelConditioning OfZones(TArray<FVoxelConditioningZone> InZones)
+	{
+		FVoxelConditioning Conditioning;
+		Conditioning.Zones = MoveTemp(InZones);
+		return Conditioning;
+	}
+
+	/** @return Whether nothing conditions the terrain here: no zone and no line (the natural surface) */
+	bool IsEmpty() const { return Zones.Num() == 0 && Lines.Num() == 0; }
+
+	/** Empty the set, keeping its allocations. */
+	void Reset()
+	{
+		Zones.Reset();
+		Lines.Reset();
+	}
+
+	/**
+	 * A heightmap world's generated height: BaseHeight blended toward each heightmap zone's TargetHeight by the zone's
+	 * weight at (X, Y). Zones layer in order (a later zone blends on top of the earlier ones); planet zones are skipped.
+	 * The heightmap generators (CPU and GPU) and every reader of the generated heightmap surface apply it to the natural
+	 * height.
+	 *
+	 * @param X World X
+	 * @param Y World Y
+	 * @param BaseHeight The natural terrain's height at (X, Y)
+	 * @return The conditioned height
+	 */
+	float ApplyToHeight(double X, double Y, float BaseHeight) const
+	{
+		float H = BaseHeight;
+		for (const FVoxelConditioningZone& Zone : Zones)
+		{
+			if (Zone.IsRadial())
+			{
+				continue;
+			}
+			const float W = Zone.GetWeightAt(X, Y);
+			if (W > 0.0f)
+			{
+				H = FMath::Lerp(H, Zone.TargetHeight, W);
+			}
+		}
+		return H;
+	}
+
+	/**
+	 * Planets (spherical SP-B10): the terrain's generated altitude along a direction: BaseAltitude blended toward each
+	 * planet zone's TargetHeight (an altitude) by its weight there, layered in order like ApplyToHeight; heightmap zones
+	 * are skipped. The planet generators (CPU and GPU) and every reader of the generated planet surface apply it to the
+	 * radial displacement.
+	 *
+	 * @param Direction Unit direction from the planet centre
+	 * @param PlanetRadius The datum radius (zone distances are measured on it)
+	 * @param BaseAltitude The natural terrain's altitude along Direction
+	 * @return The conditioned altitude
+	 */
+	float ApplyToAltitude(const FVector& Direction, double PlanetRadius, float BaseAltitude) const
+	{
+		float A = BaseAltitude;
+		for (const FVoxelConditioningZone& Zone : Zones)
+		{
+			const float W = Zone.GetWeightAtDirection(Direction, PlanetRadius);
+			if (W > 0.0f)
+			{
+				A = FMath::Lerp(A, Zone.TargetHeight, W);
+			}
+		}
+		return A;
+	}
+};
+
+/**
+ * Boundary-safe interface for supplying terrain conditioning at generation time: the zones, and the lines.
  *
  * Implemented game-side (e.g. from POI / construction claims). VoxelWorlds stays POI-agnostic — it
  * only asks "what conditioning applies to this region?". Implementations must be pure and
@@ -199,57 +333,27 @@ public:
 	virtual void GatherConditioningOnSphere(const FVector& Direction, double AngularRadius, TArray<FVoxelConditioningZone>& OutZones) const
 	{
 	}
-};
 
-/**
- * Stateless helper for applying conditioning zones to a generated terrain height.
- */
-struct FVoxelTerrainConditioning
-{
 	/**
-	 * Blend BaseHeight toward each zone's TargetHeight by the zone's weight at (X,Y). Zones layer in
-	 * order (a later zone blends on top of earlier ones). Returns the conditioned height. Planet zones are skipped.
+	 * Append the conditioning lines whose reach meets the given world-space XY region. The default supplies none.
+	 * @param Region    Chunk (or query) XY bounds
+	 * @param Need      Complete: every such line, computed here if it is not at hand. Ready: only the lines at hand; the
+	 *                  conditioner announces the rest through the conditioning-changed path when it has them
+	 * @param OutLines  Append references to the lines here (a line is shared, never copied)
 	 */
-	static float ApplyToHeight(double X, double Y, float BaseHeight, const TArray<FVoxelConditioningZone>& Zones)
+	virtual void GatherConditioningLines(const FBox2D& Region, EVoxelConditioningGather Need, TArray<FVoxelConditioningLineRef>& OutLines) const
 	{
-		float H = BaseHeight;
-		for (const FVoxelConditioningZone& Zone : Zones)
-		{
-			if (Zone.IsRadial())
-			{
-				continue;
-			}
-			const float W = Zone.GetWeightAt(X, Y);
-			if (W > 0.0f)
-			{
-				H = FMath::Lerp(H, Zone.TargetHeight, W);
-			}
-		}
-		return H;
 	}
 
 	/**
-	 * Planets (spherical SP-B10): blend the terrain's altitude along a direction toward each planet zone's TargetHeight
-	 * (an altitude) by its weight there, layered in order like ApplyToHeight; heightmap zones are skipped. The planet
-	 * generators (CPU and GPU) and every reader of the generated planet surface apply it to the radial displacement.
-	 *
-	 * @param Direction Unit direction from the planet centre
-	 * @param PlanetRadius The datum radius (zone distances are measured on it)
-	 * @param BaseAltitude The natural terrain's altitude along Direction
-	 * @param Zones Zones (planet zones apply)
-	 * @return The conditioned altitude
+	 * Planets: append the conditioning lines whose reach meets a cap on the sphere. The default supplies none.
+	 * @param Direction     Unit direction from the planet centre to the cap's centre
+	 * @param AngularRadius The cap's half-angle in radians (a chunk's, or a query's; pi or more is the whole sphere)
+	 * @param Need          Complete or Ready, as GatherConditioningLines
+	 * @param OutLines      Append references to the lines here
 	 */
-	static float ApplyToAltitude(const FVector& Direction, double PlanetRadius, float BaseAltitude, const TArray<FVoxelConditioningZone>& Zones)
+	virtual void GatherConditioningLinesOnSphere(const FVector& Direction, double AngularRadius, EVoxelConditioningGather Need,
+		TArray<FVoxelConditioningLineRef>& OutLines) const
 	{
-		float A = BaseAltitude;
-		for (const FVoxelConditioningZone& Zone : Zones)
-		{
-			const float W = Zone.GetWeightAtDirection(Direction, PlanetRadius);
-			if (W > 0.0f)
-			{
-				A = FMath::Lerp(A, Zone.TargetHeight, W);
-			}
-		}
-		return A;
 	}
 };

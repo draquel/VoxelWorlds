@@ -98,7 +98,7 @@ namespace
 		FVoxelCPUNoiseGenerator& Generator,
 		float X, float Y, float ExpectedZ,
 		const UVoxelBiomeConfiguration* Config,
-		const TArray<FVoxelConditioningZone>* Zones = nullptr)
+		const FVoxelConditioning* Conditioning = nullptr)
 	{
 		const float ChunkWorldSize = kChunkSize * kVoxelSize;
 		const int32 ChunkX = FMath::FloorToInt(X / ChunkWorldSize);
@@ -128,9 +128,9 @@ namespace
 			Request.bEnableCaves = false;
 			Request.BiomeConfiguration = const_cast<UVoxelBiomeConfiguration*>(Config);
 			Request.NoiseParams = MakeTerrainNoise();
-			if (Zones)
+			if (Conditioning)
 			{
-				Request.ConditioningZones = *Zones;
+				Request.Conditioning = *Conditioning;
 			}
 
 			TArray<FVoxelData> ChunkData;
@@ -254,7 +254,7 @@ bool FVoxelHeightGeneratedSurfaceParityTest::RunTest(const FString& Parameters)
 
 // ---------------------------------------------------------------------------
 // HT3: inside a conditioning zone, the analytic conditioned height (base+continentalness, then
-// FVoxelTerrainConditioning::ApplyToHeight) matches the real generated conditioned surface.
+// FVoxelConditioning::ApplyToHeight) matches the real generated conditioned surface.
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelHeightConditioningParityTest,
 	"VoxelWorlds.Generation.HeightParity.ConditioningZone",
@@ -278,20 +278,20 @@ bool FVoxelHeightConditioningParityTest::RunTest(const FString& Parameters)
 	const float NaturalAtCenter = Analytic.GetTerrainHeightAt(Center.X, Center.Y, Noise);
 	const float Target = NaturalAtCenter + 1500.0f;
 
-	TArray<FVoxelConditioningZone> Zones;
-	Zones.Add(FVoxelConditioningZone(Center, 4000.0f, 2000.0f, Target, 1.0f));
+	FVoxelConditioning Conditioning;
+	Conditioning.Zones.Add(FVoxelConditioningZone(Center, 4000.0f, 2000.0f, Target, 1.0f));
 
 	// Analytic conditioned height = base+continentalness, then conditioning blend (what
 	// UVoxelChunkManager::GetGeneratedSurfaceHeight composes).
 	const float AnalyticConditioned =
-		FVoxelTerrainConditioning::ApplyToHeight(Center.X, Center.Y, NaturalAtCenter, Zones);
+		Conditioning.ApplyToHeight(Center.X, Center.Y, NaturalAtCenter);
 
 	// Inside the inner radius the zone fully flattens to Target.
 	TestTrue(TEXT("Analytic conditioned height reaches the flatten target at the center"),
 		FMath::Abs(AnalyticConditioned - Target) < 0.1f);
 
 	// The real generated conditioned surface at the center must match.
-	const float RealZ = GenerateRealSurfaceZ(Generator, Center.X, Center.Y, AnalyticConditioned, Config, &Zones);
+	const float RealZ = GenerateRealSurfaceZ(Generator, Center.X, Center.Y, AnalyticConditioned, Config, &Conditioning);
 	if (TestTrue(TEXT("Found a real conditioned surface at the zone center"), RealZ != FLT_MAX))
 	{
 		AddInfo(FString::Printf(TEXT("Conditioned center: analytic=%.1f  realSurface=%.1f  target=%.1f  |diff|=%.2f voxels"),

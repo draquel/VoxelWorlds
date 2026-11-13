@@ -1250,21 +1250,22 @@ void UVoxelChunkManager::Initialize(
 		ScatterManager->SetWorldMode(WorldMode);
 		// The world's material table: the smooth terrain's points take the material the shader draws (its slope rock, G106).
 		ScatterManager->SetMaterialTable(MaterialTable);
-		// The chunk's conditioning zones, the ones generation layered onto it, so scatter's analytic surface is the
+		// The chunk's conditioning, what generation layered onto it, so scatter's analytic surface is the
 		// generated ground: the buried-chunk test's height on a heightmap (its XY footprint, world modes review G23), a
-		// line's crossing at a planet chunk's upper face (the cap its box subtends, SP-B10). The scatter manager is ours
-		// and dies with us; it asks on the game thread.
-		ScatterManager->SetConditioningGatherer([this](const FBox& ChunkBox, TArray<FVoxelConditioningZone>& OutZones)
+		// line's crossing at a planet chunk's upper face (the cap its box subtends, SP-B10). Complete, as the chunk's
+		// generation request gathered it. The scatter manager is ours and dies with us; it asks on the game thread.
+		ScatterManager->SetConditioningGatherer([this](const FBox& ChunkBox, FVoxelConditioning& Out)
 		{
 			FVector CapDirection;
 			double CapAngle = 0.0;
 			if (GetPlanetCapOfBox(ChunkBox, CapDirection, CapAngle))
 			{
-				GatherConditioningZonesOnSphere(CapDirection, CapAngle, OutZones);
+				GatherConditioningOnSphere(CapDirection, CapAngle, EVoxelConditioningGather::Complete, Out);
 			}
 			else
 			{
-				GatherConditioningZonesForRegion(FBox2D(FVector2D(ChunkBox.Min.X, ChunkBox.Min.Y), FVector2D(ChunkBox.Max.X, ChunkBox.Max.Y)), OutZones);
+				GatherConditioningForRegion(FBox2D(FVector2D(ChunkBox.Min.X, ChunkBox.Min.Y), FVector2D(ChunkBox.Max.X, ChunkBox.Max.Y)),
+					EVoxelConditioningGather::Complete, Out);
 			}
 		});
 		// The edit layers, so a heightmap chunk's extraction knows the voxel over its top layer, the chunk above's bottom
@@ -2363,17 +2364,17 @@ FVector UVoxelChunkManager::GetGeneratedSurfacePoint(const FVector& WorldPos) co
 		}
 		return FVector(WorldPos.X, WorldPos.Y, GetGeneratedColumnHeight(WorldPos.X, WorldPos.Y));
 	}
-	// A planet: the natural surface along the direction, with the planet conditioning zones there (SP-B10).
-	if (!ConditioningZones.IsEmpty())
+	// A planet: the natural surface along the direction, with the planet conditioning there (SP-B10).
+	if (!ConditioningSources.IsEmpty())
 	{
 		const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WM);
 		const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
 		const FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, Params.PlanetCenter);
-		TArray<FVoxelConditioningZone> Zones;
-		GatherConditioningZonesOnSphere(Direction, 0.0, Zones);
-		if (Zones.Num() > 0)
+		FVoxelConditioning Conditioning;
+		GatherConditioningOnSphere(Direction, 0.0, EVoxelConditioningGather::Complete, Conditioning);
+		if (!Conditioning.IsEmpty())
 		{
-			return Params.PlanetCenter + Direction * (Params.PlanetRadius + Planet.GetConditionedTerrainAltitude(Direction, Configuration->GetNoiseParams(), Zones));
+			return Params.PlanetCenter + Direction * (Params.PlanetRadius + Planet.GetConditionedTerrainAltitude(Direction, Configuration->GetNoiseParams(), Conditioning));
 		}
 	}
 	return WM->GetSurfacePoint(WorldPos, Configuration->GetNoiseParams()).Position;
@@ -2827,8 +2828,8 @@ void UVoxelChunkManager::BuildChunkGenerationRequest(const FIntVector& ChunkCoor
 	OutRequest.WaterLevel = Configuration->WaterLevel;
 	OutRequest.WaterRadius = Configuration->WaterRadius;
 
-	// Terrain conditioning zones overlapping this chunk (Phase 6c: flatten under POIs/claims)
-	GatherConditioningZonesForChunk(ChunkCoord, OutRequest.ConditioningZones);
+	// The terrain conditioning over this chunk (Phase 6c: flatten under POIs/claims)
+	GatherConditioningForChunk(ChunkCoord, OutRequest.Conditioning);
 }
 
 // ==================== World Bounds and Local Frame (WM-A2) ====================
@@ -3301,18 +3302,19 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 		LODStrategy->SetFarFieldActive(true);
 	}
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
-	// A build's zones: a cap's on the sphere, a box's in the plane (the region is the patch's footprint, FVoxelFarFieldFrame).
-	FarField->SetZoneGatherer([WeakThis](const FVoxelFarFieldRegion& Region, TArray<FVoxelConditioningZone>& OutZones)
+	// A build's conditioning: a cap's on the sphere, a box's in the plane (the region is the patch's footprint,
+	// FVoxelFarFieldFrame). Ready: a patch's region is too wide to wait for a line; it is rebuilt when one arrives.
+	FarField->SetConditioningGatherer([WeakThis](const FVoxelFarFieldRegion& Region, FVoxelConditioning& Out)
 	{
 		if (const UVoxelChunkManager* Manager = WeakThis.Get())
 		{
 			if (Region.bCap)
 			{
-				Manager->GatherConditioningZonesOnSphere(Region.Direction, Region.AngularRadius, OutZones);
+				Manager->GatherConditioningOnSphere(Region.Direction, Region.AngularRadius, EVoxelConditioningGather::Ready, Out);
 			}
 			else
 			{
-				Manager->GatherConditioningZonesForRegion(Region.Box, OutZones);
+				Manager->GatherConditioningForRegion(Region.Box, EVoxelConditioningGather::Ready, Out);
 			}
 		}
 	});
@@ -3651,7 +3653,7 @@ FString UVoxelChunkManager::GetFarOceanDebugString() const
 
 void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 {
-	ConditioningZones.Add(Zone);
+	ConditioningSources.AddZone(Zone);
 	if (FarField)
 	{
 		// The far field's patches narrow enough to take zones rebuild with it (their old meshes draw until then).
@@ -3661,13 +3663,13 @@ void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 	{
 		UE_LOG(LogVoxelStreaming, Log,
 			TEXT("Added planet conditioning zone toward %s inner=%.0f falloff=%.0f target altitude=%.0f strength=%.2f; %d total."),
-			*Zone.Direction.ToCompactString(), Zone.InnerRadius, Zone.FalloffWidth, Zone.TargetHeight, Zone.Strength, ConditioningZones.Num());
+			*Zone.Direction.ToCompactString(), Zone.InnerRadius, Zone.FalloffWidth, Zone.TargetHeight, Zone.Strength, ConditioningSources.NumZones());
 	}
 	else
 	{
 		UE_LOG(LogVoxelStreaming, Log,
 			TEXT("Added terrain conditioning zone at (%.0f,%.0f) inner=%.0f falloff=%.0f target=%.0f strength=%.2f; %d total."),
-			Zone.Center.X, Zone.Center.Y, Zone.InnerRadius, Zone.FalloffWidth, Zone.TargetHeight, Zone.Strength, ConditioningZones.Num());
+			Zone.Center.X, Zone.Center.Y, Zone.InnerRadius, Zone.FalloffWidth, Zone.TargetHeight, Zone.Strength, ConditioningSources.NumZones());
 	}
 	// A zone of the other kind is kept but never applies (each kind's gather and blend skip the other).
 	const bool bPlanet = Configuration && Configuration->WorldMode == EWorldMode::SphericalPlanet;
@@ -3679,9 +3681,9 @@ void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 	OnTerrainConditioningChanged.Broadcast();
 }
 
-void UVoxelChunkManager::GatherConditioningZonesForChunk(const FIntVector& ChunkCoord, TArray<FVoxelConditioningZone>& OutZones) const
+void UVoxelChunkManager::GatherConditioningForChunk(const FIntVector& ChunkCoord, FVoxelConditioning& Out) const
 {
-	if (ConditioningZones.IsEmpty() || !Configuration)
+	if (ConditioningSources.IsEmpty() || !Configuration)
 	{
 		return;
 	}
@@ -3697,7 +3699,7 @@ void UVoxelChunkManager::GatherConditioningZonesForChunk(const FIntVector& Chunk
 		double CapAngle = 0.0;
 		if (GetPlanetCapOfBox(FBox(ChunkOrigin, ChunkOrigin + FVector(ChunkWorldSize)), CapDirection, CapAngle))
 		{
-			GatherConditioningZonesOnSphere(CapDirection, CapAngle, OutZones);
+			GatherConditioningOnSphere(CapDirection, CapAngle, EVoxelConditioningGather::Complete, Out);
 		}
 		return;
 	}
@@ -3706,7 +3708,7 @@ void UVoxelChunkManager::GatherConditioningZonesForChunk(const FIntVector& Chunk
 		FVector2D(ChunkOrigin.X, ChunkOrigin.Y),
 		FVector2D(ChunkOrigin.X + ChunkWorldSize, ChunkOrigin.Y + ChunkWorldSize));
 
-	GatherConditioningZonesForRegion(ChunkRegion, OutZones);
+	GatherConditioningForRegion(ChunkRegion, EVoxelConditioningGather::Complete, Out);
 }
 
 bool UVoxelChunkManager::GetPlanetCapOfBox(const FBox& Box, FVector& OutDirection, double& OutAngle) const
@@ -3724,41 +3726,42 @@ bool UVoxelChunkManager::GetPlanetCapOfBox(const FBox& Box, FVector& OutDirectio
 	return true;
 }
 
-void UVoxelChunkManager::GatherConditioningZones(const FBox& Box, TArray<FVoxelConditioningZone>& OutZones) const
+void UVoxelChunkManager::GatherConditioning(const FBox& Box, EVoxelConditioningGather Need, FVoxelConditioning& Out) const
 {
-	// The zones a world box's terrain takes, in any mode (code review CR2, CM-20): on a planet the cap the box subtends
-	// (GetPlanetCapOfBox), on a heightmap world its XY region.
+	// The conditioning a world box's terrain takes, in any mode (code review CR2, CM-20): on a planet the cap the box
+	// subtends (GetPlanetCapOfBox), on a heightmap world its XY region.
 	FVector CapDirection;
 	double CapAngle = 0.0;
 	if (GetPlanetCapOfBox(Box, CapDirection, CapAngle))
 	{
-		GatherConditioningZonesOnSphere(CapDirection, CapAngle, OutZones);
+		GatherConditioningOnSphere(CapDirection, CapAngle, Need, Out);
 		return;
 	}
-	GatherConditioningZonesForRegion(FBox2D(FVector2D(Box.Min.X, Box.Min.Y), FVector2D(Box.Max.X, Box.Max.Y)), OutZones);
+	GatherConditioningForRegion(FBox2D(FVector2D(Box.Min.X, Box.Min.Y), FVector2D(Box.Max.X, Box.Max.Y)), Need, Out);
 }
 
-void UVoxelChunkManager::GatherConditioningZonesOnSphere(const FVector& Direction, double AngularRadius, TArray<FVoxelConditioningZone>& OutZones) const
+void UVoxelChunkManager::GatherConditioningOnSphere(const FVector& Direction, double AngularRadius, EVoxelConditioningGather Need,
+	FVoxelConditioning& Out) const
 {
-	if (ConditioningZones.IsEmpty() || !Configuration
+	if (ConditioningSources.IsEmpty() || !Configuration
 		|| Configuration->WorldMode != EWorldMode::SphericalPlanet)
 	{
 		return;
 	}
-	ConditioningZones.GatherOnSphere(Direction, AngularRadius, FVoxelWorldModeFactory::MakePlanetParams(*Configuration).PlanetRadius, OutZones);
+	ConditioningSources.GatherOnSphere(Direction, AngularRadius, FVoxelWorldModeFactory::MakePlanetParams(*Configuration).PlanetRadius, Need, Out);
 }
 
-void UVoxelChunkManager::GatherConditioningZonesForRegion(const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones) const
+void UVoxelChunkManager::GatherConditioningForRegion(const FBox2D& Region, EVoxelConditioningGather Need, FVoxelConditioning& Out) const
 {
-	ConditioningZones.GatherForRegion(Region, OutZones);
+	ConditioningSources.GatherForRegion(Region, Need, Out);
 }
 
-void UVoxelChunkManager::GatherConditioningZonesForPoint(double WorldX, double WorldY, TArray<FVoxelConditioningZone>& OutZones) const
+void UVoxelChunkManager::GatherConditioningForPoint(double WorldX, double WorldY, FVoxelConditioning& Out) const
 {
 	// A degenerate (point) region: zone bounds that contain (X,Y) intersect it. FBox2D::Intersect is
 	// inclusive on the boundary, so a point exactly on a zone's outer edge (weight 0) is harmless.
 	const FVector2D P(WorldX, WorldY);
-	GatherConditioningZonesForRegion(FBox2D(P, P), OutZones);
+	GatherConditioningForRegion(FBox2D(P, P), EVoxelConditioningGather::Complete, Out);
 }
 
 float UVoxelChunkManager::GetGeneratedColumnHeight(double WorldX, double WorldY) const
@@ -3770,15 +3773,15 @@ float UVoxelChunkManager::GetGeneratedColumnHeight(double WorldX, double WorldY)
 	}
 
 	// The generated rung (FVoxelSurfaceQuery::GetGeneratedSurface): base terrain + continentalness (the world mode carries
-	// the biome context set at init) with the terrain conditioning zones there (POI / claim flatten) layered on exactly as
+	// the biome context set at init) with the terrain conditioning there (POI / claim flatten) layered on exactly as
 	// generation does.
-	TArray<FVoxelConditioningZone> Zones;
-	if (!ConditioningZones.IsEmpty())
+	FVoxelConditioning Conditioning;
+	if (!ConditioningSources.IsEmpty())
 	{
-		GatherConditioningZonesForPoint(WorldX, WorldY, Zones);
+		GatherConditioningForPoint(WorldX, WorldY, Conditioning);
 	}
 	return static_cast<float>(FVoxelSurfaceQuery::GetGeneratedSurface(*WM, FVector(WorldX, WorldY, 0.0), Configuration->GetNoiseParams(),
-		Zones.Num() > 0 ? &Zones : nullptr).Position.Z);
+		!Conditioning.IsEmpty() ? &Conditioning : nullptr).Position.Z);
 }
 
 bool UVoxelChunkManager::QuerySurfacePoint(const FVector& WorldPos, EVoxelSurfaceLayer Layer, FVoxelSurfaceSample& OutSample) const
@@ -3793,23 +3796,24 @@ bool UVoxelChunkManager::QuerySurfacePoint(const FVector& WorldPos, EVoxelSurfac
 		return QueryEditMergedSurfacePoint(WorldPos, OutSample);
 	}
 
-	// The generated rung's zones, gathered for the place as GetGeneratedSurfacePoint gathers them.
-	TArray<FVoxelConditioningZone> Zones;
-	if (Layer == EVoxelSurfaceLayer::Generated && !ConditioningZones.IsEmpty())
+	// The generated rung's conditioning, gathered for the place as GetGeneratedSurfacePoint gathers it.
+	FVoxelConditioning Conditioning;
+	if (Layer == EVoxelSurfaceLayer::Generated && !ConditioningSources.IsEmpty())
 	{
 		if (WM->GetWorldModeType() == EWorldMode::SphericalPlanet)
 		{
 			const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WM);
-			GatherConditioningZonesOnSphere(FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, Planet.GetPlanetParams().PlanetCenter), 0.0, Zones);
+			GatherConditioningOnSphere(FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, Planet.GetPlanetParams().PlanetCenter), 0.0,
+				EVoxelConditioningGather::Complete, Conditioning);
 		}
 		else
 		{
-			GatherConditioningZonesForPoint(WorldPos.X, WorldPos.Y, Zones);
+			GatherConditioningForPoint(WorldPos.X, WorldPos.Y, Conditioning);
 		}
 	}
 	const FVoxelBiomeSnapshot Snapshot = FVoxelBiomeSnapshot::FromConfig(Configuration->BiomeConfiguration);
 	OutSample = FVoxelSurfaceQuery::SampleSurfacePoint(*WM, WorldPos, Configuration->VoxelSize, Configuration->GetNoiseParams(), Snapshot,
-		GetSeaSurface(), Zones.Num() > 0 ? &Zones : nullptr);
+		GetSeaSurface(), !Conditioning.IsEmpty() ? &Conditioning : nullptr);
 	if (Layer == EVoxelSurfaceLayer::Generated && IsBlockSurface())
 	{
 		// A block world's generated surface is the block top GetGeneratedSurfacePoint gives (sampled at the column's corner).
@@ -3827,22 +3831,23 @@ bool UVoxelChunkManager::GetClimateAt(const FVector& WorldPos, FVoxelClimateSamp
 	{
 		return false;
 	}
-	// The generated rung's zones, as QuerySurfacePoint gathers them: the climate's surface is the conditioned one.
-	TArray<FVoxelConditioningZone> Zones;
-	if (!ConditioningZones.IsEmpty())
+	// The generated rung's conditioning, as QuerySurfacePoint gathers it: the climate's surface is the conditioned one.
+	FVoxelConditioning Conditioning;
+	if (!ConditioningSources.IsEmpty())
 	{
 		if (WM->GetWorldModeType() == EWorldMode::SphericalPlanet)
 		{
 			const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*WM);
-			GatherConditioningZonesOnSphere(FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, Planet.GetPlanetParams().PlanetCenter), 0.0, Zones);
+			GatherConditioningOnSphere(FSphericalPlanetWorldMode::GetDirectionFromCenter(WorldPos, Planet.GetPlanetParams().PlanetCenter), 0.0,
+				EVoxelConditioningGather::Complete, Conditioning);
 		}
 		else
 		{
-			GatherConditioningZonesForPoint(WorldPos.X, WorldPos.Y, Zones);
+			GatherConditioningForPoint(WorldPos.X, WorldPos.Y, Conditioning);
 		}
 	}
 	const FVoxelBiomeSnapshot Snapshot = FVoxelBiomeSnapshot::FromConfig(Configuration->BiomeConfiguration);
-	return FVoxelSurfaceQuery::QueryClimateAt(*WM, WorldPos, Configuration->GetNoiseParams(), Snapshot, Zones.Num() > 0 ? &Zones : nullptr, OutSample);
+	return FVoxelSurfaceQuery::QueryClimateAt(*WM, WorldPos, Configuration->GetNoiseParams(), Snapshot, !Conditioning.IsEmpty() ? &Conditioning : nullptr, OutSample);
 }
 
 void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, FVoxelNoiseGenerationRequest GenRequest)

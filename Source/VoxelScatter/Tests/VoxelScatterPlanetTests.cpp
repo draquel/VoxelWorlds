@@ -42,15 +42,15 @@ namespace VoxelScatterPlanetTestUtils
 	 * GenerationZones the chunks generate conditioned (spherical Phase 5); ContextZones go to the extraction context.
 	 */
 	TArray<FVoxelSurfacePoint> ExtractAround(const UVoxelWorldConfiguration* Config, const IVoxelWorldMode& Mode, const FVector& Site,
-		const TArray<FVoxelConditioningZone>& GenerationZones = {}, const TArray<FVoxelConditioningZone>& ContextZones = {})
+		const FVoxelConditioning& GenerationZones = FVoxelConditioning(), const FVoxelConditioning& ContextZones = FVoxelConditioning())
 	{
 		FScatterExtractionContext Context;
 		Context.WorldMode = &Mode;
 		Context.NoiseParams = Config->NoiseParams;
 		Context.Sea = FVoxelSeaSurface::FromConfig(*Config);
-		if (ContextZones.Num() > 0)
+		if (!ContextZones.IsEmpty())
 		{
-			Context.ConditioningZones = MakeShared<const TArray<FVoxelConditioningZone>>(ContextZones);
+			Context.Conditioning = MakeShared<const FVoxelConditioning>(ContextZones);
 		}
 		const double ChunkWorld = ChunkSize * VoxelSize;
 		const FVector Local = (Site - Config->WorldOrigin) / ChunkWorld;
@@ -69,7 +69,7 @@ namespace VoxelScatterPlanetTestUtils
 			Request.VoxelSize = VoxelSize;
 			Request.NoiseParams = Config->NoiseParams;
 			FVoxelWorldModeFactory::FillGenerationRequest(*Config, Request);
-			Request.ConditioningZones = GenerationZones;
+			Request.Conditioning = GenerationZones;
 			TArray<FVoxelData> Voxels;
 			Generator.GenerateChunkCPU(Request, Voxels);
 			FChunkSurfaceData Surface;
@@ -191,7 +191,7 @@ bool FVoxelScatterPlanetConditionedLineTopTest::RunTest(const FString& Parameter
 	const double C45 = FMath::Cos(FMath::DegreesToRadians(45.0));
 	const FVector Site(C45, 0.0, C45);
 	const float Target = Planet.GetTerrainAltitude(Site, Config->NoiseParams) + 300.0f;
-	const TArray<FVoxelConditioningZone> Zones = { FVoxelConditioningZone::MakeRadial(Site, 1500.0f, 1000.0f, Target) };
+	const FVoxelConditioning Zones = FVoxelConditioning::OfZones({ FVoxelConditioningZone::MakeRadial(Site, 1500.0f, 1000.0f, Target) });
 	const FVector PadPoint = Center + Site * (Radius + Target);
 
 	auto Judge = [&](const TArray<FVoxelSurfacePoint>& Points, int32& OutOpen, int32& OutOff)

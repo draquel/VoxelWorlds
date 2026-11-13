@@ -21,7 +21,7 @@
  * its edit-aware band) stand on the generated ground. Real InfinitePlane terrain from the CPU generator with two
  * conditioning zones on a chunk manager, a pad cut 1,500 uu below the natural height at its centre and one raised 1,500 uu
  * over it. At 8 azimuths x 9 radii around each (the pad, the falloff ring and beyond), with the zones the sampler gathers
- * over its bounds (UVoxelChunkManager::GatherConditioningZones):
+ * over its bounds (UVoxelChunkManager::GatherConditioning):
  * - FVoxelSurfaceQuery::SampleSurface lands within a voxel of the generated isosurface, and SampleSurfacePoint (which
  *   heightmap modes forward to it) returns the same sample;
  * - the pad reads flat (slope under a degree) and beyond the ring the zones change nothing;
@@ -73,7 +73,7 @@ bool FPCGVoxelFarPointsConditionedTest::RunTest(const FString& Parameters)
 	FVoxelCPUNoiseGenerator Generator;
 	Generator.Initialize();
 	TMap<FIntVector, TArray<FVoxelData>> Chunks;
-	auto GetChunk = [&](const FIntVector& Coord, const TArray<FVoxelConditioningZone>& Zones) -> const TArray<FVoxelData>&
+	auto GetChunk = [&](const FIntVector& Coord, const FVoxelConditioning& Zones) -> const TArray<FVoxelData>&
 	{
 		if (const TArray<FVoxelData>* Found = Chunks.Find(Coord))
 		{
@@ -85,13 +85,13 @@ bool FPCGVoxelFarPointsConditionedTest::RunTest(const FString& Parameters)
 		Request.VoxelSize = VoxelSize;
 		Request.NoiseParams = Noise;
 		FVoxelWorldModeFactory::FillGenerationRequest(*Config, Request);
-		Request.ConditioningZones = Zones;
+		Request.Conditioning = Zones;
 		TArray<FVoxelData> Voxels;
 		Generator.GenerateChunkCPU(Request, Voxels);
 		return Chunks.Add(Coord, MoveTemp(Voxels));
 	};
 	// The generated isosurface in the voxel column at (X, Y) on the voxel grid, over three chunk layers around ExpectedZ.
-	auto RealSurfaceZ = [&](double X, double Y, float ExpectedZ, const TArray<FVoxelConditioningZone>& Zones)
+	auto RealSurfaceZ = [&](double X, double Y, float ExpectedZ, const FVoxelConditioning& Zones)
 	{
 		const int32 CX = FMath::FloorToInt(X / ChunkWorldSize);
 		const int32 CY = FMath::FloorToInt(Y / ChunkWorldSize);
@@ -117,9 +117,9 @@ bool FPCGVoxelFarPointsConditionedTest::RunTest(const FString& Parameters)
 	{
 		// The sampler's gather: the zones over its bounds (here a box around the site's footprint).
 		const double Reach = InnerRadius + FalloffWidth + 1000.0;
-		TArray<FVoxelConditioningZone> Zones;
-		Manager->GatherConditioningZones(FBox2D(Site.Value - FVector2D(Reach), Site.Value + FVector2D(Reach)), Zones);
-		TestEqual(*FString::Printf(TEXT("%s: the sampler's gather finds the site's zone"), Site.Key), Zones.Num(), 1);
+		FVoxelConditioning Zones;
+		Manager->GatherConditioning(FBox2D(Site.Value - FVector2D(Reach), Site.Value + FVector2D(Reach)), EVoxelConditioningGather::Complete, Zones);
+		TestEqual(*FString::Printf(TEXT("%s: the sampler's gather finds the site's zone"), Site.Key), Zones.Zones.Num(), 1);
 
 		Chunks.Reset();
 		int32 Points = 0, Off = 0, PointDiffers = 0, Sloped = 0, Changed = 0;

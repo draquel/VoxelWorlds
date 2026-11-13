@@ -113,11 +113,11 @@ struct VOXELMAP_API FVoxelMapTileFrame
 	FVoxelMapTileSample SampleAt(FIntPoint Tile, int32 GX, int32 GY) const;
 
 	/**
-	 * The generated surface's altitude at a sample, conditioning zones applied: the generated height (its world Z) on a
+	 * The generated surface's altitude at a sample, conditioning applied: the generated height (its world Z) on a
 	 * heightmap world, the conditioned terrain altitude along the direction on a planet.
 	 */
 	float Altitude(const IVoxelWorldMode& WorldMode, const FVoxelMapTileSample& Sample, const FVoxelNoiseParams& NoiseParams,
-		const TArray<FVoxelConditioningZone>& Zones) const;
+		const FVoxelConditioning& Conditioning) const;
 
 	/** The world point of a sample at an altitude: (X, Y, altitude); centre + direction x (radius + altitude). */
 	FVector PositionAt(const FVoxelMapTileSample& Sample, float InAltitude) const;
@@ -150,10 +150,11 @@ struct VOXELMAP_API FVoxelMapTileFrame
 	void ApronPixel(FIntPoint Tile, int32 GX, int32 GY, const FVoxelMapTileSample& Sample, FIntPoint& OutTile, int32& OutPX, int32& OutPY) const;
 
 	/**
-	 * The conditioning zones over a tile and its apron (POI pads, campsites), gathered on the game thread: generation
-	 * layers them onto the base height, so the map must too (QA W-05).
+	 * The conditioning over a tile and its apron (POI pads, campsites), gathered on the game thread: generation
+	 * layers it onto the base height, so the map must too (QA W-05). What is ready (EVoxelConditioningGather::Ready): a
+	 * tile does not wait for a line; it is drawn again when the conditioning changes.
 	 */
-	void GatherZones(const UVoxelChunkManager& ChunkManager, FIntPoint Tile, TArray<FVoxelConditioningZone>& OutZones) const;
+	void GatherConditioning(const UVoxelChunkManager& ChunkManager, FIntPoint Tile, FVoxelConditioning& Out) const;
 
 	// ---- The tile pyramid (MAP_PYRAMID_PLAN.md P1, D84) ----
 
@@ -214,8 +215,8 @@ struct VOXELMAP_API FVoxelMapTileFrame
 	 */
 	void SourcePixel(const FVoxelMapTileId& Id, int32 GX, int32 GY, const FVoxelMapTileSample& Sample, FIntPoint& OutTile0, int32& OutPX, int32& OutPY) const;
 
-	/** GatherZones for a tile at any level: the conditioning zones over its area and apron. */
-	void GatherZones(const UVoxelChunkManager& ChunkManager, const FVoxelMapTileId& Id, TArray<FVoxelConditioningZone>& OutZones) const;
+	/** GatherConditioning for a tile at any level: the conditioning over its area and apron. */
+	void GatherConditioning(const UVoxelChunkManager& ChunkManager, const FVoxelMapTileId& Id, FVoxelConditioning& Out) const;
 
 private:
 	/** Planets: a tile's face and its indices along the face at its level. @return False outside the level's atlas */

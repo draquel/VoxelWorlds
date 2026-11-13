@@ -32,7 +32,7 @@ namespace VoxelFarFieldTestRig
 		TSharedPtr<const FVoxelFarFieldSurface> Surface;
 		FVoxelFarFieldSettings Settings;
 		FVoxelFarField FarField;
-		const TArray<FVoxelConditioningZone> NoZones;
+		const FVoxelConditioning NoZones;
 
 		/** The voxel window the views describe: its load and unload distances */
 		double ViewDistance = 0.0;

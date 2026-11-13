@@ -15,7 +15,7 @@ class UVoxelScatterRenderer;
 class IVoxelWorldMode;
 class FVoxelMaterialTable;
 class UVoxelCaveConfiguration;
-struct FVoxelConditioningZone;
+struct FVoxelConditioning;
 
 struct FScatterExtractionContext;
 
@@ -609,13 +609,13 @@ public:
 	void SetMaterialTable(TSharedPtr<const FVoxelMaterialTable> InMaterials) { MaterialTable = MoveTemp(InMaterials); }
 
 	/**
-	 * How to gather the terrain conditioning zones over a chunk's world box, the zones generation layered onto it: the
+	 * How to gather the terrain conditioning over a chunk's world box, what generation layered onto it: the
 	 * chunk manager's region gather on a heightmap (its XY footprint, world modes review G23), the cap the box subtends
-	 * on a planet (GetPlanetCapOfBox + GatherConditioningZonesOnSphere, spherical SP-B10). Called on the game thread
-	 * when a chunk's extraction is set up (FScatterExtractionContext::ConditioningZones). Unset: no zones (the world
+	 * on a planet (GetPlanetCapOfBox + GatherConditioningOnSphere, spherical SP-B10). Called on the game thread
+	 * when a chunk's extraction is set up (FScatterExtractionContext::Conditioning). Unset: no conditioning (the world
 	 * mode's natural surface).
 	 */
-	void SetConditioningGatherer(TFunction<void(const FBox& /*ChunkBox*/, TArray<FVoxelConditioningZone>& /*OutZones*/)> InGatherer)
+	void SetConditioningGatherer(TFunction<void(const FBox& /*ChunkBox*/, FVoxelConditioning& /*Out*/)> InGatherer)
 	{
 		ConditioningGatherer = MoveTemp(InGatherer);
 	}
@@ -736,8 +736,8 @@ protected:
 	/** The world's material table for the drawn material (see SetMaterialTable). */
 	TSharedPtr<const FVoxelMaterialTable> MaterialTable;
 
-	/** The chunk's conditioning zones (see SetConditioningGatherer). */
-	TFunction<void(const FBox&, TArray<FVoxelConditioningZone>&)> ConditioningGatherer;
+	/** The chunk's conditioning (see SetConditioningGatherer). */
+	TFunction<void(const FBox&, FVoxelConditioning&)> ConditioningGatherer;
 
 	/** A chunk's edit layer (see SetEditLayerSource). */
 	TFunction<const FChunkEditLayer*(const FIntVector&)> EditLayerSource;

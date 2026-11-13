@@ -122,12 +122,12 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 	// ==================== Terrain Conditioning (Phase 6c) ====================
 
 	/**
-	 * Terrain conditioning zones overlapping this chunk — gen-time height flattening under POIs /
+	 * The terrain conditioning over this chunk (its zones and lines) — gen-time height flattening under POIs /
 	 * claims. Gathered (game thread) by VoxelChunkManager when the request is built; applied by the
-	 * heightmap generator. Empty for most chunks (no per-chunk cost when there's no conditioning).
+	 * generators. Empty for most chunks (no per-chunk cost when there's no conditioning).
 	 */
 	UPROPERTY()
-	TArray<FVoxelConditioningZone> ConditioningZones;
+	FVoxelConditioning Conditioning;
 
 	FVoxelNoiseGenerationRequest() = default;
 

@@ -95,7 +95,7 @@ timed into `FVoxelTimingStats`, which the streaming bench reports.
 ### Generation
 
 `ProcessGenerationQueue` builds a request per chunk (`BuildChunkGenerationRequest`: the world mode, the conditioning
-zones the chunk touches) and launches it within `voxel.Stream.MaxAsyncGenTasks` and `voxel.Stream.MaxLoadPerFrame`:
+over the chunk, `FVoxelConditioning`) and launches it within `voxel.Stream.MaxAsyncGenTasks` and `voxel.Stream.MaxLoadPerFrame`:
 
 - **CPU**: a thread-pool task runs `FVoxelCPUNoiseGenerator`, injects voxel trees on the same worker, and queues the
   result.
@@ -338,7 +338,7 @@ holds now:
 | `FVoxelWorldBoundaryOwner`, `FVoxelFarOceanOwner`, `FVoxelPlanetOceanOwner`, `FVoxelSeaUnderside` | the edge walls, the far ocean's and planet ocean's components, the sea undersides | `VoxelWorldComponentOwners.h` |
 | `FVoxelFarField` + `FVoxelFarFieldPresenter` | the far field's patches (selection and builds) and their components | `VoxelFarField.h`, `VoxelWorldComponentOwners.h` |
 | `FVoxelStreamingCounters` (`BenchCounters`), `FVoxelStreamingBenchmark` | the bench's counters and runs (`voxel.Bench.Run`) | `VoxelChunkManager.h`, `VoxelStreamingBenchmark.h` |
-| `FVoxelConditioningZoneSet` (`ConditioningZones`) | the terrain conditioning zones and the game's conditioner | `VoxelConditioningZoneSet.h` |
+| `FVoxelConditioningSources` (`ConditioningSources`) | where the terrain conditioning comes from: the zones added to the manager and the game's conditioner (its zones and lines); its gathers fill an `FVoxelConditioning` | `VoxelConditioningSources.h` |
 | `FVoxelTreeQuery` | a cubic world's standing voxel trees | `VoxelTreeQuery.h` |
 | `UVoxelCollisionManager`, `UVoxelScatterManager`, `UVoxelWaterPropagation`, `UVoxelEditManager` | collision, scatter, the edit-driven flood, the edit layer | their own headers |
 

@@ -359,7 +359,7 @@ struct VOXELSTREAMING_API FVoxelFarFieldFrame
 	 * A patch's origin: on the datum sphere under the patch's centre (its vertices are offsets of its own size), on a
 	 * heightmap world the surface at the patch's centre.
 	 */
-	FVector OriginOf(const FVoxelFarFieldPatchKey& Key, const struct FVoxelFarFieldSurface& Surface, const TArray<FVoxelConditioningZone>& Zones) const;
+	FVector OriginOf(const FVoxelFarFieldPatchKey& Key, const struct FVoxelFarFieldSurface& Surface, const FVoxelConditioning& Conditioning) const;
 
 	/** The face tangent a patch's vertices take their tangent from (the cube face's T; forward on a heightmap world). */
 	FVector GetFaceTangent(const FVoxelFarFieldPatchKey& Key) const;
@@ -470,7 +470,7 @@ private:
  * The analytic surface the far field samples: the planet's terrain altitude (FSphericalPlanetWorldMode, conditioning
  * zones applied as generation applies them) and its surface material and biome
  * (FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt); on a heightmap world (WM-MP1) the generated height at a world
- * (X, Y) (IVoxelWorldMode::GetTerrainHeightAt with the zones, FVoxelTerrainConditioning::ApplyToHeight; the block top of
+ * (X, Y) (IVoxelWorldMode::GetTerrainHeightAt with the conditioning, FVoxelConditioning::ApplyToHeight; the block top of
  * it in a cubic world, FVoxelBlockSurface) and FVoxelSurfaceQuery::QuerySurfaceConditions. Immutable once made; read from
  * build tasks on any thread.
  */
@@ -516,16 +516,16 @@ struct VOXELSTREAMING_API FVoxelFarFieldSurface
 	const FSphericalPlanetWorldMode& GetPlanet() const;
 
 	/**
-	 * The terrain's altitude over the datum at a sample, zones applied: along a direction the radial displacement
+	 * The terrain's altitude over the datum at a sample, conditioning applied: along a direction the radial displacement
 	 * (GetConditionedTerrainAltitude); at a world (X, Y) the generated height (its world Z), the block top in a cubic world.
 	 * The one sample triple of both kinds of surface (code review CR2, STREAM-18).
 	 *
 	 * @param Sample The sample
-	 * @param Zones Conditioning zones there (may be empty)
+	 * @param Conditioning The conditioning there (may be empty)
 	 * @param OutContinentalness Optional: the continentalness sampled on a planet (the material's biome blend reuses it); 0 on a heightmap world
 	 * @return Altitude (uu)
 	 */
-	float SampleAltitude(const FVoxelFarFieldSample& Sample, const TArray<FVoxelConditioningZone>& Zones, float* OutContinentalness = nullptr) const;
+	float SampleAltitude(const FVoxelFarFieldSample& Sample, const FVoxelConditioning& Conditioning, float* OutContinentalness = nullptr) const;
 
 	/**
 	 * The surface material and biome where the terrain is at Altitude at a sample (depth 0), as generation writes them.
@@ -552,10 +552,10 @@ struct VOXELSTREAMING_API FVoxelFarFieldSurface
 
 private:
 	// The two kinds' halves of the triple above.
-	float SampleHeight(double WorldX, double WorldY, const TArray<FVoxelConditioningZone>& Zones) const;
+	float SampleHeight(double WorldX, double WorldY, const FVoxelConditioning& Conditioning) const;
 	void SampleConditionsXY(double WorldX, double WorldY, float Height, uint8& OutMaterial, uint8& OutBiome) const;
 	FVoxelSurfaceMaterialMix SampleMaterialMixXY(double WorldX, double WorldY, float Height) const;
-	float SampleAltitude(const FVector& Direction, const TArray<FVoxelConditioningZone>& Zones, float* OutContinentalness) const;
+	float SampleAltitude(const FVector& Direction, const FVoxelConditioning& Conditioning, float* OutContinentalness) const;
 	void SampleConditions(const FVector& Direction, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome) const;
 	FVoxelSurfaceMaterialMix SampleMaterialMix(const FVector& Direction, float Altitude, float Continentalness) const;
 };
@@ -858,13 +858,13 @@ public:
 	void SetMaxBuildsInFlight(int32 InMax) { MaxBuildsInFlight = FMath::Max(1, InMax); }
 
 	/**
-	 * Where a build's conditioning zones come from (UVoxelChunkManager::GatherConditioningZonesOnSphere for a cap, its box
+	 * Where a build's conditioning comes from (UVoxelChunkManager::GatherConditioningOnSphere for a cap, its region
 	 * gather for a box), called on the game thread when a build launches for a patch narrow enough to take zones
 	 * (ZoneGatherMax) with the region its footprint covers.
 	 */
-	void SetZoneGatherer(TFunction<void(const FVoxelFarFieldRegion& Region, TArray<FVoxelConditioningZone>& OutZones)> InGatherer)
+	void SetConditioningGatherer(TFunction<void(const FVoxelFarFieldRegion& Region, FVoxelConditioning& Out)> InGatherer)
 	{
-		ZoneGatherer = MoveTemp(InGatherer);
+		ConditioningGatherer = MoveTemp(InGatherer);
 	}
 
 	/**
@@ -994,12 +994,12 @@ public:
 	 *
 	 * @param Settings The far field's settings
 	 * @param Surface The analytic surface
-	 * @param Zones Conditioning zones over the patch (may be empty)
+	 * @param Conditioning The conditioning over the patch (may be empty)
 	 * @param Key The patch
 	 * @param Out Receives the meshes and metadata
 	 */
 	static void BuildPatch(const FVoxelFarFieldSettings& Settings, const FVoxelFarFieldSurface& Surface,
-		const TArray<FVoxelConditioningZone>& Zones, const FVoxelFarFieldPatchKey& Key, FVoxelFarFieldPatchMesh& Out);
+		const FVoxelConditioning& Conditioning, const FVoxelFarFieldPatchKey& Key, FVoxelFarFieldPatchMesh& Out);
 
 	/**
 	 * Whether a patch lies wholly under the horizon seen from a camera: past the angle at which the camera's line of sight
@@ -1110,7 +1110,7 @@ private:
 	FVoxelFarFieldFrame Frame;
 	TSharedPtr<const FVoxelFarFieldSurface> Surface;
 	TSharedPtr<FBuildSink, ESPMode::ThreadSafe> Sink;
-	TFunction<void(const FVoxelFarFieldRegion&, TArray<FVoxelConditioningZone>&)> ZoneGatherer;
+	TFunction<void(const FVoxelFarFieldRegion&, FVoxelConditioning&)> ConditioningGatherer;
 	TFunction<bool(const FIntPoint&)> WaterTileQuery;
 
 	/** The roots of the last update (packed keys) */

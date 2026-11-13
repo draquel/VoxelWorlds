@@ -117,7 +117,7 @@ frame answering what differs since code review CR2):
 
 1. **Height.** The generated surface at the pixel (`FVoxelMapTileFrame::Altitude`): on a heightmap world the world
    mode's surface on the up line through (X, Y) (`GetSurfaceOnUpLine`, continentalness and the island falloff included)
-   with the terrain conditioning zones over the tile layered on (`FVoxelTerrainConditioning::ApplyToHeight`: POI pads,
+   with the terrain conditioning over the tile layered on (`FVoxelConditioning::ApplyToHeight`: POI pads,
    campsites); on a planet the conditioned altitude along the pixel's direction. A one-pixel apron from the neighbouring
    tiles feeds the hillshade, so shading is continuous across tile seams.
 2. **Material.** `FVoxelSurfaceQuery::QueryMapSurfaceMaterial`: the material generation writes at the surface voxel,
@@ -166,8 +166,8 @@ tiles) asked for half a million images at one zoom. The tile pyramid (D84) bound
   atlas coordinate (Face × N_L + U >> L, V >> L), the face's last tile partly empty, up to the level of one tile a face
   (ceil(log2 N): 11 on the 50 km planet).
 - **One drawer at every level.** `GenerateTileAsync` samples `FVoxelMapTileFrame::SampleAt(Id, ...)`: a plane's pixel
-  corners and a planet's pixel centres 2^L level-0 pixels apart, with the one-pixel apron, the conditioning zones over the
-  tile's area (`GatherZones(Id)`), the hillshade at the level's spacing (`ShadeAt(.., Level)`), and the edit overlays of
+  corners and a planet's pixel centres 2^L level-0 pixels apart, with the one-pixel apron, the conditioning over the
+  tile's area (`GatherConditioning(Id)`, what is ready), the hillshade at the level's spacing (`ShadeAt(.., Level)`), and the edit overlays of
   the level-0 tiles under its pixels (`SourcePixel`: a plane's corner pixel, a planet's pixel under the sample's
   direction; gathered from the footprint or from the overlays, whichever is fewer). A drawing costs the same at every
   level. Overlay rebuilds stay level 0's; when one changes an overlay, the coarser tiles over it go stale.

@@ -2659,7 +2659,7 @@ float FScatterExtractionContext::GetGeneratedTerrainHeight(double WorldX, double
 	// The ladder's generated rung (code review CR2, SCAT-19): the natural height with the zones layered on as generation does.
 	check(WorldMode != nullptr);
 	return static_cast<float>(FVoxelSurfaceQuery::GetGeneratedSurface(*WorldMode, FVector(WorldX, WorldY, 0.0), NoiseParams,
-		ConditioningZones.IsValid() ? ConditioningZones.Get() : nullptr).Position.Z);
+		Conditioning.IsValid() ? Conditioning.Get() : nullptr).Position.Z);
 }
 
 FVoxelData FScatterExtractionContext::GetVoxelOutsideChunk(const FIntVector& LocalCoord, const FVector& WorldPos, float VoxelSize, int32 BiomeHint,
@@ -2676,7 +2676,7 @@ FVoxelData FScatterExtractionContext::GetVoxelOutsideChunk(const FIntVector& Loc
 		Surface = &ColumnSurface;
 	}
 	const FVoxelData Generated = FVoxelSurfaceQuery::GenerateVoxelAt(*WorldMode, WorldPos, VoxelSize, NoiseParams,
-		ConditioningZones.IsValid() ? ConditioningZones.Get() : nullptr, CaveConfiguration, Sea, bEnableBiomes, BiomeHint, Surface);
+		Conditioning.IsValid() ? Conditioning.Get() : nullptr, CaveConfiguration, Sea, bEnableBiomes, BiomeHint, Surface);
 	if (OutsideEdits.IsValid())
 	{
 		if (const FVoxelEdit* Edit = OutsideEdits->Find(LocalCoord))
@@ -3277,16 +3277,16 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 		// The voxels a chunk's extraction reads past its own data are carved as generation carves them (G28, G72).
 		Context.CaveConfiguration = Configuration->bEnableCaves ? Configuration->CaveConfiguration.Get() : nullptr;
 		Context.bEnableBiomes = Configuration->bEnableBiomes;
-		// The conditioning zones over the chunk, so the analytic surface is the generated one: the buried-chunk test's
+		// The conditioning over the chunk, so the analytic surface is the generated one: the buried-chunk test's
 		// height on a heightmap (G23), the voxels past a planet chunk's faces (spherical SP-B10).
 		if (ConditioningGatherer)
 		{
 			const FVector Min = GetChunkWorldOrigin(ChunkCoord);
-			TArray<FVoxelConditioningZone> Zones;
-			ConditioningGatherer(FBox(Min, Min + FVector(Configuration->GetChunkWorldSize())), Zones);
-			if (Zones.Num() > 0)
+			FVoxelConditioning Conditioning;
+			ConditioningGatherer(FBox(Min, Min + FVector(Configuration->GetChunkWorldSize())), Conditioning);
+			if (!Conditioning.IsEmpty())
 			{
-				Context.ConditioningZones = MakeShared<const TArray<FVoxelConditioningZone>>(MoveTemp(Zones));
+				Context.Conditioning = MakeShared<const FVoxelConditioning>(MoveTemp(Conditioning));
 			}
 		}
 		// The edits in the voxels the extraction reads past the chunk: on a heightmap world the face neighbours' layers facing

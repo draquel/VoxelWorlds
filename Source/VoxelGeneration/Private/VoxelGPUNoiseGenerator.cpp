@@ -594,11 +594,12 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	// (SphericalPlanet.ush PlanetApplyConditioning) relative to the chunk (WM-BP6): [the zone's datum point minus the
 	// anchor's, in double, InnerRadius][FalloffWidth, TargetAltitude, Strength, 0], so the shader measures a short chord.
 	// Each world mode uploads only its own kind of zone, as the CPU's ApplyToHeight / ApplyToAltitude skip the other.
+	// The request's lines are not uploaded: nothing evaluates a line, on either side.
 	const bool bPlanetZones = Request.WorldMode == EWorldMode::SphericalPlanet;
 	TArray<FVector4f> ConditioningData;
-	ConditioningData.Reserve(Request.ConditioningZones.Num() * 2);
+	ConditioningData.Reserve(Request.Conditioning.Zones.Num() * 2);
 	int32 UploadedZones = 0;
-	for (const FVoxelConditioningZone& Zone : Request.ConditioningZones)
+	for (const FVoxelConditioningZone& Zone : Request.Conditioning.Zones)
 	{
 		if (Zone.IsRadial() != bPlanetZones)
 		{

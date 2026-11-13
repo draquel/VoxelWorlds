@@ -20,7 +20,7 @@
 #include "VoxelWorldComponentOwners.h"
 #include "VoxelWaterTiles.h"
 #include "VoxelStreamingViewerPolicy.h"
-#include "VoxelConditioningZoneSet.h"
+#include "VoxelConditioningSources.h"
 #include <atomic>
 #include "VoxelChunkManager.generated.h"
 
@@ -1234,47 +1234,52 @@ public:
 	 */
 	void SetTerrainConditioner(IVoxelTerrainConditioner* InConditioner)
 	{
-		ConditioningZones.SetConditioner(InConditioner);
+		ConditioningSources.SetConditioner(InConditioner);
 		OnTerrainConditioningChanged.Broadcast();
 	}
 
 	/**
-	 * Append the conditioning zones (static + the dynamic conditioner's) whose influence overlaps a world XY
-	 * region — what generation layers onto the base height there (apply with FVoxelTerrainConditioning::
+	 * Append the conditioning (the static zones and the dynamic conditioner's zones and lines) whose influence overlaps
+	 * a world XY region — what generation layers onto the base height there (apply with FVoxelConditioning::
 	 * ApplyToHeight). Game thread. Used by height consumers outside chunk generation, e.g. map tiles.
-	 * @param Region   World-space XY region
-	 * @param OutZones Appended with the overlapping zones
+	 * @param Region World-space XY region
+	 * @param Need   What the gather is for (EVoxelConditioningGather): Complete for a reader that must agree with the
+	 *               generated voxels there, Ready for one whose region is too wide to wait for a line (the map, the far
+	 *               field), which draws again when the conditioning changes
+	 * @param Out    Appended with the overlapping conditioning
 	 */
-	void GatherConditioningZones(const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones) const
+	void GatherConditioning(const FBox2D& Region, EVoxelConditioningGather Need, FVoxelConditioning& Out) const
 	{
-		GatherConditioningZonesForRegion(Region, OutZones);
+		GatherConditioningForRegion(Region, Need, Out);
 	}
 
 	/**
-	 * Append the conditioning zones a world box's terrain takes, in any world mode (code review CR2, CM-20: the one
-	 * gather a caller with a box needs, so it never asks the mode): on a planet the zones reaching the cap the box
-	 * subtends (GetPlanetCapOfBox, GatherConditioningZonesOnSphere); on a heightmap world the zones overlapping its XY
+	 * Append the conditioning a world box's terrain takes, in any world mode (code review CR2, CM-20: the one
+	 * gather a caller with a box needs, so it never asks the mode): on a planet what reaches the cap the box
+	 * subtends (GetPlanetCapOfBox, GatherConditioningOnSphere); on a heightmap world what overlaps its XY
 	 * region. Game thread.
-	 * @param Box      World box
-	 * @param OutZones Appended with the zones
+	 * @param Box  World box
+	 * @param Need What the gather is for (see the region overload)
+	 * @param Out  Appended with the conditioning
 	 */
-	void GatherConditioningZones(const FBox& Box, TArray<FVoxelConditioningZone>& OutZones) const;
+	void GatherConditioning(const FBox& Box, EVoxelConditioningGather Need, FVoxelConditioning& Out) const;
 
 	/**
-	 * Planets (spherical SP-B10): append the planet zones (static, with a Direction, and the dynamic conditioner's
-	 * GatherConditioningOnSphere) whose influence reaches a cap on the sphere: what generation layers onto the radial
-	 * height there (apply with FVoxelTerrainConditioning::ApplyToAltitude). Game thread. The map, scatter and PCG use it
-	 * for their analytic planet surfaces; generation gathers each chunk's by the cap its box subtends. Nothing on a
-	 * heightmap world.
+	 * Planets (spherical SP-B10): append the conditioning (the static planet zones, with a Direction, and the dynamic
+	 * conditioner's GatherConditioningOnSphere and GatherConditioningLinesOnSphere) whose influence reaches a cap on the
+	 * sphere: what generation layers onto the radial height there (apply with FVoxelConditioning::ApplyToAltitude). Game
+	 * thread. The map, scatter and PCG use it for their analytic planet surfaces; generation gathers each chunk's by the
+	 * cap its box subtends. Nothing on a heightmap world.
 	 * @param Direction     Unit direction from the planet centre to the cap's centre
 	 * @param AngularRadius The cap's half-angle in radians (0 for a point)
-	 * @param OutZones      Appended with the zones
+	 * @param Need          What the gather is for (see the region overload)
+	 * @param Out           Appended with the conditioning
 	 */
-	void GatherConditioningZonesOnSphere(const FVector& Direction, double AngularRadius, TArray<FVoxelConditioningZone>& OutZones) const;
+	void GatherConditioningOnSphere(const FVector& Direction, double AngularRadius, EVoxelConditioningGather Need, FVoxelConditioning& Out) const;
 
 	/**
 	 * Planets: the cap (direction and half-angle) a world box subtends from the planet centre, the query
-	 * GatherConditioningZonesOnSphere takes for a chunk or a region: the box centre's direction and asin(half diagonal /
+	 * GatherConditioningOnSphere takes for a chunk or a region: the box centre's direction and asin(half diagonal /
 	 * distance), the whole sphere for a box around the centre.
 	 * @param Box           World box
 	 * @param OutDirection  The cap's direction
@@ -2486,13 +2491,16 @@ private:
 	TSharedPtr<const FVoxelMaterialTable> MaterialTable;
 
 	/** The static terrain conditioning zones (gen-time flattening under POIs/claims; Phase 6c) and the game's conditioner */
-	FVoxelConditioningZoneSet ConditioningZones;
-
-	/** Collect conditioning zones overlapping a chunk's XY footprint into OutZones (game thread). */
-	void GatherConditioningZonesForChunk(const FIntVector& ChunkCoord, TArray<FVoxelConditioningZone>& OutZones) const;
+	FVoxelConditioningSources ConditioningSources;
 
 	/**
-	 * Build the generation request the streaming sends for a chunk (world mode, biomes, caves, water, conditioning zones).
+	 * Collect the conditioning over a chunk into Out (game thread): its XY footprint on a heightmap world, the cap its
+	 * box subtends on a planet. Complete: a chunk's voxels are generated once, so it takes every line.
+	 */
+	void GatherConditioningForChunk(const FIntVector& ChunkCoord, FVoxelConditioning& Out) const;
+
+	/**
+	 * Build the generation request the streaming sends for a chunk (world mode, biomes, caves, water, conditioning).
 	 *
 	 * @param ChunkCoord Chunk to generate
 	 * @param LODLevel LOD of the request (0 when LOD is off)
@@ -2500,11 +2508,14 @@ private:
 	 */
 	void BuildChunkGenerationRequest(const FIntVector& ChunkCoord, int32 LODLevel, FVoxelNoiseGenerationRequest& OutRequest) const;
 
-	/** Append conditioning zones (static + dynamic) whose influence overlaps a world-space XY region. */
-	void GatherConditioningZonesForRegion(const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones) const;
+	/** Append the conditioning (static + dynamic) whose influence overlaps a world-space XY region. */
+	void GatherConditioningForRegion(const FBox2D& Region, EVoxelConditioningGather Need, FVoxelConditioning& Out) const;
 
-	/** Append conditioning zones (static + dynamic) whose influence covers a single world-space XY point. */
-	void GatherConditioningZonesForPoint(double WorldX, double WorldY, TArray<FVoxelConditioningZone>& OutZones) const;
+	/**
+	 * Append the conditioning (static + dynamic) whose influence covers a single world-space XY point. Complete: a point
+	 * query answers for the generated voxels there.
+	 */
+	void GatherConditioningForPoint(double WorldX, double WorldY, FVoxelConditioning& Out) const;
 
 	/**
 	 * The generated column height (GetTerrainHeightAt plus the conditioning zones there) at a sample point, as the heightmap
