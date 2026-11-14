@@ -95,6 +95,14 @@ UVoxelCollisionComponent::UVoxelCollisionComponent(const FObjectInitializer& Obj
 	bCastDynamicShadow = false;
 	SetCanEverAffectNavigation(false);
 
+	// Static: a chunk's collision is placed once, before it is registered, and replaced (never moved) when its chunk is
+	// re-cooked. To the engine a Movable component is a dynamic movement base (MovementBaseUtility::IsDynamicBase): a
+	// character standing on one sends and receives its position relative to that base, and this component is made on
+	// each machine on its own (the container actor is not replicated), so neither side can resolve the other's. A client
+	// then dropped every server correction and a dedicated server corrected every move of a client on terrain (G215).
+	// With a static base both send world positions and a correction needs no base.
+	Mobility = EComponentMobility::Static;
+
 	// Use the standard "BlockAll" collision profile (WorldStatic, blocks all channels).
 	// This ensures proper physics filter data for character movement sweeps (ECC_Pawn),
 	// line traces (ECC_WorldStatic, ECC_Visibility), and camera collision (ECC_Camera).
@@ -174,8 +182,10 @@ void UVoxelCollisionManager::Initialize(UVoxelWorldConfiguration* Config, UVoxel
 		return;
 	}
 
-	// Add a root component to the container
+	// Add a root component to the container. Static, as the chunk components under it are: the engine refuses to attach a
+	// static component to a parent that is not (the container stays at the world's zero for its whole life).
 	USceneComponent* RootComponent = NewObject<USceneComponent>(CollisionContainerActor, TEXT("RootComponent"));
+	RootComponent->SetMobility(EComponentMobility::Static);
 	CollisionContainerActor->SetRootComponent(RootComponent);
 	RootComponent->RegisterComponent();
 
@@ -1552,6 +1562,7 @@ UPrimitiveComponent* UVoxelCollisionManager::CreateCollisionComponent(const FInt
 	const FBox ChunkLocalBounds(FVector::ZeroVector, FVector(ChunkWorldSize));
 	CollisionComp->SetCollisionBodySetup(BodySetup, ChunkLocalBounds);
 
+	// Placed before it is registered: the component is static (see its constructor) and is never moved afterwards.
 	CollisionComp->SetupAttachment(CollisionContainerActor->GetRootComponent());
 	CollisionComp->SetWorldLocation(ChunkWorldPos);
 

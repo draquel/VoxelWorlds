@@ -128,10 +128,12 @@ GPU against the CPU:
 1. It waits for an editor on a Claudius port (`Scripts/qa/launch_gate_editor.ps1 -Port 8081` starts one beside the
    main checkout's editor on 8080) and turns off its background throttle (`disable_bg_throttle.py`: an unfocused
    editor pins itself to 3 FPS and a run stalls).
-2. It runs `Automation RunTests VoxelWorlds.Generation.GPUvsCPU+VoxelWorlds.Generation.GPUNoiseGeneratorAsync+VoxelWorlds.Rendering.Crossfade+VoxelWorlds.Rendering.RayTracing+VoxelWorlds.Rendering.ChunkPrimitives+VoxelWorlds.Streaming.EditReachesProxy+VoxelEngine.Replication.Framework`:
+2. It runs `Automation RunTests VoxelWorlds.Generation.GPUvsCPU+VoxelWorlds.Generation.GPUNoiseGeneratorAsync+VoxelWorlds.Rendering.Crossfade+VoxelWorlds.Rendering.RayTracing+VoxelWorlds.Rendering.ChunkPrimitives+VoxelWorlds.Streaming.EditReachesProxy+VoxelEngine.Replication`:
    the 19 GPU and proxy tests (VoxelWorlds#263's `Generation.GPUvsCPUClimateShapingParity` the 18th, the terrain lines plan's `Generation.GPUvsCPULineParity` the 19th), the six crossfade tests and G116's `Rendering.ChunkPrimitives.CardsFromBounds` and
-   `Rendering.ChunkPrimitives.FittedCards` that also run headless, and the replication test, **28 results**
-   (27 before the conditioning lines' parity test, 19 before F3.3's `Rendering.RayTracing.ChunkGeometry`, 20 before G121's `Rendering.RayTracing.FarFieldGeometry`, 21 before G116's three `Rendering.ChunkPrimitives` tests, 24 before step 4's, 25 before the fitted cards', 26 before the climate shaping's),
+   `Rendering.ChunkPrimitives.FittedCards` that also run headless, and the game module's two replication tests (a
+   dedicated server and a client in PIE: `Replication.Framework`, the framework plugins' flows, and
+   `Replication.TerrainBase`, a pawn on voxel terrain on `VoxelDemo`, G215), **29 results**
+   (28 before `Replication.TerrainBase`, 27 before the conditioning lines' parity test, 19 before F3.3's `Rendering.RayTracing.ChunkGeometry`, 20 before G121's `Rendering.RayTracing.FarFieldGeometry`, 21 before G116's three `Rendering.ChunkPrimitives` tests, 24 before step 4's, 25 before the fitted cards', 26 before the climate shaping's),
    each expected to be a single `Success`.
 3. It extracts the **parity lines** (the parity tests' `[N voxels]: density~` lines, one per case and LOD: density,
    material, biome and metadata agreement and the GPU's CRC) and compares all **186** with the record,
