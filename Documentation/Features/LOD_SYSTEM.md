@@ -52,6 +52,14 @@ public:
     virtual void GetChunksToUnload(TArray<FIntVector>& OutUnload, const TSet<FIntVector>& LoadedChunks,
         const FLODQueryContext& Context) const = 0;
     static int32 SelectUnloadCandidates(/* veto first, cap second */);
+    // The window a viewer standing at Viewer.ViewerPosition would have within HorizonDistance of it (the load window, or
+    // with bKeep the keep window), whatever the strategy's own viewer and the cut-over: a further viewer's ground window
+    // (G217, see "Integration with ChunkManager").
+    virtual void GetWindowChunksAround(const FLODQueryContext& Viewer, float HorizonDistance, bool bKeep,
+        TArray<FIntVector>& OutChunks) const;
+    // The band of a chunk's distance from a viewer standing at ViewerPosition (no balance, no hysteresis): what far
+    // compression judges a ground window's chunk by.
+    virtual int32 GetDistanceBandLODAround(const FIntVector& ChunkCoord, const FVector& ViewerPosition) const;
 
     // Lifecycle
     virtual void Initialize(const UVoxelWorldConfiguration* WorldConfig) = 0;
@@ -511,6 +519,13 @@ bounded by geometry:
   a chunk diagonal past it); a planet only chunks in its terrain shell and above its horizon, each within its surface
   slab or near the viewer below it (WM-BP8).
 - **Edits:** edited chunks pin-load within the view distance and stay to the unload distance, outside the window too.
+- **Further viewers (a server's other players, G217):** each adds a ground window, the chunks this same window holds
+  for a viewer standing at its pawn within its collision shell's radius and two chunk widths (three kept), edited
+  chunks within that reach included (`GetWindowChunksAround`; [STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md),
+  "Further viewers and their ground windows"). The strategy itself has one viewer: these chunks are loaded and kept by
+  the chunk manager, mesh at the LOD their distance from the streaming viewer gives, and are far-compressed by the
+  distance band of their nearest viewer (`GetDistanceBandLODAround`), so a further player's near bands stay resident
+  as the first's do. A client and a standalone game have none.
 - **The pipeline:** chunks mid-generation or mid-meshing finish before they unload; `MaxChunksToUnloadPerFrame` paces
   unloading, not residency.
 
@@ -540,6 +555,10 @@ A chunk's voxels are 1 MB at 64^3. Two rules keep the window's memory down witho
   on the big planets (G67; tests `Compression.CollapseToUniform`,
   `Streaming.{Planet,Plane}.UniformAtGeneration`).
 
+A chunk of a further viewer's ground window (a server's other players, G217) is far from the streaming viewer, whose
+band would compress it under that player's feet: the band of its nearest viewer decides instead
+(`IVoxelLODStrategy::GetDistanceBandLODAround`, the raw band of the distance), with LOD on or off.
+
 The snapshot cache those readers share (shells for collision cooks, copy-on-write resident arrays) is described in
 [STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md). `voxel.FarCompression.Stats` logs residency and compression memory,
 `voxel.FarCompression.Decodes` where compressed data was expanded.
@@ -558,6 +577,13 @@ Each tick `UVoxelChunkManager`:
    manager's vetoes into `SelectUnloadCandidates`. After a camera cut (more than a chunk) it runs a second streaming
    pass in the same frame for the new camera (`UpdateStreamingForCamera`, every world mode since MP1).
 4. Re-meshes chunks whose balanced LOD changed (with a crossfade, `RENDERING_SYSTEM.md`) and updates the far field.
+
+The strategy answers for one viewer, the streaming viewer (the first player's camera). On a server the chunk manager
+gathers every other player's pawn each tick as a further viewer and asks the strategy what its window would hold around
+each (`GetWindowChunksAround`, with a context whose viewer is that pawn: the same `ForEachWindowCandidateWithin`
+enumeration `GetVisibleChunks` runs, for another viewer and reach, with the island and planet culls and without the
+cut-over, the LOD or the frustum). It loads those chunks itself and refuses their unload while a viewer needs them
+(G217; [STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md)).
 
 ---
 
