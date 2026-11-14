@@ -52,6 +52,7 @@ system you work on. The project root holds the vocabulary (`Documentation/GLOSSA
 | [CODING_STANDARDS.md](Guides/CODING_STANDARDS.md) | Conventions: Blueprint types, deprecated engine APIs, naming |
 | [MASTER_MATERIAL_SETUP.md](Guides/MASTER_MATERIAL_SETUP.md) | Building `M_VoxelMaster` and its material functions |
 | [PCG_BIOME_DECORATION_SETUP.md](Guides/PCG_BIOME_DECORATION_SETUP.md) | Setting up biome-keyed runtime PCG decoration (sampler, dispatcher, per-biome graphs) |
+| [TERRAIN_LINES.md](Guides/TERRAIN_LINES.md) | A road, a cutting or a trail from a spline in a level: the Voxel Terrain Line actor, its values, what its warnings mean |
 
 ## Research
 

@@ -10,17 +10,6 @@ class UVoxelChunkManager;
 
 // What the console commands in this folder share.
 
-#if !UE_BUILD_SHIPPING
-namespace VoxelStreamingDiagnostics
-{
-	/**
-	 * Add the test conditioning lines voxel.World.TestLines names to a chunk manager (VoxelConditioningLineConsole.cpp):
-	 * called at the end of its Initialize, before it builds a generation request. Nothing when the cvar is empty.
-	 */
-	void AddTestConditioningLines(UVoxelChunkManager& Manager);
-}
-#endif
-
 namespace VoxelEditAuditHelpers
 {
 	/** The PIE or Game world: the console's own when it is one, else the first PIE/Game world context. */

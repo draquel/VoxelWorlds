@@ -144,9 +144,53 @@ is immutable and shared from then on.
   falloff of 4 and a vertex every 2 voxels that is 16 degrees a vertex up to a grade of 10 % and 6.7 at 25 %.
 - **Block worlds** generate from the same height, so a line needs nothing of its own there: the block tops along a
   levelled line are the target's block tops.
-- **Not built yet:** the hand-placed line from a spline (the plan's L4) and the roads between POIs (R1, R2). Until L4
-  the fixture for a line in a running world is the cvar `voxel.World.TestLines`, which adds terrain-following lines
-  when a world starts.
+- **Not built yet:** the roads between POIs (the plan's R1, R2).
+
+**The hand-placed line** (the plan's section 4.5 and phase L4; the how-to is `Guides/TERRAIN_LINES.md`).
+`UVoxelTerrainLineComponent` (`VoxelStreaming/Public/VoxelTerrainLineComponent.h`) turns a `USplineComponent` on its
+actor into a conditioning line of the level's voxel world; `AVoxelTerrainLineActor` ("Voxel Terrain Line" in the Place
+Actors panel) is a spline with the component, to drop into a level. When the world starts the component samples the
+spline to a polyline and adds it to the chunk manager (`AddConditioningLine`):
+
+- **The vertices:** one every `VertexSpacingVoxels` voxels (2) along the spline's length, the last on its end. On a
+  heightmap world a vertex is the sampled point's world X and Y; on a planet it is the point's direction from the
+  planet centre, so the spline may hang at any height over the ground.
+- **The targets,** by `HeightMode`. `FollowTerrain` (the default: nothing draws the voxel terrain in the editor) takes
+  the natural terrain along the line (`IVoxelWorldMode::GetSurfaceOnUpLine`, a planet's `GetTerrainAltitude`),
+  averages it over `SmoothingDistance` each way along the line, holds it to `MaxGrade` from both ends, and adds
+  `TerrainOffset`; the average reaches as far back as forward, so it narrows toward each end and the line meets the
+  ground there (an average of what lies ahead alone starts a road on a rise with a mound). `SplineHeight` takes the
+  spline's own height: its world Z, or its altitude over the datum on a planet.
+- **The half width** is `HalfWidth` times the spline's scale Y at the vertex (1 by default), so a line widens where a
+  spline point is scaled up. The falloff, the strength, the blend and the surface (`FVoxelConditioningLineSurface`:
+  the band, the cave depth, the clear width) are the line's own, as `FVoxelConditioningLineParams` has them. A line
+  that only paints is a strength of 0 with a band.
+- **The id** is `Order` in its high half and a hash of the actor's and the component's names in its low half
+  (`GetLineId`): stable for the same level, the same on every machine (a PIE world's package is renamed, its actors
+  are not; a client's copy of a level actor carries the server's name), and where lines meet the higher order is
+  applied later and wins on its core. Lines of order 0 have ids from 0 to 2^32 - 1.
+- **The limits** are checked on the sampled line when it is registered (`UVoxelChunkManager::GetConditioningLineWarnings`)
+  and logged as warnings with the actor's name; the component keeps them (`GetLineWarnings`) and adds the line
+  whatever they say. A hand-drawn spline breaks the bend bound easily: a tight curve on a grade, or a corner.
+- **Multiplayer.** The actor is in the level on every machine and is not replicated: the server and each client sample
+  the same spline in the same world and generate the same terrain. A line spawned at runtime is not supported: it is
+  added, with the chunk manager's warning, and the chunks generated before it keep their terrain.
+- There is no editor preview: the terrain shows the line in PIE.
+
+**Registering conditioning: before the first generation request.** A chunk whose generation request is built before a
+conditioning source is registered generates without it, and nothing generates it again (it keeps the natural terrain
+until it unloads and loads; the surface queries, the map and the far field meanwhile read the conditioned surface). So
+every source registers before the chunk manager's first tick. The chunk manager announces the moment:
+`UVoxelChunkManager::OnInitialized`, a static delegate fired at the end of every manager's `Initialize` with the
+manager, before it has built a request. A source binds to it and checks the manager's world against its own:
+`UVoxelTerrainLineComponent` does (or registers at its own `BeginPlay` when the voxel world started first: every level
+actor begins play before the world's first tick), and the game's POI conditioner does (`POI_SYSTEM.md`). Until
+2026-11-13 the POI conditioner registered on its subsystem's first tick, after the chunk manager's: 8 requests were
+built first in every start (G187). The chunk manager counts the requests it builds (`GetNumGenerationRequestsBuilt`)
+and a source registered after the first (`SetTerrainConditioner`, `AddConditioningLine`, `AddConditioningZone`) is
+warned about in the log and counted (`GetNumLateConditioningSources`); `voxel.World.Stats`' conditioning line ends
+"every source registered before the first generation request" or names the late ones. `Scripts/qa/startup_order.py`
+at the project root starts a map in PIE, or with a dedicated server and a client, and reports those lines.
 
 **The surface under a line** (the plan's section 4.3 and phase L3). A line carries what the ground is along it,
 `FVoxelConditioningLineSurface` (`FVoxelConditioningLineParams::Surface`): a band of material, a minimum depth for

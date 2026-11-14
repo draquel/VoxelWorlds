@@ -1022,6 +1022,9 @@ void UVoxelChunkManager::Initialize(
 	Configuration = InConfig;
 	LODStrategy = InLODStrategy;
 	MeshRenderer = InRenderer;
+	GenerationRequestsBuilt = 0;
+	LateConditioningSources = 0;
+	RequestsBeforeLastLateSource = 0;
 	// The voxel cut-over and the descent prefetch (spherical Phase 6, WM-BP10) start over with the world.
 	ViewerPolicy.Reset();
 
@@ -1325,11 +1328,6 @@ void UVoxelChunkManager::Initialize(
 	RebuildPlanetOcean();
 	ApplyPlanetKillZ();
 
-#if !UE_BUILD_SHIPPING
-	// The test lines of voxel.World.TestLines (a fixture for shots and benches), before any generation request is built.
-	VoxelStreamingDiagnostics::AddTestConditioningLines(*this);
-#endif
-
 	// Dump biome configuration for diagnostics
 	if (Configuration->BiomeConfiguration)
 	{
@@ -1338,6 +1336,10 @@ void UVoxelChunkManager::Initialize(
 
 	UE_LOG(LogVoxelStreaming, Log, TEXT("ChunkManager initialized with config: VoxelSize=%.1f, ChunkSize=%d"),
 		Configuration->VoxelSize, Configuration->ChunkSize);
+
+	// The world has started and no generation request is built yet: whatever supplies terrain conditioning registers now
+	// (the game's conditioner, the terrain line components), so the first chunks generate with it (G187).
+	OnInitialized.Broadcast(*this);
 }
 
 void UVoxelChunkManager::HandleChunkEdited(const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius)
@@ -1454,6 +1456,8 @@ namespace
 	// requirement on every hit, dropped by that manager's Shutdown.
 	TWeakObjectPtr<UVoxelChunkManager> GLastFoundChunkManager;
 }
+
+FOnVoxelChunkManagerInitialized UVoxelChunkManager::OnInitialized;
 
 UVoxelChunkManager* UVoxelChunkManager::Find(const UWorld* World, bool bRequireInitialized)
 {
@@ -2843,6 +2847,7 @@ void UVoxelChunkManager::BuildChunkGenerationRequest(const FIntVector& ChunkCoor
 	{
 		++LineConditionedRequests;
 	}
+	++GenerationRequestsBuilt;
 }
 
 // ==================== World Bounds and Local Frame (WM-A2) ====================
@@ -3707,8 +3712,32 @@ FString UVoxelChunkManager::GetFarOceanDebugString() const
 	return FarOcean.Describe();
 }
 
+void UVoxelChunkManager::NoteConditioningSourceRegistered(const TCHAR* What)
+{
+	if (GenerationRequestsBuilt == 0)
+	{
+		return;
+	}
+	++LateConditioningSources;
+	RequestsBeforeLastLateSource = GenerationRequestsBuilt;
+	UE_LOG(LogVoxelStreaming, Warning,
+		TEXT("%s was registered after this world had built %lld generation request(s): the chunks requested before it generated without it and are not generated again (they keep the natural terrain until they unload and load). Register conditioning on UVoxelChunkManager::OnInitialized, before the first tick."),
+		What, GenerationRequestsBuilt);
+}
+
+void UVoxelChunkManager::SetTerrainConditioner(IVoxelTerrainConditioner* InConditioner)
+{
+	if (InConditioner)
+	{
+		NoteConditioningSourceRegistered(TEXT("The terrain conditioner"));
+	}
+	ConditioningSources.SetConditioner(InConditioner);
+	OnTerrainConditioningChanged.Broadcast();
+}
+
 void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 {
+	NoteConditioningSourceRegistered(TEXT("A conditioning zone"));
 	ConditioningSources.AddZone(Zone);
 	if (FarField)
 	{
@@ -3742,8 +3771,9 @@ void UVoxelChunkManager::AddConditioningLine(const FVoxelConditioningLineParams&
 	AddConditioningLine(FVoxelConditioningLine::Make(Line));
 }
 
-void UVoxelChunkManager::AddConditioningLine(const FVoxelConditioningLineRef& Line)
+void UVoxelChunkManager::AddConditioningLine(const FVoxelConditioningLineRef& Line, bool bLogWarnings)
 {
+	NoteConditioningSourceRegistered(TEXT("A conditioning line"));
 	ConditioningSources.AddLine(Line);
 	const bool bPlanet = Configuration && Configuration->WorldMode == EWorldMode::SphericalPlanet;
 	const double PlanetRadius = bPlanet ? FVoxelWorldModeFactory::MakePlanetParams(*Configuration).PlanetRadius : 0.0;
@@ -3788,8 +3818,26 @@ void UVoxelChunkManager::AddConditioningLine(const FVoxelConditioningLineRef& Li
 	}
 
 	// The limits a line must respect (TERRAIN_LINES_PLAN.md section 4.1), checked where it is made: warned about, not
-	// enforced. The cut and fill cap is half a chunk, a third of the 1.5 chunks the LOD strategy's surface slab allows
-	// conditioning (it does not look at lines).
+	// enforced.
+	if (bLogWarnings)
+	{
+		for (const FString& Warning : GetConditioningLineWarnings(*Line))
+		{
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("AddConditioningLine: line %lld: %s."), Line->GetId(), *Warning);
+		}
+	}
+}
+
+TArray<FString> UVoxelChunkManager::GetConditioningLineWarnings(const FVoxelConditioningLine& Line) const
+{
+	if (!Configuration)
+	{
+		return TArray<FString>();
+	}
+	const bool bPlanet = Configuration->WorldMode == EWorldMode::SphericalPlanet;
+	const double PlanetRadius = bPlanet ? FVoxelWorldModeFactory::MakePlanetParams(*Configuration).PlanetRadius : 0.0;
+	// The cut and fill cap is half a chunk, a third of the 1.5 chunks the LOD strategy's surface slab allows conditioning
+	// (it does not look at lines).
 	FVoxelConditioningLineLimits Limits;
 	Limits.VoxelSize = Configuration->VoxelSize;
 	Limits.bBlockWorld = FVoxelBlockSurface::UsesBlockSurface(*Configuration);
@@ -3814,10 +3862,7 @@ void UVoxelChunkManager::AddConditioningLine(const FVoxelConditioningLineRef& Li
 			};
 		}
 	}
-	for (const FString& Warning : Line->GetWarnings(Limits))
-	{
-		UE_LOG(LogVoxelStreaming, Warning, TEXT("AddConditioningLine: line %lld: %s."), Line->GetId(), *Warning);
-	}
+	return Line.GetWarnings(Limits);
 }
 
 void UVoxelChunkManager::NotifyTerrainConditioningChanged(const FBox2D& Region)
@@ -5236,10 +5281,13 @@ void UVoxelChunkManager::GetWorldReport(const FVoxelWorldReportNotes& Notes, TAr
 			WindowSegments += Line->NumSegments();
 		}
 		OutLines.Add(FString::Printf(
-			TEXT("conditioning: %d zones and %d lines (%d segments) added to the world%s; within the view distance of the streaming viewer %d zones and %d lines (%d segments); %lld generation requests carried a line"),
+			TEXT("conditioning: %d zones and %d lines (%d segments) added to the world%s; within the view distance of the streaming viewer %d zones and %d lines (%d segments); %lld generation requests carried a line; %s"),
 			ConditioningSources.NumZones(), ConditioningSources.NumLines(), StaticSegments,
 			ConditioningSources.HasConditioner() ? TEXT(", and a conditioner") : TEXT(""),
-			Window.Zones.Num(), Window.Lines.Num(), WindowSegments, LineConditionedRequests));
+			Window.Zones.Num(), Window.Lines.Num(), WindowSegments, LineConditionedRequests,
+			LateConditioningSources == 0 ? TEXT("every source registered before the first generation request")
+				: *FString::Printf(TEXT("%d source(s) REGISTERED LATE, the last after %lld generation requests (those chunks generated without it)"),
+					LateConditioningSources, RequestsBeforeLastLateSource)));
 	}
 	else
 	{

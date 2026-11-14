@@ -23,7 +23,7 @@ Ten runtime modules and one editor module, in `Source/` (the empty `VoxelWorlds`
 | `VoxelMeshing` | PostConfigInit | Core | `IVoxelMesher`: `FVoxelCPUCubicMesher`, `FVoxelCPUMarchingCubesMesher`, `FVoxelCPUDualContourMesher`; `FVoxelWaterMesher` |
 | `VoxelRendering` | PostConfigInit (vertex factory, shader directory) | Core | `IVoxelMeshRenderer`, `FVoxelMeshRenderer`, `UVoxelRegionComponent`, `FVoxelSceneProxy`, `FVoxelFadeScheduler` |
 | `VoxelScatter` | PostEngineInit | Core, Generation | `UVoxelScatterManager`, `UVoxelScatterRenderer`, `UVoxelScatterExclusionSubsystem` |
-| `VoxelStreaming` | PostEngineInit | Core, LOD, Rendering, Generation, Meshing, Scatter | `UVoxelChunkManager` and its owners, `UVoxelCollisionManager`, `UVoxelWaterPropagation`, `FVoxelFarField`, `AVoxelWorldActor`, `FVoxelStreamingBenchmark`, the console commands (`Private/Diagnostics/`) |
+| `VoxelStreaming` | PostEngineInit | Core, LOD, Rendering, Generation, Meshing, Scatter | `UVoxelChunkManager` and its owners, `UVoxelCollisionManager`, `UVoxelWaterPropagation`, `FVoxelFarField`, `AVoxelWorldActor`, `UVoxelTerrainLineComponent` (a spline in a level as a conditioning line), `FVoxelStreamingBenchmark`, the console commands (`Private/Diagnostics/`) |
 | `VoxelMap` | PostEngineInit | Core, Generation, Streaming | `UVoxelMapSubsystem`, `FVoxelMapTileStore`, the edit overlay |
 | `VoxelNavigation` | PostEngineInit | Core, Streaming, Generation | `UVoxelSurfaceNavigationSubsystem`, `FVoxelSurfacePathfinder` |
 | `VoxelPCG` | PostEngineInit | Core, Generation, Streaming (+ the PCG plugin) | the voxel surface sampler and biome dispatcher nodes, `UVoxelPCGBiomeDecorationMapping` |

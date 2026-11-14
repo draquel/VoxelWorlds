@@ -123,6 +123,14 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChunkLoaded, FIntVector, ChunkCoo
  */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChunkUnloaded, FIntVector, ChunkCoord);
 
+class UVoxelChunkManager;
+
+/**
+ * Fired at the end of every UVoxelChunkManager::Initialize, before the manager's first tick and so before it builds a
+ * generation request (UVoxelChunkManager::OnInitialized). The manager is the one that started.
+ */
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnVoxelChunkManagerInitialized, UVoxelChunkManager& /*Manager*/);
+
 /** Why a chunk was (re)queued for meshing — used to attribute re-mesh thrash in the benchmark. */
 enum class EVoxelRemeshReason : uint8
 {
@@ -421,6 +429,16 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
 	bool IsInitialized() const { return bIsInitialized; }
+
+	/**
+	 * A chunk manager has started: fired at the end of every manager's Initialize, in every world, before that manager's
+	 * first tick. Whatever supplies terrain conditioning registers on it (SetTerrainConditioner, AddConditioningLine,
+	 * AddConditioningZone), since a chunk whose generation request is built before a source is registered generates
+	 * without it and is not generated again: the game's POI conditioner and UVoxelTerrainLineComponent both do (G187).
+	 * A handler checks the manager's world against its own. Static, so a subsystem made before the world's actors can
+	 * bind before any manager exists.
+	 */
+	static FOnVoxelChunkManagerInitialized OnInitialized;
 
 	// ==================== Finding the manager ====================
 
@@ -1233,8 +1251,9 @@ public:
 
 	/**
 	 * Add a gen-time terrain conditioning zone (flattens terrain toward a target under POIs/claims).
-	 * Affects chunks generated AFTER this call. For deterministic POIs, register conditioning at world
-	 * init so chunks generate already-conditioned. Re-conditioning already-loaded chunks is Phase 7.
+	 * Affects chunks generated AFTER this call: add zones when the world starts (OnInitialized), so chunks generate
+	 * already conditioned. A zone added after a generation request was built is warned about and counted
+	 * (GetNumLateConditioningSources); the chunks requested before it keep their terrain.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Conditioning")
 	void AddConditioningZone(const FVoxelConditioningZone& Zone);
@@ -1244,8 +1263,10 @@ public:
 	 * Documentation/TERRAIN_LINES_PLAN.md). The line is made from the values (FVoxelConditioningLine::Make) and the
 	 * limits it breaks are logged as warnings (the cut and fill cap, the widths, the bend bound, a line that comes back
 	 * on itself, a block world's step: FVoxelConditioningLine::GetWarnings); a line that breaks one is still added.
-	 * Affects chunks generated AFTER this call, as a zone does: add lines before streaming starts. A line of the other
-	 * kind of world (a planet line on a heightmap world) is kept and never applies.
+	 * Affects chunks generated AFTER this call, as a zone does: add lines when the world starts (OnInitialized; a line
+	 * added after a generation request was built is warned about and counted). A line of the other kind of world (a
+	 * planet line on a heightmap world) is kept and never applies. A spline in a level becomes a line through
+	 * UVoxelTerrainLineComponent.
 	 * @param Line The line's vertices and values
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager|Conditioning")
@@ -1255,8 +1276,18 @@ public:
 	 * Add a conditioning line that is already made (shared: the gathers hand out this object). As the overload above,
 	 * with the same warnings.
 	 * @param Line The line
+	 * @param bLogWarnings Log the limits the line breaks (false for a caller that reports them itself:
+	 *                     GetConditioningLineWarnings)
 	 */
-	void AddConditioningLine(const FVoxelConditioningLineRef& Line);
+	void AddConditioningLine(const FVoxelConditioningLineRef& Line, bool bLogWarnings = true);
+
+	/**
+	 * The limits of the plan's section 4.1 a line breaks in this world (FVoxelConditioningLine::GetWarnings with this
+	 * world's voxel size, block surface, planet radius, natural surface and cut and fill cap: half a chunk).
+	 * @param Line The line
+	 * @return One sentence per limit broken; empty when the line keeps them all or the manager has no configuration
+	 */
+	TArray<FString> GetConditioningLineWarnings(const FVoxelConditioningLine& Line) const;
 
 	/** @return How many lines were added to this manager (AddConditioningLine; the conditioner's are not counted) */
 	UFUNCTION(BlueprintPure, Category = "Voxel|ChunkManager|Conditioning")
@@ -1281,13 +1312,25 @@ public:
 	/**
 	 * Register a dynamic terrain conditioner (game-side, boundary-safe — e.g. supplying zones from POI
 	 * claims). Queried per chunk at generation-request build time. Not owned; caller manages lifetime.
-	 * Broadcasts OnTerrainConditioningChanged.
+	 * Broadcasts OnTerrainConditioningChanged. Set it on OnInitialized: a conditioner set after a generation request
+	 * was built is warned about and counted (GetNumLateConditioningSources), since the chunks requested before it
+	 * generated without it (G187).
+	 * @param InConditioner The conditioner, or null to clear it
 	 */
-	void SetTerrainConditioner(IVoxelTerrainConditioner* InConditioner)
-	{
-		ConditioningSources.SetConditioner(InConditioner);
-		OnTerrainConditioningChanged.Broadcast();
-	}
+	void SetTerrainConditioner(IVoxelTerrainConditioner* InConditioner);
+
+	/** @return Whether the game's conditioner is set (SetTerrainConditioner) */
+	bool HasTerrainConditioner() const { return ConditioningSources.HasConditioner(); }
+
+	/** @return How many generation requests this manager has built since it was initialized */
+	int64 GetNumGenerationRequestsBuilt() const { return GenerationRequestsBuilt; }
+
+	/**
+	 * @return How many conditioning sources (a zone, a line, the conditioner) were registered after this manager had
+	 *         built a generation request: each was warned about, since the chunks requested before it generated without
+	 *         it. 0 in a world whose sources register on OnInitialized.
+	 */
+	int32 GetNumLateConditioningSources() const { return LateConditioningSources; }
 
 	/**
 	 * Append the conditioning (the static zones and lines and the dynamic conditioner's zones and lines) whose influence
@@ -2547,6 +2590,22 @@ private:
 
 	/** Generation requests built with at least one conditioning line gathered over the chunk (the world report) */
 	mutable int64 LineConditionedRequests = 0;
+
+	/** Generation requests built since Initialize (BuildChunkGenerationRequest) */
+	mutable int64 GenerationRequestsBuilt = 0;
+
+	/** Conditioning sources registered after a generation request was built (GetNumLateConditioningSources) */
+	int32 LateConditioningSources = 0;
+
+	/** How many generation requests had been built when the last late source was registered (the world report) */
+	int64 RequestsBeforeLastLateSource = 0;
+
+	/**
+	 * A conditioning source is being registered: warn, and count it, when generation requests were already built (the
+	 * chunks requested so far generated without it).
+	 * @param What The source, for the warning ("a conditioning line", "the terrain conditioner")
+	 */
+	void NoteConditioningSourceRegistered(const TCHAR* What);
 
 	/** A chunk's world box: the bounds a per-chunk reader of the water levels asks its range over. */
 	FBox GetChunkWorldBox(const FIntVector& ChunkCoord) const;

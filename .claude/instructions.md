@@ -60,6 +60,11 @@ section true on its date); the Features docs are the current truth.
   mode's), `Generated` (conditioning lines and zones applied, block tops on a cubic world; `GetGeneratedSurfacePoint`) or `EditMerged`
   (the loaded voxels; `QueryEditMergedSurfacePoint`). Pick the rung you mean; `GetTerrainHeightAt` is a heightmap's
   natural height and degrades on a planet.
+- **Conditioning registers at the world's start.** A chunk generates with the conditioning (zones, lines, the game's
+  conditioner) its request gathered, once. Whatever supplies conditioning registers before the chunk manager's first
+  tick, on `UVoxelChunkManager::OnInitialized` (fired at the end of `Initialize`), as `UVoxelTerrainLineComponent` and
+  the game's POI conditioner do; a source registered after a request was built is warned about and counted
+  (`GetNumLateConditioningSources`, G187). A test adds its zones and lines before it sets a viewer.
 - **Precision.** Planets are precise to about 1,000 km and heightmaps to the double range of a position: never hold a
   value of size R in float (altitudes in double on the CPU, the chunk's frame on the GPU, `PlanetFrame.ush`); primitives
   sit at their render region's origin (`FVoxelRenderRegions`) and store float offsets from it.
