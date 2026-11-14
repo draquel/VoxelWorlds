@@ -2943,11 +2943,10 @@ void UVoxelChunkManager::GatherTreeConditioning(const FBox2D& Region, FVoxelCond
 		return;
 	}
 	// A tree is planted in the chunk its base lies in, and the readers compute the trees of the chunks around the one
-	// they ask about: the lines over all of those.
+	// they ask about: the lines and the zones over all of those (G206: the zones too, so a tree on a pad stands on it).
 	const double Grow = (FVoxelTreeInjector::GetSourceChunkRadius(Configuration->TreeTemplates, Configuration->ChunkSize) + 1)
 		* static_cast<double>(Configuration->GetChunkWorldSize());
 	GatherConditioningForRegion(Region.ExpandBy(Grow), EVoxelConditioningGather::Complete, Out);
-	Out.Zones.Reset();
 }
 
 void UVoxelChunkManager::FindVoxelTreesNear(const FVector& WorldPos, float Radius, TArray<FVoxelTreeInstance>& OutTrees) const
@@ -4129,7 +4128,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 	UVoxelBiomeConfiguration* CapturedBiomeConfig = nullptr;
 	bool CapturedEnableWaterLevel = false;
 	float CapturedWaterLevel = 0.0f;
-	// The lines over the chunk and the chunks its trees may be planted in (the request's own set covers the chunk alone).
+	// The conditioning over the chunk and the chunks its trees may be planted in (the request's own set covers the chunk alone).
 	FVoxelConditioning TreeConditioning;
 
 	if (bInjectTrees)
