@@ -208,6 +208,8 @@ void UVoxelCollisionManager::Initialize(UVoxelWorldConfiguration* Config, UVoxel
 	// Reset cached state
 	LastViewerPosition = FVector(FLT_MAX);
 	bPendingInitialUpdate = true;
+	FurtherFoci.Reset();
+	LastSweepFurtherFoci.Reset();
 
 	// Reset statistics
 	TotalCollisionsGenerated = 0;
@@ -235,6 +237,8 @@ void UVoxelCollisionManager::Shutdown()
 	CookingQueueSet.Empty();
 	AsyncCollisionInProgress.Empty();
 	PendingNeighborRecooks.Empty();
+	FurtherFoci.Reset();
+	LastSweepFurtherFoci.Reset();
 
 	// Drain completed queue (results may still be arriving)
 	{
@@ -326,11 +330,24 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 	SecondsSinceDecisions += DeltaTime;
 	const float ResweepSeconds = VoxelSettings::Resolve(CVarCollisionResweepSeconds, UVoxelWorldsSettings::Get().CollisionResweepSeconds);
 	const bool bPeriodicResweep = ResweepSeconds > 0.0f && SecondsSinceDecisions >= ResweepSeconds;
-	if (DistanceMoved > MoveThreshold || LastViewerPosition.X == FLT_MAX || bPendingInitialUpdate || bStartedMoving || bPeriodicResweep)
+	// The further foci (G217: a server's other players): one that came, left or moved past the threshold since the last
+	// sweep sweeps again, as the first focus's move does.
+	bool bFurtherFociChanged = FurtherFoci.Num() != LastSweepFurtherFoci.Num();
+	for (int32 Index = 0; Index < FurtherFoci.Num() && !bFurtherFociChanged; ++Index)
+	{
+		bFurtherFociChanged = FVector::Dist(FurtherFoci[Index].Position, LastSweepFurtherFoci[Index]) > MoveThreshold;
+	}
+	if (DistanceMoved > MoveThreshold || LastViewerPosition.X == FLT_MAX || bPendingInitialUpdate || bStartedMoving || bPeriodicResweep
+		|| bFurtherFociChanged)
 	{
 		UpdateCollisionDecisions(FocusPosition);
 		LastViewerPosition = FocusPosition;
 		SecondsSinceDecisions = 0.0f;
+		LastSweepFurtherFoci.Reset(FurtherFoci.Num());
+		for (const FVoxelCollisionFocus& Focus : FurtherFoci)
+		{
+			LastSweepFurtherFoci.Add(Focus.Position);
+		}
 
 		// Once we've queued or generated any collision, initial load is complete
 		if (bPendingInitialUpdate && (CookingQueue.Num() > 0 || AsyncCollisionInProgress.Num() > 0 || CollisionData.Num() > 0))
@@ -349,6 +366,11 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 	// descending chunk's center is far below, so distance-priority deprioritizes it until the pawn is
 	// already dropping in). This closes the residual sustained-traversal / downhill fall-through.
 	ForcePathCoverage(FocusPosition, FocusVelocity);
+	// ... and under every further focus (G217), whose velocity is its pawn's.
+	for (const FVoxelCollisionFocus& Focus : FurtherFoci)
+	{
+		ForcePathCoverage(Focus.Position, Focus.Velocity);
+	}
 
 	// 3. Process dirty chunks (from edits, and neighbours that arrived after a cook: G32) — just queues requests, lightweight
 	ProcessNeighborRecooks();
@@ -371,6 +393,25 @@ FVector UVoxelCollisionManager::ResolveFocusPosition(const FVector& FallbackView
 		}
 	}
 	return FallbackViewerPosition;
+}
+
+float UVoxelCollisionManager::GetFocusRadius(const FVector& Velocity) const
+{
+	// The first focus's rule (Update): the base plus the lead of the horizontal speed, never under the configured radius.
+	const float ConfiguredBase = CVarCollisionBaseRadius.GetValueOnGameThread();
+	const float Base = ConfiguredBase > 0.0f ? ConfiguredBase : CollisionRadius;
+	const float Speed = static_cast<float>(FVector2D(Velocity.X, Velocity.Y).Size());
+	return FMath::Max(Base + Speed * VoxelSettings::Resolve(CVarCollisionLeadSeconds, UVoxelWorldsSettings::Get().CollisionLeadSeconds), CollisionRadius);
+}
+
+float UVoxelCollisionManager::GetNearestFocusDistance(const FVector& Point, const FVector& FirstFocus) const
+{
+	float Distance = FVector::Dist(Point, FirstFocus);
+	for (const FVoxelCollisionFocus& Focus : FurtherFoci)
+	{
+		Distance = FMath::Min(Distance, static_cast<float>(FVector::Dist(Point, Focus.Position)));
+	}
+	return Distance;
 }
 
 void UVoxelCollisionManager::ForcePathCoverage(const FVector& FocusPosition, const FVector& FocusVelocity)
@@ -475,7 +516,7 @@ void UVoxelCollisionManager::ProcessDirtyChunks(const FVector& ViewerPosition)
 			const FVector ChunkCenter = Configuration->WorldOrigin
 				+ FVector(Data.ChunkCoord) * ChunkWorldSize
 				+ FVector(ChunkWorldSize * 0.5f);
-			const float Distance = FVector::Dist(ChunkCenter, ViewerPosition);
+			const float Distance = GetNearestFocusDistance(ChunkCenter, ViewerPosition);
 			const float Priority = GetDirtyPriority(Data, Distance);
 
 			// Request regeneration
@@ -942,6 +983,13 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 	const float EffectiveRadius = FMath::Max(CurrentEffectiveRadius, CollisionRadius);
 	const float CollisionRadiusSq = EffectiveRadius * EffectiveRadius;
 
+	// The further foci's shells (G217): each its own radius, by its own speed.
+	TArray<float, TInlineAllocator<8>> FurtherRadiusSq;
+	for (const FVoxelCollisionFocus& Focus : FurtherFoci)
+	{
+		FurtherRadiusSq.Add(FMath::Square(GetFocusRadius(Focus.Velocity)));
+	}
+
 	// Find chunks that need collision loaded
 	TSet<FIntVector> ChunksNeedingCollision;
 
@@ -961,6 +1009,16 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 		if (DistanceSq <= CollisionRadiusSq)
 		{
 			ChunksNeedingCollision.Add(ChunkCoord);
+			continue;
+		}
+		// Within a further focus's shell (G217).
+		for (int32 Index = 0; Index < FurtherFoci.Num(); ++Index)
+		{
+			if (FVector::DistSquared(ChunkCenter, FurtherFoci[Index].Position) <= FurtherRadiusSq[Index])
+			{
+				ChunksNeedingCollision.Add(ChunkCoord);
+				break;
+			}
 		}
 	}
 
@@ -975,8 +1033,8 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 			const FVector ChunkCenter = Configuration->WorldOrigin
 				+ FVector(ChunkCoord) * ChunkWorldSize
 				+ FVector(ChunkWorldSize * 0.5f);
-			const float Distance = FVector::Dist(ChunkCenter, ViewerPosition);
-			const float Priority = CollisionRadius - Distance; // Closer = higher priority
+			const float Distance = GetNearestFocusDistance(ChunkCenter, ViewerPosition);
+			const float Priority = CollisionRadius - Distance; // Closer (to the nearest focus) = higher priority
 
 			RequestCollision(ChunkCoord, Priority);
 		}
@@ -986,7 +1044,7 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 			const FVector ChunkCenter = Configuration->WorldOrigin
 				+ FVector(ChunkCoord) * ChunkWorldSize
 				+ FVector(ChunkWorldSize * 0.5f);
-			const float Distance = FVector::Dist(ChunkCenter, ViewerPosition);
+			const float Distance = GetNearestFocusDistance(ChunkCenter, ViewerPosition);
 			const float Priority = GetDirtyPriority(*Data, Distance);
 
 			RequestCollision(ChunkCoord, Priority);

@@ -67,6 +67,19 @@ public:
 		const FLODQueryContext& Context
 	) const override;
 
+	/**
+	 * The window of a viewer at Viewer.ViewerPosition within HorizonDistance of it, in any world mode, by the rules the
+	 * streaming viewer's window follows (ForEachWindowCandidateWithin: a heightmap column's slab and near layers, a
+	 * planet chunk's slab and near band; the island's footprint and the planet's shell and horizon), whatever the
+	 * cut-over and the last Update's viewer (G217).
+	 */
+	virtual void GetWindowChunksAround(
+		const FLODQueryContext& Viewer,
+		float HorizonDistance,
+		bool bKeep,
+		TArray<FIntVector>& OutChunks
+	) const override;
+
 	virtual void Initialize(const UVoxelWorldConfiguration* WorldConfig) override;
 
 	virtual void Update(const FLODQueryContext& Context, float DeltaTime) override;
@@ -362,6 +375,9 @@ protected:
 	 */
 	bool IsChunkInWindow(const FIntVector& ChunkCoord, const FLODQueryContext& Context, EWindowUse Use) const;
 
+	/** GetPlanetSurfaceEnvelope's memo (defined below). */
+	struct FSurfaceEnvelopeMemo;
+
 	/**
 	 * Every chunk the window may load, in any world mode, within the streaming horizon (code review CR2, STREAM-21: the
 	 * one enumeration): on a heightmap world every column within the horizon and in each the layers of its window; on a
@@ -373,6 +389,21 @@ protected:
 	 * @param Visit Called per candidate with its coordinate and world centre
 	 */
 	void ForEachWindowCandidate(const FLODQueryContext& Context, TFunctionRef<void(const FIntVector&, const FVector&)> Visit) const;
+
+	/**
+	 * ForEachWindowCandidate's enumeration for any viewer and reach: every chunk of the context's viewer's window (Use)
+	 * within HorizonDistance of it, whatever the cut-over. ForEachWindowCandidate is this with the load window and the
+	 * view distance, for a window that is not suspended; GetWindowChunksAround is this for a further viewer (G217).
+	 *
+	 * @param Context The viewer's context
+	 * @param HorizonDistance The reach, in the streaming horizon's measure
+	 * @param Use Load or Keep
+	 * @param EnvelopeMemo A planet's memo of the surface envelope over the reach's disk (the streaming viewer's and a
+	 *        further viewer's are kept apart, so neither rebuilds the other's)
+	 * @param Visit Called per candidate with its coordinate and world centre
+	 */
+	void ForEachWindowCandidateWithin(const FLODQueryContext& Context, float HorizonDistance, EWindowUse Use,
+		FSurfaceEnvelopeMemo& EnvelopeMemo, TFunctionRef<void(const FIntVector&, const FVector&)> Visit) const;
 
 	/**
 	 * A planet column's crossing of the shell (SP-C1): the layers whose chunks meet the shell from ShellWindowInnerRadius
@@ -458,9 +489,12 @@ protected:
 	 * envelope steeply.
 	 * @param Context Query context (viewer position, world origin)
 	 * @param Use Load (stream in) or Keep (retain: the near window holds the shell within the unload distance)
+	 * @param HorizonDistance The horizon's reach along the ground (the view distance for the streaming viewer's window)
+	 * @param EnvelopeMemo The memo of the surface envelope over that reach's disk (LoadEnvelopeMemo for the streaming viewer)
 	 * @param Visit Called with each candidate's chunk coordinates (no repeats)
 	 */
-	void ForEachPlanetCandidate(const FLODQueryContext& Context, EWindowUse Use, TFunctionRef<void(const FIntVector&)> Visit) const;
+	void ForEachPlanetCandidate(const FLODQueryContext& Context, EWindowUse Use, double HorizonDistance,
+		FSurfaceEnvelopeMemo& EnvelopeMemo, TFunctionRef<void(const FIntVector&)> Visit) const;
 
 	/** GetPlanetSurfaceEnvelope's memo: the direction's cell and the angle it was built for, and the envelope. */
 	struct FSurfaceEnvelopeMemo
@@ -798,6 +832,9 @@ protected:
 	/** GetPlanetSurfaceEnvelope's memos: the load disk's (ForEachPlanetCandidate) and the near disk's (GetPlanetNearLayersCeiling). */
 	mutable FSurfaceEnvelopeMemo LoadEnvelopeMemo;
 	mutable FSurfaceEnvelopeMemo NearEnvelopeMemo;
+
+	/** GetWindowChunksAround's memo of the envelope over a further viewer's reach (apart from the streaming viewer's, G217). */
+	mutable FSurfaceEnvelopeMemo AroundEnvelopeMemo;
 
 	/**
 	 * The near disk's angular radius for GetPlanetNearLayersCeiling: GetNearLayersRadius along the ground at the shell's inner

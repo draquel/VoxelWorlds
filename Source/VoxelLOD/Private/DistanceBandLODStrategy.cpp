@@ -463,16 +463,41 @@ void FDistanceBandLODStrategy::ForEachWindowCandidate(const FLODQueryContext& Co
 	{
 		return;
 	}
+	ForEachWindowCandidateWithin(Context, MaxViewDistance, EWindowUse::Load, LoadEnvelopeMemo, Visit);
+}
+
+void FDistanceBandLODStrategy::GetWindowChunksAround(const FLODQueryContext& Viewer, float HorizonDistance, bool bKeep,
+	TArray<FIntVector>& OutChunks) const
+{
+	if (!bIsInitialized || LODBands.Num() == 0 || HorizonDistance <= 0.0f)
+	{
+		return;
+	}
+	// The window's own enumeration for that viewer and reach, then the world-mode culls GetVisibleChunks applies. The
+	// cut-over (the streaming viewer's altitude) says nothing of a viewer standing somewhere else.
+	ForEachWindowCandidateWithin(Viewer, HorizonDistance, bKeep ? EWindowUse::Keep : EWindowUse::Load, AroundEnvelopeMemo,
+		[&](const FIntVector& ChunkCoord, const FVector& /*ChunkCenter*/)
+	{
+		if (!ShouldCullIslandBoundary(ChunkCoord, Viewer) && !ShouldCullBeyondHorizon(ChunkCoord, Viewer))
+		{
+			OutChunks.Add(ChunkCoord);
+		}
+	});
+}
+
+void FDistanceBandLODStrategy::ForEachWindowCandidateWithin(const FLODQueryContext& Context, float HorizonDistance, EWindowUse Use,
+	FSurfaceEnvelopeMemo& EnvelopeMemo, TFunctionRef<void(const FIntVector&, const FVector&)> Visit) const
+{
 	if (!IsHeightmapWorld())
 	{
 		// A planet (WM-BP8): the chunks of its window by chunk (IsInPlanetWindow) within the horizon's cone, measured along
 		// the ground from the viewer's ground point.
 		const double GroundRadius = GetPlanetGroundRadius(Context.ViewerPosition);
-		ForEachPlanetCandidate(Context, EWindowUse::Load, [&](const FIntVector& ChunkCoord)
+		ForEachPlanetCandidate(Context, Use, HorizonDistance, EnvelopeMemo, [&](const FIntVector& ChunkCoord)
 		{
 			const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
-			if (GetPlanetGroundDistance(PlanetCenter, GroundRadius, Context.ViewerPosition, ChunkCenter) > MaxViewDistance
-				|| !IsInPlanetWindow(ChunkCoord, Context, EWindowUse::Load))
+			if (GetPlanetGroundDistance(PlanetCenter, GroundRadius, Context.ViewerPosition, ChunkCenter) > HorizonDistance
+				|| !IsInPlanetWindow(ChunkCoord, Context, Use))
 			{
 				return;
 			}
@@ -485,7 +510,7 @@ void FDistanceBandLODStrategy::ForEachWindowCandidate(const FLODQueryContext& Co
 	// terrain's).
 	const FIntVector ViewerChunk = WorldPosToChunkCoord(Context.ViewerPosition);
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
-	const int32 MaxChunkRadius = FMath::CeilToInt(MaxViewDistance / ChunkWorldSize) + 1;
+	const int32 MaxChunkRadius = FMath::CeilToInt(HorizonDistance / ChunkWorldSize) + 1;
 	for (int32 X = -MaxChunkRadius; X <= MaxChunkRadius; ++X)
 	{
 		for (int32 Y = -MaxChunkRadius; Y <= MaxChunkRadius; ++Y)
@@ -494,12 +519,12 @@ void FDistanceBandLODStrategy::ForEachWindowCandidate(const FLODQueryContext& Co
 			const int32 ColumnY = ViewerChunk.Y + Y;
 
 			// The horizon is horizontal, so a whole column is in range or not.
-			if (GetStreamingHorizon(ChunkCoordToWorldCenter(FIntVector(ColumnX, ColumnY, 0)), Context.ViewerPosition) > MaxViewDistance)
+			if (GetStreamingHorizon(ChunkCoordToWorldCenter(FIntVector(ColumnX, ColumnY, 0)), Context.ViewerPosition) > HorizonDistance)
 			{
 				continue;
 			}
 
-			const FColumnLayerRange Window = GetColumnLayerRange(ColumnX, ColumnY, Context, EWindowUse::Load);
+			const FColumnLayerRange Window = GetColumnLayerRange(ColumnX, ColumnY, Context, Use);
 			Window.ForEachLayer([&](int32 Z)
 			{
 				const FIntVector ChunkCoord(ColumnX, ColumnY, Z);
@@ -946,7 +971,7 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 	{
 		// A planet (WM-BP8): every chunk of the keep window within the load horizon (none above the voxel cut-over, WM-BP10).
 		const double GroundRadius = GetPlanetGroundRadius(Context.ViewerPosition);
-		ForEachPlanetCandidate(Context, EWindowUse::Keep, [&](const FIntVector& ChunkCoord)
+		ForEachPlanetCandidate(Context, EWindowUse::Keep, MaxViewDistance, LoadEnvelopeMemo, [&](const FIntVector& ChunkCoord)
 		{
 			const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
 			if (GetPlanetGroundDistance(PlanetCenter, GroundRadius, Context.ViewerPosition, ChunkCenter) <= MaxViewDistance
@@ -1429,8 +1454,8 @@ bool FDistanceBandLODStrategy::IsPlanetNearBandActive(const FVector& ViewerPosit
 	return FVector::Dist(ViewerPosition, PlanetCenter) - PlanetRadius <= GetPlanetNearLayersCeiling(ViewerPosition);
 }
 
-void FDistanceBandLODStrategy::ForEachPlanetCandidate(const FLODQueryContext& Context, EWindowUse Use,
-	TFunctionRef<void(const FIntVector&)> Visit) const
+void FDistanceBandLODStrategy::ForEachPlanetCandidate(const FLODQueryContext& Context, EWindowUse Use, double HorizonDistance,
+	FSurfaceEnvelopeMemo& EnvelopeMemo, TFunctionRef<void(const FIntVector&)> Visit) const
 {
 	if (PlanetRadius <= 0.0)
 	{
@@ -1448,7 +1473,7 @@ void FDistanceBandLODStrategy::ForEachPlanetCandidate(const FLODQueryContext& Co
 	// diagonal of the centre: the angle that subtends at the shell's inner radius widens every cone below.
 	const double HalfDiagonal = 0.5 * ChunkWorldSize * UE_DOUBLE_SQRT_3;
 	const double ChunkAngle = FMath::Asin(FMath::Min(1.0, HalfDiagonal / FMath::Max(ShellWindowInnerRadius, HalfDiagonal)));
-	const double LoadAngle = FMath::Min(UE_DOUBLE_PI, MaxViewDistance / GroundRadius + ChunkAngle);
+	const double LoadAngle = FMath::Min(UE_DOUBLE_PI, HorizonDistance / GroundRadius + ChunkAngle);
 
 	TSet<FIntVector> Seen;
 	Seen.Reserve(4096);
@@ -1515,7 +1540,7 @@ void FDistanceBandLODStrategy::ForEachPlanetCandidate(const FLODQueryContext& Co
 	double EnvelopeHi = ShellHi;
 	if (bPlanetSlab && PlanetWorldMode)
 	{
-		const FFloatInterval Surface = GetPlanetSurfaceEnvelope(Up, LoadAngle, LoadEnvelopeMemo);
+		const FFloatInterval Surface = GetPlanetSurfaceEnvelope(Up, LoadAngle, EnvelopeMemo);
 		const double Slack = SlabSlackChunks * ChunkWorldSize;
 		EnvelopeLo = FMath::Max(ShellLo, Surface.Min - Slack);
 		EnvelopeHi = FMath::Min(ShellHi, Surface.Max + Slack);
