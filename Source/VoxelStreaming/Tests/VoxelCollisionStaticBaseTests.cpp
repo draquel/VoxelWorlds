@@ -24,8 +24,8 @@
 // - Collision.StaticBase: in each kind of world (a smooth plane, a block world, a planet) every cooked chunk's component
 //   is static, attached to the container's static root, registered with a physics body, at its chunk's corner (it is
 //   placed before it is registered: a static component is not moved afterwards), and is not a dynamic base to the engine
-//   (MovementBaseUtility::IsDynamicBase, what the character movement asks). A re-cook, as an edit makes, replaces the
-//   component with another that holds the same: the body is made again, never moved.
+//   (MovementBaseUtility::IsDynamicBase, what the character movement asks). After a re-cook, as an edit makes, the
+//   chunk's component holds the same: the body is made again, never moved.
 //
 // The replicated behaviour (a client follows a server correction on terrain; a client's walk logs none) needs a net
 // driver: VoxelEngine.Replication.TerrainBase in the game module, a dedicated server and a client in PIE.
@@ -149,16 +149,21 @@ namespace VoxelCollisionStaticBaseTest
 		Test.TestEqual(FString::Printf(TEXT("%s: every component is registered with a physics body"), Name), First.NoBody, 0);
 		Test.TestEqual(FString::Printf(TEXT("%s: every component is at its chunk's corner"), Name), First.Misplaced, 0);
 
-		// A re-cook, as an edit makes: the old body stays until the new one replaces it, and the new one is another component.
-		UVoxelCollisionComponent* Before = First.Sample.Get();
-		if (Before)
+		// A re-cook, as an edit makes: the chunk's component is destroyed and made again from the new cook (under the same
+		// name, so the engine may build the new object where the old one was: the pointer says nothing), never moved.
+		if (First.Sample.IsValid())
 		{
-			Collision->MarkChunkDirty(First.SampleChunk);
+			int32 Recooks = 0;
+			const FIntVector SampleChunk = First.SampleChunk;
+			const FDelegateHandle Handle = Collision->OnCollisionReady.AddLambda([&Recooks, SampleChunk](const FIntVector& Chunk)
+			{
+				Recooks += Chunk == SampleChunk ? 1 : 0;
+			});
+			Collision->MarkChunkDirty(SampleChunk);
 			Test.TestTrue(FString::Printf(TEXT("%s: the re-cook settles"), Name), WaitForStreamAndCollision(W, 120.0));
-			UVoxelCollisionComponent* After = FindComponent(W, First.SampleChunk);
-			Test.TestNotNull(FString::Printf(TEXT("%s: the re-cooked chunk has a component"), Name), After);
-			Test.TestTrue(FString::Printf(TEXT("%s: the re-cook replaced the component (the body is made again, not moved)"), Name),
-				After && After != Before && (!IsValid(Before) || !Before->IsRegistered()));
+			Collision->OnCollisionReady.Remove(Handle);
+			Test.TestTrue(FString::Printf(TEXT("%s: the chunk was cooked again (non-vacuous)"), Name), Recooks > 0);
+			Test.TestNotNull(FString::Printf(TEXT("%s: the re-cooked chunk has a registered component"), Name), FindComponent(W, SampleChunk));
 
 			const FSweep Second = SweepComponents(W);
 			Test.TestEqual(FString::Printf(TEXT("%s: after the re-cook every component is static, attached, registered, in place and no dynamic base"), Name),
