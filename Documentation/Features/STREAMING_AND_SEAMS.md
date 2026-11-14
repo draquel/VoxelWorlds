@@ -363,8 +363,10 @@ checked against no terrain).
   window's chunks within R + 2 W (R + 3 W kept). On `VoxelDemo` (chunks of 4,800 uu, a view distance of 40,000, a
   shell radius of 20,000) a player far from every other adds 557 to 566 loaded chunks to the server (855 to 875 kept
   at most), about half of a full window (a client holds 980 to 1,110), and about 100 of them resident (its near
-  bands): with two players 7.6 km apart a server held 1,673 chunks, 191 resident (221 MB of voxel data), 217 uniform
-  and 1,265 compressed. Players standing together share theirs. A steady tick's streaming decisions grow by the unload
+  bands): with two players 7.6 km apart a server held 1,570 to 1,670 chunks, 191 or 192 of them resident (220 MB of
+  voxel data), about 215 uniform and the rest compressed, once the compression sweep had caught up with the new
+  window (two to three minutes after the second player arrived; 40 s after, a run read 438 resident). Players
+  standing together share theirs. A steady tick's streaming decisions grow by the unload
   decision's pass over those chunks (each is a candidate of the strategy's every tick, refused by one set lookup): on
   the test worlds 0.006, 0.017 and 0.040 ms a tick with one, two and four viewers on the plane (180 chunks a viewer)
   and 0.011, 0.027 and 0.113 ms on the planet; the windows themselves cost a rebuild a second per viewer (0.002 and
