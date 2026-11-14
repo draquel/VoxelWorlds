@@ -27,6 +27,42 @@ enum class EVoxelTerrainLineHeight : uint8
 };
 
 /**
+ * What a hand-placed line did about its bends (UVoxelTerrainLineComponent; Documentation/TERRAIN_LINES_PLAN.md, section
+ * 4.5, D134). A line sampled from a spline that keeps the bend bound is left as sampled, and every value here but the
+ * two ratios is zero.
+ */
+struct FVoxelTerrainLineBends
+{
+	/** Whether the line as sampled from the spline breaks the bend bound */
+	bool bBrokeBound = false;
+
+	/**
+	 * The line as sampled, at its worst vertex: the vertex's turn over the turn the bend bound allows there (the lesser
+	 * of the turn whose bisector meets a neighbour's outside the reach and, on a line that levels, the turn whose step
+	 * across the bisector stays under a tenth of a voxel on the grade there). Over 1 breaks the bound
+	 */
+	double DrawnBendRatio = 0.0;
+
+	/** The same for the line as made: at most 1 unless the bound was out of the rounding's reach */
+	double BendRatio = 0.0;
+
+	/**
+	 * How far each way along the line its corners were spread to round them (world units). 0: every vertex is where the
+	 * spline has it
+	 */
+	double CornerDistance = 0.0;
+
+	/** The farthest the line as made runs from the spline (world units, over the ground): 0 when no corner was rounded */
+	double FarthestFromSpline = 0.0;
+
+	/** Whether the profile was made again, flatter through the bends (a line that follows the terrain) */
+	bool bProfileFlattened = false;
+
+	/** @return Whether the line's corners were rounded, so that it leaves its spline */
+	bool WasRounded() const { return CornerDistance > 0.0; }
+};
+
+/**
  * A hand-placed conditioning line: turns a USplineComponent on the same actor into a conditioning line of the level's
  * voxel world (Documentation/TERRAIN_LINES_PLAN.md, section 4.5; the how-to is Documentation/Guides/TERRAIN_LINES.md in
  * the plugin). A road, a cutting, an embankment, a painted trail or a river bed drawn in a level.
@@ -43,9 +79,20 @@ enum class EVoxelTerrainLineHeight : uint8
  * that begins play after chunks have generated (an actor spawned at runtime) is added too, with the chunk manager's
  * warning: the chunks generated before it keep their terrain.
  *
- * The limits a line must respect (the bend bound on the sampled spline, the cut and fill cap, the widths, a line that
- * comes back on itself) are checked when it is registered and logged as warnings (GetLineWarnings); the line is added
- * whatever they say. There is no editor preview: the terrain shows the line in PIE.
+ * A spline that turns more sharply than the bend bound allows (a corner, a tight curve on a slope) does not make the
+ * line it draws: the terrain would step on the inside of the bend. The component rounds such a line's corners until
+ * every vertex keeps the bound, spreading them over up to twice the line's reach each way (the half width plus the
+ * falloff: the radius the bound asks a corner for), so the line leaves the spline by less than the reach; a line that
+ * follows the terrain then has its profile made again, flatter through what is left of each bend, and a line at the
+ * spline's height keeps the spline's heights along it. A spline that keeps the bound makes the line it draws, vertex
+ * for vertex. GetLineBends and the first sentence of GetLineWarnings say what was done and how far the line runs from
+ * its spline (D134).
+ *
+ * The limits a line must respect (the bend bound, the cut and fill cap, the widths, a line that comes back on itself)
+ * are checked on the line as made when it is registered and logged as warnings (GetLineWarnings); the line is added
+ * whatever they say. A bend the rounding could not bring within the bound (a corner of much over 100 degrees, a corner
+ * at the spline's height on a steep grade, a hairpin) is rounded as far as helps and keeps its warning. There is no
+ * editor preview: the terrain shows the line in PIE.
  */
 UCLASS(ClassGroup = (Voxel), meta = (BlueprintSpawnableComponent), HideCategories = (Activation, Cooking, AssetUserData, Collision, Navigation))
 class VOXELSTREAMING_API UVoxelTerrainLineComponent : public UActorComponent
@@ -124,8 +171,10 @@ public:
 	bool IsLineRegistered() const { return RegisteredLine.IsValid(); }
 
 	/**
-	 * @return The limits the registered line breaks, one sentence each (the bend bound, the cut and fill cap, the widths,
-	 *         a line that comes back on itself, ...); empty when it keeps them all or is not registered
+	 * @return What a level designer should know about the registered line, one sentence each: first, when the spline
+	 *         broke the bend bound, what the component did about it and how far the line runs from the spline at most;
+	 *         then the limits the line as made breaks (the bend bound, the cut and fill cap, the widths, a line that
+	 *         comes back on itself, ...). Empty when the spline's line keeps them all or is not registered
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Terrain Line")
 	const TArray<FString>& GetLineWarnings() const { return LineWarnings; }
@@ -141,14 +190,20 @@ public:
 	/**
 	 * Sample the spline to the values a conditioning line is made from, in a voxel world: the vertices every
 	 * VertexSpacingVoxels voxels, their targets by HeightMode and their half widths, and this component's line values.
+	 * Where that line breaks the bend bound its corners are rounded and, following the terrain, its profile is made
+	 * again (the class comment); a line that keeps the bound is returned as sampled.
 	 * @param Manager The world's chunk manager, initialized (its configuration and world mode say what the world is)
 	 * @param OutParams The line's values
+	 * @param OutBends What was done about the line's bends (optional)
 	 * @return False when there is no spline, the spline has no length or the manager is not initialized
 	 */
-	bool BuildLineParams(const UVoxelChunkManager& Manager, FVoxelConditioningLineParams& OutParams) const;
+	bool BuildLineParams(const UVoxelChunkManager& Manager, FVoxelConditioningLineParams& OutParams, FVoxelTerrainLineBends* OutBends = nullptr) const;
 
 	/** @return The registered line; null before the world started */
 	TSharedPtr<const FVoxelConditioningLine> GetRegisteredLine() const { return RegisteredLine; }
+
+	/** @return What was done about the registered line's bends (all zero before the world started) */
+	const FVoxelTerrainLineBends& GetLineBends() const { return LineBends; }
 
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -163,8 +218,11 @@ private:
 	/** The line added to the chunk manager (kept: the manager's sources share it) */
 	TSharedPtr<const FVoxelConditioningLine> RegisteredLine;
 
-	/** The limits the registered line breaks */
+	/** What was done about the registered line's bends, and the limits the line as made breaks */
 	TArray<FString> LineWarnings;
+
+	/** What was done about the registered line's bends */
+	FVoxelTerrainLineBends LineBends;
 
 	/** Binding on UVoxelChunkManager::OnInitialized while the voxel world has not started */
 	FDelegateHandle InitializedHandle;
