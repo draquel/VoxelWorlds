@@ -656,8 +656,8 @@ public:
 	bool HasChunkVoxelData(const FIntVector& ChunkCoord) const;
 
 	/**
-	 * Whether a chunk's voxels are held far-compressed (EVoxelDataResidency::Compressed): a settled chunk of a far band,
-	 * never one of a further viewer's ground window (G217).
+	 * Whether a chunk's voxels are held far-compressed (EVoxelDataResidency::Compressed): a settled chunk of a far band
+	 * of the streaming viewer's and, in a further viewer's ground window, of that viewer's too (G217).
 	 *
 	 * @param ChunkCoord Chunk coordinate
 	 * @return True if the chunk is tracked and its voxel data is in the compressed side buffer
@@ -1899,7 +1899,8 @@ protected:
 	 * edit reached a chunk nobody tracks, and once a second (IVoxelLODStrategy::GetWindowChunksAround for each, plus the
 	 * edited chunks within reach, as the streaming viewer's edit pins), queues the generation of their chunks that are
 	 * not tracked, and hands the collision and the scatter managers the viewers. The unload decisions, the queues'
-	 * eviction, the stale cull and far compression leave a chunk of the keep set alone (IsChunkInGroundWindow).
+	 * eviction and the stale cull leave a chunk of the keep set alone (IsChunkInGroundWindow), and far compression
+	 * judges it by the nearest viewer's distance band.
 	 *
 	 * @param Context The streaming viewer's context (the world's origin and mode; the LOD a ground chunk meshes at)
 	 */

@@ -10,7 +10,7 @@
 //   cooked, the same ground under nine probes), with the voxels those cooks read; the streaming viewer's own window and
 //   shell do not change; a chunk two viewers need is loaded once and released when the last of them leaves; an edit
 //   made where nobody was shows in the collision when a viewer comes, and one made under a further viewer re-cooks;
-//   ground chunks are not far-compressed and the residency audit finds nothing; with no further viewer left the world
+//   ground chunks are far-compressed by their nearest viewer's band (none near it) and the residency audit finds nothing; with no further viewer left the world
 //   holds what one viewer's did. The tick's cost with 1, 2 and 4 viewers is reported.
 // - Streaming.FurtherViewers.Scatter: the scatter manager measures from the nearest viewer: a further viewer's chunks
 //   hold the spawn points a streaming viewer's there do (the scatter a server's player collides with and chops), and
@@ -302,17 +302,29 @@ namespace VoxelFurtherViewersTest
 		}
 		Test.TestTrue(TEXT("Settled again after the idle ticks"), WaitForStreamAndCollision(W));
 		const FGround IdleB = ReadGround(W, SiteB);
+		// Far compression judges a ground chunk by its nearest viewer's band: the further viewer's near bands (strides under
+		// 4: the first two of ConfigureThreeLODBands) stay resident, as the streaming viewer's do, and the rest compresses.
+		const double ResidentReach = W.Config->LODBands[1].MaxDistance;
+		int32 NearCompressed = 0;
 		int32 GroundCompressed = 0;
 		int32 OwnCompressed = 0;
 		for (const FIntVector& Coord : IdleB.Loaded)
 		{
 			if (W.Manager->IsChunkFarCompressed(Coord))
 			{
-				++(OnlyA.Loaded.Contains(Coord) ? OwnCompressed : GroundCompressed);
+				if (OnlyA.Loaded.Contains(Coord))
+				{
+					++OwnCompressed;
+				}
+				else
+				{
+					++(FVector::Dist(ChunkCentre(W, Coord), ViewB) < ResidentReach ? NearCompressed : GroundCompressed);
+				}
 			}
 		}
-		Test.TestEqual(TEXT("No ground chunk is far-compressed after 400 idle ticks"), GroundCompressed, 0);
-		Test.TestTrue(TEXT("... while the streaming viewer's far band is (non-vacuous)"), OwnCompressed > 0);
+		Test.TestEqual(TEXT("No ground chunk in the further viewer's near bands is far-compressed after 400 idle ticks"), NearCompressed, 0);
+		Test.TestTrue(TEXT("... the ground window's chunks beyond them are (non-vacuous)"), GroundCompressed > 0);
+		Test.TestTrue(TEXT("... as the streaming viewer's far band is (non-vacuous)"), OwnCompressed > 0);
 		Test.TestTrue(TEXT("After 400 idle ticks the further viewer's ground is the same"), SameSet(IdleB.Cooked, ReferenceB.Cooked) && ProbeDifference(IdleB, ReferenceB) <= 1.0);
 
 		// The same viewer twice: nothing twice.
@@ -398,7 +410,8 @@ namespace VoxelFurtherViewersTest
 				Cost.IsEmpty() ? TEXT("") : TEXT("; "), 1 + Further.Num(), W.Manager->GetLoadedChunkCount(), StreamingMs / Ticks, GroundMs / Ticks, CollisionMs / Ticks);
 		}
 		Test.AddInfo(FString::Printf(TEXT("%s, a steady tick: %s"), Mode, *Cost));
-		Test.AddInfo(FString::Printf(TEXT("%s: after 400 idle ticks %d of the streaming viewer's chunks were far-compressed and %d of the ground window's"), Mode, OwnCompressed, GroundCompressed));
+		Test.AddInfo(FString::Printf(TEXT("%s: after 400 idle ticks %d of the streaming viewer's chunks were far-compressed and %d of the ground window's, none of those within %.0f uu of its viewer"),
+			Mode, OwnCompressed, GroundCompressed, ResidentReach));
 
 		// No further viewer left: one viewer's world, with its edits' chunks out of reach unloaded.
 		Test.TestTrue(TEXT("No further viewer settles"), Stream(W, ViewA, {}));

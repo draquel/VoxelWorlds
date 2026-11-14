@@ -80,6 +80,9 @@ public:
 		TArray<FIntVector>& OutChunks
 	) const override;
 
+	/** The band of the chunk centre's 3D distance from ViewerPosition (GetRawLODForDistance), with LOD on or off. */
+	virtual int32 GetDistanceBandLODAround(const FIntVector& ChunkCoord, const FVector& ViewerPosition) const override;
+
 	virtual void Initialize(const UVoxelWorldConfiguration* WorldConfig) override;
 
 	virtual void Update(const FLODQueryContext& Context, float DeltaTime) override;

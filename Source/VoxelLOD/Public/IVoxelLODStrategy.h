@@ -182,6 +182,23 @@ public:
 	{
 	}
 
+	/**
+	 * The LOD of the distance band a chunk falls in for a viewer standing at ViewerPosition: the band of its distance
+	 * alone, without the balance and the hysteresis the strategy keeps for its own viewer. The chunk manager judges a
+	 * ground window's chunk by the nearest viewer's band (G217: a chunk near a server's other player stays resident, as
+	 * one near the first does, and the rest of that player's window is far-compressed, as the first's is).
+	 *
+	 * Default: 0 (the nearest band: a strategy that cannot tell keeps such a chunk resident).
+	 *
+	 * @param ChunkCoord Chunk position in chunk coordinate space
+	 * @param ViewerPosition The viewer
+	 * @return LOD level of the chunk's distance band for that viewer (0 = nearest band)
+	 */
+	virtual int32 GetDistanceBandLODAround(const FIntVector& ChunkCoord, const FVector& ViewerPosition) const
+	{
+		return 0;
+	}
+
 	// ==================== Lifecycle ====================
 
 	/**

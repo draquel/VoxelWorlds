@@ -388,6 +388,11 @@ int32 FDistanceBandLODStrategy::GetDistanceBandLOD(
 	return GetRawLODForDistance(GetDistanceToViewer(ChunkCoordToWorldCenter(ChunkCoord), Context));
 }
 
+int32 FDistanceBandLODStrategy::GetDistanceBandLODAround(const FIntVector& ChunkCoord, const FVector& ViewerPosition) const
+{
+	return GetRawLODForDistance(static_cast<float>(FVector::Distance(ChunkCoordToWorldCenter(ChunkCoord), ViewerPosition)));
+}
+
 TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 	const FLODQueryContext& Context) const
 {

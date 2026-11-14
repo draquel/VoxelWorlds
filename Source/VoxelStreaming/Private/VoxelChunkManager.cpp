@@ -7104,11 +7104,19 @@ void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Cont
 		// Idle: LastStateChangeFrame is the frame the chunk entered Loaded; it stays fixed while
 		// settled and resets on any remesh (Loaded -> PendingMeshing -> ... -> Loaded).
 		if ((CurrentFrame - S.LastStateChangeFrame) < IdleFrames) return false;
-		const int32 BandLOD = (bLODActive || !LODStrategy) ? S.LODLevel : LODStrategy->GetDistanceBandLOD(Coord, Context);
+		int32 BandLOD = (bLODActive || !LODStrategy) ? S.LODLevel : LODStrategy->GetDistanceBandLOD(Coord, Context);
 		if ((1 << FMath::Clamp(BandLOD, 0, 7)) < MinStride) return false;
-		// A further viewer's ground chunk is far from the streaming viewer and near a player (G217): its voxels are read
-		// by that player's collision cooks and the server's point reads, as a near band's are.
-		return !GroundKeepChunks.Contains(Coord);
+		// A further viewer's ground chunk (G217) is far from the streaming viewer and may be near a player: the band of the
+		// nearest viewer decides, so the chunks around a server's other player stay resident for its collision cooks and
+		// the server's point reads, as the ones around the first do, and the rest of its window compresses as the first's.
+		if (LODStrategy && GroundKeepChunks.Contains(Coord))
+		{
+			for (const FVoxelFurtherViewer& Viewer : FurtherViewers)
+			{
+				BandLOD = FMath::Min(BandLOD, LODStrategy->GetDistanceBandLODAround(Coord, Viewer.Position));
+			}
+		}
+		return (1 << FMath::Clamp(BandLOD, 0, 7)) >= MinStride;
 	};
 
 	// Install finished async encodes. Drained even with the sweep off.
