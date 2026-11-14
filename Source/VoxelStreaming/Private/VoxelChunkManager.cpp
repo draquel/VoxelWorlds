@@ -3732,7 +3732,14 @@ void UVoxelChunkManager::SetTerrainConditioner(IVoxelTerrainConditioner* InCondi
 		NoteConditioningSourceRegistered(TEXT("The terrain conditioner"));
 	}
 	ConditioningSources.SetConditioner(InConditioner);
+	// A conditioner's zones and lines may lie anywhere.
+	BroadcastTerrainConditioningChanged(FVoxelConditioningRegion::Everywhere());
+}
+
+void UVoxelChunkManager::BroadcastTerrainConditioningChanged(const FVoxelConditioningRegion& Region)
+{
 	OnTerrainConditioningChanged.Broadcast();
+	OnTerrainConditioningChangedIn.Broadcast(Region);
 }
 
 void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
@@ -3763,7 +3770,17 @@ void UVoxelChunkManager::AddConditioningZone(const FVoxelConditioningZone& Zone)
 		UE_LOG(LogVoxelStreaming, Warning, TEXT("AddConditioningZone: a %s zone in a %s world has no effect (planet zones need a Direction, FVoxelConditioningZone::MakeRadial)."),
 			Zone.IsRadial() ? TEXT("planet") : TEXT("heightmap"), bPlanet ? TEXT("planet") : TEXT("heightmap"));
 	}
-	OnTerrainConditioningChanged.Broadcast();
+	// Where the zone reaches: its cap on a planet, its box on a heightmap world (a zone of the other kind reaches nothing).
+	if (bPlanet)
+	{
+		BroadcastTerrainConditioningChanged(Zone.IsRadial()
+			? FVoxelConditioningRegion::OfCap(Zone.Direction, Zone.GetAngularRadius(FVoxelWorldModeFactory::MakePlanetParams(*Configuration).PlanetRadius))
+			: FVoxelConditioningRegion::OfCap(FVector::UpVector, -1.0));
+	}
+	else
+	{
+		BroadcastTerrainConditioningChanged(FVoxelConditioningRegion::OfBox(Zone.IsRadial() ? FBox2D(ForceInit) : Zone.GetBounds2D()));
+	}
 }
 
 void UVoxelChunkManager::AddConditioningLine(const FVoxelConditioningLineParams& Line)
@@ -3873,7 +3890,7 @@ void UVoxelChunkManager::NotifyTerrainConditioningChanged(const FBox2D& Region)
 		FarRegion.Box = Region;
 		FarField->InvalidateRegion(FarRegion);
 	}
-	OnTerrainConditioningChanged.Broadcast();
+	BroadcastTerrainConditioningChanged(FVoxelConditioningRegion::OfBox(Region));
 }
 
 void UVoxelChunkManager::NotifyTerrainConditioningChangedOnSphere(const FVector& Direction, double AngularRadius)
@@ -3886,7 +3903,7 @@ void UVoxelChunkManager::NotifyTerrainConditioningChangedOnSphere(const FVector&
 		FarRegion.AngularRadius = AngularRadius;
 		FarField->InvalidateRegion(FarRegion);
 	}
-	OnTerrainConditioningChanged.Broadcast();
+	BroadcastTerrainConditioningChanged(FVoxelConditioningRegion::OfCap(Direction, AngularRadius));
 }
 
 void UVoxelChunkManager::GatherConditioningForChunk(const FIntVector& ChunkCoord, FVoxelConditioning& Out) const

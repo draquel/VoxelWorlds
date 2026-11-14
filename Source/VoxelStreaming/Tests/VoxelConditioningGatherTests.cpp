@@ -556,4 +556,81 @@ bool FVoxelConditioningAddLineTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// Where the conditioning changed (UVoxelChunkManager::OnTerrainConditioningChangedIn; the terrain lines plan's R1): a
+// line's bounds with its reach, a zone's bounds, the region a conditioner names for a line it worked out late, and
+// everywhere when a conditioner is set or cleared; a cap on a planet. Fired with OnTerrainConditioningChanged, so a
+// reader that keeps something per place (the map's tiles) draws again only there.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelConditioningChangedRegionTest,
+	"VoxelWorlds.Streaming.Conditioning.ChangedRegion",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelConditioningChangedRegionTest::RunTest(const FString& Parameters)
+{
+	// A plane.
+	{
+		VoxelTesting::FTestChunkWorld W;
+		W.Create(TEXT("ConditioningChangedRegionPlane"));
+		W.ConfigureSmallPlane();
+		W.StartManager();
+		const float VoxelSize = W.Config->VoxelSize;
+		int32 Broadcasts = 0;
+		TArray<FVoxelConditioningRegion> Regions;
+		const FDelegateHandle Handle = W.Manager->OnTerrainConditioningChanged.AddLambda([&Broadcasts]() { ++Broadcasts; });
+		const FDelegateHandle InHandle = W.Manager->OnTerrainConditioningChangedIn.AddLambda([&Regions](const FVoxelConditioningRegion& Region) { Regions.Add(Region); });
+
+		FVoxelConditioningLineParams Params;
+		Params.FalloffWidth = 4.0f * VoxelSize;
+		Params.Id = 9;
+		for (int32 Index = 0; Index <= 20; ++Index)
+		{
+			Params.Vertices.Add(FVoxelConditioningLineVertex(FVector(500.0 + 100.0 * Index, -800.0 + 60.0 * Index, 0.0), 200.0f, 3.0f * VoxelSize));
+		}
+		const FVoxelConditioningLineRef Line = FVoxelConditioningLine::Make(Params);
+		W.Manager->AddConditioningLine(Line);
+		TestTrue(TEXT("Plane: adding a line names its bounds with its reach"), Regions.Num() == 1 && !Regions[0].bEverywhere && !Regions[0].bCap
+			&& Regions[0].Box.bIsValid && Regions[0].Box == Line->GetBounds2D());
+
+		const FBox2D Named(FVector2D(-700.0, 300.0), FVector2D(200.0, 900.0));
+		W.Manager->NotifyTerrainConditioningChanged(Named);
+		TestTrue(TEXT("Plane: a conditioner's notification names its region"), Regions.Num() == 2 && !Regions[1].bEverywhere && !Regions[1].bCap && Regions[1].Box == Named);
+
+		const FVoxelConditioningZone Zone(FVector2D(-3000.0, 2500.0), 400.0f, 300.0f, 150.0f, 1.0f);
+		W.Manager->AddConditioningZone(Zone);
+		TestTrue(TEXT("Plane: adding a zone names its bounds"), Regions.Num() == 3 && !Regions[2].bEverywhere && Regions[2].Box == Zone.GetBounds2D());
+
+		W.Manager->SetTerrainConditioner(nullptr);
+		TestTrue(TEXT("Plane: a conditioner set or cleared may change the conditioning anywhere"), Regions.Num() == 4 && Regions[3].bEverywhere);
+		TestEqual(TEXT("Plane: the delegate without a region fires for each change too"), Broadcasts, 4);
+		W.Manager->OnTerrainConditioningChanged.Remove(Handle);
+		W.Manager->OnTerrainConditioningChangedIn.Remove(InHandle);
+		W.Stop();
+	}
+
+	// A planet: caps.
+	{
+		VoxelTesting::FTestChunkWorld W;
+		W.Create(TEXT("ConditioningChangedRegionPlanet"));
+		W.ConfigureSmallPlanet();
+		W.StartManager();
+		const double Radius = W.Config->WorldRadius;
+		TArray<FVoxelConditioningRegion> Regions;
+		const FDelegateHandle InHandle = W.Manager->OnTerrainConditioningChangedIn.AddLambda([&Regions](const FVoxelConditioningRegion& Region) { Regions.Add(Region); });
+
+		const FVector Toward = FVector(0.3, -0.5, 0.8).GetSafeNormal();
+		W.Manager->NotifyTerrainConditioningChangedOnSphere(Toward * 3.0, 0.02);
+		TestTrue(TEXT("Planet: a conditioner's notification names its cap, the direction a unit one"), Regions.Num() == 1 && Regions[0].bCap && !Regions[0].bEverywhere
+			&& Regions[0].Direction.Equals(Toward, 1.0e-9) && Regions[0].AngularRadius == 0.02);
+
+		const FVoxelConditioningZone Zone = FVoxelConditioningZone::MakeRadial(FVector(1.0, 0.2, 0.1), 600.0f, 400.0f, 120.0f, 1.0f);
+		W.Manager->AddConditioningZone(Zone);
+		TestTrue(TEXT("Planet: adding a zone names its cap"), Regions.Num() == 2 && Regions[1].bCap && Regions[1].Direction.Equals(Zone.Direction, 1.0e-9)
+			&& FMath::IsNearlyEqual(Regions[1].AngularRadius, Zone.GetAngularRadius(Radius), 1.0e-12));
+		W.Manager->OnTerrainConditioningChangedIn.Remove(InHandle);
+		W.Stop();
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

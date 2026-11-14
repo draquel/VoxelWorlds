@@ -85,8 +85,14 @@ through `GatherConditioning` and `GatherConditioningOnSphere` and lines through 
 `GatherConditioningLinesOnSphere`, which default to none. A conditioner that works a line out after a `Ready` gather
 calls `NotifyTerrainConditioningChanged` with the line's region (`NotifyTerrainConditioningChangedOnSphere` with a cap):
 the far field rebuilds the patches there that take conditioning (`FVoxelFarField::InvalidateRegion`) and
-`OnTerrainConditioningChanged` fires (the map redraws every tile). Adding a zone or a line does the same for its own
-region. Chunks generated before keep their terrain: lines and zones are added before streaming starts.
+`OnTerrainConditioningChanged` fires, with `OnTerrainConditioningChangedIn` beside it, which says where
+(`FVoxelConditioningRegion`: a box on a heightmap world, a cap on a planet, or everywhere when a conditioner is set or
+cleared). The map binds the second and makes stale only the tiles the region reaches (`MAP_SYSTEM.md`): a
+conditioner's lines arrive one by one (the game's roads, worked out by a worker after the far field asked for them),
+and each made every tile stale while the map heard only that something had changed (found by the terrain lines plan's
+R1: 107 whole-map redraws in the first seconds of `VoxelDemo`). Adding a zone or a line does the same for its own
+region. Chunks generated before keep their terrain: lines and zones are added before streaming starts. Test
+`VoxelWorlds.Streaming.Conditioning.ChangedRegion`.
 
 The set also answers for the surface under its lines ("The surface under a line" below): `GetBandAt` and
 `GetBandOnSphere` (the band's material and depth there), `GetMinCaveDepthAt` and `GetMinCaveDepthOnSphere`,
@@ -144,7 +150,23 @@ is immutable and shared from then on.
   falloff of 4 and a vertex every 2 voxels that is 16 degrees a vertex up to a grade of 10 % and 6.7 at 25 %.
 - **Block worlds** generate from the same height, so a line needs nothing of its own there: the block tops along a
   levelled line are the target's block tops.
-- **Not built yet:** the roads between POIs (the plan's R1, R2).
+- **From a polyline to a line** (`FVoxelConditioningLineShape`, `VoxelGeneration/Public/VoxelConditioningLineShape.h`;
+  the plan's R1 and D134). Static functions on plain positions and heights, with nothing of who makes the line, for
+  a caller that has a drawn or routed polyline and wants a line within the bend bound. `RoundCorners` samples the
+  polyline evenly and, while a vertex turns by more than a bound (`GetMaxTurnForReach`: the bisectors meet outside
+  the reach; `GetMaxTurnForGrade`: the step at a grade), spreads the corners along the line (`SpreadCorners`: each
+  point the mean of the points within a distance each way, twice over), wider each try. It averages the whole line,
+  keeps the two ends, moves no point further than twice the distance it spread over, and reports the worst turn
+  left, whether that is within the bound, and the farthest move; a line that comes back on itself is reported as
+  outside the bound. `MakeProfile` makes a levelled line's targets: the ground averaged along the line (the window
+  narrowing toward the ends), held from the start to a grade and, at each vertex that turns, to the grade the bend
+  bound leaves there (`GetMaxGradeForTurn`, with a margin of a tenth), the start at a given height or the ground's, the end at a given height or where the grades bring it.
+  A line made from those targets steps by less than a tenth of a voxel across every bisector whatever its turns: a
+  tight bend on a slope is levelled, with more cut and fill, which the caller judges against its cap. The roads
+  between POIs are made with it (VoxelWorldPOI's `FPOIRoads`); the hand-placed line's component does not call it
+  yet (the plan's L5) and warns.
+- **Not built yet:** roads on planets and block worlds (the plan's R2; on the plane and the island they are
+  VoxelWorldPOI's, `POI_SYSTEM.md` section 5.1), the hand-placed line's bends (L5).
 
 **The hand-placed line** (the plan's section 4.5 and phase L4; the how-to is `Guides/TERRAIN_LINES.md`).
 `UVoxelTerrainLineComponent` (`VoxelStreaming/Public/VoxelTerrainLineComponent.h`) turns a `USplineComponent` on its

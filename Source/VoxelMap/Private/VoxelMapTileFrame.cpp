@@ -314,19 +314,68 @@ void FVoxelMapTileFrame::ApronPixel(FIntPoint Tile, int32 GX, int32 GY, const FV
 
 void FVoxelMapTileFrame::GatherConditioning(const UVoxelChunkManager& ChunkManager, FIntPoint Tile, FVoxelConditioning& Out) const
 {
-	if (bPlanet)
+	double Least = 0.0;
+	const FVoxelConditioningRegion Region = GetConditioningRegion(FVoxelMapTileId(Tile, 0), Least);
+	if (Region.bCap)
 	{
-		// The tile's cap: its centre's direction and 1.5 tile widths of angle (spherical SP-B10).
-		ChunkManager.GatherConditioningOnSphere(Grid.CellCentreDirection(Tile), 1.5 * GetTileWorldSize() / FMath::Max(Radius, 1.0),
-			EVoxelConditioningGather::Ready, Out);
+		ChunkManager.GatherConditioningOnSphere(Region.Direction, Region.AngularRadius, EVoxelConditioningGather::Ready, Out);
 		return;
 	}
-	// The tile and its 1-voxel apron.
+	ChunkManager.GatherConditioning(Region.Box, EVoxelConditioningGather::Ready, Out);
+}
+
+FVoxelConditioningRegion FVoxelMapTileFrame::GetConditioningRegion(const FVoxelMapTileId& Id, double& OutLeastHalfWidth) const
+{
+	OutLeastHalfWidth = 0.0;
+	if (Id.Level == 0)
+	{
+		if (bPlanet)
+		{
+			// The tile's cap: its centre's direction and 1.5 tile widths of angle (spherical SP-B10).
+			return FVoxelConditioningRegion::OfCap(Grid.CellCentreDirection(Id.Coord), 1.5 * GetTileWorldSize() / FMath::Max(Radius, 1.0));
+		}
+		// The tile and its 1-voxel apron.
+		const FVector2D TileMin(
+			(Id.Coord.X * ChunkSize - 1) * VoxelSize + WorldOrigin.X,
+			(Id.Coord.Y * ChunkSize - 1) * VoxelSize + WorldOrigin.Y);
+		return FVoxelConditioningRegion::OfBox(FBox2D(TileMin, TileMin + FVector2D((ChunkSize + 2) * VoxelSize)));
+	}
+	const double Scale = static_cast<double>(1 << Id.Level);
+	// A pixel above level 0 is a point sample every 2^Level voxels: the tile takes every line as at least 0.71 of that
+	// wide, for the height and for the band, so a road is an unbroken line on the map and not dashes, and gathers over
+	// its area grown by as much. A tile wider than the gather limit takes no lines (a road is far under a pixel there).
+	OutLeastHalfWidth = TakesLines(Id.Level) ? FVoxelConditioningLine::CoarseHalfWidthPerSpacing * Scale * VoxelSize : 0.0;
+	if (bPlanet)
+	{
+		// The tile's cap: its centre's direction and 1.5 of its widths of angle.
+		return FVoxelConditioningRegion::OfCap(Grid.DirectionAt(FirstLevel0Tile(Id), 0.5 * Scale, 0.5 * Scale),
+			(1.5 * Scale * GetTileWorldSize() + OutLeastHalfWidth) / FMath::Max(Radius, 1.0));
+	}
+	// The tile and its one-pixel apron.
 	const FVector2D TileMin(
-		(Tile.X * ChunkSize - 1) * VoxelSize + WorldOrigin.X,
-		(Tile.Y * ChunkSize - 1) * VoxelSize + WorldOrigin.Y);
-	const FVector2D TileMax = TileMin + FVector2D((ChunkSize + 2) * VoxelSize);
-	ChunkManager.GatherConditioning(FBox2D(TileMin, TileMax), EVoxelConditioningGather::Ready, Out);
+		(static_cast<double>(Id.Coord.X) * ChunkSize - 1.0) * Scale * VoxelSize + WorldOrigin.X,
+		(static_cast<double>(Id.Coord.Y) * ChunkSize - 1.0) * Scale * VoxelSize + WorldOrigin.Y);
+	return FVoxelConditioningRegion::OfBox(FBox2D(TileMin, TileMin + FVector2D((ChunkSize + 2) * Scale * VoxelSize)).ExpandBy(OutLeastHalfWidth));
+}
+
+bool FVoxelMapTileFrame::MeetsConditioningRegion(const FVoxelMapTileId& Id, const FVoxelConditioningRegion& Region) const
+{
+	if (Region.bEverywhere)
+	{
+		return true;
+	}
+	double Least = 0.0;
+	const FVoxelConditioningRegion Tile = GetConditioningRegion(Id, Least);
+	if (Tile.bCap != Region.bCap)
+	{
+		return false;
+	}
+	if (Tile.bCap)
+	{
+		const double Angle = FMath::Atan2(FVector::CrossProduct(Tile.Direction, Region.Direction).Size(), FVector::DotProduct(Tile.Direction, Region.Direction));
+		return Region.AngularRadius >= 0.0 && Angle <= Tile.AngularRadius + Region.AngularRadius;
+	}
+	return Region.Box.bIsValid && Tile.Box.Intersect(Region.Box);
 }
 
 // ---------------------------------------------------------------------------
@@ -577,27 +626,18 @@ void FVoxelMapTileFrame::GatherConditioning(const UVoxelChunkManager& ChunkManag
 		GatherConditioning(ChunkManager, Id.Coord, Out);
 		return;
 	}
-	const double Scale = static_cast<double>(1 << Id.Level);
-	// A pixel above level 0 is a point sample every 2^Level voxels: the tile takes every line as at least 0.71 of that
-	// wide, for the height and for the band, so a road is an unbroken line on the map and not dashes, and gathers over
-	// its area grown by as much. A tile wider than the gather limit takes no lines (a road is far under a pixel there).
+	// The tile's region (GetConditioningRegion): its area and apron, grown by the least half width its level takes
+	// lines with. A tile wider than the gather limit takes no lines (a road is far under a pixel there).
 	const bool bLines = TakesLines(Id.Level);
-	const double Least = bLines ? FVoxelConditioningLine::CoarseHalfWidthPerSpacing * Scale * VoxelSize : 0.0;
-	if (bPlanet)
+	double Least = 0.0;
+	const FVoxelConditioningRegion Region = GetConditioningRegion(Id, Least);
+	if (Region.bCap)
 	{
-		// The tile's cap: its centre's direction and 1.5 of its widths of angle.
-		const FVector Centre = Grid.DirectionAt(FirstLevel0Tile(Id), 0.5 * Scale, 0.5 * Scale);
-		ChunkManager.GatherConditioningOnSphere(Centre, (1.5 * Scale * GetTileWorldSize() + Least) / FMath::Max(Radius, 1.0),
-			EVoxelConditioningGather::Ready, Out);
+		ChunkManager.GatherConditioningOnSphere(Region.Direction, Region.AngularRadius, EVoxelConditioningGather::Ready, Out);
 	}
 	else
 	{
-		// The tile and its one-pixel apron.
-		const FVector2D TileMin(
-			(static_cast<double>(Id.Coord.X) * ChunkSize - 1.0) * Scale * VoxelSize + WorldOrigin.X,
-			(static_cast<double>(Id.Coord.Y) * ChunkSize - 1.0) * Scale * VoxelSize + WorldOrigin.Y);
-		const FVector2D TileMax = TileMin + FVector2D((ChunkSize + 2) * Scale * VoxelSize);
-		ChunkManager.GatherConditioning(FBox2D(TileMin, TileMax).ExpandBy(Least), EVoxelConditioningGather::Ready, Out);
+		ChunkManager.GatherConditioning(Region.Box, EVoxelConditioningGather::Ready, Out);
 	}
 	if (bLines)
 	{

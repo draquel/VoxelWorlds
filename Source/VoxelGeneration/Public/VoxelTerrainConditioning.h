@@ -194,6 +194,53 @@ enum class EVoxelConditioningGather : uint8
 };
 
 /**
+ * Where the terrain conditioning changed (UVoxelChunkManager::OnTerrainConditioningChangedIn): a world XY box on a
+ * heightmap world, a cap on a planet, or everywhere (a conditioner was set). A reader that keeps something per place (a
+ * map tile's image) draws again only where the region reaches; a line worked out late by a conditioner is announced with
+ * its bounds, and many arrive one by one.
+ */
+struct FVoxelConditioningRegion
+{
+	/** The conditioning may have changed anywhere: Box and the cap are not read */
+	bool bEverywhere = false;
+
+	/** A cap on a planet (Direction, AngularRadius), else a heightmap world's Box */
+	bool bCap = false;
+
+	/** The cap's centre: a unit direction from the planet centre */
+	FVector Direction = FVector::UpVector;
+
+	/** The cap's half-angle (radians) */
+	double AngularRadius = 0.0;
+
+	/** A heightmap world's region (world XY). Invalid: a change that reaches nothing in this kind of world */
+	FBox2D Box = FBox2D(ForceInit);
+
+	static FVoxelConditioningRegion Everywhere()
+	{
+		FVoxelConditioningRegion Region;
+		Region.bEverywhere = true;
+		return Region;
+	}
+
+	static FVoxelConditioningRegion OfBox(const FBox2D& InBox)
+	{
+		FVoxelConditioningRegion Region;
+		Region.Box = InBox;
+		return Region;
+	}
+
+	static FVoxelConditioningRegion OfCap(const FVector& InDirection, double InAngularRadius)
+	{
+		FVoxelConditioningRegion Region;
+		Region.bCap = true;
+		Region.Direction = InDirection.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
+		Region.AngularRadius = InAngularRadius;
+		return Region;
+	}
+};
+
+/**
  * The conditioning at a place: every shape that reshapes the generated terrain there, the lines and the zones, as one
  * value. The gathers fill it for a region, a cap or a chunk (UVoxelChunkManager::GatherConditioning); a generation
  * request carries it; every reader of the generated surface takes it and asks it for the height on a heightmap world

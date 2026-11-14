@@ -175,6 +175,14 @@ tiles) asked for half a million images at one zoom. The tile pyramid (D84) bound
   under `voxel.Map.TileBudgetMB` (32 MB, 2,048 tiles of 64 × 64), trimmed to 90% when over. It replaces world modes
   review WM-E2's detail and overview budgets (two images a tile) and their 16 × 16 overview. A tile invalidated by an edit
   or a conditioning change keeps its image, marked stale, until its redraw lands.
+- **A conditioning change redraws where it reaches** (`HandleTerrainConditioningChanged`, bound to
+  `UVoxelChunkManager::OnTerrainConditioningChangedIn`; the terrain lines plan's R1). The change names its region
+  (`FVoxelConditioningRegion`): the tiles whose own gather region it meets are made stale
+  (`FVoxelMapTileFrame::GetConditioningRegion`, the tile and its apron grown by the least half width its level takes
+  lines with; `MeetsConditioningRegion`), and every tile only when it changed everywhere (a conditioner set after the
+  first tiles, QA W-05). `voxel.Map.Stats` counts the images made stale this way (`conditioning-stale=`). Test
+  `VoxelWorlds.Map.ConditioningRegion`: of 25 tiles drawn, a change far away makes none stale, a change inside one
+  tile that tile, a change everywhere all 25.
 - **Requests from the view** (`RequestView`, `FVoxelMapTileQueue`). A view asks for the tiles it shows at the level
   matching its texels (`LevelForTexel`: the coarsest whose pixels are at most a texel apart), nearest its centre first,
   and that replaces its last request: what left the view stops waiting. The queue serves the minimap, then the world map,

@@ -256,7 +256,7 @@ void UVoxelMapSubsystem::Deinitialize()
 	if (bDelegatesBound && CachedChunkManagerWeak.IsValid())
 	{
 		CachedChunkManagerWeak->OnChunkGenerated.RemoveDynamic(this, &UVoxelMapSubsystem::OnChunkGenerated);
-		CachedChunkManagerWeak->OnTerrainConditioningChanged.Remove(ConditioningChangedHandle);
+		CachedChunkManagerWeak->OnTerrainConditioningChangedIn.Remove(ConditioningChangedHandle);
 		ConditioningChangedHandle.Reset();
 		bDelegatesBound = false;
 	}
@@ -433,7 +433,7 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 	if (!bDelegatesBound)
 	{
 		ChunkMgr->OnChunkGenerated.AddDynamic(this, &UVoxelMapSubsystem::OnChunkGenerated);
-		ConditioningChangedHandle = ChunkMgr->OnTerrainConditioningChanged.AddUObject(
+		ConditioningChangedHandle = ChunkMgr->OnTerrainConditioningChangedIn.AddUObject(
 			this, &UVoxelMapSubsystem::HandleTerrainConditioningChanged);
 		bDelegatesBound = true;
 
@@ -645,6 +645,39 @@ int32 UVoxelMapSubsystem::InvalidateAllTiles()
 	return Invalidated;
 }
 
+int32 UVoxelMapSubsystem::InvalidateTilesIn(const FVoxelConditioningRegion& Region)
+{
+	if (Region.bEverywhere)
+	{
+		return InvalidateAllTiles();
+	}
+	TArray<FVoxelMapTileId> Ids;
+	TileStore.GetIds(Ids);
+	for (const TSet<FVoxelMapTileId>& View : ViewTiles)
+	{
+		for (const FVoxelMapTileId& Id : View)
+		{
+			if (TileQueue.IsDrawing(Id))
+			{
+				Ids.Add(Id);
+			}
+		}
+	}
+	int32 Invalidated = 0;
+	for (const FVoxelMapTileId& Id : Ids)
+	{
+		if (TileFrame.MeetsConditioningRegion(Id, Region))
+		{
+			Invalidated += InvalidateTile(Id) ? 1 : 0;
+		}
+	}
+	if (Invalidated > 0)
+	{
+		LaunchWaitingTiles();
+	}
+	return Invalidated;
+}
+
 int64 UVoxelMapSubsystem::ExploreAllTiles(const FVector& Center, float Radius)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_ExploreAll);
@@ -837,7 +870,7 @@ void UVoxelMapSubsystem::OnChunkGenerated(FIntVector ChunkCoord)
 	}
 }
 
-void UVoxelMapSubsystem::HandleTerrainConditioningChanged()
+void UVoxelMapSubsystem::HandleTerrainConditioningChanged(const FVoxelConditioningRegion& Region)
 {
 	if (bShuttingDown)
 	{
@@ -846,9 +879,19 @@ void UVoxelMapSubsystem::HandleTerrainConditioningChanged()
 	// Tiles drawn before the POI conditioner registered show the unflattened terrain (QA W-05): every image goes stale,
 	// drawings already running are discarded, and the views' tiles are drawn again. The current images stay until the new
 	// ones land (R22: the map used to flash blank here), and the redraws reuse the stored edit overlays without reading
-	// chunk data. A stale tile no view shows is drawn again when one asks for it.
-	const int32 Redrawn = InvalidateAllTiles();
-	UE_LOG(LogVoxelMap, Log, TEXT("Terrain conditioning changed: %d map tile image(s) stale, %d queued for the views."),
+	// chunk data. A stale tile no view shows is drawn again when one asks for it. A change with a region (a zone, a
+	// line, a road a conditioner worked out late: they arrive one by one) makes stale only the tiles it reaches.
+	if (Region.bEverywhere)
+	{
+		const int32 Redrawn = InvalidateAllTiles();
+		DrawStats.ConditioningStale += Redrawn;
+		UE_LOG(LogVoxelMap, Log, TEXT("Terrain conditioning changed: %d map tile image(s) stale, %d queued for the views."),
+			Redrawn, TileQueue.NumWaiting());
+		return;
+	}
+	const int32 Redrawn = InvalidateTilesIn(Region);
+	DrawStats.ConditioningStale += Redrawn;
+	UE_LOG(LogVoxelMap, Verbose, TEXT("Terrain conditioning changed in a region: %d map tile image(s) stale, %d queued for the views."),
 		Redrawn, TileQueue.NumWaiting());
 }
 
@@ -918,11 +961,11 @@ FString UVoxelMapSubsystem::GetDebugStats() const
 		Levels += FString::Printf(TEXT("%sL%d:%d"), Levels.IsEmpty() ? TEXT("") : TEXT(" "), Pair.Key, Pair.Value);
 	}
 	return FString::Printf(
-		TEXT("tiles cached=%d explored=%lld (mask %d blocks, %d full, %.1f KB) waiting=%d drawing=%d waiting-peak=%d (minimap %d, world map %d, edits %d, prefetch %d) | drawn=%lld (%.0f/s over %.0f s, %.2f ms a tile on a worker) replaced=%lld image-requests=%lld | images=%d %.1f/%.0f MB [%s] evicted=%lld | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d"),
+		TEXT("tiles cached=%d explored=%lld (mask %d blocks, %d full, %.1f KB) waiting=%d drawing=%d waiting-peak=%d (minimap %d, world map %d, edits %d, prefetch %d) | drawn=%lld (%.0f/s over %.0f s, %.2f ms a tile on a worker) replaced=%lld image-requests=%lld conditioning-stale=%lld | images=%d %.1f/%.0f MB [%s] evicted=%lld | overlays=%d columns=%d bytes=%d edited-tiles=%d dirty=%d awaiting=%d rebuild-queued=%d"),
 		TileStore.Num(), ExploredMask.Num(), ExploredMask.NumBlocks(), ExploredMask.NumFullBlocks(), ExploredMask.GetAllocatedSize() / 1024.0, TileQueue.NumWaiting(), TileQueue.NumDrawing(), DrawStats.WaitingPeak,
 		TileQueue.NumWaitingFor(EVoxelMapRequester::Minimap), TileQueue.NumWaitingFor(EVoxelMapRequester::WorldMap),
 		TileQueue.NumWaitingFor(EVoxelMapRequester::Edits), TileQueue.NumWaitingFor(EVoxelMapRequester::Prefetch),
-		DrawStats.Drawn, static_cast<double>(DrawStats.Drawn) / Elapsed, Elapsed, MsPerTile, DrawStats.Replaced, DrawStats.ImageRequests,
+		DrawStats.Drawn, static_cast<double>(DrawStats.Drawn) / Elapsed, Elapsed, MsPerTile, DrawStats.Replaced, DrawStats.ImageRequests, DrawStats.ConditioningStale,
 		TileStore.Num(), TileStore.GetBytes() / MB, TileStore.GetBudget() / MB, *Levels, TileStore.GetEvictions(),
 		EditOverlays.Num(), MaskedColumns, Bytes, TileEditedChunks.Num(), OverlayDirtyTiles.Num(),
 		OverlayAwaitingTiles.Num(), OverlayRebuildTiles.Num());
