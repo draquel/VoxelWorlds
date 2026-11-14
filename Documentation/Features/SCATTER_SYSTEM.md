@@ -257,6 +257,13 @@ What that rule fixed:
   ground generation makes, POI pads and their falloff rings included (`Conditioning`, gathered by the chunk manager,
   `SetConditioningGatherer`). Before, a pad cut below a chunk's top left its ground points underground, and the chunk
   under a raised pad read as open surface.
+- **A conditioning line's clear width** (the terrain lines plan's L3). `ExtractChunkSurfacePoints` drops the surface
+  points on the ground inside a line's clear half width (`FVoxelConditioning::IsClearedAt`, `IsClearedOnSphere` on a
+  planet, from the same `Conditioning`), in all three extractors, so no pass places anything on a road, a later pass
+  from the cached points included. A line is there for the world's life, as the chunk's generated voxels are, so the
+  points are dropped and not masked at placement as an exclusion volume's are; points under the ground (a cave's floor
+  under a road) are left. A set with no line pays one count test. Test
+  `VoxelWorlds.Scatter.ConditioningLine.ClearWidth`.
 - **The voxel over a heightmap chunk's top layer** (G26, G28). Solid, the chunk's top voxel is no surface (the chunk above
   extracts it) and the column below is covered; air, the crossing interpolates against it. Before G26 it was taken for
   air, which copied the surface onto the chunk's top face up to 1.5 voxels under the ground; before G28 it still was
@@ -1034,7 +1041,13 @@ Stateless, thread-safe static class that stamps tree blocks into VoxelData durin
 2. For current chunk AND up to 26 neighbors, call `ComputeTreePositionsForChunk()`:
    - Deterministic seed from `HashCombine(WorldSeed, SourceChunkCoord)`
    - `floor(TreeDensity)` trees, plus one with the fractional part's probability
-   - Random X,Y within source chunk → the world mode's generated surface there (`GetSurfaceOnUpLine`) for Z
+   - Random X,Y within source chunk → the world mode's natural surface there (`GetSurfaceOnUpLine`) for Z
+   - Conditioning lines over the source chunk (the terrain lines plan's L3): a tree inside a line's clear half width
+     is not planted, and a tree beside a line that moves the ground stands on the ground the line leaves
+     (`FVoxelConditioning::IsClearedAt`, `ApplyLinesToHeight`). The chunk manager gathers the lines over the chunk and
+     the chunks its trees may be planted in (`GatherTreeConditioning`, `GetSourceChunkRadius`) for the injection and
+     for the tree queries (`FindVoxelTreeAt`, `FindVoxelTreesNear`), so both compute the same trees. Conditioning
+     zones are not read: a tree on a POI's pad stands at the natural height (G206)
    - Filter by placement rules: material, biome, slope, elevation, water level
 3. For each tree position, if bounding box overlaps current chunk: call `StampTree()`
 

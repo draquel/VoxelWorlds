@@ -188,7 +188,8 @@ float FVoxelFarFieldSurface::SampleHeight(double WorldX, double WorldY, const FV
 	return Height;
 }
 
-void FVoxelFarFieldSurface::SampleConditionsXY(double WorldX, double WorldY, float Height, uint8& OutMaterial, uint8& OutBiome) const
+void FVoxelFarFieldSurface::SampleConditionsXY(double WorldX, double WorldY, float Height, uint8& OutMaterial, uint8& OutBiome,
+	const FVoxelConditioning* Conditioning) const
 {
 	if (Biomes.bIsValid)
 	{
@@ -196,26 +197,30 @@ void FVoxelFarFieldSurface::SampleConditionsXY(double WorldX, double WorldY, flo
 		FVoxelWaterSample Over;
 		const bool bWater = Water.Sample(FVector(WorldX, WorldY, Height), Over);
 		FVoxelSurfaceQuery::QuerySurfaceConditions(static_cast<float>(WorldX), static_cast<float>(WorldY), Height, VoxelSize, Biomes, WorldSeed,
-			bWater, static_cast<float>(Over.SurfaceLevel), OutMaterial, OutBiome);
+			bWater, static_cast<float>(Over.SurfaceLevel), OutMaterial, OutBiome, Conditioning);
 		return;
 	}
-	// No biomes: generation's material by depth (the surface's at depth 0).
+	// No biomes: generation's material by depth (the surface's at depth 0), a conditioning line's band over it.
 	OutMaterial = WorldMode->GetMaterialAtDepth(FVector(WorldX, WorldY, Height), Height, 0.0f);
 	OutBiome = 0;
+	if (Conditioning && Conditioning->Lines.Num() > 0)
+	{
+		Conditioning->GetBandAt(WorldX, WorldY, OutMaterial);
+	}
 }
 
-FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMixXY(double WorldX, double WorldY, float Height) const
+FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMixXY(double WorldX, double WorldY, float Height, const FVoxelConditioning* Conditioning) const
 {
 	if (Biomes.bIsValid)
 	{
 		FVoxelWaterSample Over;
 		const bool bWater = Water.Sample(FVector(WorldX, WorldY, Height), Over);
 		return FVoxelSurfaceQuery::QuerySurfaceMaterialMix(static_cast<float>(WorldX), static_cast<float>(WorldY), Height, Biomes, WorldSeed,
-			bWater, static_cast<float>(Over.SurfaceLevel));
+			bWater, static_cast<float>(Over.SurfaceLevel), Conditioning);
 	}
 	FVoxelSurfaceMaterialMix Mix;
 	uint8 Biome = 0;
-	SampleConditionsXY(WorldX, WorldY, Height, Mix.Materials[0], Biome);
+	SampleConditionsXY(WorldX, WorldY, Height, Mix.Materials[0], Biome, Conditioning);
 	Mix.Materials[1] = Mix.Materials[0];
 	Mix.BiomeID = Biome;
 	return Mix;
@@ -245,31 +250,37 @@ float FVoxelFarFieldSurface::SampleAltitude(const FVector& Direction, const FVox
 	return Altitude;
 }
 
-void FVoxelFarFieldSurface::SampleConditions(const FVector& Direction, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome) const
+void FVoxelFarFieldSurface::SampleConditions(const FVector& Direction, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome,
+	const FVoxelConditioning* Conditioning) const
 {
 	const FSphericalPlanetWorldMode& Planet = GetPlanet();
 	if (Biomes.bIsValid)
 	{
 		FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(Planet, Direction, Altitude, Continentalness, Altitude, VoxelSize, NoiseParams,
-			Biomes, Water, OutMaterial, OutBiome);
+			Biomes, Water, OutMaterial, OutBiome, Conditioning);
 		return;
 	}
-	// No biomes: generation's material by depth (the surface's at depth 0).
+	// No biomes: generation's material by depth (the surface's at depth 0), a conditioning line's band over it.
 	const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
 	OutMaterial = Planet.GetMaterialAtDepth(Params.PlanetCenter + Direction * (Params.PlanetRadius + Altitude), Altitude, 0.0f);
 	OutBiome = 0;
+	if (Conditioning && Conditioning->Lines.Num() > 0)
+	{
+		Conditioning->GetBandOnSphere(Direction, Params.PlanetRadius, OutMaterial);
+	}
 }
 
-FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMix(const FVector& Direction, float Altitude, float Continentalness) const
+FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMix(const FVector& Direction, float Altitude, float Continentalness,
+	const FVoxelConditioning* Conditioning) const
 {
 	const FSphericalPlanetWorldMode& Planet = GetPlanet();
 	if (Biomes.bIsValid)
 	{
-		return FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(Planet, Direction, Altitude, Continentalness, NoiseParams, Biomes, Water);
+		return FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(Planet, Direction, Altitude, Continentalness, NoiseParams, Biomes, Water, Conditioning);
 	}
 	FVoxelSurfaceMaterialMix Mix;
 	uint8 Biome = 0;
-	SampleConditions(Direction, Altitude, Continentalness, Mix.Materials[0], Biome);
+	SampleConditions(Direction, Altitude, Continentalness, Mix.Materials[0], Biome, Conditioning);
 	Mix.Materials[1] = Mix.Materials[0];
 	Mix.BiomeID = Biome;
 	return Mix;
@@ -288,23 +299,25 @@ float FVoxelFarFieldSurface::SampleAltitude(const FVoxelFarFieldSample& Sample, 
 	return SampleAltitude(Sample.Direction, Conditioning, OutContinentalness);
 }
 
-void FVoxelFarFieldSurface::SampleConditions(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome) const
+void FVoxelFarFieldSurface::SampleConditions(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome,
+	const FVoxelConditioning* Conditioning) const
 {
 	if (bHeightmap)
 	{
-		SampleConditionsXY(Sample.XY.X, Sample.XY.Y, Altitude, OutMaterial, OutBiome);
+		SampleConditionsXY(Sample.XY.X, Sample.XY.Y, Altitude, OutMaterial, OutBiome, Conditioning);
 		return;
 	}
-	SampleConditions(Sample.Direction, Altitude, Continentalness, OutMaterial, OutBiome);
+	SampleConditions(Sample.Direction, Altitude, Continentalness, OutMaterial, OutBiome, Conditioning);
 }
 
-FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMix(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness) const
+FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMix(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness,
+	const FVoxelConditioning* Conditioning) const
 {
 	if (bHeightmap)
 	{
-		return SampleMaterialMixXY(Sample.XY.X, Sample.XY.Y, Altitude);
+		return SampleMaterialMixXY(Sample.XY.X, Sample.XY.Y, Altitude, Conditioning);
 	}
-	return SampleMaterialMix(Sample.Direction, Altitude, Continentalness);
+	return SampleMaterialMix(Sample.Direction, Altitude, Continentalness, Conditioning);
 }
 
 // ==================== FVoxelFarField: statics ====================
@@ -568,6 +581,25 @@ bool FVoxelFarFieldFrame::TakesZones(const FVoxelFarFieldFootprint& Footprint) c
 		return Footprint.Box.GetSize().X <= Settings.ZoneGatherMax;
 	}
 	return Footprint.CapAngle <= Settings.ZoneGatherMax;
+}
+
+double FVoxelFarFieldFrame::LeastLineHalfWidth(int32 Level) const
+{
+	return FVoxelConditioningLine::CoarseHalfWidthPerSpacing * Settings.GetPatchArc(Level) / FMath::Max(Settings.PatchQuads, 2);
+}
+
+FVoxelFarFieldRegion FVoxelFarFieldFrame::GrownBy(const FVoxelFarFieldRegion& Region, double Distance) const
+{
+	FVoxelFarFieldRegion Grown = Region;
+	if (Grown.bCap)
+	{
+		Grown.AngularRadius += Distance / FMath::Max(Settings.Radius, 1.0);
+	}
+	else if (Grown.Box.bIsValid)
+	{
+		Grown.Box = Grown.Box.ExpandBy(Distance);
+	}
+	return Grown;
 }
 
 bool FVoxelFarFieldFrame::GetColumn(const FVoxelFarFieldFootprint& Footprint, FIntPoint& OutColumn) const
@@ -853,7 +885,7 @@ void FVoxelFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, const FV
 			}
 			Normals[I + J * Row] = FVector3f(Normal);
 			FVoxelSurfaceMaterialMix& Mix = Mixes[I + J * Row];
-			Mix = Surface.SampleMaterialMix(Samples[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index]);
+			Mix = Surface.SampleMaterialMix(Samples[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index], &Conditioning);
 			Materials[I + J * Row] = Mix.Materials[0];
 			Biomes[I + J * Row] = Mix.BiomeID;
 			Out.MinAltitude = FMath::Min(Out.MinAltitude, static_cast<float>(Altitudes[Index]));
@@ -1402,7 +1434,8 @@ void FVoxelFarField::InvalidateRegion(const FVoxelFarFieldRegion& Region)
 	for (TPair<uint64, TUniquePtr<FPatchState>>& Pair : Patches)
 	{
 		FPatchState& Patch = *Pair.Value;
-		if (Patch.bBuilt && Frame.TakesZones(Patch) && Frame.Intersects(Patch, Region))
+		// A patch takes a line as at least its least half width wide, so it is changed that far outside the line's reach.
+		if (Patch.bBuilt && Frame.TakesZones(Patch) && Frame.Intersects(Patch, Frame.GrownBy(Region, Frame.LeastLineHalfWidth(Patch.Key.Level))))
 		{
 			Patch.bDirty = true;
 		}
@@ -1892,7 +1925,12 @@ void FVoxelFarField::LaunchBuilds()
 		FVoxelConditioning Conditioning;
 		if (ConditioningGatherer && Frame.TakesZones(*Patch))
 		{
-			ConditioningGatherer(Frame.RegionOf(*Patch), Conditioning);
+			// The patch samples the surface every vertex spacing: it takes every line as at least 0.71 of that wide, for
+			// the height and for the band, and gathers over its footprint grown by as much, so a line just outside it
+			// whose widened band reaches in is not missed.
+			const double Least = Frame.LeastLineHalfWidth(Patch->Key.Level);
+			ConditioningGatherer(Frame.GrownBy(Frame.RegionOf(*Patch), Least), Conditioning);
+			Conditioning.LeastHalfWidth = static_cast<float>(Least);
 		}
 		Patch->bBuilding = true;
 		Patch->bDirty = false;

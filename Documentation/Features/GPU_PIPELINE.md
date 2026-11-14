@@ -77,10 +77,11 @@ the CPU). Per voxel, in the CPU generator's order:
 
    **Conditioning lines** (`ConditioningLines.ush`; `WORLD_MODES.md`, "Conditioning lines"). The upload builds the
    chunk's segment list with the function the CPU generator uses (`FVoxelChunkLineSegments::Build`) and sends it as
-   `ConditioningLineSegmentCount` and `ConditioningLineData`, a `StructuredBuffer<float4>` of 4 float4s a segment, as
-   the height rules and ores travel: `[A.xyz, target at A] [B.xyz, target at B] [half width at A, half width at B,
-   falloff, strength] [line index, blend, 0, 0]`, positions relative to the chunk's origin corner on a heightmap world
-   and to the anchor's point on the datum sphere on a planet. `GpuApplyConditioningLines` walks it in one flat loop
+   `ConditioningLineSegmentCount` and `ConditioningLineData`, a `StructuredBuffer<float4>` of 5 float4s a segment
+   (`VOXELGEN_LINE_SEGMENT_STRIDE`, `FVoxelConditioningLine::SegmentStride`), as the height rules and ores travel:
+   `[A.xyz, target at A] [B.xyz, target at B] [half width at A, half width at B, falloff, strength] [line index,
+   blend, band material or -1, band depth] [band half width, minimum cave depth, 0, 0]`, positions relative to the
+   chunk's origin corner on a heightmap world and to the anchor's point on the datum sphere on a planet. `GpuApplyConditioningLines` walks it in one flat loop
    with no attribute: per segment the nearest place on it and the squared distance, the nearest of a line's segments
    kept; when the line index changes, and after the last segment, the line before blends
    (`GpuBlendConditioningLine`: the distance, on a planet the arc under the chord with `asin` by its series as the
@@ -88,6 +89,14 @@ the CPU). Per voxel, in the CPU generator's order:
    blend). The heightmap branch passes the voxel's offset in the plane, the planet branch `SurfaceOffset`. A chunk
    with no segment skips the call on one count test. `VoxelWorlds.Generation.GPUvsCPULineParity` holds the two sides
    to each other.
+
+   The same walk leaves the surface under the lines at the voxel's column (`ConditioningLineSurface`, the CPU's
+   `FVoxelChunkLineSurface`; `WORLD_MODES.md`, "The surface under a line"): the band's material and depth where the
+   voxel's column lies on a line's band (the later line's where two overlap) and the largest of the lines' minimum
+   cave depths, each times its line's profile there. A line of strength 0 has a profile and no weight, so it paints
+   and moves no height. The cave carve takes the depth (`GpuCaveCarve`'s `MinDepthUnderLines`: every layer's minimum
+   depth is at least it), and the material step writes the band's material down to its depth after the height rules
+   and before the cave-wall override and the ores, in the biome pipeline and in the depth-only one.
 2. **Biome blend** from temperature, moisture and continentalness, before the caves (the caves read the leading
    biome's cave overrides).
 3. **Caves**: `GpuCaveCarve` with the biome's overrides and the sea's minimum depth.

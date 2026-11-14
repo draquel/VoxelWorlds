@@ -26,7 +26,10 @@ static TAutoConsoleVariable<FString> CVarVoxelWorldTestLines(
 	TEXT("'lat,lon' in degrees on a planet (joined along great circles). Keys: hw (half width in voxels, 3), falloff (voxels, 4), ")
 	TEXT("step (vertex spacing in voxels, 2), offset (uu added to the target, 0), smooth (uu of the natural height averaged each way ")
 	TEXT("along the line, 1200), grade (the target's steepest slope as a fraction, 0 = no limit), flat (1: one target all along, the ")
-	TEXT("natural height at the first point plus the offset), strength (1). The target follows the natural terrain. Empty: none."),
+	TEXT("natural height at the first point plus the offset), strength (1; 0 is a line that only paints and clears). The surface along ")
+	TEXT("the line: band (a material id; none), bandhw (the band's half width in voxels, 0 = the core's), banddepth (voxels, 4), cave ")
+	TEXT("(no cave within this many voxels under the line, 0), clear (half width in voxels kept clear of scatter, PCG points and voxel ")
+	TEXT("trees, 0). The target follows the natural terrain. Empty: none."),
 	ECVF_Default);
 
 namespace VoxelTestLines
@@ -104,6 +107,11 @@ namespace VoxelTestLines
 			else if (Key == TEXT("grade")) { OutGrade = Number; }
 			else if (Key == TEXT("flat")) { bOutFlat = Number != 0.0f; }
 			else if (Key == TEXT("strength")) { OutParams.Strength = Number; }
+			else if (Key == TEXT("band")) { OutParams.Surface.BandMaterialID = FMath::RoundToInt32(Number); }
+			else if (Key == TEXT("bandhw")) { OutParams.Surface.BandHalfWidth = Number * VoxelSize; }
+			else if (Key == TEXT("banddepth")) { OutParams.Surface.BandDepth = Number; }
+			else if (Key == TEXT("cave")) { OutParams.Surface.MinCaveDepth = Number; }
+			else if (Key == TEXT("clear")) { OutParams.Surface.ClearHalfWidth = Number * VoxelSize; }
 			else
 			{
 				OutError = FString::Printf(TEXT("unknown key '%s'"), *Key);
@@ -213,9 +221,10 @@ void VoxelStreamingDiagnostics::AddTestConditioningLines(UVoxelChunkManager& Man
 			Params.Vertices.Add(FVoxelConditioningLineVertex(Path[Index], (bFlat ? Natural[0] : Target[Index]) + Offset, HalfWidth));
 		}
 		Params.Id = LineIndex + 1;
-		UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.TestLines: line %d: %d vertices from %d points, half width %.0f, target %.0f to %.0f."),
+		UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.TestLines: line %d: %d vertices from %d points, half width %.0f, target %.0f to %.0f; band material %d (half width %.0f, %.0f voxels deep), caves under %.0f voxels, clear half width %.0f."),
 			LineIndex + 1, Params.Vertices.Num(), Points.Num(), HalfWidth,
-			Params.Vertices.Num() > 0 ? Params.Vertices[0].TargetHeight : 0.0f, Params.Vertices.Num() > 0 ? Params.Vertices.Last().TargetHeight : 0.0f);
+			Params.Vertices.Num() > 0 ? Params.Vertices[0].TargetHeight : 0.0f, Params.Vertices.Num() > 0 ? Params.Vertices.Last().TargetHeight : 0.0f,
+			Params.Surface.BandMaterialID, Params.Surface.BandHalfWidth, Params.Surface.BandDepth, Params.Surface.MinCaveDepth, Params.Surface.ClearHalfWidth);
 		Manager.AddConditioningLine(Params);
 	}
 }

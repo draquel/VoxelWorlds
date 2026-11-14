@@ -13,7 +13,7 @@ FVector FVoxelTreeQuery::GlobalVoxelToWorldCentre(const UVoxelWorldConfiguration
 }
 
 bool FVoxelTreeQuery::FindAt(const UVoxelWorldConfiguration& Config, const IVoxelWorldMode& WorldMode, const FVoxelWaterLevels& Water, const FVector& WorldPos,
-	FReadVoxel ReadVoxel, FVoxelTreeInstance& OutTree)
+	FReadVoxel ReadVoxel, FVoxelTreeInstance& OutTree, const FVoxelConditioning* Conditioning)
 {
 	const float VoxelSize = Config.VoxelSize;
 	const FVector Relative = (WorldPos - Config.WorldOrigin) / VoxelSize;
@@ -25,7 +25,7 @@ bool FVoxelTreeQuery::FindAt(const UVoxelWorldConfiguration& Config, const IVoxe
 	TArray<FVoxelTreeInstance> Candidates;
 	FVoxelTreeInjector::FindTreesWithTrunkAt(GlobalVoxel, Config.ChunkSize, VoxelSize, Config.WorldOrigin,
 		Config.WorldSeed, Config.TreeTemplates, Config.GetNoiseParams(), WorldMode, Config.TreeDensity,
-		Config.BiomeConfiguration, TreeWater.bAny, static_cast<float>(TreeWater.GetLevel()), Candidates);
+		Config.BiomeConfiguration, TreeWater.bAny, static_cast<float>(TreeWater.GetLevel()), Candidates, Conditioning);
 
 	// The voxel must still be that tree's trunk block; where two trunks touch, the tree with more of its trunk left wins.
 	const FVoxelData Voxel = ReadVoxel(GlobalVoxelToWorldCentre(&Config, GlobalVoxel));
@@ -50,7 +50,7 @@ bool FVoxelTreeQuery::FindAt(const UVoxelWorldConfiguration& Config, const IVoxe
 }
 
 void FVoxelTreeQuery::FindNear(const UVoxelWorldConfiguration& Config, const IVoxelWorldMode& WorldMode, const FVoxelWaterLevels& Water, const FVector& WorldPos, float Radius,
-	FReadVoxel ReadVoxel, TArray<FVoxelTreeInstance>& OutTrees)
+	FReadVoxel ReadVoxel, TArray<FVoxelTreeInstance>& OutTrees, const FVoxelConditioning* Conditioning)
 {
 	OutTrees.Reset();
 	const float VoxelSize = Config.VoxelSize;
@@ -76,7 +76,7 @@ void FVoxelTreeQuery::FindNear(const UVoxelWorldConfiguration& Config, const IVo
 				FBox(FVector(ColumnMin.X, ColumnMin.Y, -UE_LARGE_WORLD_MAX), FVector(ColumnMin.X + ChunkWorldSize, ColumnMin.Y + ChunkWorldSize, UE_LARGE_WORLD_MAX)));
 			FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), ChunkSize, VoxelSize, Config.WorldOrigin,
 				Config.WorldSeed, Config.GetNoiseParams(), WorldMode, Config.TreeDensity, Config.TreeTemplates,
-				Config.BiomeConfiguration, TreeWater.bAny, static_cast<float>(TreeWater.GetLevel()), Positions, Templates, Seeds);
+				Config.BiomeConfiguration, TreeWater.bAny, static_cast<float>(TreeWater.GetLevel()), Positions, Templates, Seeds, Conditioning);
 			for (int32 i = 0; i < Positions.Num(); ++i)
 			{
 				FVoxelTreeInstance Tree;

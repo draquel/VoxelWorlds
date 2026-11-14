@@ -197,10 +197,15 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     float TerrainAltitude = EffectiveBaseHeight + TerrainNoise * EffectiveHeightScale * 0.5f;
 
     // Terrain conditioning (SP-B10): the planet lines (the chunk's segment list, relative to the anchor's datum point),
-    // then the planet zones, blend the altitude along this direction before the SDF, as on the CPU.
+    // then the planet zones, blend the altitude along this direction before the SDF, as on the CPU. The lines also
+    // leave a surface along this direction: the band's material and depth, the caves' minimum depth.
+    ConditioningLineSurface LineSurface;
+    LineSurface.BandMaterial = -1;
+    LineSurface.BandDepth = 0.0f;
+    LineSurface.MinCaveDepth = 0.0f;
     if (ConditioningLineSegmentCount > 0)
     {
-        TerrainAltitude = GpuApplyConditioningLines(SurfaceOffset, TerrainAltitude, PlanetRadius);
+        TerrainAltitude = GpuApplyConditioningLines(SurfaceOffset, TerrainAltitude, PlanetRadius, LineSurface);
     }
     if (ConditioningZoneCount > 0)
     {
@@ -235,7 +240,7 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         float CaveCarve = 0.0f;
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            CaveCarve = GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, OutBiomeID, bUnderwaterColumn, true);
+            CaveCarve = GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, OutBiomeID, bUnderwaterColumn, true, LineSurface.MinCaveDepth);
             Density = ApplyCaveCarve(Density, CaveCarve);
         }
 
@@ -244,6 +249,12 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         MaterialID = GpuBlendedMaterial(Blend, DepthBelowSurface, bUnderwaterMaterial, BlendDitherBase + int3(VoxelCoord));
 
         MaterialID = ApplyGpuHeightRules(MaterialID, Altitude, DepthBelowSurface);
+
+        // A conditioning line's band, as in the heightmap branch: after the height rules, before the cave walls and ores
+        if (LineSurface.BandMaterial >= 0 && DepthBelowSurface < LineSurface.BandDepth)
+        {
+            MaterialID = (uint)LineSurface.BandMaterial;
+        }
 
         if (CaveWallOverrideEnabled != 0 && CaveCarve > 0.0f && CaveCarve < 1.0f
             && Density >= 127u && DepthBelowSurface >= CaveWallMaterialMinDepth)
@@ -267,9 +278,13 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     else
     {
         MaterialID = GetMaterialForPlanet(DepthBelowSurface * VoxelSize);
+        if (LineSurface.BandMaterial >= 0 && DepthBelowSurface < LineSurface.BandDepth)
+        {
+            MaterialID = (uint)LineSurface.BandMaterial;
+        }
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            Density = ApplyCaveCarve(Density, GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, 0u, bUnderwaterColumn, true));
+            Density = ApplyCaveCarve(Density, GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, 0u, bUnderwaterColumn, true, LineSurface.MinCaveDepth));
         }
     }
 

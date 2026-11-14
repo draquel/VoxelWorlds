@@ -224,8 +224,18 @@ struct VOXELMAP_API FVoxelMapTileFrame
 	 */
 	void SourcePixel(const FVoxelMapTileId& Id, int32 GX, int32 GY, const FVoxelMapTileSample& Sample, FIntPoint& OutTile0, int32& OutPX, int32& OutPY) const;
 
-	/** GatherConditioning for a tile at any level: the conditioning over its area and apron. */
+	/**
+	 * GatherConditioning for a tile at any level: the conditioning over its area and apron. Above level 0 the set takes
+	 * every line as at least 0.71 of a pixel wide (FVoxelConditioning::LeastHalfWidth: a pixel is a point sample every
+	 * 2^Level voxels), and a tile at a level that takes no lines (TakesLines) gets the zones alone.
+	 */
 	void GatherConditioning(const UVoxelChunkManager& ChunkManager, const FVoxelMapTileId& Id, FVoxelConditioning& Out) const;
+
+	/**
+	 * Whether a tile at a level draws conditioning lines: up to the level whose tile is
+	 * FVoxelConditioningLine::GatherLimitChunks chunks wide (level 6). Above it a road is far under a pixel.
+	 */
+	static bool TakesLines(int32 Level);
 
 private:
 	/** Planets: a tile's face and its indices along the face at its level. @return False outside the level's atlas */

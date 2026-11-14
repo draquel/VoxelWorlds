@@ -578,18 +578,39 @@ void FVoxelMapTileFrame::GatherConditioning(const UVoxelChunkManager& ChunkManag
 		return;
 	}
 	const double Scale = static_cast<double>(1 << Id.Level);
+	// A pixel above level 0 is a point sample every 2^Level voxels: the tile takes every line as at least 0.71 of that
+	// wide, for the height and for the band, so a road is an unbroken line on the map and not dashes, and gathers over
+	// its area grown by as much. A tile wider than the gather limit takes no lines (a road is far under a pixel there).
+	const bool bLines = TakesLines(Id.Level);
+	const double Least = bLines ? FVoxelConditioningLine::CoarseHalfWidthPerSpacing * Scale * VoxelSize : 0.0;
 	if (bPlanet)
 	{
 		// The tile's cap: its centre's direction and 1.5 of its widths of angle.
 		const FVector Centre = Grid.DirectionAt(FirstLevel0Tile(Id), 0.5 * Scale, 0.5 * Scale);
-		ChunkManager.GatherConditioningOnSphere(Centre, 1.5 * Scale * GetTileWorldSize() / FMath::Max(Radius, 1.0),
+		ChunkManager.GatherConditioningOnSphere(Centre, (1.5 * Scale * GetTileWorldSize() + Least) / FMath::Max(Radius, 1.0),
 			EVoxelConditioningGather::Ready, Out);
-		return;
 	}
-	// The tile and its one-pixel apron.
-	const FVector2D TileMin(
-		(static_cast<double>(Id.Coord.X) * ChunkSize - 1.0) * Scale * VoxelSize + WorldOrigin.X,
-		(static_cast<double>(Id.Coord.Y) * ChunkSize - 1.0) * Scale * VoxelSize + WorldOrigin.Y);
-	const FVector2D TileMax = TileMin + FVector2D((ChunkSize + 2) * Scale * VoxelSize);
-	ChunkManager.GatherConditioning(FBox2D(TileMin, TileMax), EVoxelConditioningGather::Ready, Out);
+	else
+	{
+		// The tile and its one-pixel apron.
+		const FVector2D TileMin(
+			(static_cast<double>(Id.Coord.X) * ChunkSize - 1.0) * Scale * VoxelSize + WorldOrigin.X,
+			(static_cast<double>(Id.Coord.Y) * ChunkSize - 1.0) * Scale * VoxelSize + WorldOrigin.Y);
+		const FVector2D TileMax = TileMin + FVector2D((ChunkSize + 2) * Scale * VoxelSize);
+		ChunkManager.GatherConditioning(FBox2D(TileMin, TileMax).ExpandBy(Least), EVoxelConditioningGather::Ready, Out);
+	}
+	if (bLines)
+	{
+		Out.LeastHalfWidth = static_cast<float>(Least);
+	}
+	else
+	{
+		Out.Lines.Reset();
+	}
+}
+
+bool FVoxelMapTileFrame::TakesLines(int32 Level)
+{
+	// A tile at a level is 2^Level chunks wide.
+	return Level >= 0 && Level < 31 && (1 << Level) <= FVoxelConditioningLine::GatherLimitChunks;
 }
