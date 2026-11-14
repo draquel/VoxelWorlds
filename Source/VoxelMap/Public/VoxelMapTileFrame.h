@@ -237,6 +237,24 @@ struct VOXELMAP_API FVoxelMapTileFrame
 	 */
 	static bool TakesLines(int32 Level);
 
+	/**
+	 * The region a tile gathers its conditioning over (GatherConditioning): the tile and its apron, grown by the least
+	 * half width its level takes lines with; a box on a heightmap world, a cap on a planet.
+	 * @param Id The tile
+	 * @param OutLeastHalfWidth The least half width a line is taken to have at the tile's level (0 at level 0 and at a
+	 *                          level that takes no lines)
+	 * @return The region
+	 */
+	FVoxelConditioningRegion GetConditioningRegion(const FVoxelMapTileId& Id, double& OutLeastHalfWidth) const;
+
+	/**
+	 * Whether a change of conditioning reaches a tile's image: the changed region meets the region the tile gathers its
+	 * conditioning over (everywhere reaches every tile; a region of the other kind of world reaches none).
+	 * @param Id The tile
+	 * @param Region Where the conditioning changed
+	 */
+	bool MeetsConditioningRegion(const FVoxelMapTileId& Id, const FVoxelConditioningRegion& Region) const;
+
 private:
 	/** Planets: a tile's face and its indices along the face at its level. @return False outside the level's atlas */
 	bool FaceIndicesAt(const FVoxelMapTileId& Id, int32& OutFace, int32& OutU, int32& OutV) const;

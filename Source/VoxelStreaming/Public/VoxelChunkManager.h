@@ -1322,6 +1322,9 @@ public:
 	/** @return Whether the game's conditioner is set (SetTerrainConditioner) */
 	bool HasTerrainConditioner() const { return ConditioningSources.HasConditioner(); }
 
+	/** Fire OnTerrainConditioningChanged and OnTerrainConditioningChangedIn for a region. */
+	void BroadcastTerrainConditioningChanged(const FVoxelConditioningRegion& Region);
+
 	/** @return How many generation requests this manager has built since it was initialized */
 	int64 GetNumGenerationRequestsBuilt() const { return GenerationRequestsBuilt; }
 
@@ -1385,9 +1388,19 @@ public:
 	/**
 	 * Fired when the terrain conditioning changes (a conditioner registered, a zone or a line added, or a conditioner's
 	 * NotifyTerrainConditioningChanged). Chunks
-	 * generated earlier keep their terrain; caches of analytic heights (map tiles) should rebuild.
+	 * generated earlier keep their terrain; caches of analytic heights should rebuild. A reader that keeps something per
+	 * place binds OnTerrainConditioningChangedIn, which says where.
 	 */
 	FSimpleMulticastDelegate OnTerrainConditioningChanged;
+
+	/**
+	 * Fired with OnTerrainConditioningChanged, with where the conditioning changed: a zone's or a line's reach, the
+	 * region a conditioner named (NotifyTerrainConditioningChanged: a road worked out after a Ready gather), or
+	 * everywhere (a conditioner was set). The map draws again only the tiles the region meets: a conditioner's lines
+	 * arrive one by one, and each used to make every tile stale.
+	 */
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnVoxelTerrainConditioningChangedIn, const FVoxelConditioningRegion& /*Region*/);
+	FOnVoxelTerrainConditioningChangedIn OnTerrainConditioningChangedIn;
 
 	// ==================== Collision Mesh Generation ====================
 

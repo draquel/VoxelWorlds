@@ -406,8 +406,12 @@ private:
 	UFUNCTION()
 	void OnChunkGenerated(FIntVector ChunkCoord);
 
-	/** Terrain conditioning changed (POI pads registered after the first tiles): rebuild every tile image. */
-	void HandleTerrainConditioningChanged();
+	/**
+	 * Terrain conditioning changed (UVoxelChunkManager::OnTerrainConditioningChangedIn): the tile images the changed
+	 * region reaches are stale and drawn again; every image when it changed everywhere (a conditioner was set after the
+	 * first tiles), only the tiles a zone, a line or a conditioner's late line meets otherwise.
+	 */
+	void HandleTerrainConditioningChanged(const FVoxelConditioningRegion& Region);
 
 	/** Mark a level-0 tile explored (ExplorationRevision counts the new ones). */
 	void MarkExplored(FIntPoint TileCoord);
@@ -431,6 +435,13 @@ private:
 
 	/** Mark every stored image stale and queue again the ones the views show (RedrawAllTiles, a conditioning change). */
 	int32 InvalidateAllTiles();
+
+	/**
+	 * InvalidateAllTiles for the tiles a change of conditioning reaches (FVoxelMapTileFrame::MeetsConditioningRegion).
+	 * @param Region Where the conditioning changed
+	 * @return How many tiles were made stale
+	 */
+	int32 InvalidateTilesIn(const FVoxelConditioningRegion& Region);
 
 	/**
 	 * The colour of a level-0 pixel from the finest level stored over it (voxel.Map.Capture).
@@ -566,7 +577,7 @@ private:
 	/** What each view shows, as it last asked (RequestView): an invalidated tile in a view is queued again for it. */
 	TSet<FVoxelMapTileId> ViewTiles[static_cast<int32>(EVoxelMapRequester::Num)];
 
-	/** Binding on the chunk manager's OnTerrainConditioningChanged. */
+	/** Binding on the chunk manager's OnTerrainConditioningChangedIn. */
 	FDelegateHandle ConditioningChangedHandle;
 
 	FCriticalSection TileMutex;		// Guards TileStore writes (made on the game thread when a drawing completes)
@@ -612,6 +623,8 @@ private:
 		int64 Replaced = 0;
 		/** Tiles the views' requests queued (RequestView). */
 		int64 ImageRequests = 0;
+		/** Tile images a change of terrain conditioning made stale (HandleTerrainConditioningChanged). */
+		int64 ConditioningStale = 0;
 		/** The most tiles waiting at once. */
 		int32 WaitingPeak = 0;
 		/** Worker seconds spent drawing the stored tiles. */
