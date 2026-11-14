@@ -1951,6 +1951,10 @@ bool FVoxelWaterFillSubmergedChunkTest::RunTest(const FString& Parameters)
 // zone. On a planet: a diagonal line at latitude 45, a line across a cube-face edge, and a line through a chunk corner
 // (those of the eight chunks around it that the surface passes through). A CPU run without the lines shows they move
 // the voxels of each chunk (non-vacuous).
+// The surface under a line (the plan's L3), on the same lists: a line that only paints its band, a levelled road with a
+// narrower band crossing a painted line (the later line's band where both lie), and a road over a cave layer that opens
+// at the surface, with the cave-wall override on (the band is written before it, and no cave opens above the line's
+// minimum depth); on the planet a painted band and a road over the caves.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPULineParityTest, "VoxelWorlds.Generation.GPUvsCPULineParity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -2007,13 +2011,48 @@ bool FVoxelGPUvsCPULineParityTest::RunTest(const FString& Parameters)
 		Request.BiomeConfiguration = BiomeConfig;
 		return Request;
 	};
+	// A cave layer that opens at the surface and carves about half the ground, with the cave-wall override: what a
+	// line's minimum cave depth holds back.
+	UVoxelCaveConfiguration* LineCaves = NewObject<UVoxelCaveConfiguration>();
+	LineCaves->AddToRoot();
+	LineCaves->bEnableCaves = true;
+	LineCaves->UnderwaterMinDepth = 0.0f;
+	LineCaves->bOverrideCaveWallMaterial = true;
+	LineCaves->CaveWallMaterialID = 2;
+	LineCaves->CaveWallMaterialMinDepth = 2.0f;
+	LineCaves->BiomeOverrides.Empty();
+	LineCaves->CaveLayers.Empty();
+	{
+		FCaveLayerConfig Cheese;
+		Cheese.bEnabled = true;
+		Cheese.CaveType = ECaveType::Cheese;
+		Cheese.SeedOffset = 977;
+		Cheese.Frequency = 0.0022f; Cheese.Octaves = 2; Cheese.Persistence = 0.5f; Cheese.Lacunarity = 2.0f;
+		Cheese.Threshold = -0.05f; Cheese.CarveStrength = 1.0f; Cheese.CarveFalloff = 0.2f;
+		Cheese.MinDepth = 2.0f; Cheese.MaxDepth = 0.0f; Cheese.DepthFadeWidth = 2.0f; Cheese.VerticalScale = 1.0f;
+		LineCaves->CaveLayers.Add(Cheese);
+	}
+	// A band of a material no biome gives, as wide as the core (or HalfWidth wide), four voxels deep; caves under a depth.
+	auto SurfaceOf = [](int32 Material, float BandHalfWidth, float CaveDepth)
+	{
+		FVoxelConditioningLineSurface Surface;
+		Surface.BandMaterialID = Material;
+		Surface.BandHalfWidth = BandHalfWidth;
+		Surface.BandDepth = 4.0f;
+		Surface.MinCaveDepth = CaveDepth;
+		return Surface;
+	};
+
 	// A straight line between two points given relative to the grid origin.
-	auto PlaneLine = [&](const FVector2D& A, const FVector2D& B, float TargetA, float TargetB, EBlend Blend, int64 Id)
+	auto PlaneLine = [&](const FVector2D& A, const FVector2D& B, float TargetA, float TargetB, EBlend Blend, int64 Id,
+		const FVoxelConditioningLineSurface& Surface = FVoxelConditioningLineSurface(), float Strength = 1.0f)
 	{
 		FVoxelConditioningLineParams Params;
 		Params.FalloffWidth = Falloff;
 		Params.Blend = Blend;
 		Params.Id = Id;
+		Params.Surface = Surface;
+		Params.Strength = Strength;
 		const int32 Steps = FMath::Max(1, FMath::CeilToInt32((B - A).Size() / Spacing));
 		for (int32 Step = 0; Step <= Steps; ++Step)
 		{
@@ -2047,6 +2086,28 @@ bool FVoxelGPUvsCPULineParityTest::RunTest(const FString& Parameters)
 		Blends.Request.Conditioning.Lines.Add(PlaneLine(FVector2D(6900.0, 3000.0), FVector2D(9900.0, 4300.0), 900.0f, 900.0f, EBlend::LowerOnly, 1));
 		Blends.Request.Conditioning.Lines.Add(PlaneLine(FVector2D(7500.0, 5100.0), FVector2D(9300.0, 2100.0), 1500.0f, 1500.0f, EBlend::RaiseOnly, 2));
 		Blends.Request.Conditioning.Zones.Add(FVoxelConditioningZone(FVector2D(PlaneOrigin.X + 8400.0, PlaneOrigin.Y + 3600.0), 300.0f, 500.0f, 1200.0f, 1.0f));
+
+		// The surface under a line. A line that only paints: the band alone, no height.
+		FSite& Painted = Sites.AddDefaulted_GetRef();
+		Painted.Name = TEXT("Line plane painted band");
+		Painted.Request = MakePlaneRequest(FIntVector(3, 1, 0));
+		Painted.Request.Conditioning.Lines.Add(PlaneLine(FVector2D(6600.0, 1900.0), FVector2D(10200.0, 5300.0), 0.0f, 0.0f, EBlend::Level, 1, SurfaceOf(30, 0.0f, 0.0f), 0.0f));
+
+		// A levelled road with a band narrower than its core, over a painted line it crosses: the later line's band wins.
+		FSite& Road = Sites.AddDefaulted_GetRef();
+		Road.Name = TEXT("Line plane road with a narrower band over a painted line");
+		Road.Request = MakePlaneRequest(FIntVector(3, 1, 0));
+		Road.Request.Conditioning.Lines.Add(PlaneLine(FVector2D(7500.0, 5100.0), FVector2D(9300.0, 2100.0), 0.0f, 0.0f, EBlend::Level, 1, SurfaceOf(30, 0.0f, 0.0f), 0.0f));
+		Road.Request.Conditioning.Lines.Add(PlaneLine(FVector2D(6600.0, 1900.0), FVector2D(10200.0, 5300.0), 700.0f, 1700.0f, EBlend::Level, 2, SurfaceOf(31, 2.0f * VoxelSize, 0.0f)));
+
+		// A road over a cave layer that opens at the surface: no cave above the line's minimum depth, the band under the
+		// cave walls.
+		FSite& Cave = Sites.AddDefaulted_GetRef();
+		Cave.Name = TEXT("Line plane road over caves");
+		Cave.Request = MakePlaneRequest(FIntVector(3, 1, 0));
+		Cave.Request.bEnableCaves = true;
+		Cave.Request.CaveConfiguration = LineCaves;
+		Cave.Request.Conditioning.Lines.Add(PlaneLine(FVector2D(6600.0, 1900.0), FVector2D(10200.0, 5300.0), 700.0f, 1700.0f, EBlend::Level, 1, SurfaceOf(30, 0.0f, 12.0f)));
 	}
 
 	// ---- The planet: Review_Planet's size and terrain, off the world origin, biomes and a sea.
@@ -2101,7 +2162,8 @@ bool FVoxelGPUvsCPULineParityTest::RunTest(const FString& Parameters)
 	};
 	// An arc through a direction, 2,400 uu each way along a heading given as a second direction, its target an offset
 	// from the natural altitude along it at each end.
-	auto PlanetLine = [&](const FVector& Through, const FVector& Toward, float OffsetA, float OffsetB, EBlend Blend)
+	auto PlanetLine = [&](const FVector& Through, const FVector& Toward, float OffsetA, float OffsetB, EBlend Blend,
+		const FVoxelConditioningLineSurface& Surface = FVoxelConditioningLineSurface(), float Strength = 1.0f)
 	{
 		const FVector Tangent = (Toward - Through * FVector::DotProduct(Toward, Through)).GetSafeNormal();
 		const float Natural = Planet.GetTerrainAltitude(Through, Config->NoiseParams);
@@ -2109,6 +2171,8 @@ bool FVoxelGPUvsCPULineParityTest::RunTest(const FString& Parameters)
 		Params.bRadial = true;
 		Params.FalloffWidth = Falloff;
 		Params.Blend = Blend;
+		Params.Surface = Surface;
+		Params.Strength = Strength;
 		const int32 HalfSteps = 16;
 		for (int32 Step = -HalfSteps; Step <= HalfSteps; ++Step)
 		{
@@ -2126,6 +2190,20 @@ bool FVoxelGPUvsCPULineParityTest::RunTest(const FString& Parameters)
 		const FVoxelConditioningLineRef DiagonalLine = PlanetLine(Dir45, FVector(0.3, 1.0, 0.6).GetSafeNormal(), 0.0f, 500.0f, EBlend::Level);
 		Diagonal.Request = MakePlanetRequest(ChunkAt(Origin + Dir45 * (Radius + Planet.GetTerrainAltitude(Dir45, Config->NoiseParams) + 250.0f)));
 		Diagonal.Request.Conditioning.Lines.Add(DiagonalLine);
+
+		// The surface under a line: a line that only paints, at the same place.
+		FSite& Painted = Sites.AddDefaulted_GetRef();
+		Painted.Name = TEXT("Line planet painted band at latitude 45");
+		Painted.Request = MakePlanetRequest(ChunkAt(Origin + Dir45 * (Radius + Planet.GetTerrainAltitude(Dir45, Config->NoiseParams))));
+		Painted.Request.Conditioning.Lines.Add(PlanetLine(Dir45, FVector(0.3, 1.0, 0.6).GetSafeNormal(), 0.0f, 0.0f, EBlend::Level, SurfaceOf(30, 0.0f, 0.0f), 0.0f));
+
+		// A road over the cave layer that opens at the surface, climbing: the band and the minimum cave depth.
+		FSite& Cave = Sites.AddDefaulted_GetRef();
+		Cave.Name = TEXT("Line planet road over caves");
+		Cave.Request = MakePlanetRequest(ChunkAt(Origin + Dir45 * (Radius + Planet.GetTerrainAltitude(Dir45, Config->NoiseParams) + 250.0f)));
+		Cave.Request.bEnableCaves = true;
+		Cave.Request.CaveConfiguration = LineCaves;
+		Cave.Request.Conditioning.Lines.Add(PlanetLine(Dir45, FVector(0.3, 1.0, 0.6).GetSafeNormal(), 0.0f, 500.0f, EBlend::Level, SurfaceOf(30, 0.0f, 12.0f)));
 
 		// Across a cube-face edge, lowered.
 		const FVector DirEdge = LatLonDirection(0.0, 45.0);
@@ -2171,7 +2249,8 @@ bool FVoxelGPUvsCPULineParityTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("The surface passes through three or more of the chunks around the planet's corner"), CornerChunks >= 3);
 	}
 
-	// Non-vacuous: the lines move each chunk's voxels on the CPU, and each chunk's segment list is not empty.
+	// Non-vacuous: the lines change each chunk's voxels on the CPU (their density, or their material where a line only
+	// paints), a line with a band paints some, a line over caves closes some, and each chunk's segment list is not empty.
 	bool bAllMoved = true;
 	for (const FSite& Site : Sites)
 	{
@@ -2181,17 +2260,29 @@ bool FVoxelGPUvsCPULineParityTest::RunTest(const FString& Parameters)
 		CPUGenerator.GenerateChunkCPU(Site.Request, With);
 		CPUGenerator.GenerateChunkCPU(Natural, Without);
 		int32 Differ = 0;
+		int32 Painted = 0;
+		int32 CarvedWith = 0;
+		int32 CarvedWithout = 0;
 		for (int32 Index = 0; Index < With.Num() && Index < Without.Num(); ++Index)
 		{
-			Differ += With[Index].Density != Without[Index].Density ? 1 : 0;
+			Differ += (With[Index].Density != Without[Index].Density || With[Index].MaterialID != Without[Index].MaterialID) ? 1 : 0;
+			Painted += (With[Index].MaterialID == 30 || With[Index].MaterialID == 31) ? 1 : 0;
+			CarvedWith += With[Index].HasUndergroundFlag() ? 1 : 0;
+			CarvedWithout += Without[Index].HasUndergroundFlag() ? 1 : 0;
 		}
 		FVoxelChunkLineSegments Segments;
 		FVoxelChunkLineSegments::Build(Site.Request, Segments);
-		AddInfo(FString::Printf(TEXT("%s: chunk (%d, %d, %d), %d segments in its list, %d voxels' density moved by the conditioning"),
-			*Site.Name, Site.Request.ChunkCoord.X, Site.Request.ChunkCoord.Y, Site.Request.ChunkCoord.Z, Segments.Num(), Differ));
-		if (Segments.Num() == 0 || Differ < 50)
+		AddInfo(FString::Printf(TEXT("%s: chunk (%d, %d, %d), %d segments in its list, %d voxels changed by the conditioning, %d painted by a band, %d underground air against %d without the lines"),
+			*Site.Name, Site.Request.ChunkCoord.X, Site.Request.ChunkCoord.Y, Site.Request.ChunkCoord.Z, Segments.Num(), Differ, Painted, CarvedWith, CarvedWithout));
+		bool bHasBand = false;
+		for (const FVoxelConditioningLineRef& Line : Site.Request.Conditioning.Lines)
 		{
-			AddError(FString::Printf(TEXT("%s: the line does not move the chunk (%d segments, %d voxels)"), *Site.Name, Segments.Num(), Differ));
+			bHasBand |= Line->GetSurface().HasBand();
+		}
+		if (Segments.Num() == 0 || Differ < 50 || (bHasBand && Painted < 200) || (Site.Request.bEnableCaves && CarvedWith >= CarvedWithout))
+		{
+			AddError(FString::Printf(TEXT("%s: the line does not change the chunk as meant (%d segments, %d voxels changed, %d painted, %d underground air against %d)"),
+				*Site.Name, Segments.Num(), Differ, Painted, CarvedWith, CarvedWithout));
 			bAllMoved = false;
 		}
 	}
@@ -2217,6 +2308,7 @@ bool FVoxelGPUvsCPULineParityTest::RunTest(const FString& Parameters)
 	BiomeConfig->RemoveFromRoot();
 	PlanetBiomes->RemoveFromRoot();
 	Config->RemoveFromRoot();
+	LineCaves->RemoveFromRoot();
 	TestTrue(TEXT("The lines move every test chunk"), bAllMoved);
 	TestTrue(TEXT("GPU==CPU parity with conditioning lines, plane and planet, across LOD 0/1/2"), bAllPass);
 	return true;

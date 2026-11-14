@@ -216,6 +216,17 @@ struct VOXELGENERATION_API FVoxelConditioning
 	TArray<FVoxelConditioningLineRef> Lines;
 
 	/**
+	 * The least half width every line here is taken to have, for the height and for the band (world units; 0: the lines
+	 * as they are). A reader that samples the surface every S units sets it to 0.71 S
+	 * (FVoxelConditioningLine::CoarseHalfWidthPerSpacing) on the set it gathered for itself: a far-field patch, a map
+	 * tile above level 0. A line narrower than its samples would otherwise fall between them and draw as dashes; with it
+	 * a road is an unbroken line on the map and an unbroken band in the far field. The voxels are generated once at full
+	 * resolution and cannot do this, so a generation request, and every reader that must agree with the voxels at a
+	 * place, leaves it 0. A gather for a set that has it grows its region by it.
+	 */
+	float LeastHalfWidth = 0.0f;
+
+	/**
 	 * The conditioning of a list of zones and no line.
 	 * @param InZones The zones, in the order they are applied
 	 * @return The conditioning
@@ -235,6 +246,7 @@ struct VOXELGENERATION_API FVoxelConditioning
 	{
 		Zones.Reset();
 		Lines.Reset();
+		LeastHalfWidth = 0.0f;
 	}
 
 	/**
@@ -279,7 +291,8 @@ struct VOXELGENERATION_API FVoxelConditioning
 
 	/**
 	 * The lines' part of ApplyToHeight: each heightmap line's blend, in order, evaluated from the lines themselves in
-	 * double (the generators evaluate the chunk's segment list instead, in the chunk's frame).
+	 * double (the generators evaluate the chunk's segment list instead, in the chunk's frame), each line at least
+	 * LeastHalfWidth wide.
 	 * @param X World X
 	 * @param Y World Y
 	 * @param BaseHeight The height before the lines
@@ -295,6 +308,55 @@ struct VOXELGENERATION_API FVoxelConditioning
 	 * @return The altitude after them
 	 */
 	float ApplyLinesToAltitude(const FVector& Direction, double PlanetRadius, float BaseAltitude) const;
+
+	// ==================== The surface under the lines (TERRAIN_LINES_PLAN.md, section 4.3) ====================
+	// What the lines here make of the ground along them, for the readers of the generated surface. The generators (CPU
+	// and GPU) read the same from the chunk's segment list (FVoxelChunkLineSegments). A set with no line answers at the
+	// cost of a count test.
+
+	/** @return Whether some line here has a band, a minimum cave depth or a clearing: a reader skips the tests when none has */
+	bool HasLineSurfaces() const;
+
+	/**
+	 * The band at a heightmap (X, Y): the material the generated surface is there in place of the biome's. Where the
+	 * bands of two lines overlap the later line's wins, as in the voxels. Honours LeastHalfWidth.
+	 * @param X World X
+	 * @param Y World Y
+	 * @param OutMaterial The band's material (untouched when there is none)
+	 * @param OutDepth How deep under the generated surface the band goes, in voxels (optional; untouched when there is none)
+	 * @return Whether a band lies there
+	 */
+	bool GetBandAt(double X, double Y, uint8& OutMaterial, float* OutDepth = nullptr) const;
+
+	/**
+	 * The band along a planet direction, as GetBandAt.
+	 * @param Direction Unit direction from the planet centre
+	 * @param PlanetRadius The datum radius
+	 * @param OutMaterial The band's material (untouched when there is none)
+	 * @param OutDepth How deep the band goes, in voxels (optional; untouched when there is none)
+	 * @return Whether a band lies there
+	 */
+	bool GetBandOnSphere(const FVector& Direction, double PlanetRadius, uint8& OutMaterial, float* OutDepth = nullptr) const;
+
+	/**
+	 * The shallowest depth a cave may open at under the lines at a heightmap (X, Y), in voxels: the largest of each
+	 * line's minimum cave depth times its profile there (the whole depth on its core, easing to 0 across its falloff).
+	 * A caller takes the larger of this and the cave layer's own minimum (FVoxelCPUNoiseGenerator::CalculateCaveDensity).
+	 * @return The depth, 0 where no line asks for one
+	 */
+	float GetMinCaveDepthAt(double X, double Y) const;
+
+	/** GetMinCaveDepthAt along a planet direction. */
+	float GetMinCaveDepthOnSphere(const FVector& Direction, double PlanetRadius) const;
+
+	/**
+	 * Whether a heightmap (X, Y) lies inside some line's clear width: no scatter instance, PCG point or voxel tree is
+	 * placed there.
+	 */
+	bool IsClearedAt(double X, double Y) const;
+
+	/** IsClearedAt along a planet direction. */
+	bool IsClearedOnSphere(const FVector& Direction, double PlanetRadius) const;
 
 	/**
 	 * The zones' part of ApplyToHeight: the height blended toward each heightmap zone's target, in order.

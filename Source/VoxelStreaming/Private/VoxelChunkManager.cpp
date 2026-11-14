@@ -2924,7 +2924,25 @@ bool UVoxelChunkManager::FindVoxelTreeAt(const FVector& WorldPos, FVoxelTreeInst
 	{
 		return false;
 	}
-	return FVoxelTreeQuery::FindAt(*Configuration, *WorldMode, GetWaterLevels(), WorldPos, [this](const FVector& P) { return GetVoxelAt(P); }, OutTree);
+	FVoxelConditioning TreeConditioning;
+	GatherTreeConditioning(FBox2D(FVector2D(WorldPos.X, WorldPos.Y), FVector2D(WorldPos.X, WorldPos.Y)), TreeConditioning);
+	return FVoxelTreeQuery::FindAt(*Configuration, *WorldMode, GetWaterLevels(), WorldPos, [this](const FVector& P) { return GetVoxelAt(P); }, OutTree,
+		&TreeConditioning);
+}
+
+void UVoxelChunkManager::GatherTreeConditioning(const FBox2D& Region, FVoxelConditioning& Out) const
+{
+	Out.Reset();
+	if (!Configuration)
+	{
+		return;
+	}
+	// A tree is planted in the chunk its base lies in, and the readers compute the trees of the chunks around the one
+	// they ask about: the lines over all of those.
+	const double Grow = (FVoxelTreeInjector::GetSourceChunkRadius(Configuration->TreeTemplates, Configuration->ChunkSize) + 1)
+		* static_cast<double>(Configuration->GetChunkWorldSize());
+	GatherConditioningForRegion(Region.ExpandBy(Grow), EVoxelConditioningGather::Complete, Out);
+	Out.Zones.Reset();
 }
 
 void UVoxelChunkManager::FindVoxelTreesNear(const FVector& WorldPos, float Radius, TArray<FVoxelTreeInstance>& OutTrees) const
@@ -2934,7 +2952,10 @@ void UVoxelChunkManager::FindVoxelTreesNear(const FVector& WorldPos, float Radiu
 	{
 		return;
 	}
-	FVoxelTreeQuery::FindNear(*Configuration, *WorldMode, GetWaterLevels(), WorldPos, Radius, [this](const FVector& P) { return GetVoxelAt(P); }, OutTrees);
+	FVoxelConditioning TreeConditioning;
+	GatherTreeConditioning(FBox2D(FVector2D(WorldPos.X - Radius, WorldPos.Y - Radius), FVector2D(WorldPos.X + Radius, WorldPos.Y + Radius)), TreeConditioning);
+	FVoxelTreeQuery::FindNear(*Configuration, *WorldMode, GetWaterLevels(), WorldPos, Radius, [this](const FVector& P) { return GetVoxelAt(P); }, OutTrees,
+		&TreeConditioning);
 }
 
 void UVoxelChunkManager::GetVoxelTreeBlocks(const FVoxelTreeInstance& Tree, TArray<FVoxelTreeVoxel>& OutBlocks) const
@@ -3748,9 +3769,11 @@ void UVoxelChunkManager::AddConditioningLine(const FVoxelConditioningLineRef& Li
 	}
 
 	UE_LOG(LogVoxelStreaming, Log,
-		TEXT("Added %s conditioning line %lld: %d segments, falloff=%.0f strength=%.2f blend=%s reach=%.0f; %d total."),
+		TEXT("Added %s conditioning line %lld: %d segments, falloff=%.0f strength=%.2f blend=%s reach=%.0f; band material %d (half width %.0f, %.0f voxels deep), caves under %.0f voxels, clear half width %.0f; %d total."),
 		Line->IsRadial() ? TEXT("planet") : TEXT("terrain"), Line->GetId(), Line->NumSegments(), Line->GetFalloffWidth(), Line->GetStrength(),
-		*UEnum::GetDisplayValueAsText(Line->GetBlend()).ToString(), Line->GetReach(), ConditioningSources.NumLines());
+		*UEnum::GetDisplayValueAsText(Line->GetBlend()).ToString(), Line->GetReach(),
+		Line->GetSurface().BandMaterialID, Line->GetSurface().BandHalfWidth, Line->GetSurface().HasBand() ? Line->GetSurface().BandDepth : 0.0f,
+		Line->GetSurface().MinCaveDepth, Line->GetSurface().ClearHalfWidth, ConditioningSources.NumLines());
 
 	if (!Configuration)
 	{
@@ -4044,9 +4067,13 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 	UVoxelBiomeConfiguration* CapturedBiomeConfig = nullptr;
 	bool CapturedEnableWaterLevel = false;
 	float CapturedWaterLevel = 0.0f;
+	// The lines over the chunk and the chunks its trees may be planted in (the request's own set covers the chunk alone).
+	FVoxelConditioning TreeConditioning;
 
 	if (bInjectTrees)
 	{
+		const FBox TreeBox = GetChunkWorldBox(ChunkCoord);
+		GatherTreeConditioning(FBox2D(FVector2D(TreeBox.Min.X, TreeBox.Min.Y), FVector2D(TreeBox.Max.X, TreeBox.Max.Y)), TreeConditioning);
 		CapturedTreeTemplates = Configuration->TreeTemplates;
 		CapturedTreeDensity = Configuration->TreeDensity;
 		CapturedWorldSeed = Configuration->WorldSeed;
@@ -4067,7 +4094,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 		bInjectTrees, CapturedTreeTemplates = MoveTemp(CapturedTreeTemplates),
 		CapturedTreeDensity, CapturedWorldSeed, CapturedWorldOrigin,
 		CapturedNoiseParams, CapturedWorldMode,
-		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel]() mutable
+		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel, TreeConditioning = MoveTemp(TreeConditioning)]() mutable
 	{
 		// Generate voxel data on background thread
 		TArray<FVoxelData> VoxelData;
@@ -4089,7 +4116,8 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 				CapturedBiomeConfig,
 				CapturedEnableWaterLevel,
 				CapturedWaterLevel,
-				VoxelData);
+				VoxelData,
+				&TreeConditioning);
 		}
 
 		// Queue result for game thread
@@ -4311,6 +4339,10 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 	const FVoxelWaterLevelRange TreeWater = GetWaterLevels().GetRange(GetChunkWorldBox(ChunkCoord));
 	const bool CapturedEnableWaterLevel = TreeWater.bAny;
 	const float CapturedWaterLevel = static_cast<float>(TreeWater.GetLevel());
+	// The lines over the chunk and the chunks its trees may be planted in (the request's own set covers the chunk alone).
+	FVoxelConditioning TreeConditioning;
+	const FBox TreeBox = GetChunkWorldBox(ChunkCoord);
+	GatherTreeConditioning(FBox2D(FVector2D(TreeBox.Min.X, TreeBox.Min.Y), FVector2D(TreeBox.Max.X, TreeBox.Max.Y)), TreeConditioning);
 
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 
@@ -4319,7 +4351,7 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 		CapturedTreeTemplates = MoveTemp(CapturedTreeTemplates),
 		CapturedTreeDensity, CapturedWorldSeed, CapturedWorldOrigin,
 		CapturedNoiseParams, CapturedWorldMode,
-		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel]() mutable
+		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel, TreeConditioning = MoveTemp(TreeConditioning)]() mutable
 	{
 		FVoxelTreeInjector::InjectTrees(
 			ChunkCoord,
@@ -4334,7 +4366,8 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 			CapturedBiomeConfig,
 			CapturedEnableWaterLevel,
 			CapturedWaterLevel,
-			VoxelData);
+			VoxelData,
+			&TreeConditioning);
 
 		if (UVoxelChunkManager* This = WeakThis.Get())
 		{

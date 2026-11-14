@@ -104,7 +104,7 @@ uint CaveWallMaterialID;
 float CaveWallMaterialMinDepth;
 int ConditioningZoneCount;
 StructuredBuffer<float4> ConditioningZoneData;
-// The chunk's conditioning line segments (FVoxelChunkLineSegments), 4 float4s a segment; layout in ConditioningLines.ush.
+// The chunk's conditioning line segments (FVoxelChunkLineSegments), 5 float4s a segment; layout in ConditioningLines.ush.
 int ConditioningLineSegmentCount;
 StructuredBuffer<float4> ConditioningLineData;
 
@@ -312,9 +312,12 @@ void GpuCaveBiomeOverride(uint BiomeID, out float OutCaveScale, out float OutMin
  * @param bUnderwater The column's terrain is under the sea (and water is on)
  * @param bPlanetFrame A literal at each call: true in the planet branch, false in the heightmap one. A runtime
  *        WorldMode test inlined (and, on FXC, ran) both layer samplers at every call (F2.13)
+ * @param MinDepthUnderLines The shallowest depth (voxels) the conditioning lines over the column let a cave open at
+ *        (ConditioningLineSurface.MinCaveDepth): each layer's minimum depth is at least this; 0: the layers' own
  * @return Carve density [0, 1]
  */
-float GpuCaveCarve(float3 VoxelOffset, PlanetVoxelFrame Planet, float DepthBelowSurface, uint BiomeID, bool bUnderwater, bool bPlanetFrame)
+float GpuCaveCarve(float3 VoxelOffset, PlanetVoxelFrame Planet, float DepthBelowSurface, uint BiomeID, bool bUnderwater, bool bPlanetFrame,
+    float MinDepthUnderLines)
 {
     float BiomeCaveScale;
     float MinDepthOverride;
@@ -336,7 +339,12 @@ float GpuCaveCarve(float3 VoxelOffset, PlanetVoxelFrame Planet, float DepthBelow
     {
         const float FadeWidth = CaveLayerDepthFadeWidth[ci];
         const float MaxDepth = CaveLayerMaxDepth[ci];
-        const float EffectiveMinDepth = (MinDepthOverride >= 0.0f) ? MinDepthOverride : CaveLayerMinDepth[ci];
+        float EffectiveMinDepth = (MinDepthOverride >= 0.0f) ? MinDepthOverride : CaveLayerMinDepth[ci];
+        // Under a conditioning line no cave opens above the line's minimum depth: it only ever deepens the layer's.
+        if (MinDepthUnderLines > 0.0f)
+        {
+            EffectiveMinDepth = max(EffectiveMinDepth, MinDepthUnderLines);
+        }
 
         if (DepthBelowSurface < EffectiveMinDepth - FadeWidth)
         {
@@ -461,9 +469,14 @@ void MainCS(
             TerrainHeight = ApplyIslandFalloffToHeight(WorldPos.x, WorldPos.y, TerrainHeight);
         }
         // Terrain conditioning: the lines (the chunk's segment list, in the chunk's frame), then the zones, as on the CPU.
+        // The lines also leave a surface at this column: the band's material and depth, the caves' minimum depth.
+        ConditioningLineSurface LineSurface;
+        LineSurface.BandMaterial = -1;
+        LineSurface.BandDepth = 0.0f;
+        LineSurface.MinCaveDepth = 0.0f;
         if (ConditioningLineSegmentCount > 0)
         {
-            TerrainHeight = GpuApplyConditioningLines(Offset2D, TerrainHeight, 0.0f);
+            TerrainHeight = GpuApplyConditioningLines(Offset2D, TerrainHeight, 0.0f, LineSurface);
         }
         if (ConditioningZoneCount > 0)
         {
@@ -503,7 +516,7 @@ void MainCS(
         float CaveCarve = 0.0f;
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            CaveCarve = GpuCaveCarve(VoxelOffset, (PlanetVoxelFrame)0, DepthBelowSurface, BiomeID, bUnderwaterColumn, false);
+            CaveCarve = GpuCaveCarve(VoxelOffset, (PlanetVoxelFrame)0, DepthBelowSurface, BiomeID, bUnderwaterColumn, false, LineSurface.MinCaveDepth);
             Density = ApplyCaveCarve(Density, CaveCarve);
         }
 
@@ -516,6 +529,13 @@ void MainCS(
 
             // Height-based material overrides (snow at peaks, rock at altitude, etc.)
             MaterialID = ApplyGpuHeightRules(MaterialID, WorldPos.z, DepthBelowSurface);
+
+            // A conditioning line's band: its material to the band's depth, after the height rules and before the cave
+            // walls and the ores (FVoxelChunkLineSurface::HasBandAt)
+            if (LineSurface.BandMaterial >= 0 && DepthBelowSurface < LineSurface.BandDepth)
+            {
+                MaterialID = (uint)LineSurface.BandMaterial;
+            }
 
             // Cave-wall material override (still-solid voxels partially carved near a cave boundary)
             if (CaveWallOverrideEnabled != 0 && CaveCarve > 0.0f && CaveCarve < 1.0f
@@ -541,6 +561,10 @@ void MainCS(
         else
         {
             MaterialID = GetMaterialForInfinitePlane(WorldPos.z, TerrainHeight, EffectiveVoxelSize);
+            if (LineSurface.BandMaterial >= 0 && DepthBelowSurface < LineSurface.BandDepth)
+            {
+                MaterialID = (uint)LineSurface.BandMaterial;
+            }
         }
 
         // Per-voxel cave/underground flag when cave carving turned solid -> air (matches CPU). The CPU

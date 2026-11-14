@@ -189,9 +189,10 @@ struct VOXELSTREAMING_API FVoxelFarFieldSettings
 	int32 SkirtLevels = 3;
 
 	/**
-	 * Patches wider than this take no conditioning zones: a POI pad is a few chunks across, so at their resolution it does
-	 * not show, and a cap of a face would ask the POI system for every POI on it. On a planet a cap's angular radius
-	 * (radians); on a heightmap world a footprint's edge (uu).
+	 * Patches wider than this take no conditioning, neither zones nor lines: a POI pad is a few chunks across and a road
+	 * a few voxels, so at their resolution neither shows, and a cap of a face would ask the POI system for every POI and
+	 * every road on it. On a planet a cap's angular radius (radians); on a heightmap world a footprint's edge (uu). The
+	 * map's tiles and the PCG sampler keep the same limit for lines (FVoxelConditioningLine::GatherLimitChunks).
 	 */
 	double ZoneGatherMax = 0.0;
 
@@ -416,8 +417,18 @@ struct VOXELSTREAMING_API FVoxelFarFieldFrame
 	/** Whether a footprint meets a region. */
 	bool Intersects(const FVoxelFarFieldFootprint& Footprint, const FVoxelFarFieldRegion& Region) const;
 
-	/** Whether a patch is narrow enough to take conditioning zones (ZoneGatherMax). */
+	/** Whether a patch is narrow enough to take conditioning, zones and lines (ZoneGatherMax). */
 	bool TakesZones(const FVoxelFarFieldFootprint& Footprint) const;
+
+	/**
+	 * The least half width a patch of a level takes every conditioning line to have: 0.71 of its vertex spacing
+	 * (FVoxelConditioningLine::CoarseHalfWidthPerSpacing, FVoxelConditioning::LeastHalfWidth), so a road narrower than the
+	 * spacing is an unbroken band across the patch and not dashes.
+	 */
+	double LeastLineHalfWidth(int32 Level) const;
+
+	/** A region grown by a distance along the surface (a box's edges, a cap's angular radius). */
+	FVoxelFarFieldRegion GrownBy(const FVoxelFarFieldRegion& Region, double Distance) const;
 
 	/** Heightmap worlds: the chunk column (chunk X, Y) under a footprint's centre. False on a planet. */
 	bool GetColumn(const FVoxelFarFieldFootprint& Footprint, FIntPoint& OutColumn) const;
@@ -541,8 +552,10 @@ struct VOXELSTREAMING_API FVoxelFarFieldSurface
 	 * @param Continentalness SampleAltitude's continentalness
 	 * @param OutMaterial Surface material ID
 	 * @param OutBiome Dominant biome ID
+	 * @param Conditioning The patch's conditioning, or null: a conditioning line's band is the material where one lies
 	 */
-	void SampleConditions(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome) const;
+	void SampleConditions(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome,
+		const FVoxelConditioning* Conditioning = nullptr) const;
 
 	/**
 	 * The surface material mix where the terrain is at Altitude at a sample (G45): its two leading materials and the
@@ -552,18 +565,21 @@ struct VOXELSTREAMING_API FVoxelFarFieldSurface
 	 * @param Sample The sample
 	 * @param Altitude The terrain's altitude there (SampleAltitude)
 	 * @param Continentalness SampleAltitude's continentalness
+	 * @param Conditioning The patch's conditioning, or null: on a conditioning line's band the mix is the band's material alone
 	 * @return The mix
 	 */
-	FVoxelSurfaceMaterialMix SampleMaterialMix(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness) const;
+	FVoxelSurfaceMaterialMix SampleMaterialMix(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness,
+		const FVoxelConditioning* Conditioning = nullptr) const;
 
 private:
 	// The two kinds' halves of the triple above.
 	float SampleHeight(double WorldX, double WorldY, const FVoxelConditioning& Conditioning) const;
-	void SampleConditionsXY(double WorldX, double WorldY, float Height, uint8& OutMaterial, uint8& OutBiome) const;
-	FVoxelSurfaceMaterialMix SampleMaterialMixXY(double WorldX, double WorldY, float Height) const;
+	void SampleConditionsXY(double WorldX, double WorldY, float Height, uint8& OutMaterial, uint8& OutBiome, const FVoxelConditioning* Conditioning) const;
+	FVoxelSurfaceMaterialMix SampleMaterialMixXY(double WorldX, double WorldY, float Height, const FVoxelConditioning* Conditioning) const;
 	float SampleAltitude(const FVector& Direction, const FVoxelConditioning& Conditioning, float* OutContinentalness) const;
-	void SampleConditions(const FVector& Direction, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome) const;
-	FVoxelSurfaceMaterialMix SampleMaterialMix(const FVector& Direction, float Altitude, float Continentalness) const;
+	void SampleConditions(const FVector& Direction, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome,
+		const FVoxelConditioning* Conditioning) const;
+	FVoxelSurfaceMaterialMix SampleMaterialMix(const FVector& Direction, float Altitude, float Continentalness, const FVoxelConditioning* Conditioning) const;
 };
 
 struct VOXELSTREAMING_API FVoxelFarFieldSection

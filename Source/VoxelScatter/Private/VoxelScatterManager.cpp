@@ -2727,6 +2727,31 @@ void UVoxelScatterManager::ExtractChunkSurfacePoints(
 				static_cast<float>(FVector::DotProduct(Point.Normal, Point.LocalUp)));
 		}
 	}
+
+	// A conditioning line's clear width (the terrain lines plan's L3): no surface point on the ground inside it, so no
+	// pass places anything there, a later one from the cached points included. A line is there for the world's life, as
+	// the chunk's generated voxels are, so the points are dropped here and not masked at placement, as an exclusion
+	// volume's are. Points under the ground (a cave's floor far under a road) are left.
+	if (Context.Conditioning.IsValid() && Context.Conditioning->Lines.Num() > 0 && Context.Conditioning->HasLineSurfaces())
+	{
+		const FVoxelConditioning& Conditioning = *Context.Conditioning;
+		if (Context.WorldMode && Context.WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet)
+		{
+			const FSphericalPlanetParams& Planet = static_cast<const FSphericalPlanetWorldMode&>(*Context.WorldMode).GetPlanetParams();
+			OutSurfaceData.SurfacePoints.RemoveAll([&Conditioning, &Planet](const FVoxelSurfacePoint& Point)
+			{
+				return !Point.bIsUnderground && Conditioning.IsClearedOnSphere(
+					FSphericalPlanetWorldMode::GetDirectionFromCenter(Point.Position, Planet.PlanetCenter), Planet.PlanetRadius);
+			});
+		}
+		else
+		{
+			OutSurfaceData.SurfacePoints.RemoveAll([&Conditioning](const FVoxelSurfacePoint& Point)
+			{
+				return !Point.bIsUnderground && Conditioning.IsClearedAt(Point.Position.X, Point.Position.Y);
+			});
+		}
+	}
 }
 
 void UVoxelScatterManager::ExtractSurfacePointsByRay(

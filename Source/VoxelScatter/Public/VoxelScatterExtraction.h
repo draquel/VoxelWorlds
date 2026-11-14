@@ -54,7 +54,9 @@ struct FScatterExtractionContext
 	 * compares the chunk's top with the natural height plus this conditioning (FVoxelConditioning::ApplyToHeight;
 	 * world modes review G23). Planets (spherical SP-B10): the voxels past a chunk's +X, +Y and +Z faces
 	 * (GetVoxelOutsideChunk) are generated on the flattened ground (ApplyToAltitude). Each kind of zone applies only
-	 * in its own kind of world.
+	 * in its own kind of world. A conditioning line's clear width (FVoxelConditioning::IsClearedAt, IsClearedOnSphere)
+	 * keeps the chunk's surface points on the ground out of it (UVoxelScatterManager::ExtractChunkSurfacePoints), so
+	 * nothing is placed there.
 	 * Null or empty: the world mode's natural surface.
 	 */
 	TSharedPtr<const FVoxelConditioning> Conditioning;

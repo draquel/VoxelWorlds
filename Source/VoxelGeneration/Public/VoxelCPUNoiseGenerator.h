@@ -143,6 +143,9 @@ public:
 	 * @param WorldSeed Base world seed
 	 * @param bIsUnderwater The terrain surface above is under the water (caves keep UnderwaterMinDepth below it)
 	 * @param Planet On a planet, the layers' VerticalScale acts along local up (SP-B6); null in heightmap modes
+	 * @param MinDepthUnderLines The shallowest depth (voxels) the conditioning lines over the column let a cave open at
+	 *        (FVoxelChunkLineSurface::MinCaveDepth, FVoxelConditioning::GetMinCaveDepthAt): each layer's minimum depth is
+	 *        at least this. 0: the layers' own
 	 * @return Carve density in range [0, 1]
 	 */
 	static float CalculateCaveDensity(
@@ -152,7 +155,8 @@ public:
 		const UVoxelCaveConfiguration* CaveConfig,
 		int32 WorldSeed,
 		bool bIsUnderwater = false,
-		const FSphericalPlanetParams* Planet = nullptr);
+		const FSphericalPlanetParams* Planet = nullptr,
+		float MinDepthUnderLines = 0.0f);
 
 private:
 	// ==================== Ore Vein Helpers ====================

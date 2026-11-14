@@ -75,6 +75,8 @@ public:
 	 * @param bEnableWaterLevel Whether water level is active
 	 * @param WaterLevel Water level height (trees below this are skipped)
 	 * @param InOutVoxelData Voxel data to modify (must be ChunkSize^3 elements)
+	 * @param Conditioning The conditioning over the chunk and the source chunks around it (GetSourceChunkRadius of them
+	 *        each way), or null: its lines (ComputeTreePositionsForChunk)
 	 */
 	static void InjectTrees(
 		const FIntVector& ChunkCoord,
@@ -86,7 +88,18 @@ public:
 		float TreeDensity,
 		const UVoxelBiomeConfiguration* BiomeConfig,
 		bool bEnableWaterLevel, float WaterLevel,
-		TArray<FVoxelData>& InOutVoxelData);
+		TArray<FVoxelData>& InOutVoxelData,
+		const struct FVoxelConditioning* Conditioning = nullptr);
+
+	/**
+	 * How many chunks each way in X and Y a chunk's trees may be planted in: a tree in a neighbouring chunk reaches into
+	 * this one by its canopy. InjectTrees and FindTreesWithTrunkAt compute the source chunks' trees this far out, so the
+	 * conditioning they are given covers the chunk grown by as many chunks.
+	 * @param Templates The world's tree templates
+	 * @param ChunkSize Voxels per chunk edge
+	 * @return The radius in chunks, at least 1
+	 */
+	static int32 GetSourceChunkRadius(const TArray<FVoxelTreeTemplate>& Templates, int32 ChunkSize);
 
 	/**
 	 * Compute deterministic tree positions for a specific source chunk.
@@ -107,6 +120,10 @@ public:
 	 * @param OutGlobalVoxelPositions Global voxel coordinates of tree base positions
 	 * @param OutTemplateIDs Template ID for each tree
 	 * @param OutSeeds Per-tree random seed
+	 * @param Conditioning The conditioning over the source chunk, or null. Its lines only (the terrain lines plan's L3):
+	 *        no tree is planted inside a line's clear width, and a tree beside a line that moves the ground stands on the
+	 *        ground the line leaves. Its zones are not read: a tree on a POI's pad stands at the natural height, as before
+	 *        (G206). Every caller passes the same lines for a place (a complete gather), so the trees are the same ones
 	 */
 	static void ComputeTreePositionsForChunk(
 		const FIntVector& SourceChunkCoord,
@@ -120,7 +137,8 @@ public:
 		bool bEnableWaterLevel, float WaterLevel,
 		TArray<FIntVector>& OutGlobalVoxelPositions,
 		TArray<int32>& OutTemplateIDs,
-		TArray<uint32>& OutSeeds);
+		TArray<uint32>& OutSeeds,
+		const struct FVoxelConditioning* Conditioning = nullptr);
 
 	/**
 	 * Every voxel one tree's stamp writes, in the order the stamp writes them (canopy, then trunk), the trunk's base block
@@ -142,6 +160,7 @@ public:
 	 *
 	 * @param GlobalVoxel The voxel (global voxel coordinate)
 	 * @param OutTrees Receives the trees (appended); usually one, two only where trunks touch
+	 * @param Conditioning The conditioning over the voxel's chunk and the source chunks around it, as InjectTrees takes it
 	 */
 	static void FindTreesWithTrunkAt(
 		const FIntVector& GlobalVoxel,
@@ -153,7 +172,8 @@ public:
 		float TreeDensity,
 		const UVoxelBiomeConfiguration* BiomeConfig,
 		bool bEnableWaterLevel, float WaterLevel,
-		TArray<FVoxelTreeInstance>& OutTrees);
+		TArray<FVoxelTreeInstance>& OutTrees,
+		const struct FVoxelConditioning* Conditioning = nullptr);
 
 private:
 	/**

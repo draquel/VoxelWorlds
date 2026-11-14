@@ -2570,6 +2570,16 @@ private:
 	void GatherConditioningForRegion(const FBox2D& Region, EVoxelConditioningGather Need, FVoxelConditioning& Out) const;
 
 	/**
+	 * The conditioning lines the voxel trees over a world XY region are planted with (FVoxelTreeInjector): a complete
+	 * gather over the region grown by the chunks a tree may be planted in around it (GetSourceChunkRadius), the zones
+	 * dropped (the injector reads lines only). Every reader of the trees gathers through here, so each computes the trees
+	 * generation injected.
+	 * @param Region The region whose trees are wanted (a chunk's XY box, a query's)
+	 * @param Out Reset and filled
+	 */
+	void GatherTreeConditioning(const FBox2D& Region, FVoxelConditioning& Out) const;
+
+	/**
 	 * Append the conditioning (static + dynamic) whose influence covers a single world-space XY point. Complete: a point
 	 * query answers for the generated voxels there.
 	 */

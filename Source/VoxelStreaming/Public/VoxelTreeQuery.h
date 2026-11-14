@@ -30,14 +30,20 @@ struct VOXELSTREAMING_API FVoxelTreeQuery
 
 	/**
 	 * The standing tree whose trunk holds the voxel at a world position (where two trunks touch, the one with more trunk left).
+	 * @param Conditioning The conditioning the trees there were injected with (its lines: a complete gather over the
+	 *        position's chunk and the chunks beside it), or null
 	 * @return False when no tree's trunk block is there
 	 */
 	static bool FindAt(const UVoxelWorldConfiguration& Config, const IVoxelWorldMode& WorldMode, const FVoxelWaterLevels& Water, const FVector& WorldPos,
-		FReadVoxel ReadVoxel, FVoxelTreeInstance& OutTree);
+		FReadVoxel ReadVoxel, FVoxelTreeInstance& OutTree, const struct FVoxelConditioning* Conditioning = nullptr);
 
-	/** The standing trees (a trunk block over their base left) within Radius of a world position in XY, nearest first. */
+	/**
+	 * The standing trees (a trunk block over their base left) within Radius of a world position in XY, nearest first.
+	 * @param Conditioning The conditioning the trees there were injected with (its lines: a complete gather over the
+	 *        chunks the radius touches), or null
+	 */
 	static void FindNear(const UVoxelWorldConfiguration& Config, const IVoxelWorldMode& WorldMode, const FVoxelWaterLevels& Water, const FVector& WorldPos, float Radius,
-		FReadVoxel ReadVoxel, TArray<FVoxelTreeInstance>& OutTrees);
+		FReadVoxel ReadVoxel, TArray<FVoxelTreeInstance>& OutTrees, const struct FVoxelConditioning* Conditioning = nullptr);
 
 	/** A tree's blocks still in the voxels (each block once, the trunk's over the canopy's where they overlap). */
 	static void GetBlocks(const UVoxelWorldConfiguration& Config, const FVoxelTreeInstance& Tree, FReadVoxel ReadVoxel,

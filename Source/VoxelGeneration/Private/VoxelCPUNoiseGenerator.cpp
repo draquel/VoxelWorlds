@@ -206,7 +206,8 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 	}
 
 	// Terrain conditioning. The lines: the chunk's segment list (the floats the GPU uploads), evaluated once per XY
-	// column here, since a line depends on (X, Y) alone and the loop below computes the height for every voxel. A chunk
+	// column here, since a line depends on (X, Y) alone and the loop below computes the height for every voxel: each
+	// column's blends of the height and the surface the lines leave there (the band, the caves' minimum depth). A chunk
 	// no line reaches pays the count test. The zones after them, per voxel as before.
 	FVoxelChunkLineColumns LineColumns;
 	if (Request.Conditioning.Lines.Num() > 0)
@@ -216,7 +217,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 		LineSegments.EvaluateColumns(ChunkSize, VoxelSize, LineColumns);
 	}
 	const bool bLines = !LineColumns.IsEmpty();
+	const bool bLineSurfaces = LineColumns.HasSurfaces();
 	const bool bZones = Request.Conditioning.Zones.Num() > 0;
+	const FVoxelChunkLineSurface NoLineSurface;
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
@@ -265,6 +268,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 				{
 					TerrainHeight = Request.Conditioning.ApplyZonesToHeight(WorldPos.X, WorldPos.Y, TerrainHeight);
 				}
+				// The surface the lines leave at this column: the band's material and depth, the caves' minimum depth.
+				const FVoxelChunkLineSurface& LineSurface = bLineSurfaces ? LineColumns.Surfaces[X + Y * ChunkSize] : NoLineSurface;
+				const float LineCaveDepth = LineSurface.MinCaveDepth;
 
 				// Calculate signed distance to surface
 				float SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(
@@ -304,7 +310,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
 						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
-						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater);
+						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, nullptr, LineCaveDepth);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -326,6 +332,13 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 					// Apply height-based material overrides (snow at peaks, rock at altitude, etc.)
 					// Height rules still apply after water (snow on peaks even if base is underwater)
 					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, WorldPos.Z, DepthBelowSurface);
+
+					// A conditioning line's band: its material to the band's depth, after the height rules and before
+					// the cave walls and the ores.
+					if (LineSurface.HasBandAt(DepthBelowSurface))
+					{
+						MaterialID = static_cast<uint8>(LineSurface.BandMaterial);
+					}
 
 					// Cave wall material override (solid voxels near cave boundaries)
 					if (Request.bEnableCaves && Request.CaveConfiguration
@@ -362,12 +375,16 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
 					BiomeID = Blend.GetDominantBiome();
 					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
+					if (LineSurface.HasBandAt(DepthBelowSurface))
+					{
+						MaterialID = static_cast<uint8>(LineSurface.BandMaterial);
+					}
 
 					// Cave carving for fallback path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
 						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater);
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, nullptr, LineCaveDepth);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -379,12 +396,16 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 				{
 					// Legacy behavior: use world mode's material assignment
 					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainHeight, DepthBelowSurface * VoxelSize);
+					if (LineSurface.HasBandAt(DepthBelowSurface))
+					{
+						MaterialID = static_cast<uint8>(LineSurface.BandMaterial);
+					}
 
 					// Cave carving for non-biome path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
 						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater);
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, nullptr, LineCaveDepth);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -536,12 +557,15 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				// generators blend the column height, so density, depth, the underwater test, caves and materials all
 				// follow the conditioned ground. A line reads the voxel's point on the datum sphere less the anchor's,
 				// the shader's SurfaceOffset, formed in double.
+				// The lines also leave a surface along this direction: the band's material and depth, the caves'
+				// minimum depth.
+				FVoxelChunkLineSurface LineSurface;
 				if (bLines)
 				{
 					const FVector3f SurfaceOffset((Direction - AnchorDirection) * PlanetRadius);
 					if (LineSegments.MayReach(SurfaceOffset))
 					{
-						TerrainAltitude = LineSegments.Apply(SurfaceOffset, TerrainAltitude);
+						TerrainAltitude = LineSegments.Apply(SurfaceOffset, TerrainAltitude, LineSurface);
 					}
 				}
 				if (bZones)
@@ -590,7 +614,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					float CaveDensity = 0.0f;
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, &PlanetParams);
+						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, &PlanetParams, LineSurface.MinCaveDepth);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -613,6 +637,13 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 
 					// Height rules by altitude above the datum (SP-B2)
 					MaterialID = BiomeConfig->ApplyHeightMaterialRules(MaterialID, Altitude, DepthBelowSurface);
+
+					// A conditioning line's band, as in the heightmap modes: after the height rules, before the cave
+					// walls and the ores.
+					if (LineSurface.HasBandAt(DepthBelowSurface))
+					{
+						MaterialID = static_cast<uint8>(LineSurface.BandMaterial);
+					}
 
 					// Cave wall material override (solid voxels near cave boundaries)
 					if (Request.bEnableCaves && Request.CaveConfiguration
@@ -647,11 +678,15 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 					FBiomeBlend Blend = FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f);
 					BiomeID = Blend.GetDominantBiome();
 					MaterialID = FVoxelBiomeRegistry::GetBlendedMaterial(Blend, DepthBelowSurface, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
+					if (LineSurface.HasBandAt(DepthBelowSurface))
+					{
+						MaterialID = static_cast<uint8>(LineSurface.BandMaterial);
+					}
 
 					// Cave carving for fallback path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, &PlanetParams);
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, &PlanetParams, LineSurface.MinCaveDepth);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);
@@ -662,11 +697,15 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				else
 				{
 					MaterialID = WorldMode.GetMaterialAtDepth(WorldPos, TerrainAltitude, DepthBelowSurface * VoxelSize);
+					if (LineSurface.HasBandAt(DepthBelowSurface))
+					{
+						MaterialID = static_cast<uint8>(LineSurface.BandMaterial);
+					}
 
 					// Cave carving for non-biome path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, &PlanetParams);
+						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, &PlanetParams, LineSurface.MinCaveDepth);
 						if (CaveDensity > 0.0f)
 						{
 							float NewDensity = FMath::Max(0.0f, static_cast<float>(Density) - CaveDensity * 255.0f);

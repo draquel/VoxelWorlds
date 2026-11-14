@@ -1,20 +1,34 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 //
-// Terrain conditioning lines on the GPU (Documentation/TERRAIN_LINES_PLAN.md, L2): a polyline that levels, lowers or
-// raises the terrain height along it, applied before the conditioning zones in the heightmap branch
-// (GenerateVoxelDensity.usf) and in the planet branch (SphericalPlanet.ush). Mirrors FVoxelChunkLineSegments::ForEachLine
-// and FinishLine (VoxelChunkLineSegments.h) operation for operation: the CPU generator evaluates the same float4s, so
-// GPU and CPU match (VoxelWorlds.Generation.GPUvsCPULineParity). Any change here must be mirrored there.
+// Terrain conditioning lines on the GPU (Documentation/TERRAIN_LINES_PLAN.md, L2 and L3): a polyline that levels, lowers
+// or raises the terrain height along it, applied before the conditioning zones in the heightmap branch
+// (GenerateVoxelDensity.usf) and in the planet branch (SphericalPlanet.ush), and the surface it leaves along it: a band
+// of material and a minimum depth for caves. Mirrors FVoxelChunkLineSegments::ForEachLine and FinishLine and
+// FVoxelChunkLineSample::ApplyTo (VoxelChunkLineSegments.h) operation for operation: the CPU generator evaluates the
+// same float4s, so GPU and CPU match (VoxelWorlds.Generation.GPUvsCPULineParity). Any change here must be mirrored there.
 //
 // Include AFTER the generation globals: this file reads ConditioningLineSegmentCount and ConditioningLineData.
 //
-// ConditioningLineData is the chunk's segment list, 4 float4s a segment, in the chunk's frame (relative to the chunk's
-// origin corner on a heightmap world, to the anchor's point on the datum sphere on a planet), the lines in the order they
-// are applied and each line's segments in order along it:
-//   [A.xyz, target at A] [B.xyz, target at B] [half width at A, half width at B, falloff, strength] [line index, blend, 0, 0]
-// blend: 0 Level, 1 LowerOnly, 2 RaiseOnly (EVoxelConditioningLineBlend).
+// ConditioningLineData is the chunk's segment list, 5 float4s a segment (VOXELGEN_LINE_SEGMENT_STRIDE,
+// FVoxelConditioningLine::SegmentStride), in the chunk's frame (relative to the chunk's origin corner on a heightmap
+// world, to the anchor's point on the datum sphere on a planet), the lines in the order they are applied and each line's
+// segments in order along it:
+//   [A.xyz, target at A] [B.xyz, target at B] [half width at A, half width at B, falloff, strength]
+//   [line index, blend, band material or -1, band depth in voxels] [band half width, minimum cave depth in voxels, 0, 0]
+// blend: 0 Level, 1 LowerOnly, 2 RaiseOnly (EVoxelConditioningLineBlend). The band's half width is negative for a line
+// with no band and a value no core exceeds for a band as wide as the core.
 
 #pragma once
+
+#define VOXELGEN_LINE_SEGMENT_STRIDE 5
+
+/** What the chunk's lines make of the ground at a point (FVoxelChunkLineSurface). */
+struct ConditioningLineSurface
+{
+    int BandMaterial;   // the band's material, -1 where no band lies (the later line's where two overlap)
+    float BandDepth;    // how deep under the generated surface the band goes, in voxels
+    float MinCaveDepth; // the shallowest depth a cave may open at, in voxels (0: the caves' own)
+};
 
 /**
  * One line's blend of a height, from its nearest segment (FVoxelChunkLineSegments::FinishLine): the distance (the arc
@@ -26,13 +40,16 @@
  * @param DistSq The squared distance to it, in the chunk's frame
  * @param Height The height (or altitude) so far
  * @param ArcRadius The datum radius on a planet, 0 on a heightmap world
+ * @param Surface The surface the lines before this one left; this line's band replaces an earlier one's and its minimum
+ *        cave depth (times its profile here) deepens it (FVoxelChunkLineSample::ApplyTo)
  */
-float GpuBlendConditioningLine(int Segment, float T, float DistSq, float Height, float ArcRadius)
+float GpuBlendConditioningLine(int Segment, float T, float DistSq, float Height, float ArcRadius, inout ConditioningLineSurface Surface)
 {
-    const float4 s0 = ConditioningLineData[Segment * 4 + 0];
-    const float4 s1 = ConditioningLineData[Segment * 4 + 1];
-    const float4 s2 = ConditioningLineData[Segment * 4 + 2];
-    const float4 s3 = ConditioningLineData[Segment * 4 + 3];
+    const float4 s0 = ConditioningLineData[Segment * VOXELGEN_LINE_SEGMENT_STRIDE + 0];
+    const float4 s1 = ConditioningLineData[Segment * VOXELGEN_LINE_SEGMENT_STRIDE + 1];
+    const float4 s2 = ConditioningLineData[Segment * VOXELGEN_LINE_SEGMENT_STRIDE + 2];
+    const float4 s3 = ConditioningLineData[Segment * VOXELGEN_LINE_SEGMENT_STRIDE + 3];
+    const float4 s4 = ConditioningLineData[Segment * VOXELGEN_LINE_SEGMENT_STRIDE + 4];
 
     float dist = sqrt(DistSq);
     if (ArcRadius > 0.0f)
@@ -46,26 +63,41 @@ float GpuBlendConditioningLine(int Segment, float T, float DistSq, float Height,
     const float halfWidth = s2.x + T * (s2.y - s2.x);
     const float target = s0.w + T * (s1.w - s0.w);
 
-    // FVoxelConditioningLine::WeightAtDistance: the strength on the core, a smoothstep to zero across the falloff.
-    float w;
+    // FVoxelConditioningLine::WeightAtDistance for a strength of 1, the profile: 1 on the core, a smoothstep to zero
+    // across the falloff. The weight is the strength times it (a line that only paints has a strength of 0).
+    float profile;
     if (dist <= halfWidth)
     {
-        w = s2.w;
+        profile = 1.0f;
     }
     else
     {
         const float falloff = max(1.0f, s2.z);
         if (dist >= halfWidth + falloff)
         {
-            w = 0.0f;
+            profile = 0.0f;
         }
         else
         {
             const float t = (dist - halfWidth) / falloff;
-            const float s = 1.0f - (t * t * (3.0f - 2.0f * t));
-            w = s2.w * s;
+            profile = 1.0f - (t * t * (3.0f - 2.0f * t));
         }
     }
+    if (profile <= 0.0f)
+    {
+        return Height;
+    }
+
+    // The surface (FVoxelChunkLineSample::ApplyTo): the band to the lesser of its half width and the core's
+    // (FVoxelConditioningLine::IsOnBand), the minimum cave depth eased by the profile.
+    if (dist <= min(s4.x, halfWidth))
+    {
+        Surface.BandMaterial = (int)s3.z;
+        Surface.BandDepth = s3.w;
+    }
+    Surface.MinCaveDepth = max(Surface.MinCaveDepth, s4.y * profile);
+
+    const float w = s2.w * profile;
     if (w <= 0.0f)
     {
         return Height;
@@ -94,9 +126,13 @@ float GpuBlendConditioningLine(int Segment, float T, float DistSq, float Height,
  *          the datum sphere less the anchor's (SurfaceOffset) on a planet
  * @param BaseHeight The natural height (or altitude) there
  * @param ArcRadius The datum radius on a planet, 0 on a heightmap world
+ * @param OutSurface The surface the lines leave there: the band and the caves' minimum depth
  */
-float GpuApplyConditioningLines(float3 P, float BaseHeight, float ArcRadius)
+float GpuApplyConditioningLines(float3 P, float BaseHeight, float ArcRadius, out ConditioningLineSurface OutSurface)
 {
+    OutSurface.BandMaterial = -1;
+    OutSurface.BandDepth = 0.0f;
+    OutSurface.MinCaveDepth = 0.0f;
     float H = BaseHeight;
     int currentLine = -1;
     int bestSegment = 0;
@@ -104,14 +140,14 @@ float GpuApplyConditioningLines(float3 P, float BaseHeight, float ArcRadius)
     float bestDistSq = 3.402823466e+38f;
     for (int s = 0; s < ConditioningLineSegmentCount; ++s)
     {
-        const float4 s0 = ConditioningLineData[s * 4 + 0];
-        const float4 s1 = ConditioningLineData[s * 4 + 1];
-        const int lineIndex = (int)ConditioningLineData[s * 4 + 3].x;
+        const float4 s0 = ConditioningLineData[s * VOXELGEN_LINE_SEGMENT_STRIDE + 0];
+        const float4 s1 = ConditioningLineData[s * VOXELGEN_LINE_SEGMENT_STRIDE + 1];
+        const int lineIndex = (int)ConditioningLineData[s * VOXELGEN_LINE_SEGMENT_STRIDE + 3].x;
         if (lineIndex != currentLine)
         {
             if (currentLine >= 0)
             {
-                H = GpuBlendConditioningLine(bestSegment, bestT, bestDistSq, H, ArcRadius);
+                H = GpuBlendConditioningLine(bestSegment, bestT, bestDistSq, H, ArcRadius, OutSurface);
             }
             currentLine = lineIndex;
             bestDistSq = 3.402823466e+38f;
@@ -131,7 +167,7 @@ float GpuApplyConditioningLines(float3 P, float BaseHeight, float ArcRadius)
     }
     if (currentLine >= 0)
     {
-        H = GpuBlendConditioningLine(bestSegment, bestT, bestDistSq, H, ArcRadius);
+        H = GpuBlendConditioningLine(bestSegment, bestT, bestDistSq, H, ArcRadius, OutSurface);
     }
     return H;
 }

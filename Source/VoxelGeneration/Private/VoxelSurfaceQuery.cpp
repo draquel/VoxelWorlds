@@ -39,6 +39,20 @@ namespace
 		Over.Level = Sample.SurfaceLevel;
 		return Over;
 	}
+
+	/** Whether a conditioning has lines, which may paint a band or deepen the caves (the one test a set with no line pays). */
+	FORCEINLINE bool HasLines(const FVoxelConditioning* Conditioning)
+	{
+		return Conditioning && Conditioning->Lines.Num() > 0;
+	}
+
+	/** A mix that is one material alone: a conditioning line's band. */
+	FORCEINLINE void SetBandMix(FVoxelSurfaceMaterialMix& Mix, uint8 Band)
+	{
+		Mix.Materials[0] = Band;
+		Mix.Materials[1] = Band;
+		Mix.Weight = 0.0f;
+	}
 }
 
 void FVoxelSurfaceQuery::SampleHeightmapClimate(
@@ -183,20 +197,21 @@ void FVoxelSurfaceQuery::QuerySurfaceConditionsAt(
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
 	const FVoxelWaterLevels& Water,
-	uint8& OutSurfaceMaterial, uint8& OutBiomeID)
+	uint8& OutSurfaceMaterial, uint8& OutBiomeID,
+	const FVoxelConditioning* Conditioning)
 {
 	if (WorldMode.GetWorldModeType() != EWorldMode::SphericalPlanet)
 	{
 		const FColumnWater Over = WaterOver(Water, Surface.Position);
 		QuerySurfaceConditions(static_cast<float>(Surface.Position.X), static_cast<float>(Surface.Position.Y),
 			static_cast<float>(Surface.Position.Z), VoxelSize, BiomeSnapshot, NoiseParams.Seed,
-			Over.bWater && !Water.IsRadial(), static_cast<float>(Over.Level), OutSurfaceMaterial, OutBiomeID);
+			Over.bWater && !Water.IsRadial(), static_cast<float>(Over.Level), OutSurfaceMaterial, OutBiomeID, Conditioning);
 		return;
 	}
 	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode);
 	const FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(Surface.Position, Planet.GetPlanetParams().PlanetCenter);
 	QueryPlanetSurfaceConditionsAt(Planet, Direction, Surface.Altitude, Continentalness, static_cast<double>(Surface.Altitude), VoxelSize,
-		NoiseParams, BiomeSnapshot, Water, OutSurfaceMaterial, OutBiomeID);
+		NoiseParams, BiomeSnapshot, Water, OutSurfaceMaterial, OutBiomeID, Conditioning);
 }
 
 FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QuerySurfaceMaterialMixAt(
@@ -205,17 +220,19 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QuerySurfaceMaterialMixAt(
 	float Continentalness,
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
-	const FVoxelWaterLevels& Water)
+	const FVoxelWaterLevels& Water,
+	const FVoxelConditioning* Conditioning)
 {
 	if (WorldMode.GetWorldModeType() != EWorldMode::SphericalPlanet)
 	{
 		const FColumnWater Over = WaterOver(Water, Surface.Position);
 		return QuerySurfaceMaterialMix(static_cast<float>(Surface.Position.X), static_cast<float>(Surface.Position.Y),
-			static_cast<float>(Surface.Position.Z), BiomeSnapshot, NoiseParams.Seed, Over.bWater && !Water.IsRadial(), static_cast<float>(Over.Level));
+			static_cast<float>(Surface.Position.Z), BiomeSnapshot, NoiseParams.Seed, Over.bWater && !Water.IsRadial(), static_cast<float>(Over.Level),
+			Conditioning);
 	}
 	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode);
 	const FVector Direction = FSphericalPlanetWorldMode::GetDirectionFromCenter(Surface.Position, Planet.GetPlanetParams().PlanetCenter);
-	return QueryPlanetSurfaceMaterialMixAt(Planet, Direction, Surface.Altitude, Continentalness, NoiseParams, BiomeSnapshot, Water);
+	return QueryPlanetSurfaceMaterialMixAt(Planet, Direction, Surface.Altitude, Continentalness, NoiseParams, BiomeSnapshot, Water, Conditioning);
 }
 
 uint8 FVoxelSurfaceQuery::QueryMapSurfaceMaterial(
@@ -250,8 +267,9 @@ uint8 FVoxelSurfaceQuery::QueryMapSurfaceMaterial(
 			QuerySurfaceConditions(
 				static_cast<float>(Position.X), static_cast<float>(Position.Y), SurfaceAltitude, VoxelSize,
 				BiomeSnapshot, NoiseParams.Seed, Over.bWater, static_cast<float>(Over.Level),
-				MaterialID, BiomeID);
+				MaterialID, BiomeID, Conditioning);
 		}
+		return MaterialID;
 	}
 	else if (bUseBiomes)
 	{
@@ -280,6 +298,18 @@ uint8 FVoxelSurfaceQuery::QueryMapSurfaceMaterial(
 		MaterialID = WorldMode.GetMaterialAtDepth(Position,
 			bPlanet ? static_cast<float>(static_cast<const FSphericalPlanetWorldMode&>(WorldMode).GetPlanetParams().PlanetRadius + SurfaceAltitude) : SurfaceAltitude,
 			0.0f);
+	}
+	// A conditioning line's band, as the generators' fallback and legacy pipelines write it over their material.
+	if (HasLines(Conditioning))
+	{
+		if (bPlanet)
+		{
+			Conditioning->GetBandOnSphere(Direction, static_cast<const FSphericalPlanetWorldMode&>(WorldMode).GetPlanetParams().PlanetRadius, MaterialID);
+		}
+		else
+		{
+			Conditioning->GetBandAt(Position.X, Position.Y, MaterialID);
+		}
 	}
 	return MaterialID;
 }
@@ -362,8 +392,16 @@ FVoxelData FVoxelSurfaceQuery::GenerateVoxelAt(
 				? Snapshot.GetBiomeBlend(Temperature, Moisture, Continentalness).GetDominantBiome()
 				: FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f).GetDominantBiome();
 		}
+		// The lines over the column keep caves under their minimum depth, as generation does.
+		float MinDepthUnderLines = 0.0f;
+		if (HasLines(Conditioning))
+		{
+			MinDepthUnderLines = bPlanet
+				? Conditioning->GetMinCaveDepthOnSphere(Direction, PlanetParams->PlanetRadius)
+				: Conditioning->GetMinCaveDepthAt(WorldPos.X, WorldPos.Y);
+		}
 		const float Carve = FVoxelCPUNoiseGenerator::CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Caves, NoiseParams.Seed,
-			bUnderwater, PlanetParams);
+			bUnderwater, PlanetParams, MinDepthUnderLines);
 		if (Carve > 0.0f)
 		{
 			Density = static_cast<uint8>(FMath::Clamp(FMath::Max(0.0f, static_cast<float>(Density) - Carve * 255.0f), 0.0f, 255.0f));
@@ -426,13 +464,20 @@ void FVoxelSurfaceQuery::QuerySurfaceConditions(
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
 	int32 WorldSeed,
 	bool bEnableWaterLevel, float WaterLevel,
-	uint8& OutSurfaceMaterial, uint8& OutBiomeID)
+	uint8& OutSurfaceMaterial, uint8& OutBiomeID,
+	const FVoxelConditioning* Conditioning)
 {
 	OutSurfaceMaterial = 0;
 	OutBiomeID = 0;
 
 	if (!BiomeSnapshot.bIsValid)
 	{
+		// No biome pipeline: a conditioning line's band is still the surface's material, as the generators' other
+		// pipelines write it.
+		if (HasLines(Conditioning))
+		{
+			Conditioning->GetBandAt(WorldX, WorldY, OutSurfaceMaterial);
+		}
 		return;
 	}
 
@@ -458,6 +503,12 @@ void FVoxelSurfaceQuery::QuerySurfaceConditions(
 
 	// Apply height material rules (snow on peaks, etc.)
 	OutSurfaceMaterial = BiomeSnapshot.ApplyHeightMaterialRules(OutSurfaceMaterial, TerrainHeight, 0.0f);
+
+	// A conditioning line's band, after the height rules, as generation writes it.
+	if (HasLines(Conditioning))
+	{
+		Conditioning->GetBandAt(WorldX, WorldY, OutSurfaceMaterial);
+	}
 }
 
 FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurface(
@@ -498,7 +549,7 @@ FVoxelSurfaceSample FVoxelSurfaceQuery::SampleSurface(
 	QuerySurfaceConditions(
 		WorldX, WorldY, CentreHeight, VoxelSize,
 		BiomeSnapshot, WorldSeed, bEnableWaterLevel, WaterLevel,
-		Sample.MaterialID, Sample.BiomeID);
+		Sample.MaterialID, Sample.BiomeID, Conditioning);
 
 	Sample.Position = FVector(WorldX, WorldY, CentreHeight);
 	Sample.Altitude = WorldMode.GetAltitude(Sample.Position);
@@ -517,7 +568,8 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(
 {
 	OutSurfaceMaterial = 0;
 	OutBiomeID = 0;
-	if (!BiomeSnapshot.bIsValid)
+	// Without a biome pipeline the one thing to name is a conditioning line's band (QueryPlanetSurfaceConditionsAt).
+	if (!BiomeSnapshot.bIsValid && !HasLines(Conditioning))
 	{
 		return;
 	}
@@ -530,7 +582,7 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(
 	// variant when water is on), height rules by the altitude. At a surface point the depth is 0.
 	float Continentalness = 0.0f;
 	float TerrainAltitude = FSphericalPlanetWorldMode::SampleRadialDisplacement(
-		Direction, Params.PlanetRadius, Planet.GetTerrainParams(), NoiseParams, &BiomeSnapshot, &Continentalness);
+		Direction, Params.PlanetRadius, Planet.GetTerrainParams(), NoiseParams, BiomeSnapshot.bIsValid ? &BiomeSnapshot : &Planet.GetBiomeSnapshot(), &Continentalness);
 	if (Conditioning && !Conditioning->IsEmpty())
 	{
 		// The conditioned terrain (SP-B10), as the generator blends it.
@@ -539,7 +591,7 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(
 	// Altitudes, formed in double (WM-BP4), as the generator compares them.
 	const double VoxelAltitude = FSphericalPlanetWorldMode::CalculateRadialDistance(Position, Params.PlanetCenter) - Params.PlanetRadius;
 	QueryPlanetSurfaceConditionsAt(Planet, Direction, TerrainAltitude, Continentalness, VoxelAltitude, VoxelSize, NoiseParams,
-		BiomeSnapshot, Water, OutSurfaceMaterial, OutBiomeID);
+		BiomeSnapshot, Water, OutSurfaceMaterial, OutBiomeID, Conditioning);
 }
 
 void FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(
@@ -552,17 +604,25 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
 	const FVoxelWaterLevels& Water,
-	uint8& OutSurfaceMaterial, uint8& OutBiomeID)
+	uint8& OutSurfaceMaterial, uint8& OutBiomeID,
+	const FVoxelConditioning* Conditioning)
 {
 	OutSurfaceMaterial = 0;
 	OutBiomeID = 0;
-	if (!BiomeSnapshot.bIsValid)
-	{
-		return;
-	}
-
 	const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
 	const float DepthBelowSurface = static_cast<float>((static_cast<double>(TerrainAltitude) - VoxelAltitude) / FMath::Max(VoxelSize, KINDA_SMALL_NUMBER));
+	if (!BiomeSnapshot.bIsValid)
+	{
+		// No biome pipeline: a conditioning line's band is still the material to its depth, as the generators' other
+		// pipelines write it.
+		uint8 OnlyBand = 0;
+		float OnlyBandDepth = 0.0f;
+		if (HasLines(Conditioning) && Conditioning->GetBandOnSphere(Direction, Params.PlanetRadius, OnlyBand, &OnlyBandDepth) && DepthBelowSurface < OnlyBandDepth)
+		{
+			OutSurfaceMaterial = OnlyBand;
+		}
+		return;
+	}
 	const float Altitude = static_cast<float>(VoxelAltitude);
 
 	// Climate as generation samples it: the planet noise at the direction's point on the datum sphere (WM-BP5)
@@ -580,6 +640,17 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(
 		? BiomeSnapshot.GetBlendedMaterialWithWater(Blend, DepthBelowSurface, TerrainAltitude, static_cast<float>(Over.Level - Params.PlanetRadius), Dither)
 		: BiomeSnapshot.GetBlendedMaterial(Blend, DepthBelowSurface, Dither);
 	OutSurfaceMaterial = BiomeSnapshot.ApplyHeightMaterialRules(OutSurfaceMaterial, Altitude, DepthBelowSurface);
+
+	// A conditioning line's band to its depth under the terrain, after the height rules, as generation writes it.
+	if (HasLines(Conditioning))
+	{
+		uint8 Band = 0;
+		float BandDepth = 0.0f;
+		if (Conditioning->GetBandOnSphere(Direction, Params.PlanetRadius, Band, &BandDepth) && DepthBelowSurface < BandDepth)
+		{
+			OutSurfaceMaterial = Band;
+		}
+	}
 }
 
 FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(
@@ -589,20 +660,34 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(
 	float Continentalness,
 	const FVoxelNoiseParams& NoiseParams,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
-	const FVoxelWaterLevels& Water)
+	const FVoxelWaterLevels& Water,
+	const FVoxelConditioning* Conditioning)
 {
 	FVoxelSurfaceMaterialMix Mix;
+	const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
 	if (!BiomeSnapshot.bIsValid)
 	{
+		uint8 OnlyBand = 0;
+		if (HasLines(Conditioning) && Conditioning->GetBandOnSphere(Direction, Params.PlanetRadius, OnlyBand))
+		{
+			SetBandMix(Mix, OnlyBand);
+		}
 		return Mix;
 	}
-	const FSphericalPlanetParams& Params = Planet.GetPlanetParams();
 
 	// Climate and the blend as QueryPlanetSurfaceConditionsAt has them
 	float Temperature = 0.0f, Moisture = 0.0f;
 	SamplePlanetClimate(Direction, Params.PlanetRadius, TerrainAltitude, NoiseParams.Seed, BiomeSnapshot, Temperature, Moisture);
 	const FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
 	Mix.BiomeID = Blend.GetDominantBiome();
+
+	// On a conditioning line's band the surface is the band's material alone (the biome stays the column's).
+	uint8 Band = 0;
+	if (HasLines(Conditioning) && Conditioning->GetBandOnSphere(Direction, Params.PlanetRadius, Band))
+	{
+		SetBandMix(Mix, Band);
+		return Mix;
+	}
 
 	// The blend's surface materials and shares, height rules applied to each, merged per material.
 	uint8 Materials[MAX_BIOME_BLEND];
@@ -655,11 +740,17 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QuerySurfaceMaterialMix(
 	float WorldX, float WorldY, float TerrainHeight,
 	const FVoxelBiomeSnapshot& BiomeSnapshot,
 	int32 WorldSeed,
-	bool bEnableWaterLevel, float WaterLevel)
+	bool bEnableWaterLevel, float WaterLevel,
+	const FVoxelConditioning* Conditioning)
 {
 	FVoxelSurfaceMaterialMix Mix;
 	if (!BiomeSnapshot.bIsValid)
 	{
+		uint8 OnlyBand = 0;
+		if (HasLines(Conditioning) && Conditioning->GetBandAt(WorldX, WorldY, OnlyBand))
+		{
+			SetBandMix(Mix, OnlyBand);
+		}
 		return Mix;
 	}
 
@@ -687,6 +778,14 @@ FVoxelSurfaceMaterialMix FVoxelSurfaceQuery::QuerySurfaceMaterialMix(
 		: 0.0f;
 	const FBiomeBlend Blend = BiomeSnapshot.GetBiomeBlend(Temperature, Moisture, Continentalness);
 	Mix.BiomeID = Blend.GetDominantBiome();
+
+	// On a conditioning line's band the surface is the band's material alone (the biome stays the column's).
+	uint8 Band = 0;
+	if (HasLines(Conditioning) && Conditioning->GetBandAt(WorldX, WorldY, Band))
+	{
+		SetBandMix(Mix, Band);
+		return Mix;
+	}
 
 	// The blend's surface materials and shares, height rules applied to each, merged per material (as the planet's mix).
 	uint8 Materials[MAX_BIOME_BLEND];

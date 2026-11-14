@@ -167,7 +167,7 @@ tiles) asked for half a million images at one zoom. The tile pyramid (D84) bound
   (ceil(log2 N): 11 on the 50 km planet).
 - **One drawer at every level.** `GenerateTileAsync` samples `FVoxelMapTileFrame::SampleAt(Id, ...)`: a plane's pixel
   corners and a planet's pixel centres 2^L level-0 pixels apart, with the one-pixel apron, the conditioning over the
-  tile's area (`GatherConditioning(Id)`, what is ready), the hillshade at the level's spacing (`ShadeAt(.., Level)`), and the edit overlays of
+  tile's area (`GatherConditioning(Id)`, what is ready; above level 0 its lines taken as at least 0.71 of a pixel wide, and none above level 6: "Conditioning lines on the map" below), the hillshade at the level's spacing (`ShadeAt(.., Level)`), and the edit overlays of
   the level-0 tiles under its pixels (`SourcePixel`: a plane's corner pixel, a planet's pixel under the sample's
   direction; gathered from the footprint or from the overlays, whichever is fewer). A drawing costs the same at every
   level. Overlay rebuilds stay level 0's; when one changes an overlay, the coarser tiles over it go stale.
@@ -184,6 +184,18 @@ tiles) asked for half a million images at one zoom. The tile pyramid (D84) bound
 - **The coarser level meanwhile.** While a view's tiles draw, the samplers show the nearest coarser level stored over each
   texel (VoxelCharacterPlugin's `FVCPlaneMapSampler`, `FVCPlanetMapSampler`), so a zoom or a pan shows the old image
   scaled up, then sharpens.
+- **Conditioning lines on the map** (the terrain lines plan's L3; `WORLD_MODES.md`, "The surface under a line"). A
+  line's band is a material like any other: `QueryMapSurfaceMaterial` names it where generation writes it, so at level
+  0, where a pixel is a voxel column, the map's pixel and the generated voxel name the same material across a band. A
+  pixel above level 0 is a point sample 2^L voxels apart, and a road a few voxels wide would fall between the samples
+  and draw as dashes: a tile above level 0 takes every line as at least 0.71 of a pixel wide, for the height and for
+  the band (`FVoxelMapTileFrame::GatherConditioning(Id)` sets `FVoxelConditioning::LeastHalfWidth` and gathers over the
+  tile grown by as much), so a road is an unbroken line one to two pixels wide at every level that draws it. A tile
+  above level 6 (a tile there is 64 chunks wide, the far field's limit; `TakesLines`,
+  `FVoxelConditioningLine::GatherLimitChunks`) takes the zones alone: a road is far under a pixel, and the gather
+  would ask a conditioner for every road over many placement cells. Test `VoxelWorlds.Map.ConditioningLine.Band`: on
+  a trail 3 voxels wide and a road 6 voxels wide the band's pixels are one connected run at levels 1 to 6, where a
+  point sample alone breaks from level 3.
 
 A load and `ExploreAll` queue nothing, since only the views ask (exploration became the explored mask in P2, below). Tests: `VoxelWorlds.Map.Pyramid.Levels` (the
 arithmetic on a plane and on a planet of 37 tiles a face edge), `.ViewRequests` (an island through the subsystem),

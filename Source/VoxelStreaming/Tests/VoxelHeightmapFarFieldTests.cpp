@@ -1385,7 +1385,8 @@ bool FFarFieldPlaneCameraAfterCutTest::RunTest(const FString& Parameters)
 
 // The far field and a conditioning line (Documentation/TERRAIN_LINES_PLAN.md, L2): the region a line reaches, a patch
 // built with the line following its height, and the invalidation: when the conditioning over a region changes, the
-// built patches that take conditioning and meet the region rebuild, and no other does.
+// built patches that take conditioning and meet the region rebuild, and no other does. A patch takes a line as at
+// least 0.71 of its vertex spacing wide (L3), so it meets a region from that much farther off.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlaneConditioningLineTest,
 	"VoxelWorlds.FarField.Plane.ConditioningLine",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1463,12 +1464,18 @@ bool FFarFieldPlaneConditioningLineTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("The far field settles"), Rig.Converge(View, NoChunk) > 0);
 	TMap<uint64, uint32> Serials;
 	int32 Meeting = 0;
+	// Whether a patch is changed by the line: it takes conditioning and meets the line's region grown by the patch's own
+	// least half width for a line.
+	const auto Meets = [&Rig, &Region](const FVoxelFarField::FPatchState& Patch)
+	{
+		return Rig.Frame().TakesZones(Patch) && Rig.Frame().Intersects(Patch, Rig.Frame().GrownBy(Region, Rig.Frame().LeastLineHalfWidth(Patch.Key.Level)));
+	};
 	Rig.FarField.ForEachPatch([&](const FVoxelFarField::FPatchState& Patch)
 	{
 		if (Patch.bBuilt)
 		{
 			Serials.Add(Patch.Key.Pack(), Patch.BuildSerial);
-			Meeting += (Rig.Frame().TakesZones(Patch) && Rig.Frame().Intersects(Patch, Region)) ? 1 : 0;
+			Meeting += Meets(Patch) ? 1 : 0;
 		}
 	});
 	TestTrue(TEXT("Built patches meet the line's region"), Meeting > 0);
@@ -1483,7 +1490,7 @@ bool FFarFieldPlaneConditioningLineTest::RunTest(const FString& Parameters)
 		{
 			return;
 		}
-		const bool bMeets = Rig.Frame().TakesZones(Patch) && Rig.Frame().Intersects(Patch, Region);
+		const bool bMeets = Meets(Patch);
 		const bool bRebuilt = Patch.BuildSerial != *Serial;
 		Rebuilt += (bMeets && bRebuilt) ? 1 : 0;
 		NotRebuilt += (bMeets && !bRebuilt) ? 1 : 0;
@@ -1496,6 +1503,192 @@ bool FFarFieldPlaneConditioningLineTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Patches rebuilt"), Rebuilt > 0);
 	TestEqual(TEXT("No patch outside the region rebuilt"), RebuiltElsewhere, 0);
 	TestTrue(TEXT("Patches outside the region kept their build"), Kept > 0);
+	return true;
+}
+
+// A conditioning line's band in the far field (Documentation/TERRAIN_LINES_PLAN.md, L3). A patch samples the surface at
+// its vertices, a vertex spacing apart; it takes every line as at least 0.71 of that wide. On the lattice of each of the
+// four finest levels, along a trail three voxels wide that crosses many patches: the vertices whose material mix is the
+// band's alone are one connected run from the line's start to its end, where with the line as it is they break up (or
+// vanish) once the spacing passes the band's width. With and without the biome pipeline. The far field's own gather asks
+// over a patch's footprint grown by that least half width, and never for a patch wider than the gather limit.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlaneConditioningLineBandTest,
+	"VoxelWorlds.FarField.Plane.ConditioningLineBand",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFarFieldPlaneConditioningLineBandTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelHeightmapFarFieldTestUtils;
+	constexpr uint8 BandMaterial = 30;
+
+	UVoxelBiomeConfiguration* Biomes = NewObject<UVoxelBiomeConfiguration>();
+	Biomes->AddToRoot();
+	Biomes->InitializeDefaults();
+	bool bSomePointSampleBroke = false;
+	for (const bool bBiomes : { true, false })
+	{
+		UVoxelWorldConfiguration* Config = MakePlaneConfig();
+		Config->bEnableBiomes = bBiomes;
+		Config->BiomeConfiguration = bBiomes ? Biomes : nullptr;
+		FRig Rig(Config, 64, 150000.0, /*bSea=*/true);
+		const FVoxelFarFieldSettings& Settings = Rig.Settings;
+		const float VoxelSize = Config->VoxelSize;
+		const FVector2D Site = GetSites()[1];
+		const FVector2D Start = Site + FVector2D(-9000.0, -6000.0);
+		const FVector2D End = Site + FVector2D(9000.0, 6000.0);
+		FVoxelConditioningLineParams Params;
+		Params.FalloffWidth = 2.0f * VoxelSize;
+		Params.Strength = 0.0f;
+		Params.Surface.BandMaterialID = BandMaterial;
+		const int32 Steps = FMath::CeilToInt32((End - Start).Size() / (2.0 * VoxelSize));
+		for (int32 Step = 0; Step <= Steps; ++Step)
+		{
+			const FVector2D P = FMath::Lerp(Start, End, static_cast<double>(Step) / Steps);
+			Params.Vertices.Add(FVoxelConditioningLineVertex(FVector(P.X, P.Y, 0.0), 0.0f, 1.5f * VoxelSize));
+		}
+		const FVoxelConditioningLineRef Line = FVoxelConditioningLine::Make(Params);
+
+		// Whether one vertex of a lattice names the band, with a conditioning.
+		const auto IsBand = [&Rig](const FVector2D& XY, const FVoxelConditioning& Conditioning)
+		{
+			const FVoxelFarFieldSample Sample = FVoxelFarFieldSample::OfXY(XY);
+			const FVoxelSurfaceMaterialMix Mix = Rig.Surface->SampleMaterialMix(Sample, Rig.Surface->SampleAltitude(Sample, Conditioning), 0.0f, &Conditioning);
+			uint8 Material = 0, Biome = 0;
+			Rig.Surface->SampleConditions(Sample, Rig.Surface->SampleAltitude(Sample, Conditioning), 0.0f, Material, Biome, &Conditioning);
+			return Mix.Materials[0] == BandMaterial && Mix.Materials[1] == BandMaterial && Material == BandMaterial;
+		};
+		// Whether a set of lattice vertices joins the vertex nearest the line's start to the one nearest its end.
+		const auto Joined = [&](const TSet<FIntPoint>& Vertices, double Spacing)
+		{
+			if (Vertices.Num() == 0)
+			{
+				return false;
+			}
+			const auto Nearest = [&](const FVector2D& Point)
+			{
+				FIntPoint Best(0, 0);
+				double BestDistance = TNumericLimits<double>::Max();
+				for (const FIntPoint& V : Vertices)
+				{
+					const double Distance = FVector2D::DistSquared(FVector2D(Settings.GridOrigin.X + V.X * Spacing, Settings.GridOrigin.Y + V.Y * Spacing), Point);
+					if (Distance < BestDistance)
+					{
+						BestDistance = Distance;
+						Best = V;
+					}
+				}
+				return Best;
+			};
+			const FIntPoint To = Nearest(End);
+			TSet<FIntPoint> Seen;
+			TArray<FIntPoint> Open;
+			Open.Add(Nearest(Start));
+			Seen.Add(Open[0]);
+			while (Open.Num() > 0)
+			{
+				const FIntPoint At = Open.Pop(EAllowShrinking::No);
+				if (At == To)
+				{
+					return true;
+				}
+				for (int32 DY = -1; DY <= 1; ++DY)
+				{
+					for (int32 DX = -1; DX <= 1; ++DX)
+					{
+						const FIntPoint Next(At.X + DX, At.Y + DY);
+						if (Vertices.Contains(Next) && !Seen.Contains(Next))
+						{
+							Seen.Add(Next);
+							Open.Add(Next);
+						}
+					}
+				}
+			}
+			return false;
+		};
+
+		const int32 Finest = Settings.EdgeLevel;
+		for (int32 Level = Finest; Level >= FMath::Max(Finest - 3, 0); --Level)
+		{
+			const double Spacing = Settings.GetPatchArc(Level) / Settings.PatchQuads;
+			const double Least = Rig.Frame().LeastLineHalfWidth(Level);
+			TestEqual(FString::Printf(TEXT("Level %d: a patch takes a line as at least 0.71 of its vertex spacing wide"), Level), Least, 0.71 * Spacing, 1e-6);
+			FVoxelConditioning Widened;
+			Widened.Lines.Add(Line);
+			Widened.LeastHalfWidth = static_cast<float>(Least);
+			FVoxelConditioning AsItIs;
+			AsItIs.Lines.Add(Line);
+			TSet<FIntPoint> BandVertices;
+			TSet<FIntPoint> PointVertices;
+			// Every lattice vertex within two spacings of the line's box.
+			const FBox2D Box = FBox2D(FVector2D(FMath::Min(Start.X, End.X), FMath::Min(Start.Y, End.Y)), FVector2D(FMath::Max(Start.X, End.X), FMath::Max(Start.Y, End.Y))).ExpandBy(2.0 * Spacing + Least);
+			for (int32 J = FMath::FloorToInt32((Box.Min.Y - Settings.GridOrigin.Y) / Spacing); J <= FMath::CeilToInt32((Box.Max.Y - Settings.GridOrigin.Y) / Spacing); ++J)
+			{
+				for (int32 I = FMath::FloorToInt32((Box.Min.X - Settings.GridOrigin.X) / Spacing); I <= FMath::CeilToInt32((Box.Max.X - Settings.GridOrigin.X) / Spacing); ++I)
+				{
+					const FVector2D XY(Settings.GridOrigin.X + I * Spacing, Settings.GridOrigin.Y + J * Spacing);
+					// Only vertices near the line can be on a band: the rest are skipped by their distance to it.
+					const FVector2D Along = (End - Start).GetSafeNormal();
+					if (FMath::Abs(FVector2D::CrossProduct(Along, XY - Start)) > 2.0 * Spacing + Least)
+					{
+						continue;
+					}
+					if (IsBand(XY, Widened))
+					{
+						BandVertices.Add(FIntPoint(I, J));
+					}
+					if (IsBand(XY, AsItIs))
+					{
+						PointVertices.Add(FIntPoint(I, J));
+					}
+				}
+			}
+			const bool bUnbroken = Joined(BandVertices, Spacing);
+			const bool bPointUnbroken = Joined(PointVertices, Spacing);
+			bSomePointSampleBroke |= !bPointUnbroken;
+			int32 Lost = 0;
+			for (const FIntPoint& V : PointVertices)
+			{
+				Lost += BandVertices.Contains(V) ? 0 : 1;
+			}
+			AddInfo(FString::Printf(TEXT("%s, level %d (a vertex every %.0f uu): %d vertices on the band, %s from end to end; with the line as it is %d, %s"),
+				bBiomes ? TEXT("Biomes") : TEXT("No biomes"), Level, Spacing, BandVertices.Num(), bUnbroken ? TEXT("unbroken") : TEXT("BROKEN"), PointVertices.Num(),
+				bPointUnbroken ? TEXT("unbroken") : TEXT("broken")));
+			TestTrue(FString::Printf(TEXT("%s, level %d: the band is unbroken from the line's start to its end"), bBiomes ? TEXT("Biomes") : TEXT("No biomes"), Level), bUnbroken);
+			TestEqual(FString::Printf(TEXT("%s, level %d: every vertex on the line as it is stays on the band"), bBiomes ? TEXT("Biomes") : TEXT("No biomes"), Level), Lost, 0);
+		}
+
+		// The far field's own gather: over a patch's footprint grown by its least half width, never for a patch wider
+		// than the gather limit.
+		if (bBiomes)
+		{
+			int32 Asked = 0;
+			double WidestAsked = 0.0;
+			int32 NotGrown = 0;
+			Rig.FarField.SetConditioningGatherer([&](const FVoxelFarFieldRegion& InRegion, FVoxelConditioning& Out)
+			{
+				++Asked;
+				const double Width = InRegion.Box.GetSize().X;
+				WidestAsked = FMath::Max(WidestAsked, Width);
+				// A patch is a power of two of chunks wide; grown by 1.42 of its vertex spacing its width is not.
+				const double Chunks = Width / Settings.ChunkWorldSize;
+				NotGrown += FMath::IsNearlyEqual(Chunks, FMath::RoundToDouble(Chunks), 1e-6) ? 1 : 0;
+				if (Line->MeetsRegion(InRegion.Box))
+				{
+					Out.Lines.Add(Line);
+				}
+			});
+			const FVoxelFarFieldView View = Rig.MakeView(Rig.SurfacePoint(Site) + FVector(0.0, 0.0, 300.0));
+			TestTrue(TEXT("The far field settles"), Rig.Converge(View, [](const FIntVector&) { return false; }) > 0);
+			AddInfo(FString::Printf(TEXT("The far field asked for conditioning %d times, the widest region %.0f uu (the gather limit %.0f uu), %d regions not grown"),
+				Asked, WidestAsked, Settings.ZoneGatherMax, NotGrown));
+			TestTrue(TEXT("The far field gathers conditioning for its narrow patches"), Asked > 0);
+			TestEqual(TEXT("Every region asked is the patch's footprint grown"), NotGrown, 0);
+			TestTrue(TEXT("No patch wider than the gather limit asks"), WidestAsked <= Settings.ZoneGatherMax * (1.0 + 1.5 / Settings.PatchQuads));
+		}
+	}
+	TestTrue(TEXT("A point sample alone breaks the band at some level (non-vacuous)"), bSomePointSampleBroke);
+	Biomes->RemoveFromRoot();
 	return true;
 }
 

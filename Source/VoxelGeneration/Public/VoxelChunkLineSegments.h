@@ -8,10 +8,83 @@
 struct FVoxelNoiseGenerationRequest;
 
 /**
+ * What a chunk's conditioning lines make of the ground at a point (the plan's section 4.3): the band there and the
+ * shallowest depth a cave may open at. The generators' form of FVoxelConditioning's GetBandAt and GetMinCaveDepthAt, in
+ * float from the chunk's segment list; the shader carries the same three values (GpuApplyConditioningLines).
+ */
+struct FVoxelChunkLineSurface
+{
+	/** The band's material, or -1 where no band lies (where two lines' bands overlap, the later line's) */
+	int32 BandMaterial = -1;
+
+	/** How deep under the generated surface the band goes, in voxels */
+	float BandDepth = 0.0f;
+
+	/** The shallowest depth a cave may open at, in voxels: 0 leaves the caves their own */
+	float MinCaveDepth = 0.0f;
+
+	/** @return Whether anything is set: a band or a minimum cave depth */
+	bool IsSet() const { return BandMaterial >= 0 || MinCaveDepth > 0.0f; }
+
+	/**
+	 * Whether a voxel at a depth under the generated surface carries the band's material. Air over the band does too (a
+	 * negative depth), as it carries the surface's material elsewhere.
+	 * @param DepthBelowSurface The voxel's depth under the generated surface, in voxels
+	 */
+	bool HasBandAt(float DepthBelowSurface) const { return BandMaterial >= 0 && DepthBelowSurface < BandDepth; }
+};
+
+/** One line's result at a point of a chunk (FVoxelChunkLineSegments::ForEachLine), from its nearest segment. */
+struct FVoxelChunkLineSample
+{
+	/** The line's blend */
+	EVoxelConditioningLineBlend Blend = EVoxelConditioningLineBlend::Level;
+
+	/** The target height (or altitude) there */
+	float Target = 0.0f;
+
+	/** The weight the height is blended by: the strength times Profile (0 for a line that only paints) */
+	float Weight = 0.0f;
+
+	/** The weight's profile for a strength of 1: 1 on the core, a smoothstep to 0 across the falloff. Over 0 */
+	float Profile = 0.0f;
+
+	/** The line's band material where the point lies on its band, else -1 */
+	int32 BandMaterial = -1;
+
+	/** The line's band depth, in voxels */
+	float BandDepth = 0.0f;
+
+	/** The line's minimum cave depth times Profile, in voxels */
+	float MinCaveDepth = 0.0f;
+
+	/**
+	 * Apply this line to what the lines before it left: the height's blend, the band (a later line's replaces an
+	 * earlier one's), the deepest minimum cave depth. The shader's GpuBlendConditioningLine in the same order.
+	 * @param InOutHeight The height so far
+	 * @param InOutSurface The surface so far
+	 */
+	void ApplyTo(float& InOutHeight, FVoxelChunkLineSurface& InOutSurface) const
+	{
+		if (Weight > 0.0f)
+		{
+			InOutHeight = FVoxelConditioningLine::BlendHeight(Blend, InOutHeight, Target, Weight);
+		}
+		if (BandMaterial >= 0)
+		{
+			InOutSurface.BandMaterial = BandMaterial;
+			InOutSurface.BandDepth = BandDepth;
+		}
+		InOutSurface.MinCaveDepth = FMath::Max(InOutSurface.MinCaveDepth, MinCaveDepth);
+	}
+};
+
+/**
  * What a chunk's conditioning lines do to each of its XY columns on a heightmap world: per column, the lines that have a
- * weight there with their target, weight and blend, in the order they are applied. The heightmap generator works it out
- * once per column before its voxel loop (FVoxelChunkLineSegments::EvaluateColumns), since the lines depend on (X, Y)
- * alone and the loop computes the height for every voxel.
+ * weight there with their target, weight and blend, in the order they are applied, and the surface the lines leave there
+ * (the band, the caves' minimum depth). The heightmap generator works it out once per column before its voxel loop
+ * (FVoxelChunkLineSegments::EvaluateColumns), since the lines depend on (X, Y) alone and the loop computes the height
+ * for every voxel.
  */
 struct VOXELGENERATION_API FVoxelChunkLineColumns
 {
@@ -29,8 +102,14 @@ struct VOXELGENERATION_API FVoxelChunkLineColumns
 	/** The blends, column after column */
 	TArray<FColumnBlend> Blends;
 
-	/** @return Whether no column has a blend (the chunk's lines reach none of its columns) */
+	/** Per column (X + Y x ChunkSize) the surface the lines leave there; empty when no column has one */
+	TArray<FVoxelChunkLineSurface> Surfaces;
+
+	/** @return Whether no column has a blend (the chunk's lines move the height of none of its columns) */
 	bool IsEmpty() const { return Blends.Num() == 0; }
+
+	/** @return Whether some column has a band or a minimum cave depth */
+	bool HasSurfaces() const { return Surfaces.Num() > 0; }
 
 	/**
 	 * A column's height with the lines applied.
@@ -61,7 +140,9 @@ struct VOXELGENERATION_API FVoxelChunkLineColumns
  * no float is of the size of a world position or of the planet's radius.
  *
  * FVoxelConditioningLine::SegmentStride float4s a segment:
- * [A.xyz, target at A] [B.xyz, target at B] [half width at A, half width at B, falloff, strength] [line index, blend, 0, 0].
+ * [A.xyz, target at A] [B.xyz, target at B] [half width at A, half width at B, falloff, strength]
+ * [line index, blend, band material or -1, band depth in voxels] [band half width, minimum cave depth in voxels, 0, 0].
+ * The last two rows carry the line's surface (FVoxelConditioningLineSurface), the same on each of its segments.
  */
 struct VOXELGENERATION_API FVoxelChunkLineSegments
 {
@@ -97,12 +178,13 @@ struct VOXELGENERATION_API FVoxelChunkLineSegments
 	}
 
 	/**
-	 * Walk the list at a point: for each line, the nearest of its segments, then Func(Blend, Target, Weight) if the
-	 * weight there is over zero. The shader's loop, operation for operation, in float.
+	 * Walk the list at a point: for each line, the nearest of its segments, then Func(const FVoxelChunkLineSample&) if
+	 * the point lies within the line's core or falloff (a profile over zero; a line that only paints has a weight of
+	 * zero there and still a band). The shader's loop, operation for operation, in float.
 	 *
 	 * @param Point The point in the chunk's frame: (X, Y, 0) from the origin corner on a heightmap world, the point on
 	 *              the datum sphere less the anchor's on a planet
-	 * @param Func Called once per line with a weight, in the order the lines are applied
+	 * @param Func Called once per line that reaches the point, in the order the lines are applied
 	 */
 	template <typename FuncType>
 	void ForEachLine(const FVector3f& Point, FuncType&& Func) const
@@ -148,23 +230,37 @@ struct VOXELGENERATION_API FVoxelChunkLineSegments
 	}
 
 	/**
-	 * A height with the chunk's lines applied at a point (the planet generator's per-voxel form; the heightmap generator
-	 * uses EvaluateColumns).
+	 * A height with the chunk's lines applied at a point, and the surface they leave there (the planet generator's
+	 * per-voxel form; the heightmap generator uses EvaluateColumns).
+	 * @param Point The point in the chunk's frame, as ForEachLine
+	 * @param Height The natural height or altitude there
+	 * @param OutSurface The band and the caves' minimum depth there (reset first)
+	 * @return The height after the lines
+	 */
+	float Apply(const FVector3f& Point, float Height, FVoxelChunkLineSurface& OutSurface) const
+	{
+		OutSurface = FVoxelChunkLineSurface();
+		ForEachLine(Point, [&Height, &OutSurface](const FVoxelChunkLineSample& Sample)
+		{
+			Sample.ApplyTo(Height, OutSurface);
+		});
+		return Height;
+	}
+
+	/**
+	 * A height with the chunk's lines applied at a point, for a caller that does not need the surface.
 	 * @param Point The point in the chunk's frame, as ForEachLine
 	 * @param Height The natural height or altitude there
 	 * @return The height after the lines
 	 */
 	float Apply(const FVector3f& Point, float Height) const
 	{
-		ForEachLine(Point, [&Height](EVoxelConditioningLineBlend Blend, float Target, float Weight)
-		{
-			Height = FVoxelConditioningLine::BlendHeight(Blend, Height, Target, Weight);
-		});
-		return Height;
+		FVoxelChunkLineSurface Surface;
+		return Apply(Point, Height, Surface);
 	}
 
 	/**
-	 * A heightmap chunk's columns: each column's blends, at the positions the generators give a column's voxels
+	 * A heightmap chunk's columns: each column's blends and surface, at the positions the generators give a column's voxels
 	 * (X x VoxelSize, Y x VoxelSize from the origin corner, in float).
 	 * @param ChunkSize Voxels along a chunk's edge
 	 * @param VoxelSize The base voxel size
@@ -173,7 +269,10 @@ struct VOXELGENERATION_API FVoxelChunkLineSegments
 	void EvaluateColumns(int32 ChunkSize, float VoxelSize, FVoxelChunkLineColumns& Out) const;
 
 private:
-	/** One line's result at its nearest segment: the distance (an arc on a planet), the half width and target there, the weight. */
+	/**
+	 * One line's result at its nearest segment: the distance (an arc on a planet), the half width and target there, the
+	 * weight and its profile, the band and the minimum cave depth.
+	 */
 	template <typename FuncType>
 	void FinishLine(int32 Segment, float T, float DistSq, FuncType&& Func) const
 	{
@@ -181,6 +280,7 @@ private:
 		const FVector4f& S1 = Data[Segment * FVoxelConditioningLine::SegmentStride + 1];
 		const FVector4f& S2 = Data[Segment * FVoxelConditioningLine::SegmentStride + 2];
 		const FVector4f& S3 = Data[Segment * FVoxelConditioningLine::SegmentStride + 3];
+		const FVector4f& S4 = Data[Segment * FVoxelConditioningLine::SegmentStride + 4];
 		float Dist = FMath::Sqrt(DistSq);
 		if (ArcRadius > 0.0f)
 		{
@@ -193,10 +293,20 @@ private:
 		}
 		const float HalfWidth = S2.X + T * (S2.Y - S2.X);
 		const float Target = S0.W + T * (S1.W - S0.W);
-		const float Weight = FVoxelConditioningLine::WeightAtDistance(Dist, HalfWidth, S2.Z, S2.W);
-		if (Weight > 0.0f)
+		// The profile is the weight for a strength of 1: over zero on the core and across the falloff whatever the
+		// strength, so a line that only paints (strength 0) is still handed on for its band.
+		const float Profile = FVoxelConditioningLine::WeightAtDistance(Dist, HalfWidth, S2.Z, 1.0f);
+		if (Profile > 0.0f)
 		{
-			Func(static_cast<EVoxelConditioningLineBlend>(static_cast<uint8>(S3.Y)), Target, Weight);
+			FVoxelChunkLineSample Sample;
+			Sample.Blend = static_cast<EVoxelConditioningLineBlend>(static_cast<uint8>(S3.Y));
+			Sample.Target = Target;
+			Sample.Weight = FVoxelConditioningLine::WeightAtDistance(Dist, HalfWidth, S2.Z, S2.W);
+			Sample.Profile = Profile;
+			Sample.BandMaterial = FVoxelConditioningLine::IsOnBand(Dist, HalfWidth, S4.X) ? static_cast<int32>(S3.Z) : -1;
+			Sample.BandDepth = S3.W;
+			Sample.MinCaveDepth = S4.Y * Profile;
+			Func(Sample);
 		}
 	}
 };

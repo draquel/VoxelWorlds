@@ -74,6 +74,24 @@ FVoxelConditioningLineRef FVoxelConditioningLine::Make(const FVoxelConditioningL
 	Line->Id = Params.Id;
 	Line->bRadial = Params.bRadial;
 
+	// The surface. A band has a material of the table's range and reaches at least the surface's own voxel (a depth of 1:
+	// the analytic readers name the band at depth 0, the voxel there lies up to one voxel under the surface); its half
+	// width as the generators read it is the surface's, or a value no core exceeds where the surface gives 0.
+	Line->Surface = Params.Surface;
+	Line->Surface.BandHalfWidth = FMath::Max(Params.Surface.BandHalfWidth, 0.0f);
+	Line->Surface.MinCaveDepth = FMath::Max(Params.Surface.MinCaveDepth, 0.0f);
+	Line->Surface.ClearHalfWidth = FMath::Max(Params.Surface.ClearHalfWidth, 0.0f);
+	if (!Line->Surface.HasBand() || Params.Surface.BandDepth <= 0.0f)
+	{
+		Line->Surface.BandMaterialID = -1;
+		Line->BandHalfWidthLimit = -1.0f;
+	}
+	else
+	{
+		Line->Surface.BandDepth = FMath::Max(Params.Surface.BandDepth, 1.0f);
+		Line->BandHalfWidthLimit = Line->Surface.BandHalfWidth > 0.0f ? Line->Surface.BandHalfWidth : TNumericLimits<float>::Max();
+	}
+
 	// Two vertices at one place make a segment of no length, which has no direction to measure along: merged here.
 	const double SamePlace = Params.bRadial ? 1.0e-10 : 1.0e-3;
 	Line->Vertices.Reserve(Params.Vertices.Num());
@@ -114,8 +132,10 @@ void FVoxelConditioningLine::BuildBounds()
 	{
 		MaxHalfWidth = FMath::Max(MaxHalfWidth, Vertex.HalfWidth);
 	}
-	// The weight's profile holds the falloff at 1 or more (WeightAtDistance), so the reach does too.
-	Reach = static_cast<double>(MaxHalfWidth) + FMath::Max(1.0, static_cast<double>(FalloffWidth));
+	// The weight's profile holds the falloff at 1 or more (WeightAtDistance), so the reach does too. A clearing wider
+	// than that (a verge) is part of what the line changes: the reach holds it, so every gather finds the line for it.
+	HeightReach = static_cast<double>(MaxHalfWidth) + FMath::Max(1.0, static_cast<double>(FalloffWidth));
+	Reach = FMath::Max(HeightReach, static_cast<double>(Surface.ClearHalfWidth));
 
 	Bounds = FBox2D(ForceInit);
 	BlockBounds.Reset();
@@ -241,11 +261,11 @@ bool FVoxelConditioningLine::MeetsCap(const FVector& CapDirection, double CapAng
 	return false;
 }
 
-bool FVoxelConditioningLine::FindNearest(double X, double Y, int32& OutSegment, double& OutT, double& OutDistSq) const
+bool FVoxelConditioningLine::FindNearest(double X, double Y, double SearchReach, int32& OutSegment, double& OutT, double& OutDistSq) const
 {
 	using namespace VoxelConditioningLinePrivate;
 	if (bRadial || NumSegments() == 0
-		|| X < Bounds.Min.X - Reach || X > Bounds.Max.X + Reach || Y < Bounds.Min.Y - Reach || Y > Bounds.Max.Y + Reach)
+		|| X < Bounds.Min.X - SearchReach || X > Bounds.Max.X + SearchReach || Y < Bounds.Min.Y - SearchReach || Y > Bounds.Max.Y + SearchReach)
 	{
 		return false;
 	}
@@ -253,12 +273,12 @@ bool FVoxelConditioningLine::FindNearest(double X, double Y, int32& OutSegment, 
 	// cannot hold the nearest segment of a point the line changes.
 	const FVector2D P(X, Y);
 	const int32 Segments = NumSegments();
-	double Best = Reach * Reach;
+	double Best = SearchReach * SearchReach;
 	bool bFound = false;
 	for (int32 Block = 0; Block < BlockBounds.Num(); ++Block)
 	{
 		const FBox2D& Box = BlockBounds[Block];
-		if (X < Box.Min.X - Reach || X > Box.Max.X + Reach || Y < Box.Min.Y - Reach || Y > Box.Max.Y + Reach)
+		if (X < Box.Min.X - SearchReach || X > Box.Max.X + SearchReach || Y < Box.Min.Y - SearchReach || Y > Box.Max.Y + SearchReach)
 		{
 			continue;
 		}
@@ -285,7 +305,8 @@ bool FVoxelConditioningLine::FindNearest(double X, double Y, int32& OutSegment, 
 	return bFound;
 }
 
-bool FVoxelConditioningLine::FindNearestOnSphere(const FVector& Point, double PlanetRadius, int32& OutSegment, double& OutT, double& OutDistSq) const
+bool FVoxelConditioningLine::FindNearestOnSphere(const FVector& Point, double PlanetRadius, double SearchReach, int32& OutSegment, double& OutT,
+	double& OutDistSq) const
 {
 	using namespace VoxelConditioningLinePrivate;
 	if (!bRadial || NumSegments() == 0 || PlanetRadius <= 0.0)
@@ -295,7 +316,7 @@ bool FVoxelConditioningLine::FindNearestOnSphere(const FVector& Point, double Pl
 	// On the unit sphere: a point's chord to a ball's centre is at most the ball's radius plus its chord to the nearest
 	// segment, and a chord is no longer than its arc, so a ball farther than its radius plus the reach holds no segment
 	// within reach.
-	const double ReachChord = Reach / PlanetRadius;
+	const double ReachChord = SearchReach / PlanetRadius;
 	if ((Point - CapCentre).SizeSquared() > FMath::Square(CapChordRadius + ReachChord))
 	{
 		return false;
@@ -330,38 +351,78 @@ bool FVoxelConditioningLine::FindNearestOnSphere(const FVector& Point, double Pl
 	return bFound;
 }
 
-bool FVoxelConditioningLine::Evaluate(double X, double Y, float& OutTarget, float& OutWeight) const
+void FVoxelConditioningLine::FillSample(int32 Segment, double T, double Distance, double LeastHalfWidth, FVoxelConditioningLineSample& Out) const
+{
+	const FVoxelConditioningLineVertex& A = Vertices[Segment];
+	const FVoxelConditioningLineVertex& B = Vertices[Segment + 1];
+	const float Along = static_cast<float>(T);
+	const float Dist = static_cast<float>(Distance);
+	float HalfWidth = A.HalfWidth + Along * (B.HalfWidth - A.HalfWidth);
+	// The band: to the lesser of its own half width and the core's (a negative limit: no band).
+	float BandHalfWidth = FMath::Min(BandHalfWidthLimit, HalfWidth);
+	if (LeastHalfWidth > 0.0)
+	{
+		// A reader that samples coarsely takes the core and the band as at least this wide, so neither falls between
+		// its samples.
+		const float Least = static_cast<float>(LeastHalfWidth);
+		HalfWidth = FMath::Max(HalfWidth, Least);
+		BandHalfWidth = BandHalfWidthLimit >= 0.0f ? FMath::Max(BandHalfWidth, Least) : BandHalfWidth;
+	}
+	Out.Target = A.TargetHeight + Along * (B.TargetHeight - A.TargetHeight);
+	Out.Distance = Dist;
+	Out.HalfWidth = HalfWidth;
+	Out.Weight = WeightAtDistance(Dist, HalfWidth, FalloffWidth, Strength);
+	Out.Profile = WeightAtDistance(Dist, HalfWidth, FalloffWidth, 1.0f);
+	Out.bOnBand = BandHalfWidthLimit >= 0.0f && Dist <= BandHalfWidth;
+}
+
+bool FVoxelConditioningLine::Sample(double X, double Y, double LeastHalfWidth, FVoxelConditioningLineSample& Out) const
 {
 	int32 Segment = 0;
 	double T = 0.0;
 	double DistSq = 0.0;
-	if (!FindNearest(X, Y, Segment, T, DistSq))
+	if (!FindNearest(X, Y, Reach + FMath::Max(LeastHalfWidth, 0.0), Segment, T, DistSq))
 	{
 		return false;
 	}
-	const FVoxelConditioningLineVertex& A = Vertices[Segment];
-	const FVoxelConditioningLineVertex& B = Vertices[Segment + 1];
-	const float Along = static_cast<float>(T);
-	OutTarget = A.TargetHeight + Along * (B.TargetHeight - A.TargetHeight);
-	OutWeight = WeightAtDistance(static_cast<float>(FMath::Sqrt(DistSq)), A.HalfWidth + Along * (B.HalfWidth - A.HalfWidth), FalloffWidth, Strength);
+	FillSample(Segment, T, FMath::Sqrt(DistSq), LeastHalfWidth, Out);
+	return true;
+}
+
+bool FVoxelConditioningLine::SampleOnSphere(const FVector& Direction, double PlanetRadius, double LeastHalfWidth, FVoxelConditioningLineSample& Out) const
+{
+	int32 Segment = 0;
+	double T = 0.0;
+	double DistSq = 0.0;
+	if (!FindNearestOnSphere(Direction, PlanetRadius, Reach + FMath::Max(LeastHalfWidth, 0.0), Segment, T, DistSq))
+	{
+		return false;
+	}
+	FillSample(Segment, T, VoxelConditioningLinePrivate::ChordToArc(FMath::Sqrt(DistSq), PlanetRadius), LeastHalfWidth, Out);
+	return true;
+}
+
+bool FVoxelConditioningLine::Evaluate(double X, double Y, float& OutTarget, float& OutWeight) const
+{
+	FVoxelConditioningLineSample At;
+	if (!Sample(X, Y, 0.0, At))
+	{
+		return false;
+	}
+	OutTarget = At.Target;
+	OutWeight = At.Weight;
 	return OutWeight > 0.0f;
 }
 
 bool FVoxelConditioningLine::EvaluateOnSphere(const FVector& Direction, double PlanetRadius, float& OutTarget, float& OutWeight) const
 {
-	int32 Segment = 0;
-	double T = 0.0;
-	double DistSq = 0.0;
-	if (!FindNearestOnSphere(Direction, PlanetRadius, Segment, T, DistSq))
+	FVoxelConditioningLineSample At;
+	if (!SampleOnSphere(Direction, PlanetRadius, 0.0, At))
 	{
 		return false;
 	}
-	const FVoxelConditioningLineVertex& A = Vertices[Segment];
-	const FVoxelConditioningLineVertex& B = Vertices[Segment + 1];
-	const float Along = static_cast<float>(T);
-	const double Arc = VoxelConditioningLinePrivate::ChordToArc(FMath::Sqrt(DistSq), PlanetRadius);
-	OutTarget = A.TargetHeight + Along * (B.TargetHeight - A.TargetHeight);
-	OutWeight = WeightAtDistance(static_cast<float>(Arc), A.HalfWidth + Along * (B.HalfWidth - A.HalfWidth), FalloffWidth, Strength);
+	OutTarget = At.Target;
+	OutWeight = At.Weight;
 	return OutWeight > 0.0f;
 }
 
@@ -386,7 +447,9 @@ void FVoxelConditioningLine::AppendSegment(int32 Segment, const FVector3f& A, co
 	Out.Add(FVector4f(A, VertexA.TargetHeight));
 	Out.Add(FVector4f(B, VertexB.TargetHeight));
 	Out.Add(FVector4f(VertexA.HalfWidth, VertexB.HalfWidth, FalloffWidth, Strength));
-	Out.Add(FVector4f(static_cast<float>(LineIndex), static_cast<float>(static_cast<uint8>(Blend)), 0.0f, 0.0f));
+	Out.Add(FVector4f(static_cast<float>(LineIndex), static_cast<float>(static_cast<uint8>(Blend)),
+		static_cast<float>(Surface.BandMaterialID), Surface.HasBand() ? Surface.BandDepth : 0.0f));
+	Out.Add(FVector4f(BandHalfWidthLimit, Surface.MinCaveDepth, 0.0f, 0.0f));
 }
 
 void FVoxelConditioningLine::AppendChunkSegments(const FBox2D& ChunkBox, const FVector2D& Origin, int32 LineIndex, TArray<FVector4f>& Out,
@@ -610,7 +673,7 @@ TArray<FString> FVoxelConditioningLine::GetWarnings(const FVoxelConditioningLine
 				WorstStep = FMath::Max(WorstStep, Step);
 			}
 		}
-		if (HalfTan > FMath::Min(Lengths[Index - 1], Lengths[Index]) / (2.0 * Reach))
+		if (HalfTan > FMath::Min(Lengths[Index - 1], Lengths[Index]) / (2.0 * HeightReach))
 		{
 			++TightTurns;
 			WorstTurn = FMath::Max(WorstTurn, Turn);
@@ -624,7 +687,7 @@ TArray<FString> FVoxelConditioningLine::GetWarnings(const FVoxelConditioningLine
 	if (TightTurns > 0)
 	{
 		Warnings.Add(FString::Printf(TEXT("%d vertices turn so sharply (up to %.0f degrees) that their bisector meets a neighbour's inside the reach (%.0f uu): round the corner to a radius of the reach or more"),
-			TightTurns, FMath::RadiansToDegrees(WorstTurn), Reach));
+			TightTurns, FMath::RadiansToDegrees(WorstTurn), HeightReach));
 	}
 
 	// No part of the line within twice its reach of another part, neighbouring segments aside: the nearest segment
@@ -638,8 +701,8 @@ TArray<FString> FVoxelConditioningLine::GetWarnings(const FVoxelConditioningLine
 		{
 			Along[Segment + 1] = Along[Segment] + Lengths[Segment];
 		}
-		const double Apart = UE_DOUBLE_PI * Reach;
-		const double Close = 0.99 * 2.0 * Reach;
+		const double Apart = UE_DOUBLE_PI * HeightReach;
+		const double Close = 0.99 * 2.0 * HeightReach;
 		const int32 Blocks = FMath::DivideAndRoundUp(Segments, BlockSegments);
 		int32 ClosePairs = 0;
 		for (int32 BlockA = 0; BlockA < Blocks; ++BlockA)
@@ -687,7 +750,28 @@ TArray<FString> FVoxelConditioningLine::GetWarnings(const FVoxelConditioningLine
 		if (ClosePairs > 0)
 		{
 			Warnings.Add(FString::Printf(TEXT("%d pairs of segments lie within twice the reach (%.0f uu) of each other without being neighbours: the line comes back on itself or crosses itself, and the nearest segment changes there with a step"),
-				ClosePairs, 2.0 * Reach));
+				ClosePairs, 2.0 * HeightReach));
+		}
+	}
+
+	// The band: four voxels deep, so Dual Contouring at stride 4 (which reads the solid voxel on its lattice, up to three
+	// voxels under the surface) finds it, and two voxels wide, so the full-resolution lattice always samples it.
+	if (Surface.HasBand())
+	{
+		if (Surface.BandDepth < 4.0f)
+		{
+			Warnings.Add(FString::Printf(TEXT("the band is %.1f voxels deep, under four: at stride 4 the mesher reads the solid voxel up to three voxels under the surface and shows the ground under the band"),
+				Surface.BandDepth));
+		}
+		float MinHalfWidth = TNumericLimits<float>::Max();
+		for (const FVoxelConditioningLineVertex& Vertex : Vertices)
+		{
+			MinHalfWidth = FMath::Min(MinHalfWidth, Vertex.HalfWidth);
+		}
+		const double BandWidth = 2.0 * FMath::Min(BandHalfWidthLimit, MinHalfWidth);
+		if (BandWidth < 2.0 * Voxel)
+		{
+			Warnings.Add(FString::Printf(TEXT("the band is %.0f uu wide at its narrowest, under two voxels (%.0f uu): the voxels sample it in places only"), BandWidth, 2.0 * Voxel));
 		}
 	}
 	return Warnings;
@@ -696,13 +780,12 @@ TArray<FString> FVoxelConditioningLine::GetWarnings(const FVoxelConditioningLine
 float FVoxelConditioning::ApplyLinesToHeight(double X, double Y, float BaseHeight) const
 {
 	float H = BaseHeight;
+	FVoxelConditioningLineSample At;
 	for (const FVoxelConditioningLineRef& Line : Lines)
 	{
-		float Target = 0.0f;
-		float Weight = 0.0f;
-		if (Line->Evaluate(X, Y, Target, Weight))
+		if (Line->Sample(X, Y, LeastHalfWidth, At) && At.Weight > 0.0f)
 		{
-			H = FVoxelConditioningLine::BlendHeight(Line->GetBlend(), H, Target, Weight);
+			H = FVoxelConditioningLine::BlendHeight(Line->GetBlend(), H, At.Target, At.Weight);
 		}
 	}
 	return H;
@@ -711,16 +794,124 @@ float FVoxelConditioning::ApplyLinesToHeight(double X, double Y, float BaseHeigh
 float FVoxelConditioning::ApplyLinesToAltitude(const FVector& Direction, double PlanetRadius, float BaseAltitude) const
 {
 	float A = BaseAltitude;
+	FVoxelConditioningLineSample At;
 	for (const FVoxelConditioningLineRef& Line : Lines)
 	{
-		float Target = 0.0f;
-		float Weight = 0.0f;
-		if (Line->EvaluateOnSphere(Direction, PlanetRadius, Target, Weight))
+		if (Line->SampleOnSphere(Direction, PlanetRadius, LeastHalfWidth, At) && At.Weight > 0.0f)
 		{
-			A = FVoxelConditioningLine::BlendHeight(Line->GetBlend(), A, Target, Weight);
+			A = FVoxelConditioningLine::BlendHeight(Line->GetBlend(), A, At.Target, At.Weight);
 		}
 	}
 	return A;
+}
+
+bool FVoxelConditioning::GetBandAt(double X, double Y, uint8& OutMaterial, float* OutDepth) const
+{
+	// The last line whose band lies here wins, as the generators' loop leaves it (lines in the order they are applied).
+	FVoxelConditioningLineSample At;
+	for (int32 Index = Lines.Num() - 1; Index >= 0; --Index)
+	{
+		const FVoxelConditioningLine& Line = *Lines[Index];
+		if (Line.GetSurface().HasBand() && Line.Sample(X, Y, LeastHalfWidth, At) && At.bOnBand)
+		{
+			OutMaterial = static_cast<uint8>(Line.GetSurface().BandMaterialID);
+			if (OutDepth)
+			{
+				*OutDepth = Line.GetSurface().BandDepth;
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+bool FVoxelConditioning::GetBandOnSphere(const FVector& Direction, double PlanetRadius, uint8& OutMaterial, float* OutDepth) const
+{
+	FVoxelConditioningLineSample At;
+	for (int32 Index = Lines.Num() - 1; Index >= 0; --Index)
+	{
+		const FVoxelConditioningLine& Line = *Lines[Index];
+		if (Line.GetSurface().HasBand() && Line.SampleOnSphere(Direction, PlanetRadius, LeastHalfWidth, At) && At.bOnBand)
+		{
+			OutMaterial = static_cast<uint8>(Line.GetSurface().BandMaterialID);
+			if (OutDepth)
+			{
+				*OutDepth = Line.GetSurface().BandDepth;
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+float FVoxelConditioning::GetMinCaveDepthAt(double X, double Y) const
+{
+	float Depth = 0.0f;
+	FVoxelConditioningLineSample At;
+	for (const FVoxelConditioningLineRef& Line : Lines)
+	{
+		const float LineDepth = Line->GetSurface().MinCaveDepth;
+		if (LineDepth > 0.0f && Line->Sample(X, Y, 0.0, At))
+		{
+			Depth = FMath::Max(Depth, LineDepth * At.Profile);
+		}
+	}
+	return Depth;
+}
+
+float FVoxelConditioning::GetMinCaveDepthOnSphere(const FVector& Direction, double PlanetRadius) const
+{
+	float Depth = 0.0f;
+	FVoxelConditioningLineSample At;
+	for (const FVoxelConditioningLineRef& Line : Lines)
+	{
+		const float LineDepth = Line->GetSurface().MinCaveDepth;
+		if (LineDepth > 0.0f && Line->SampleOnSphere(Direction, PlanetRadius, 0.0, At))
+		{
+			Depth = FMath::Max(Depth, LineDepth * At.Profile);
+		}
+	}
+	return Depth;
+}
+
+bool FVoxelConditioning::IsClearedAt(double X, double Y) const
+{
+	FVoxelConditioningLineSample At;
+	for (const FVoxelConditioningLineRef& Line : Lines)
+	{
+		const float Clear = Line->GetSurface().ClearHalfWidth;
+		if (Clear > 0.0f && Line->Sample(X, Y, 0.0, At) && At.Distance <= Clear)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool FVoxelConditioning::IsClearedOnSphere(const FVector& Direction, double PlanetRadius) const
+{
+	FVoxelConditioningLineSample At;
+	for (const FVoxelConditioningLineRef& Line : Lines)
+	{
+		const float Clear = Line->GetSurface().ClearHalfWidth;
+		if (Clear > 0.0f && Line->SampleOnSphere(Direction, PlanetRadius, 0.0, At) && At.Distance <= Clear)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool FVoxelConditioning::HasLineSurfaces() const
+{
+	for (const FVoxelConditioningLineRef& Line : Lines)
+	{
+		if (Line->GetSurface().IsSet())
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 void FVoxelConditioning::SortLines()

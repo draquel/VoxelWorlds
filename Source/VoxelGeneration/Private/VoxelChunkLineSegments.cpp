@@ -49,30 +49,51 @@ void FVoxelChunkLineSegments::EvaluateColumns(int32 ChunkSize, float VoxelSize, 
 {
 	Out.First.Reset();
 	Out.Blends.Reset();
+	Out.Surfaces.Reset();
 	if (Num() == 0)
 	{
 		return;
 	}
 	Out.First.SetNumUninitialized(ChunkSize * ChunkSize + 1);
+	Out.Surfaces.SetNum(ChunkSize * ChunkSize);
+	bool bAnySurface = false;
 	for (int32 Y = 0; Y < ChunkSize; ++Y)
 	{
 		for (int32 X = 0; X < ChunkSize; ++X)
 		{
-			Out.First[X + Y * ChunkSize] = Out.Blends.Num();
+			const int32 Column = X + Y * ChunkSize;
+			Out.First[Column] = Out.Blends.Num();
 			// The column's offset from the origin corner, as the shader forms it (float3(VoxelCoord) x VoxelSize).
 			const FVector3f Point(static_cast<float>(X) * VoxelSize, static_cast<float>(Y) * VoxelSize, 0.0f);
 			if (!MayReach(Point))
 			{
 				continue;
 			}
-			ForEachLine(Point, [&Out](EVoxelConditioningLineBlend Blend, float Target, float Weight)
+			FVoxelChunkLineSurface& Surface = Out.Surfaces[Column];
+			ForEachLine(Point, [&Out, &Surface](const FVoxelChunkLineSample& Sample)
 			{
-				FVoxelChunkLineColumns::FColumnBlend& Added = Out.Blends.AddDefaulted_GetRef();
-				Added.Target = Target;
-				Added.Weight = Weight;
-				Added.Blend = Blend;
+				// The height's blend is kept for the voxel loop (it needs the column's natural height); the surface is
+				// settled here, as FVoxelChunkLineSample::ApplyTo settles it.
+				if (Sample.Weight > 0.0f)
+				{
+					FVoxelChunkLineColumns::FColumnBlend& Added = Out.Blends.AddDefaulted_GetRef();
+					Added.Target = Sample.Target;
+					Added.Weight = Sample.Weight;
+					Added.Blend = Sample.Blend;
+				}
+				if (Sample.BandMaterial >= 0)
+				{
+					Surface.BandMaterial = Sample.BandMaterial;
+					Surface.BandDepth = Sample.BandDepth;
+				}
+				Surface.MinCaveDepth = FMath::Max(Surface.MinCaveDepth, Sample.MinCaveDepth);
 			});
+			bAnySurface |= Surface.IsSet();
 		}
 	}
 	Out.First[ChunkSize * ChunkSize] = Out.Blends.Num();
+	if (!bAnySurface)
+	{
+		Out.Surfaces.Reset();
+	}
 }

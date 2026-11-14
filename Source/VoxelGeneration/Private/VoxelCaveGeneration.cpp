@@ -106,7 +106,8 @@ float FVoxelCPUNoiseGenerator::CalculateCaveDensity(
 	const UVoxelCaveConfiguration* CaveConfig,
 	int32 WorldSeed,
 	bool bIsUnderwater,
-	const FSphericalPlanetParams* Planet)
+	const FSphericalPlanetParams* Planet,
+	float MinDepthUnderLines)
 {
 	if (!CaveConfig || !CaveConfig->bEnableCaves)
 	{
@@ -147,6 +148,12 @@ float FVoxelCPUNoiseGenerator::CalculateCaveDensity(
 
 		// Determine effective min depth (biome override or layer default)
 		float EffectiveMinDepth = (BiomeMinDepthOverride >= 0.0f) ? BiomeMinDepthOverride : Layer.MinDepth;
+
+		// Under a conditioning line no cave opens above the line's minimum depth: it only ever deepens the layer's.
+		if (MinDepthUnderLines > 0.0f)
+		{
+			EffectiveMinDepth = FMath::Max(EffectiveMinDepth, MinDepthUnderLines);
+		}
 
 		// Check depth constraints
 		if (DepthBelowSurface < EffectiveMinDepth - Layer.DepthFadeWidth)

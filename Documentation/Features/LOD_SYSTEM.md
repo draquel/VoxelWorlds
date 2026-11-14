@@ -399,7 +399,14 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   seas inside the bounds would z-fight; the grid water that stood in for unloaded columns while the far field was off
   went in code review CR1, D-CR13). A conditioning zone or line that is added, and a region a conditioner
   names, rebuild the patches they meet that take conditioning (`FVoxelFarField::InvalidateRegion`: a box on a heightmap
-  world, a cap on a planet; `FVoxelFarFieldFrame::RegionOfZone`, `RegionOfLine`). The build queue's priority offset for non-root patches is 1e12
+  world, a cap on a planet; `FVoxelFarFieldFrame::RegionOfZone`, `RegionOfLine`). A patch samples the surface at its
+  vertices, a vertex spacing apart, so it takes every conditioning line as at least 0.71 of that spacing wide
+  (`FVoxelFarFieldFrame::LeastLineHalfWidth`, `FVoxelConditioning::LeastHalfWidth`; the terrain lines plan's L3), for
+  the height and for the band: it gathers over its footprint grown by as much, meets a changed region from that much
+  farther off, and a road narrower than the spacing is an unbroken band across it instead of dashes. The material
+  samplers take the patch's conditioning (`SampleMaterialMix`, `SampleConditions`): on a line's band a vertex's mix is
+  the band's material alone, as the voxels there are (`WORLD_MODES.md`, "The surface under a line"). Patches wider
+  than `ZoneGatherMax` take no conditioning, zones or lines. Test `VoxelWorlds.FarField.Plane.ConditioningLineBand`. The build queue's priority offset for non-root patches is 1e12
   (it was 1e30, which a double adds a distance to without change, so with six builds a tick the patches under the
   camera could starve behind thousands of far ones: found on the plane, the planet's six roots and horizon hid it).
 

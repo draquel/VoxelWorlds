@@ -7,6 +7,10 @@
 
 #include "PCGVoxelSurfaceSampler.generated.h"
 
+class IVoxelWorldMode;
+struct FVoxelConditioning;
+enum class EVoxelConditioningGather : uint8;
+
 namespace PCGVoxelSurfaceSamplerConstants
 {
 	const FName BoundingShapeLabel = TEXT("Bounding Shape");
@@ -98,6 +102,27 @@ class FPCGVoxelSurfaceSamplerElement : public IPCGElement
 public:
 	virtual bool CanExecuteOnlyOnMainThread(FPCGContext* Context) const override { return true; }
 	virtual bool IsCacheable(const UPCGSettings* InSettings) const override { return false; }
+
+	/**
+	 * What the sampler's gather of conditioning asks for over its bounds (the terrain lines plan's L3): Complete, so its
+	 * points stand on the ground the voxels generate, except over bounds wider than the lines' gather limit
+	 * (FVoxelConditioningLine::GatherLimitChunks chunks), where it takes the lines at hand: a complete gather there would
+	 * have a conditioner work out every line over many placement cells on the game thread.
+	 * @param Bounds The sampler's bounds
+	 * @param ChunkWorldSize The world's chunk edge (uu)
+	 * @return The need
+	 */
+	VOXELPCG_API static EVoxelConditioningGather GetConditioningNeed(const FBox& Bounds, double ChunkWorldSize);
+
+	/**
+	 * Whether a sampled point lies inside a conditioning line's clear width, where the sampler emits no point (a
+	 * heightmap world: at the point's X and Y; a planet: along its direction from the centre).
+	 * @param Conditioning The conditioning gathered over the bounds
+	 * @param WorldMode The world mode
+	 * @param Position The sampled point
+	 * @return Whether the point is dropped
+	 */
+	VOXELPCG_API static bool IsInClearWidth(const FVoxelConditioning& Conditioning, const IVoxelWorldMode& WorldMode, const FVector& Position);
 
 protected:
 	virtual bool ExecuteInternal(FPCGContext* Context) const override;
