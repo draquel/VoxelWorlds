@@ -232,6 +232,16 @@ static TAutoConsoleVariable<int32> CVarGPUGenerationEnable(
 // even loaded (feetLd=0) and collision can't cook what doesn't exist. These raise the generation/submit
 // throughput so the load front keeps up. Adaptive throttling still applies under frame pressure.
 
+// G217: on a server the pawn of every player but the first is a further viewer with a ground window of its own.
+static TAutoConsoleVariable<int32> CVarStreamGroundWindows(
+	TEXT("voxel.Stream.GroundWindows"),
+	1,
+	TEXT("1: every player's pawn beside the first player's is a further viewer (a server's other players): the chunks its\n")
+	TEXT("collision shell cooks from are loaded and kept around it, the shell is cooked there and scatter measures from the\n")
+	TEXT("nearest viewer. 0: the first player only, as before G217 (a comparison: a second player far from the first has no\n")
+	TEXT("ground on the server). A client and a standalone game have one viewer either way."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarStreamMaxLoadPerFrame(
 	TEXT("voxel.Stream.MaxLoadPerFrame"),
 	0,
@@ -772,6 +782,9 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	// === Streaming decisions ===
 	double SectionStart = FPlatformTime::Seconds();
+	// The further viewers (a server's other players) and their ground windows first (G217): the unload decisions and the
+	// queues below leave their chunks alone.
+	UpdateGroundWindows(Context);
 	if (bNeedStreamingUpdate)
 	{
 		const bool bWasForced = bForceStreamingUpdate;
@@ -1099,6 +1112,16 @@ void UVoxelChunkManager::Initialize(
 	LastStreamingUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	bForceStreamingUpdate = false;
 	LODEvalSchedule.Reset();
+	FurtherViewers.Reset();
+	GroundLoadChunks.Reset();
+	GroundKeepChunks.Reset();
+	GroundWindowBuiltFor.Reset();
+	GroundWindowBuiltFrame = 0;
+	bGroundWindowsDirty = false;
+	bFurtherViewersHandedOn = false;
+	GroundChunksUnqueued = 0;
+	GroundWindowRebuilds = 0;
+	LastGroundWindowMs = 0.0f;
 
 	// Reset adaptive throttle state
 	SmoothedFrameTimeMs = 16.67f;
@@ -1359,6 +1382,8 @@ void UVoxelChunkManager::HandleChunkEdited(const FIntVector& ChunkCoord, EEditSo
 		// analytic streaming band). Force a streaming update so the edit-pinned load pass in
 		// UpdateLoadDecisions picks it up this tick instead of waiting for viewer movement.
 		bForceStreamingUpdate = true;
+		// ... and a further viewer's ground window takes it in at once, where it is within its reach (G217).
+		bGroundWindowsDirty = true;
 	}
 
 	// Mark the edited chunk dirty: it re-meshes and its seams restale (on its way to a mesh as well, G57).
@@ -1589,6 +1614,16 @@ void UVoxelChunkManager::Shutdown()
 	LastStreamingUpdatePosition = FVector(FLT_MAX, FLT_MAX, FLT_MAX);
 	bForceStreamingUpdate = false;
 	LODEvalSchedule.Reset();
+	FurtherViewers.Reset();
+	GroundLoadChunks.Reset();
+	GroundKeepChunks.Reset();
+	GroundWindowBuiltFor.Reset();
+	GroundWindowBuiltFrame = 0;
+	bGroundWindowsDirty = false;
+	bFurtherViewersHandedOn = false;
+	GroundChunksUnqueued = 0;
+	GroundWindowRebuilds = 0;
+	LastGroundWindowMs = 0.0f;
 
 	// Clean up LOD strategy (we own it)
 	if (LODStrategy)
@@ -1953,6 +1988,12 @@ bool UVoxelChunkManager::HasChunkVoxelData(const FIntVector& ChunkCoord) const
 {
 	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
 	return State && State->Descriptor.HasVoxelDataAvailable();
+}
+
+bool UVoxelChunkManager::IsChunkFarCompressed(const FIntVector& ChunkCoord) const
+{
+	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+	return State && State->Descriptor.Residency == EVoxelDataResidency::Compressed;
 }
 
 bool UVoxelChunkManager::IsChunkWaterSettled(const FIntVector& ChunkCoord) const
@@ -2519,6 +2560,288 @@ FLODQueryContext UVoxelChunkManager::BuildStreamingContext() const
 	return Context;
 }
 
+// ==================== Further viewers and their ground windows (G217) ====================
+
+void UVoxelChunkManager::SetFurtherViewerOverride(bool bActive, const TArray<FVector>& Positions)
+{
+	bFurtherViewerOverride = bActive;
+	FurtherViewerOverride = bActive ? Positions : TArray<FVector>();
+}
+
+void UVoxelChunkManager::GatherFurtherViewers(TArray<FVoxelFurtherViewer>& OutViewers) const
+{
+	OutViewers.Reset();
+	if (CVarStreamGroundWindows.GetValueOnGameThread() == 0)
+	{
+		return;
+	}
+	if (bFurtherViewerOverride)
+	{
+		for (const FVector& Position : FurtherViewerOverride)
+		{
+			OutViewers.Add({ Position, FVector::ZeroVector });
+		}
+		return;
+	}
+	// A fixed view (the bench's, a test's) reads no player: its run is the same with players in the world or without.
+	const UWorld* World = GetWorld();
+	if (bBenchmarkViewActive || !World)
+	{
+		return;
+	}
+	// Every player's pawn but the first player's, whose camera the streaming follows (BuildQueryContext) and whose pawn
+	// the collision shell centres on. A player with no pawn (not spawned yet, dead and not respawned) is no viewer. A
+	// client's world and a standalone game's hold their own player alone.
+	const APlayerController* First = World->GetFirstPlayerController();
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		const APlayerController* PC = It->Get();
+		if (!PC || PC == First)
+		{
+			continue;
+		}
+		if (const APawn* Pawn = PC->GetPawn())
+		{
+			OutViewers.Add({ Pawn->GetActorLocation(), Pawn->GetVelocity() });
+		}
+	}
+}
+
+float UVoxelChunkManager::GetNearestViewerDistance(const FVector& Point, float StreamingViewerDistance) const
+{
+	float Distance = StreamingViewerDistance;
+	for (const FVoxelFurtherViewer& Viewer : FurtherViewers)
+	{
+		Distance = FMath::Min(Distance, static_cast<float>(FVector::Dist(Point, Viewer.Position)));
+	}
+	return Distance;
+}
+
+void UVoxelChunkManager::UpdateGroundWindows(const FLODQueryContext& Context)
+{
+	GatherFurtherViewers(FurtherViewers);
+
+	// The collision shell and the scatter follow the same viewers (the hand-over is skipped while there never were any).
+	if (FurtherViewers.Num() > 0 || bFurtherViewersHandedOn)
+	{
+		TArray<FVoxelCollisionFocus> Foci;
+		TArray<FVector> Positions;
+		Foci.Reserve(FurtherViewers.Num());
+		Positions.Reserve(FurtherViewers.Num());
+		for (const FVoxelFurtherViewer& Viewer : FurtherViewers)
+		{
+			Foci.Add({ Viewer.Position, Viewer.Velocity });
+			Positions.Add(Viewer.Position);
+		}
+		if (CollisionManager)
+		{
+			CollisionManager->SetFurtherFoci(Foci);
+		}
+		if (ScatterManager)
+		{
+			ScatterManager->SetFurtherViewers(Positions);
+		}
+		bFurtherViewersHandedOn = FurtherViewers.Num() > 0;
+	}
+
+	// A ground window is what a collision shell cooks from: none without further viewers, a strategy or collision.
+	if (FurtherViewers.Num() == 0 || !LODStrategy || !Configuration || !CollisionManager || !Configuration->bGenerateCollision)
+	{
+		if (GroundKeepChunks.Num() > 0 || GroundWindowBuiltFor.Num() > 0 || GroundLoadChunks.Num() > 0)
+		{
+			// The last further viewer left: its chunks are the strategy's to unload from the next decision on.
+			GroundLoadChunks.Reset();
+			GroundKeepChunks.Reset();
+			GroundWindowBuiltFor.Reset();
+		}
+		GroundChunksUnqueued = 0;
+		bGroundWindowsDirty = false;
+		LastGroundWindowMs = 0.0f;
+		return;
+	}
+
+	const double StartTime = FPlatformTime::Seconds();
+	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+
+	// Work the windows out again when a viewer came or left, moved an eighth of a chunk from where its window was built
+	// or changed its shell's radius by as much (its speed's lead), when an edit reached a chunk nobody tracks, and once a
+	// second (60 ticks). Nothing is kept per player: the sets are this list's, replaced whole.
+	const float Step = GroundWindowStepChunks * ChunkWorldSize;
+	TArray<float, TInlineAllocator<8>> Radii;
+	bool bRebuild = bGroundWindowsDirty || FurtherViewers.Num() != GroundWindowBuiltFor.Num() || CurrentFrame - GroundWindowBuiltFrame >= 60;
+	for (int32 Index = 0; Index < FurtherViewers.Num(); ++Index)
+	{
+		Radii.Add(CollisionManager->GetFocusRadius(FurtherViewers[Index].Velocity));
+		if (!bRebuild)
+		{
+			const FVector4& Built = GroundWindowBuiltFor[Index];
+			bRebuild = FVector::Dist(FurtherViewers[Index].Position, FVector(Built.X, Built.Y, Built.Z)) > Step
+				|| FMath::Abs(Radii[Index] - static_cast<float>(Built.W)) > Step;
+		}
+	}
+
+	auto ChunkCentreOf = [this, ChunkWorldSize](const FIntVector& Coord)
+	{
+		return Configuration->WorldOrigin + FVector(Coord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
+	};
+
+	if (bRebuild)
+	{
+		GroundLoadChunks.Reset();
+		GroundKeepChunks.Reset();
+		GroundWindowBuiltFor.Reset();
+		TArray<FIntVector> EditedChunks;
+		if (EditManager)
+		{
+			EditManager->GetEditedChunkCoords(EditedChunks);
+		}
+		TSet<FIntVector> LoadSet;
+		TArray<FIntVector> Chunks;
+		auto AddLoad = [this, &LoadSet](const FIntVector& Coord)
+		{
+			bool bAlready = false;
+			LoadSet.Add(Coord, &bAlready);
+			if (!bAlready)
+			{
+				GroundLoadChunks.Add(Coord);
+			}
+		};
+		for (int32 Index = 0; Index < FurtherViewers.Num(); ++Index)
+		{
+			const FVoxelFurtherViewer& Viewer = FurtherViewers[Index];
+			// The strategy's window for a viewer standing there: this world's origin and mode, no lead, no frustum.
+			FLODQueryContext ViewerContext = Context;
+			ViewerContext.ViewerPosition = Viewer.Position;
+			ViewerContext.ViewerForward = FVector::ForwardVector;
+			ViewerContext.ViewerLead = 0.0;
+			ViewerContext.FrustumPlanes.Reset();
+
+			// The shell cooks the loaded chunks whose centre lies within its radius, each with its 26 neighbours' voxels:
+			// a chunk's diagonal (1.73 widths) past the radius, an eighth of a chunk for the viewer's move and another for
+			// its radius's change before the next rebuild. A chunk more is kept, so a viewer pacing at an edge reloads nothing.
+			const float LoadReach = Radii[Index] + GroundWindowMarginChunks * ChunkWorldSize;
+			const float KeepReach = LoadReach + ChunkWorldSize;
+			Chunks.Reset();
+			LODStrategy->GetWindowChunksAround(ViewerContext, LoadReach, /*bKeep=*/false, Chunks);
+			for (const FIntVector& Coord : Chunks)
+			{
+				AddLoad(Coord);
+			}
+			Chunks.Reset();
+			LODStrategy->GetWindowChunksAround(ViewerContext, KeepReach, /*bKeep=*/true, Chunks);
+			GroundKeepChunks.Append(Chunks);
+
+			// The edited chunks within reach, wherever the analytic window puts them (a dungeon's stamp under the slab, a
+			// build over it), as the streaming viewer's edit pins (UpdateLoadDecisions).
+			for (const FIntVector& Coord : EditedChunks)
+			{
+				const float Horizon = LODStrategy->GetStreamingHorizon(ChunkCentreOf(Coord), Viewer.Position);
+				if (Horizon <= KeepReach)
+				{
+					GroundKeepChunks.Add(Coord);
+					if (Horizon <= LoadReach)
+					{
+						AddLoad(Coord);
+					}
+				}
+			}
+			GroundWindowBuiltFor.Add(FVector4(Viewer.Position, Radii[Index]));
+		}
+		GroundKeepChunks.Append(GroundLoadChunks);
+		GroundWindowBuiltFrame = CurrentFrame;
+		bGroundWindowsDirty = false;
+		++GroundWindowRebuilds;
+	}
+
+	// The load pass: every chunk of the windows that is not tracked goes to the generation queue, nearest its viewer
+	// first, as the streaming viewer's requests do (the same per-tick cap). After a rebuild, while the cap left some
+	// over, and twice a second (a failed generation leaves its chunk untracked).
+	if (bRebuild || GroundChunksUnqueued > 0 || CurrentFrame % 30 == 0)
+	{
+		const int32 MaxChunksToAddPerFrame = ResolveMaxLoadPerFrame() * 4;
+		int32 ChunksAdded = 0;
+		GroundChunksUnqueued = 0;
+		for (const FIntVector& Coord : GroundLoadChunks)
+		{
+			const EChunkState CurrentState = GetChunkState(Coord);
+			if (CurrentState == EChunkState::PendingUnload)
+			{
+				if (LoadedChunkCoords.Contains(Coord))
+				{
+					// Queued to unload before the window reached it: it stays, with its mesh and its collision.
+					RemoveFromUnloadQueue(Coord);
+					SetChunkState(Coord, EChunkState::Loaded);
+				}
+				else
+				{
+					++GroundChunksUnqueued; // never meshed (the stale cull): it unloads, and the next pass asks again
+				}
+				continue;
+			}
+			if (CurrentState != EChunkState::Unloaded)
+			{
+				continue;
+			}
+			if (ChunksAdded >= MaxChunksToAddPerFrame)
+			{
+				++GroundChunksUnqueued;
+				continue;
+			}
+			const FVector ChunkCenter = ChunkCentreOf(Coord);
+			FChunkLODRequest Request;
+			Request.ChunkCoord = Coord;
+			// Its mesh's LOD is the streaming viewer's business (far from it: the coarsest); the voxels and the collision
+			// cooked from them are full detail whatever it is.
+			Request.LODLevel = LODStrategy->GetLODForChunk(Coord, Context);
+			Request.Priority = 1.0f / FMath::Max(
+				GetNearestViewerDistance(ChunkCenter, static_cast<float>(FVector::Dist(ChunkCenter, Context.ViewerPosition))), 1.0f);
+
+			FVoxelChunkState& State = GetOrCreateChunkState(Coord);
+			State.LODLevel = Request.LODLevel;
+			State.Priority = Request.Priority;
+			if (AddToGenerationQueue(Request))
+			{
+				SetChunkState(Coord, EChunkState::PendingGeneration);
+				++ChunksAdded;
+			}
+		}
+	}
+	LastGroundWindowMs = VoxelTickTiming::MsSince(StartTime);
+}
+
+void UVoxelChunkManager::GetViewersReport(TArray<FString>& OutLines) const
+{
+	OutLines.Reset();
+	if (!bIsInitialized || !Configuration)
+	{
+		return;
+	}
+	int32 Loaded = 0;
+	int32 OnTheWay = 0;
+	for (const FIntVector& Coord : GroundLoadChunks)
+	{
+		const EChunkState State = GetChunkState(Coord);
+		Loaded += State == EChunkState::Loaded ? 1 : 0;
+		OnTheWay += (State != EChunkState::Loaded && State != EChunkState::Unloaded) ? 1 : 0;
+	}
+	OutLines.Add(FString::Printf(
+		TEXT("streaming viewer (%.0f, %.0f, %.0f), %d chunks loaded; further viewers %d (voxel.Stream.GroundWindows %d); ground windows: %d chunks to load (%d loaded, %d on the way), %d kept, worked out %lld times, last tick %.3f ms"),
+		CurrentViewerPosition.X, CurrentViewerPosition.Y, CurrentViewerPosition.Z, LoadedChunkCoords.Num(), FurtherViewers.Num(),
+		CVarStreamGroundWindows.GetValueOnGameThread(), GroundLoadChunks.Num(), Loaded, OnTheWay, GroundKeepChunks.Num(), GroundWindowRebuilds,
+		LastGroundWindowMs));
+	for (int32 Index = 0; Index < FurtherViewers.Num(); ++Index)
+	{
+		const FVoxelFurtherViewer& Viewer = FurtherViewers[Index];
+		const FIntVector Under = WorldToChunkCoord(Viewer.Position - GetUpVectorAt(Viewer.Position) * 50.0);
+		const float Radius = CollisionManager ? CollisionManager->GetFocusRadius(Viewer.Velocity) : 0.0f;
+		OutLines.Add(FString::Printf(
+			TEXT("further viewer %d at (%.0f, %.0f, %.0f), speed %.0f: shell radius %.0f, window reach %.0f; the chunk under it (%d, %d, %d) loaded %d, collision %d"),
+			Index + 1, Viewer.Position.X, Viewer.Position.Y, Viewer.Position.Z, Viewer.Velocity.Size(), Radius,
+			Radius + GroundWindowMarginChunks * Configuration->GetChunkWorldSize(), Under.X, Under.Y, Under.Z, IsChunkLoaded(Under) ? 1 : 0,
+			CollisionManager && CollisionManager->HasCollision(Under) ? 1 : 0));
+	}
+}
+
 void UVoxelChunkManager::ApplyDescentPrefetch(FLODQueryContext& Context, float DeltaTime)
 {
 	const double LeadSeconds = CVarStreamDescentLead.GetValueOnGameThread();
@@ -2709,6 +3032,14 @@ void UVoxelChunkManager::UpdateUnloadDecisions(const FLODQueryContext& Context)
 	const bool bWindowSuspended = LODStrategy->IsWindowSuspended();
 	auto CanUnload = [this, &Context, EditPinDistance, ChunkWorldSize, bWindowSuspended](const FIntVector& ChunkCoord) -> bool
 	{
+		// In a further viewer's ground window (G217): the strategy judges by the streaming viewer alone, and a server's
+		// other players keep the ground under them whatever its window and its cut-over say. First: every chunk of a
+		// ground window far from the streaming viewer is a candidate each tick.
+		if (GroundKeepChunks.Contains(ChunkCoord))
+		{
+			return false;
+		}
+
 		// Only settled chunks unload here: anything mid-pipeline finishes first, and PendingUnload
 		// chunks are already queued.
 		if (GetChunkState(ChunkCoord) != EChunkState::Loaded)
@@ -4938,6 +5269,11 @@ bool UVoxelChunkManager::IsChunkBeyondUnloadDistance(const FIntVector& ChunkCoor
 	{
 		return false;
 	}
+	// A further viewer's ground chunk is in range whatever the streaming viewer's distance and cut-over (G217).
+	if (GroundKeepChunks.Contains(ChunkCoord))
+	{
+		return false;
+	}
 	// Above a planet's voxel cut-over (WM-BP10) every chunk is: the window holds nothing.
 	if (LODStrategy->IsWindowSuspended())
 	{
@@ -6768,7 +7104,18 @@ void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Cont
 		// Idle: LastStateChangeFrame is the frame the chunk entered Loaded; it stays fixed while
 		// settled and resets on any remesh (Loaded -> PendingMeshing -> ... -> Loaded).
 		if ((CurrentFrame - S.LastStateChangeFrame) < IdleFrames) return false;
-		const int32 BandLOD = (bLODActive || !LODStrategy) ? S.LODLevel : LODStrategy->GetDistanceBandLOD(Coord, Context);
+		int32 BandLOD = (bLODActive || !LODStrategy) ? S.LODLevel : LODStrategy->GetDistanceBandLOD(Coord, Context);
+		if ((1 << FMath::Clamp(BandLOD, 0, 7)) < MinStride) return false;
+		// A further viewer's ground chunk (G217) is far from the streaming viewer and may be near a player: the band of the
+		// nearest viewer decides, so the chunks around a server's other player stay resident for its collision cooks and
+		// the server's point reads, as the ones around the first do, and the rest of its window compresses as the first's.
+		if (LODStrategy && GroundKeepChunks.Contains(Coord))
+		{
+			for (const FVoxelFurtherViewer& Viewer : FurtherViewers)
+			{
+				BandLOD = FMath::Min(BandLOD, LODStrategy->GetDistanceBandLODAround(Coord, Viewer.Position));
+			}
+		}
 		return (1 << FMath::Clamp(BandLOD, 0, 7)) >= MinStride;
 	};
 
@@ -8134,7 +8481,9 @@ int32 UVoxelChunkManager::ReprioritizeQueues(const FLODQueryContext& Context)
 		// would otherwise evict the ground it just requested.
 		const float HorizonDistance = LODStrategy ? LODStrategy->GetStreamingHorizon(ChunkCenter, ViewerPosition) : FMath::Sqrt(DistSq);
 
-		if (bWindowSuspended || FMath::Square(HorizonDistance) > EvictDistanceSq)
+		// A further viewer's ground chunk stays queued whatever the streaming viewer's distance and cut-over (G217).
+		const bool bGroundChunk = GroundKeepChunks.Num() > 0 && GroundKeepChunks.Contains(Request.ChunkCoord);
+		if (!bGroundChunk && (bWindowSuspended || FMath::Square(HorizonDistance) > EvictDistanceSq))
 		{
 			// Beyond view distance — evict from queue and reset chunk state
 			GenerationQueueSet.Remove(Request.ChunkCoord);
@@ -8145,8 +8494,8 @@ int32 UVoxelChunkManager::ReprioritizeQueues(const FLODQueryContext& Context)
 		}
 		else
 		{
-			// Update priority: closer = higher priority
-			Request.Priority = 1.0f / FMath::Max(FMath::Sqrt(DistSq), 1.0f);
+			// Update priority: closer = higher priority (to the nearest viewer, G217: the streaming viewer alone has none else)
+			Request.Priority = 1.0f / FMath::Max(GetNearestViewerDistance(ChunkCenter, FMath::Sqrt(DistSq)), 1.0f);
 
 			// Update LOD level based on current viewer position
 			// This prevents chunks from being generated at a stale LOD level
@@ -8177,7 +8526,7 @@ int32 UVoxelChunkManager::ReprioritizeQueues(const FLODQueryContext& Context)
 	for (FChunkLODRequest& Request : MeshingQueue)
 	{
 		const FVector ChunkCenter = WorldOrigin + FVector(Request.ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
-		const float Dist = FVector::Dist(ChunkCenter, ViewerPosition);
+		const float Dist = GetNearestViewerDistance(ChunkCenter, FVector::Dist(ChunkCenter, ViewerPosition));
 		Request.Priority = 1.0f / FMath::Max(Dist, 1.0f);
 
 		// Update LOD level for meshing queue items too

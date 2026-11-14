@@ -148,6 +148,26 @@ public:
 	 */
 	void Update(const FVector& ViewerPosition, float DeltaTime);
 
+	/**
+	 * The viewers beside Update's (G217): on a server, the pawns of the players other than the one the streaming follows.
+	 * Every distance the manager decides by (a type's spawn distance, the scatter radius, the clean-up beyond them) is a
+	 * chunk's distance from the nearest viewer, so the server holds the scatter (its collision, what a player chops)
+	 * around each of its players where it has their chunks. The chunk manager sets them each tick; nothing is kept per
+	 * player.
+	 *
+	 * @param InViewers This tick's further viewers (empty on a client and in a standalone game)
+	 */
+	void SetFurtherViewers(const TArray<FVector>& InViewers) { FurtherViewers = InViewers; }
+
+	/**
+	 * A point's distance from the nearest viewer: Update's alone without further ones (the same arithmetic as before
+	 * them), else the least of them all.
+	 *
+	 * @param Point A chunk's centre
+	 * @return The distance (uu)
+	 */
+	float GetViewerDistance(const FVector& Point) const;
+
 	// ==================== Scatter Definitions ====================
 
 	/**
@@ -920,6 +940,9 @@ protected:
 
 	/** Last viewer position (for debug drawing) */
 	FVector LastViewerPosition = FVector::ZeroVector;
+
+	/** The viewers beside Update's (SetFurtherViewers, G217) */
+	TArray<FVector> FurtherViewers;
 
 	// ==================== Deferred Generation Queue ====================
 

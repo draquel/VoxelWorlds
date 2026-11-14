@@ -164,7 +164,8 @@ int32 UVoxelChunkManager::AuditResidency(FString& OutReport) const
 		for (const TPair<FIntVector, FVoxelChunkState>& Pair : ChunkStates)
 		{
 			const float Distance = DistanceToViewer(Pair.Key);
-			if (Distance > UnloadDistance)
+			// A further viewer's ground chunk is where it belongs, however far from the streaming viewer (G217).
+			if (Distance > UnloadDistance && !GroundKeepChunks.Contains(Pair.Key))
 			{
 				const int32 StateIndex = static_cast<int32>(Pair.Value.State);
 				if (StateIndex >= 0 && StateIndex < NumStates)

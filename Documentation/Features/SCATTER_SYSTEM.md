@@ -821,6 +821,11 @@ keeps the smooth three for the tests that ran on them).
 
 - Per-definition `SpawnDistance` allows different ranges per scatter type; a definition with `SpawnDistance` 0 spawns at
   the world configuration's `ScatterRadius`
+- Every one of these distances is a chunk's distance from the nearest viewer (`GetViewerDistance`): the streaming
+  viewer, and on a server each further viewer, the pawn of a player other than the first (`SetFurtherViewers`, set by
+  the chunk manager every tick; G217). So a server holds the scatter (its collision, the instance a player chops)
+  around each of its players, in the chunks of that player's ground window
+  ([STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md)); a client and a standalone game have the one viewer
 - Trees can have larger spawn distance to prevent pop-in
 - Grass can have smaller distance for performance
 - Out-of-range cleanup releases instances to pool via `ReleaseChunkScatterType()` (in place: no tree rebuild)

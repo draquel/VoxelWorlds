@@ -158,6 +158,47 @@ public:
 		return OutSelected.Num();
 	}
 
+	/**
+	 * The chunks of the window a viewer standing at Viewer.ViewerPosition would have within HorizonDistance of it
+	 * (measured as GetStreamingHorizon), whatever this strategy's own viewer is doing: the last Update's viewer is not
+	 * read and the cut-over does not empty it. The world-mode culls apply; the LOD and the frustum do not. The chunk
+	 * manager asks it for the ground window of a player other than the streaming viewer (G217: on a server every
+	 * player's pawn gets the chunks its collision shell cooks from, by the same window rules as the first player's).
+	 *
+	 * Default: nothing (a strategy that cannot tell gives such a player no chunks).
+	 *
+	 * @param Viewer A context whose ViewerPosition is the further viewer (its world origin and mode as every context's)
+	 * @param HorizonDistance How far the chunks reach, in the streaming horizon's measure (uu)
+	 * @param bKeep False: the chunks to stream in (the load window). True: the chunks to keep once loaded (the keep
+	 *        window, wider near the viewer, so a viewer changing layer unloads nothing nearby)
+	 * @param OutChunks Receives the chunk coordinates (appended, no repeats within one call)
+	 */
+	virtual void GetWindowChunksAround(
+		const FLODQueryContext& Viewer,
+		float HorizonDistance,
+		bool bKeep,
+		TArray<FIntVector>& OutChunks
+	) const
+	{
+	}
+
+	/**
+	 * The LOD of the distance band a chunk falls in for a viewer standing at ViewerPosition: the band of its distance
+	 * alone, without the balance and the hysteresis the strategy keeps for its own viewer. The chunk manager judges a
+	 * ground window's chunk by the nearest viewer's band (G217: a chunk near a server's other player stays resident, as
+	 * one near the first does, and the rest of that player's window is far-compressed, as the first's is).
+	 *
+	 * Default: 0 (the nearest band: a strategy that cannot tell keeps such a chunk resident).
+	 *
+	 * @param ChunkCoord Chunk position in chunk coordinate space
+	 * @param ViewerPosition The viewer
+	 * @return LOD level of the chunk's distance band for that viewer (0 = nearest band)
+	 */
+	virtual int32 GetDistanceBandLODAround(const FIntVector& ChunkCoord, const FVector& ViewerPosition) const
+	{
+		return 0;
+	}
+
 	// ==================== Lifecycle ====================
 
 	/**

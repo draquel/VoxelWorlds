@@ -167,6 +167,20 @@ struct FVoxelCollisionCoverSample
 	float Bias = 0.0f;
 };
 
+/**
+ * A further focus of the collision shell (G217): on a server, the pawn of a player other than the one the streaming
+ * follows. The chunk manager hands the manager this tick's (UVoxelCollisionManager::SetFurtherFoci); nothing is kept per
+ * player.
+ */
+struct FVoxelCollisionFocus
+{
+	/** The pawn's position */
+	FVector Position = FVector::ZeroVector;
+
+	/** The pawn's velocity: the shell's lead and the path coverage read it */
+	FVector Velocity = FVector::ZeroVector;
+};
+
 struct FAsyncCollisionResult
 {
 	FIntVector ChunkCoord;
@@ -247,6 +261,28 @@ public:
 	 * @param DeltaTime Time since last update
 	 */
 	void Update(const FVector& ViewerPosition, float DeltaTime);
+
+	/**
+	 * The shell's further foci for the next Update (G217): the pawns of a server's other players. A chunk gets collision
+	 * within the radius of any focus (the first player's pawn, as before, and each of these: GetFocusRadius), is cooked
+	 * in the order of its distance from the nearest one, and loses it once outside every one's. The chunk manager sets
+	 * them each tick from the players the world has then, so a player who leaves releases its shell at the next sweep.
+	 *
+	 * @param InFoci This tick's further foci (empty on a client and in a standalone game)
+	 */
+	void SetFurtherFoci(const TArray<FVoxelCollisionFocus>& InFoci) { FurtherFoci = InFoci; }
+
+	/** @return The further foci the last SetFurtherFoci gave */
+	const TArray<FVoxelCollisionFocus>& GetFurtherFoci() const { return FurtherFoci; }
+
+	/**
+	 * The radius of the shell around a further focus moving at a velocity: the configured radius plus the lead its
+	 * horizontal speed adds (voxel.Collision.LeadSeconds), as the first focus's (GetCurrentEffectiveRadius), unsmoothed.
+	 *
+	 * @param Velocity The focus's velocity
+	 * @return The radius (uu), never under GetCollisionRadius
+	 */
+	float GetFocusRadius(const FVector& Velocity) const;
 
 	// ==================== Dirty Marking ====================
 
@@ -682,6 +718,20 @@ protected:
 
 	/** Speed (uu/s) at or below which the focus counts as stationary. */
 	static constexpr float StationarySpeedThreshold = 10.0f;
+
+	// ==================== Further foci (G217) ====================
+
+	/** This tick's further foci (SetFurtherFoci): a server's other players' pawns. */
+	TArray<FVoxelCollisionFocus> FurtherFoci;
+
+	/** Where the further foci were at the last decision sweep: a change of their number or a move past the threshold sweeps again. */
+	TArray<FVector> LastSweepFurtherFoci;
+
+	/**
+	 * A point's distance from the nearest focus: the first focus alone without further ones (the same arithmetic as
+	 * before them), else the least of them all.
+	 */
+	float GetNearestFocusDistance(const FVector& Point, const FVector& FirstFocus) const;
 
 	// ==================== Statistics ====================
 
