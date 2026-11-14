@@ -19,6 +19,11 @@ class UBodySetup;
  * Unlike hacking a UBoxComponent's FBodyInstance, this component properly
  * overrides GetBodySetup() so the physics engine always uses our trimesh
  * BodySetup for sweeps, traces, and overlap queries.
+ *
+ * Static: it is placed at its chunk's corner before it is registered and replaced, never moved, when the chunk is
+ * re-cooked. A character standing on it is therefore on a static movement base: it sends and receives world positions,
+ * which is what lets a client and a server agree about a pawn on terrain though each has its own copy of this
+ * component (the container actor is not replicated; G215).
  */
 UCLASS(MinimalAPI)
 class UVoxelCollisionComponent : public UPrimitiveComponent

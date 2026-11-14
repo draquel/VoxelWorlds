@@ -300,6 +300,21 @@ re-cooks queue below every first cook; the old body stays live until the new one
 `Collision.{NeighborArrival,EditNeighbors}`). `voxel.Collision.AuditNeighbors`
 lists cooks that read a neighbour as air and are stale.
 
+**A chunk's collision is a static component.** Each cooked chunk is one `UVoxelCollisionComponent` at the chunk's
+corner, on the `VoxelCollisionContainer` actor the collision manager spawns (transient, not replicated: every machine
+cooks its own). The component and the container's root are static (`EComponentMobility::Static`): a component is
+placed before it is registered and a re-cook replaces it, so nothing ever moves one. A character's networking depends
+on that. To the engine a Movable component is a dynamic movement base (`MovementBaseUtility::IsDynamicBase`), and a
+character standing on one sends and receives its position relative to the base; neither machine can resolve the
+other's copy of a chunk's component, so while the components were Movable a client dropped every server correction on
+terrain and a dedicated server corrected every move of a client that walked on it (G215: 8,050 corrections in a 261 s
+walk of a road, and after a server-side teleport the client's pawn hung 28 uu over the server's). On a static base
+both sides send world positions, and the client applies a correction whose base it cannot resolve and finds its own
+floor there. Tests `Collision.StaticBase` (a plane, a block world and a planet: every component static, attached to
+the static root, at its chunk's corner and no dynamic base, across a re-cook) and, in the editor, the game module's
+`VoxelEngine.Replication.TerrainBase` (a dedicated server and a client on `VoxelDemo`: the client walks, the server
+moves and teleports its pawn, the client follows).
+
 ## What an edit re-meshes
 
 `UVoxelEditManager` broadcasts each edited chunk; `HandleChunkEdited`:
