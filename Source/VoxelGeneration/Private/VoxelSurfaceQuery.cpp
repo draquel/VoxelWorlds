@@ -28,6 +28,8 @@ namespace
 		bool bWater = false;
 		/** World Z, or the distance from the planet centre (FVoxelWaterBody::Level) */
 		double Level = 0.0;
+		/** A lake's minimum cave depth over its footprint, in voxels (FVoxelWaterBody::MinCaveDepth); 0 otherwise */
+		float MinCaveDepth = 0.0f;
 	};
 
 	/** The water levels' sample at a position, reduced to what the surface's material needs. */
@@ -37,6 +39,7 @@ namespace
 		FColumnWater Over;
 		Over.bWater = Water.Sample(WorldPos, Sample);
 		Over.Level = Sample.SurfaceLevel;
+		Over.MinCaveDepth = Sample.MinCaveDepth;
 		return Over;
 	}
 
@@ -392,13 +395,14 @@ FVoxelData FVoxelSurfaceQuery::GenerateVoxelAt(
 				? Snapshot.GetBiomeBlend(Temperature, Moisture, Continentalness).GetDominantBiome()
 				: FVoxelBiomeRegistry::GetBiomeBlend(Temperature, Moisture, 0.15f).GetDominantBiome();
 		}
-		// The lines over the column keep caves under their minimum depth, as generation does.
-		float MinDepthUnderLines = 0.0f;
+		// The lines over the column keep caves under their minimum depth, as generation does; so does a lake over its
+		// footprint (the chunk's water columns carry the same depth to the generators).
+		float MinDepthUnderLines = Over.MinCaveDepth;
 		if (HasLines(Conditioning))
 		{
-			MinDepthUnderLines = bPlanet
+			MinDepthUnderLines = FMath::Max(MinDepthUnderLines, bPlanet
 				? Conditioning->GetMinCaveDepthOnSphere(Direction, PlanetParams->PlanetRadius)
-				: Conditioning->GetMinCaveDepthAt(WorldPos.X, WorldPos.Y);
+				: Conditioning->GetMinCaveDepthAt(WorldPos.X, WorldPos.Y));
 		}
 		const float Carve = FVoxelCPUNoiseGenerator::CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Caves, NoiseParams.Seed,
 			bUnderwater, PlanetParams, MinDepthUnderLines);

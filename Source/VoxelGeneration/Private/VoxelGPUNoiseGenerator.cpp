@@ -8,6 +8,7 @@
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelBiomeBlendDither.h"
 #include "VoxelDownLines.h"
+#include "VoxelChunkWaterColumns.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelNoise.h"
 #include "VoxelChunkLineSegments.h"
@@ -53,11 +54,17 @@ static void GetPlanetChunkAnchor(const FVoxelNoiseGenerationRequest& Request, FV
  * Gating as on the CPU: the water passes only with water on; the seed and flood when the sea surface crosses the
  * chunk's voxel box or the box lies wholly under it (G132; no seeds above the sea); the cave-flag clear whenever the
  * water pass ran, folded into the line scan.
+ *
+ * With a level per down-line (the chunk's water columns: a lake or a river reach may reach the chunk) the seed and the
+ * flood are the column kernels, which read each line's own level in place of the sea sphere, and every line is walked,
+ * as on the CPU.
  */
 static void AddPlanetLinePassDispatches(
 	FRDGBuilder& GraphBuilder,
 	const FVoxelNoiseGenerationRequest& Request,
-	FRDGBufferRef VoxelBuffer)
+	FRDGBufferRef VoxelBuffer,
+	const FVoxelChunkWaterColumns& WaterColumns,
+	FRDGBufferSRVRef WaterColumnSRV)
 {
 	const int32 ChunkSize = Request.ChunkSize;
 	const FVoxelDownLines Lines = FVoxelDownLines::Make(ChunkSize, FVoxelDownLines::PlanetChunkDown(Request));
@@ -92,11 +99,55 @@ static void AddPlanetLinePassDispatches(
 	};
 
 	const auto& ShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
-	const bool bWaterPass = Request.bEnableWaterLevel;
+	const bool bWaterColumns = !WaterColumns.IsEmpty();
+	const bool bWaterPass = Request.bEnableWaterLevel || bWaterColumns;
 	const FVoxelSeaSurface Sea = FVoxelSeaSurface::MakeSphere(Request.SphericalPlanetParams.PlanetCenter, Request.WaterRadius);
 	const FBox VoxelBox(ChunkWorldPos, ChunkWorldPos + FVector((ChunkSize - 1) * Request.VoxelSize));
 
-	if (bWaterPass && !Sea.IsAbove(VoxelBox))
+	if (bWaterColumns)
+	{
+		// Phase 1: seed along the lines, each to its own level
+		{
+			FVoxelWaterLineSeedColumnsCS::FParameters* Params = GraphBuilder.AllocParameters<FVoxelWaterLineSeedColumnsCS::FParameters>();
+			Params->ChunkSize = ChunkSize;
+			Params->VoxelSize = Request.VoxelSize;
+			Params->LineAxisA = Lines.AxisA;
+			Params->LineForward = Lines.bForward ? 1 : 0;
+			Params->LineShifts = ShiftSRV;
+			Params->PlanetAnchorLocal = AnchorLocal;
+			Params->PlanetAnchorDir = AnchorDir;
+			Params->PlanetAnchorDist = static_cast<float>(AnchorDist);
+			Params->WaterColumnBase = WaterColumns.GetFirstColumn();
+			Params->WaterColumns = WaterColumnSRV;
+			Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+			TShaderMapRef<FVoxelWaterLineSeedColumnsCS> Shader(ShaderMap);
+			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelWaterLineSeedColumns"), Shader, Params, LineGroups);
+		}
+
+		// Phase 2: flood, a voxel at or under its own line's level
+		TShaderMapRef<FVoxelWaterFloodSweepRadialColumnsCS> SweepShader(ShaderMap);
+		for (int32 Round = 0; Round < FloodSweepRounds; ++Round)
+		{
+			for (const uint32 Axis : { 2u, 0u, 1u })
+			{
+				FVoxelWaterFloodSweepRadialColumnsCS::FParameters* Params = GraphBuilder.AllocParameters<FVoxelWaterFloodSweepRadialColumnsCS::FParameters>();
+				Params->ChunkSize = ChunkSize;
+				Params->VoxelSize = Request.VoxelSize;
+				Params->SweepAxis = Axis;
+				Params->LineAxisA = Lines.AxisA;
+				Params->LineForward = Lines.bForward ? 1 : 0;
+				Params->LineShifts = ShiftSRV;
+				Params->PlanetAnchorLocal = AnchorLocal;
+				Params->PlanetAnchorDir = AnchorDir;
+				Params->PlanetAnchorDist = static_cast<float>(AnchorDist);
+				Params->WaterColumnBase = WaterColumns.GetFirstColumn();
+				Params->WaterColumns = WaterColumnSRV;
+				Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelWaterFloodSweepRadialColumns"), SweepShader, Params, ColumnGroups);
+			}
+		}
+	}
+	else if (bWaterPass && !Sea.IsAbove(VoxelBox))
 	{
 		// Phase 1: seed along the lines
 		{
@@ -149,11 +200,19 @@ static void AddPlanetLinePassDispatches(
  *   chunk straddles the water level (no seeds otherwise); the cave-flag clear (CPU phase 3) runs
  *   whenever the water pass ran, folded into the underground column kernel via ClearCaveFlags.
  * - Underground classification: always (pass 2, the boundary propagation, is the same in every mode).
+ * - A chunk with water columns (a lake or a river reach may reach it; FVoxelChunkWaterColumns): the water pass runs
+ *   with the column kernels, each column seeding from its own level and the flood passing a voxel at or under its own
+ *   column's level, as FVoxelCPUNoiseGenerator::ApplyWaterFillPass does with them.
+ *
+ * @param WaterColumns The chunk's water columns (empty: one level, the request's)
+ * @param WaterColumnSRV Their buffer (null when they are empty)
  */
 static void AddVoxelPostPassDispatches(
 	FRDGBuilder& GraphBuilder,
 	const FVoxelNoiseGenerationRequest& Request,
-	FRDGBufferRef VoxelBuffer)
+	FRDGBufferRef VoxelBuffer,
+	const FVoxelChunkWaterColumns& WaterColumns,
+	FRDGBufferSRVRef WaterColumnSRV)
 {
 	const int32 ChunkSize = Request.ChunkSize;
 	const int32 TotalVoxels = ChunkSize * ChunkSize * ChunkSize;
@@ -170,15 +229,49 @@ static void AddVoxelPostPassDispatches(
 	const float ChunkWorldZ = static_cast<float>(Request.GetChunkWorldPosition().Z);
 
 	const bool bPlanet = Request.WorldMode == EWorldMode::SphericalPlanet;
-	const bool bWaterPass = Request.bEnableWaterLevel && !bPlanet;
+	const bool bWaterColumns = !WaterColumns.IsEmpty();
+	const bool bWaterPass = (Request.bEnableWaterLevel || bWaterColumns) && !bPlanet;
 	// The chunk the water level passes through, or one wholly under it (seeded from its top layer, G129), as the CPU pass
-	const bool bChunkAtOrUnderWaterLevel = bWaterPass && Request.WaterLevel >= ChunkWorldZ;
+	const bool bChunkAtOrUnderWaterLevel = bWaterPass && !bWaterColumns && Request.WaterLevel >= ChunkWorldZ;
 
 	const auto& ShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
 
 	if (bPlanet)
 	{
-		AddPlanetLinePassDispatches(GraphBuilder, Request, VoxelBuffer);
+		AddPlanetLinePassDispatches(GraphBuilder, Request, VoxelBuffer, WaterColumns, WaterColumnSRV);
+	}
+
+	if (bWaterPass && bWaterColumns)
+	{
+		// Phase 1: column seed, each column from its own level (a column no body covers, or whose level lies under the
+		// chunk, seeds nothing)
+		{
+			FVoxelWaterColumnSeedColumnsCS::FParameters* Params = GraphBuilder.AllocParameters<FVoxelWaterColumnSeedColumnsCS::FParameters>();
+			Params->ChunkSize = ChunkSize;
+			Params->VoxelSize = Request.VoxelSize;
+			Params->ChunkWorldZ = ChunkWorldZ;
+			Params->WaterColumns = WaterColumnSRV;
+			Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+			TShaderMapRef<FVoxelWaterColumnSeedColumnsCS> Shader(ShaderMap);
+			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelWaterColumnSeedColumns"), Shader, Params, ColumnGroups);
+		}
+
+		// Phase 2: flood, a voxel at or under its own column's level
+		TShaderMapRef<FVoxelWaterFloodSweepColumnsCS> SweepShader(ShaderMap);
+		for (int32 Round = 0; Round < FloodSweepRounds; ++Round)
+		{
+			for (const uint32 Axis : { 2u, 0u, 1u })
+			{
+				FVoxelWaterFloodSweepColumnsCS::FParameters* Params = GraphBuilder.AllocParameters<FVoxelWaterFloodSweepColumnsCS::FParameters>();
+				Params->ChunkSize = ChunkSize;
+				Params->VoxelSize = Request.VoxelSize;
+				Params->ChunkWorldZ = ChunkWorldZ;
+				Params->SweepAxis = Axis;
+				Params->WaterColumns = WaterColumnSRV;
+				Params->VoxelData = GraphBuilder.CreateUAV(VoxelBuffer);
+				FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("VoxelWaterFloodSweepColumns"), SweepShader, Params, ColumnGroups);
+			}
+		}
 	}
 
 	if (bChunkAtOrUnderWaterLevel)
@@ -415,7 +508,9 @@ static FRDGBufferSRVRef CreateFloat4StructuredSRV(FRDGBuilder& GraphBuilder, con
 static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	FRDGBuilder& GraphBuilder,
 	const FVoxelNoiseGenerationRequest& Request,
-	FRDGBufferRef VoxelBuffer)
+	FRDGBufferRef VoxelBuffer,
+	const FVoxelChunkWaterColumns& WaterColumns,
+	FRDGBufferSRVRef WaterColumnSRV)
 {
 	FGenerateVoxelDensityCS::FParameters* Parameters = GraphBuilder.AllocParameters<FGenerateVoxelDensityCS::FParameters>();
 	Parameters->ChunkWorldPosition = FVector3f(Request.GetChunkWorldPosition());
@@ -629,6 +724,15 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	Parameters->ConditioningLineSegmentCount = LineSegments.Num();
 	Parameters->ConditioningLineData = CreateFloat4StructuredSRV(GraphBuilder, LineSegments.Data, TEXT("VoxelConditioningLineData"));
 
+	// The chunk's water columns where a lake or a river reach may reach it: the same float4s the CPU generator reads
+	// (FVoxelChunkWaterColumns), a level per column or, on a planet, per down-line (the shift rows first, with the
+	// lines' axis and direction, so the density pass finds a voxel's line). A chunk with one level uploads nothing: the
+	// shader reads the level above, and the parameter stands on the line data's buffer.
+	Parameters->WaterColumnsEnabled = WaterColumns.IsEmpty() ? 0 : 1;
+	Parameters->WaterLineAxisA = WaterColumns.IsEmpty() ? 2 : WaterColumns.GetLines().AxisA;
+	Parameters->WaterLineForward = (!WaterColumns.IsEmpty() && WaterColumns.GetLines().bForward) ? 1 : 0;
+	Parameters->WaterColumnData = WaterColumnSRV ? WaterColumnSRV : Parameters->ConditioningLineData;
+
 	// IslandBowl world-mode params (Phase C) — from the request; ignored by the shader unless WorldMode==IslandBowl.
 	Parameters->IslandShape = static_cast<int32>(Request.IslandParams.Shape);
 	Parameters->IslandFalloffType = static_cast<int32>(Request.IslandParams.FalloffType);
@@ -786,7 +890,14 @@ void FVoxelGPUNoiseGenerator::DispatchComputeShader(
 
 			// Populate shader parameters (shared with the streaming BeginGenerateChunkGPU path via
 			// BuildDensityShaderParameters — single source of truth so both dispatch bit-identically).
-			FGenerateVoxelDensityCS::FParameters* Parameters = BuildDensityShaderParameters(GraphBuilder, CapturedRequest, VoxelBuffer);
+			// The chunk's water columns where a lake or a river reach may reach it (the request carries the bodies): built
+			// once and uploaded once, read by the density pass and the fill. Empty, and no buffer, for every other chunk.
+			FVoxelChunkWaterColumns WaterColumns;
+			FVoxelChunkWaterColumns::Build(CapturedRequest, WaterColumns);
+			const FRDGBufferSRVRef WaterColumnSRV = WaterColumns.IsEmpty() ? nullptr
+				: CreateFloat4StructuredSRV(GraphBuilder, WaterColumns.Data, TEXT("VoxelWaterColumns"));
+
+			FGenerateVoxelDensityCS::FParameters* Parameters = BuildDensityShaderParameters(GraphBuilder, CapturedRequest, VoxelBuffer, WaterColumns, WaterColumnSRV);
 
 			// Get shader
 			TShaderMapRef<FGenerateVoxelDensityCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
@@ -809,7 +920,7 @@ void FVoxelGPUNoiseGenerator::DispatchComputeShader(
 			);
 
 			// Post-passes (water fill + underground classification) — finished data on the GPU
-			AddVoxelPostPassDispatches(GraphBuilder, CapturedRequest, VoxelBuffer);
+			AddVoxelPostPassDispatches(GraphBuilder, CapturedRequest, VoxelBuffer, WaterColumns, WaterColumnSRV);
 
 			// Extract the buffer to persist it beyond graph execution
 			GraphBuilder.QueueBufferExtraction(VoxelBuffer, &Result->OutputBuffer);
@@ -866,7 +977,14 @@ FVoxelGenerationHandle FVoxelGPUNoiseGenerator::BeginGenerateChunkGPU(const FVox
 			FRDGBufferDesc VoxelBufferDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), TotalVoxels);
 			FRDGBufferRef VoxelBuffer = GraphBuilder.CreateBuffer(VoxelBufferDesc, TEXT("VoxelDensityBufferAsync"));
 
-			FGenerateVoxelDensityCS::FParameters* Parameters = BuildDensityShaderParameters(GraphBuilder, CapturedRequest, VoxelBuffer);
+			// The chunk's water columns where a lake or a river reach may reach it (the request carries the bodies): built
+			// once and uploaded once, read by the density pass and the fill. Empty, and no buffer, for every other chunk.
+			FVoxelChunkWaterColumns WaterColumns;
+			FVoxelChunkWaterColumns::Build(CapturedRequest, WaterColumns);
+			const FRDGBufferSRVRef WaterColumnSRV = WaterColumns.IsEmpty() ? nullptr
+				: CreateFloat4StructuredSRV(GraphBuilder, WaterColumns.Data, TEXT("VoxelWaterColumns"));
+
+			FGenerateVoxelDensityCS::FParameters* Parameters = BuildDensityShaderParameters(GraphBuilder, CapturedRequest, VoxelBuffer, WaterColumns, WaterColumnSRV);
 
 			TShaderMapRef<FGenerateVoxelDensityCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
@@ -885,7 +1003,7 @@ FVoxelGenerationHandle FVoxelGPUNoiseGenerator::BeginGenerateChunkGPU(const FVox
 
 			// Post-passes (water fill + underground classification) — the readback below returns
 			// finished voxel data, so the game thread / workers do no per-voxel post-processing.
-			AddVoxelPostPassDispatches(GraphBuilder, CapturedRequest, VoxelBuffer);
+			AddVoxelPostPassDispatches(GraphBuilder, CapturedRequest, VoxelBuffer, WaterColumns, WaterColumnSRV);
 
 			// Enqueue the async GPU→CPU copy into a readback within the same graph (no CPU stall).
 			Result->DensityReadback = new FRHIGPUBufferReadback(TEXT("VoxelDensityReadback"));

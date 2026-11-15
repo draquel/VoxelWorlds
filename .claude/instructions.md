@@ -54,7 +54,9 @@ section true on its date); the Features docs are the current truth.
   reaches bounds, local up, altitude and the surface coordinate through the chunk manager (`Voxel|World` functions).
   Never assume +Z is up or compare a Z with `WaterLevel`: water is read through the world's water levels, which hold
   the sea, the lakes and the river reaches: `UVoxelChunkManager::SampleWater` at a position,
-  `GatherWaterLevels` over the bounds a reader works on (then `Sample` and `GetRange` on that snapshot), and
+  `GatherWaterLevels` over the bounds a reader works on (then `Sample` and `GetRange` on that snapshot),
+  `IsVoxelUnderWater` for a voxel of a chunk as generation's fill tests it (the chunk's water columns,
+  `FVoxelChunkWaterColumns`: a level per column, per down-line on a planet), and
   `GetWaterLevels` only for what means the sea itself (`GetSea` for geometry drawn at it). Never copy the sea's
   snapshot for a reader of "the water here": a lake stands over it. `FVoxelWaterLevels::FromConfig` is the only reader
   of the configuration's `WaterLevel` and `WaterRadius` (WATER_SYSTEM.md, "The water levels", "Lakes and river

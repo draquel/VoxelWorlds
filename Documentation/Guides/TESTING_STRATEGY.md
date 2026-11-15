@@ -129,17 +129,18 @@ GPU against the CPU:
    main checkout's editor on 8080) and turns off its background throttle (`disable_bg_throttle.py`: an unfocused
    editor pins itself to 3 FPS and a run stalls).
 2. It runs `Automation RunTests VoxelWorlds.Generation.GPUvsCPU+VoxelWorlds.Generation.GPUNoiseGeneratorAsync+VoxelWorlds.Rendering.Crossfade+VoxelWorlds.Rendering.RayTracing+VoxelWorlds.Rendering.ChunkPrimitives+VoxelWorlds.Streaming.EditReachesProxy+VoxelEngine.Replication`:
-   the 19 GPU and proxy tests (VoxelWorlds#263's `Generation.GPUvsCPUClimateShapingParity` the 18th, the terrain lines plan's `Generation.GPUvsCPULineParity` the 19th), the six crossfade tests and G116's `Rendering.ChunkPrimitives.CardsFromBounds` and
+   the 20 GPU and proxy tests (VoxelWorlds#263's `Generation.GPUvsCPUClimateShapingParity` the 18th, the terrain lines plan's `Generation.GPUvsCPULineParity` the 19th, the hydrology plan's `Generation.GPUvsCPUWaterBodiesParity` the 20th), the six crossfade tests and G116's `Rendering.ChunkPrimitives.CardsFromBounds` and
    `Rendering.ChunkPrimitives.FittedCards` that also run headless, and the game module's two replication tests (a
    dedicated server and a client in PIE: `Replication.Framework`, the framework plugins' flows, and
-   `Replication.TerrainBase`, a pawn on voxel terrain on `VoxelDemo`, G215), **29 results**
-   (28 before `Replication.TerrainBase`, 27 before the conditioning lines' parity test, 19 before F3.3's `Rendering.RayTracing.ChunkGeometry`, 20 before G121's `Rendering.RayTracing.FarFieldGeometry`, 21 before G116's three `Rendering.ChunkPrimitives` tests, 24 before step 4's, 25 before the fitted cards', 26 before the climate shaping's),
+   `Replication.TerrainBase`, a pawn on voxel terrain on `VoxelDemo`, G215), **30 results**
+   (29 before the water bodies' parity test, 28 before `Replication.TerrainBase`, 27 before the conditioning lines' parity test, 19 before F3.3's `Rendering.RayTracing.ChunkGeometry`, 20 before G121's `Rendering.RayTracing.FarFieldGeometry`, 21 before G116's three `Rendering.ChunkPrimitives` tests, 24 before step 4's, 25 before the fitted cards', 26 before the climate shaping's),
    each expected to be a single `Success`.
 3. It extracts the **parity lines** (the parity tests' `[N voxels]: density~` lines, one per case and LOD: density,
-   material, biome and metadata agreement and the GPU's CRC) and compares all **186** with the record,
-   `Documentation/CodeReview/Baselines/gpu_parity_lines_2026-11-13_l3.txt` in the parent repository (`parity_lines.py`;
+   material, biome and metadata agreement and the GPU's CRC) and compares all **210** with the record,
+   `Documentation/CodeReview/Baselines/gpu_parity_lines_2026-11-15_h2.txt` in the parent repository (`parity_lines.py`;
    the 132 of `gpu_parity_lines_2026-11-06_g132.txt` unchanged, the conditioning lines' 39, `GPUvsCPULineParity`'s
-   13 chunks at three LODs, and the 15 of the surface under a line, that test's five more chunks; before that:
+   13 chunks at three LODs, the 15 of the surface under a line, that test's five more chunks, and the water bodies' 24,
+   `GPUvsCPUWaterBodiesParity`'s 8 chunks; before that:
    CR2's 114 less the three `BlendDither off` cases, gone with `voxel.Biome.BlendDither` in VoxelWorlds 8, 24 lines moved
    by the shader cleanup of G97 and G88, `Features/GPU_PIPELINE.md`, the climate shaping's 15 since VoxelWorlds#263, and
    G129's three: the water parity's chunk under the level, with the three `Caves under the sea` CRCs moved because that

@@ -470,13 +470,15 @@ FVector FVoxelWaterLake::GetCellCentre(int32 CellX, int32 CellY, double Level, c
 
 // ==================== A body ====================
 
-FVoxelWaterBody FVoxelWaterBody::MakeLake(uint32 InId, double InLevel, const TSharedRef<const FVoxelWaterLake>& InLake, const FVoxelWaterFrame& Frame, double MaxDepth)
+FVoxelWaterBody FVoxelWaterBody::MakeLake(uint32 InId, double InLevel, const TSharedRef<const FVoxelWaterLake>& InLake, const FVoxelWaterFrame& Frame, double MaxDepth,
+	float InMinCaveDepth)
 {
 	FVoxelWaterBody Body;
 	Body.Id = InId;
 	Body.Kind = EVoxelWaterBodyKind::Lake;
 	Body.Level = InLevel;
 	Body.Lake = InLake;
+	Body.MinCaveDepth = FMath::Max(InMinCaveDepth, 0.0f);
 	const double Depth = FMath::Max(MaxDepth, 0.0);
 	FVector CapDirection;
 	double CapAngle = 0.0;
@@ -679,6 +681,7 @@ bool FVoxelWaterLevels::SampleBodies(const FVector& WorldPos, FVoxelWaterSample&
 	Out.Kind = At.Body->Kind;
 	Out.SurfaceLevel = At.Level;
 	Out.Depth = At.Level - Frame.HeightOf(WorldPos);
+	Out.MinCaveDepth = At.Body->MinCaveDepth;
 	const FVector Up = Frame.UpAt(WorldPos);
 	Out.SurfaceNormal = Up;
 	if (At.Body->Kind == EVoxelWaterBodyKind::Reach)

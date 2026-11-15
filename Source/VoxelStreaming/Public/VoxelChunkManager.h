@@ -37,6 +37,7 @@ class UVoxelEditManager;
 class UVoxelCollisionManager;
 class UVoxelScatterManager;
 class UVoxelWaterPropagation;
+class FVoxelChunkWaterReader;
 class FVoxelSeamRegistry;
 class FVoxelStreamingBenchmark;
 struct FVoxelBenchConfig;
@@ -976,6 +977,25 @@ public:
 	bool HasWaterBodies() const { return !WaterBodySources.IsEmpty(); }
 
 	/**
+	 * Whether a voxel of a chunk is at or under the water level over its own column, as generation's fill tests it
+	 * (the hydrology plan's section 5.4): the water pull's and the edit-driven flood's test. Where a lake or a river
+	 * reach may reach the chunk it reads the chunk's water columns (FVoxelChunkWaterReader: a level per column, or per
+	 * down-line on a planet, worked out when first asked and kept for the chunks asked last); everywhere else it is
+	 * the sea's own arithmetic at the voxel's sample point. Game thread.
+	 *
+	 * @param ChunkCoord The chunk
+	 * @param Local The voxel's local coordinates, each in [0, ChunkSize)
+	 * @return True at or under a water surface
+	 */
+	bool IsVoxelUnderWater(const FIntVector& ChunkCoord, const FIntVector& Local) const;
+
+	/**
+	 * @return How many generation requests carried a lake's or a river reach's levels since Initialize: the chunks
+	 *         whose generators built water columns in place of the one level
+	 */
+	int64 GetNumWaterColumnRequests() const { return WaterColumnRequests; }
+
+	/**
 	 * The water levels over a world box, in any mode: the sea and the lakes and river reaches whose footprints may
 	 * reach the box's columns (its XY on a heightmap world, the cap it subtends on a planet). A value, safe to hand to
 	 * a worker; it holds over the box and says nothing true outside it. With no body in the world it is the sea's
@@ -1083,6 +1103,10 @@ public:
 		int32 PointSnapshots = 0;
 		/** GatherWaterLevels calls that asked the sources (a world with bodies) */
 		int64 BoxGathers = 0;
+		/** Generation requests that carried a lake's or a river reach's levels (the chunks with water columns) */
+		int64 ColumnRequests = 0;
+		/** Chunks the pull or the flood looked up that a body may reach (a reader of the chunk's water columns was made) */
+		int64 ChunkReaders = 0;
 	};
 
 	/** @return The point gather's counters since Initialize */
@@ -1090,6 +1114,7 @@ public:
 	{
 		FWaterGatherStats Out = WaterGatherStats;
 		Out.PointSnapshots = WaterPointCache.Num();
+		Out.ColumnRequests = WaterColumnRequests;
 		return Out;
 	}
 
@@ -2889,6 +2914,35 @@ private:
 
 	/** The point gather's snapshot for the place holding a position (a world with bodies), gathered when it is not kept. */
 	const FVoxelWaterLevels& FindOrGatherWaterAt(const FVector& WorldPos) const;
+
+	/** One chunk the pull or the flood asked about: the reader of its water columns, or none where the sea alone holds */
+	struct FChunkWaterReaderSlot
+	{
+		FIntVector Chunk = FIntVector::ZeroValue;
+		TSharedPtr<FVoxelChunkWaterReader> Reader;
+		uint32 LastUsed = 0;
+	};
+
+	/** How many chunks' readers are kept: a pull asks about a chunk and its six neighbours, a flood about the chunks it is in */
+	static constexpr int32 ChunkWaterReaderCacheSize = 64;
+
+	/** The readers of the chunks asked last, least recently used replaced; emptied when the bodies change */
+	mutable TArray<FChunkWaterReaderSlot> ChunkWaterReaders;
+	mutable int32 LastChunkWaterReader = INDEX_NONE;
+	mutable uint32 ChunkWaterReaderClock = 0;
+
+	/** Generation requests that carried bodies (GetNumWaterColumnRequests) */
+	mutable int64 WaterColumnRequests = 0;
+
+	/**
+	 * The reader of a chunk's water columns in a world with bodies: made from the water levels gathered over the chunk
+	 * (complete, as its generation request's) when a lake or a river reach may reach it, and kept.
+	 * @return The reader, or null where one level holds over the chunk (the sea's, or none)
+	 */
+	FVoxelChunkWaterReader* FindChunkWaterReader(const FIntVector& ChunkCoord) const;
+
+	/** Make the edit-driven flood if the world has water and none was made: a lake in a world with the sea off needs it too. */
+	void EnsureWaterPropagation();
 
 	/** Drop what was kept from the water levels and fire OnWaterBodiesChanged. */
 	void BroadcastWaterBodiesChanged(const FVoxelConditioningRegion& Region);
