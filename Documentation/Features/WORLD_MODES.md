@@ -165,8 +165,10 @@ is immutable and shared from then on.
   tight bend on a slope is levelled, with more cut and fill, which the caller judges against its cap. The roads
   between POIs are made with it (VoxelWorldPOI's `FPOIRoads`); the hand-placed line's component does not call it
   yet (the plan's L5) and warns.
-- **Not built yet:** roads on planets and block worlds (the plan's R2; on the plane and the island they are
-  VoxelWorldPOI's, `POI_SYSTEM.md` section 5.1), the hand-placed line's bends (L5).
+- **Roads between POIs** are VoxelWorldPOI's, in every world mode (the plan's R1 and R2; `POI_SYSTEM.md` section
+  5.1): heightmap lines on the plane, the island and block worlds, radial lines on a planet, gathered through
+  `IVoxelTerrainConditioner::GatherConditioningLines` and `GatherConditioningLinesOnSphere`.
+- **Not built yet:** the hand-placed line's bends (L5).
 
 **The hand-placed line** (the plan's section 4.5 and phase L4; the how-to is `Guides/TERRAIN_LINES.md`).
 `UVoxelTerrainLineComponent` (`VoxelStreaming/Public/VoxelTerrainLineComponent.h`) turns a `USplineComponent` on its

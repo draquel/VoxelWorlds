@@ -1042,12 +1042,17 @@ Stateless, thread-safe static class that stamps tree blocks into VoxelData durin
    - Deterministic seed from `HashCombine(WorldSeed, SourceChunkCoord)`
    - `floor(TreeDensity)` trees, plus one with the fractional part's probability
    - Random X,Y within source chunk → the world mode's natural surface there (`GetSurfaceOnUpLine`) for Z
-   - Conditioning lines over the source chunk (the terrain lines plan's L3): a tree inside a line's clear half width
-     is not planted, and a tree beside a line that moves the ground stands on the ground the line leaves
-     (`FVoxelConditioning::IsClearedAt`, `ApplyLinesToHeight`). The chunk manager gathers the lines over the chunk and
-     the chunks its trees may be planted in (`GatherTreeConditioning`, `GetSourceChunkRadius`) for the injection and
-     for the tree queries (`FindVoxelTreeAt`, `FindVoxelTreesNear`), so both compute the same trees. Conditioning
-     zones are not read: a tree on a POI's pad stands at the natural height (G206)
+   - The conditioning over the source chunk: a tree inside a line's clear half width is not planted (the terrain
+     lines plan's L3), and a tree stands on the ground generation makes at its column, the natural height with the
+     lines' blend and then the zones' (`FVoxelConditioning::IsClearedAt`, `ApplyToHeight`): beside a road on the
+     ground the road leaves, on a POI's pad on the pad (G206: with the natural height a tree on a pad cut into a
+     slope began in the air over it, and one on a raised pad under its ground). The height rule, the water check and
+     the surface material are judged at that height. The chunk manager gathers the lines and the zones over the
+     chunk and the chunks its trees may be planted in (`GatherTreeConditioning`, `GetSourceChunkRadius`) for the
+     injection and for the tree queries (`FindVoxelTreeAt`, `FindVoxelTreesNear`), so both compute the same trees. A
+     world with no conditioning there plants the trees of the natural ground. A pad is not cleared of trees: nothing
+     tells the injector to keep a place clear but a line's clear width (G222). Test
+     `VoxelWorlds.Cubic.VoxelTrees.OnAPad`
    - Filter by placement rules: material, biome, slope, elevation, water level
 3. For each tree position, if bounding box overlaps current chunk: call `StampTree()`
 
