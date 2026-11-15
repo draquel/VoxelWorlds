@@ -69,6 +69,14 @@ bool FVoxelMapConditioningRegionTest::RunTest(const FString& Parameters)
 	W.Create(TEXT("VoxelMapConditioningRegion"));
 	W.ConfigureSmallPlane();
 	W.StartManager();
+	// A conditioner that supplies nothing, registered when the world starts (one registered after the first generation
+	// request is warned about): taking it out later is a change that may reach anywhere.
+	struct FNoConditioning : IVoxelTerrainConditioner
+	{
+		virtual void GatherConditioning(const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones) const override {}
+	};
+	FNoConditioning Nothing;
+	W.Manager->AddTerrainConditioner(&Nothing);
 	UVoxelMapSubsystem* Map = W.World->GetSubsystem<UVoxelMapSubsystem>();
 	W.SetViewer(W.ViewerOverGround(0.0, 0.0, 300.0f));
 	if (!TestNotNull(TEXT("The game world has a map"), Map) || !TestTrue(TEXT("Streaming settles"), W.Settle()))
@@ -152,9 +160,9 @@ bool FVoxelMapConditioningRegionTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("A change inside a tile makes that tile stale, and no other"), ConditioningStale(Map), Before + 1);
 	TestTrue(TEXT("The stale tile draws again"), DrainMap(Map, W.World));
 
-	// A conditioner set or cleared: anywhere.
+	// A conditioner removed (or registered): anywhere.
 	const FString StatsBefore = Map->GetDebugStats();
-	W.Manager->SetTerrainConditioner(nullptr);
+	W.Manager->RemoveTerrainConditioner(&Nothing);
 	const int64 AfterAll = ConditioningStale(Map);
 	AddInfo(FString::Printf(TEXT("%d tiles within the radius, %d drawn; stale after a change inside one tile: %lld; after a change everywhere: %lld more (%s)"),
 		Tiles.Num(), Drawn, Before + 1, AfterAll - Before - 1, *StatsBefore.Left(60)));

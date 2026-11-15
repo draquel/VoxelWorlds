@@ -51,26 +51,43 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 			{
 				continue;
 			}
-			// The bodies of the world's water levels, and the sample at the position.
+			// The bodies of the world's water: the sea's record, the lakes and river reaches added to the world, and how
+			// many sources may hand out more; then the sample at the position (the point gather).
 			const FVoxelWaterLevels Levels = CM->GetWaterLevels();
 			auto KindName = [](EVoxelWaterBodyKind Kind)
 			{
 				return Kind == EVoxelWaterBodyKind::Sea ? TEXT("sea") : Kind == EVoxelWaterBodyKind::Lake ? TEXT("lake") : TEXT("reach");
 			};
 			const TCHAR* LevelTerms = Levels.IsRadial() ? TEXT("from the planet centre") : TEXT("world Z");
+			TArray<FVoxelWaterBody> Bodies(Levels.GetBodies());
+			Bodies.Append(CM->GetStaticWaterBodies());
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: %d water bod%s (levels: %s)"),
-				*TargetWorld->GetName(), Levels.GetBodies().Num(), Levels.GetBodies().Num() == 1 ? TEXT("y") : TEXT("ies"), LevelTerms);
-			for (const FVoxelWaterBody& Body : Levels.GetBodies())
+				*TargetWorld->GetName(), Bodies.Num(), Bodies.Num() == 1 ? TEXT("y") : TEXT("ies"), LevelTerms);
+			for (const FVoxelWaterBody& Body : Bodies)
 			{
 				const bool bEverywhere = Body.Bounds == FVoxelWaterLevels::WholeWorld();
-				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]:   body %u: %s, level %.1f, %s"),
-					*TargetWorld->GetName(), Body.Id, KindName(Body.Kind), Body.Level,
+				FString Footprint;
+				if (Body.Kind == EVoxelWaterBodyKind::Lake && Body.Lake.IsValid())
+				{
+					Footprint = FString::Printf(TEXT(", %d cells of %.0f uu"), Body.Lake->NumCells(), Body.Lake->GetCellSize());
+				}
+				else if (Body.Kind == EVoxelWaterBodyKind::Reach && Body.Reach.IsValid())
+				{
+					Footprint = FString::Printf(TEXT(", %d segments down to level %.1f, footprint to %.0f uu, %.0f uu/s"),
+						Body.Reach->NumSegments(), Body.Reach->GetMinLevel(), Body.Reach->GetReach(), Body.Reach->GetFlowSpeed());
+				}
+				UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]:   body %u: %s, level %.1f%s, %s"),
+					*TargetWorld->GetName(), Body.Id, KindName(Body.Kind), Body.Level, *Footprint,
 					bEverywhere ? TEXT("over the whole world") : *FString::Printf(TEXT("bounds %s"), *Body.Bounds.ToString()));
 			}
+			const UVoxelChunkManager::FWaterGatherStats G = CM->GetWaterGatherStats();
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: %s; the point gather: %lld samples, %lld gathered a place (%d places kept); %lld gathers by bounds"),
+				*TargetWorld->GetName(), CM->HasWaterBodies() ? TEXT("lakes or river reaches may lie in the world (a body or a source is registered)") : TEXT("the sea alone (no lake, no river reach, no source)"),
+				G.PointSamples, G.PointGathers, G.PointSnapshots, G.BoxGathers);
 			if (bColumn)
 			{
 				FVoxelWaterSample Sample;
-				if (Levels.Sample(Column, Sample))
+				if (CM->SampleWater(Column, Sample))
 				{
 					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: at (%.0f, %.0f, %.0f): body %u (%s), surface level %.1f, depth %.1f (positive under the surface)"),
 						*TargetWorld->GetName(), Column.X, Column.Y, Column.Z, Sample.BodyId, KindName(Sample.Kind), Sample.SurfaceLevel, Sample.Depth);

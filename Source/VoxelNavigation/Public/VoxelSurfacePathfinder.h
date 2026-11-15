@@ -92,6 +92,14 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavParams
 	FVoxelWaterLevels Water;
 
 	/**
+	 * The water over a cell, asked of the world (UVoxelChunkManager::SampleWater), set by
+	 * UVoxelSurfaceNavigationSubsystem while the world holds a lake or a river reach: the level over the cell itself
+	 * decides IsUnderwater, in place of Water (the sea's, one level everywhere). X, Y and Height are in the frame the
+	 * search runs in (a planet's region frame converts them). Unset: Water. Game thread. Not exposed to Blueprint.
+	 */
+	TFunction<bool(double X, double Y, float Height, FVoxelWaterSample& Out)> WaterSampler;
+
+	/**
 	 * The world (X, Y) of a cell's centre.
 	 *
 	 * @param Cell Grid cell
@@ -116,8 +124,9 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavParams
 	}
 
 	/**
-	 * Whether a cell's surface is deeper under the water than a walker wades (MaxWadeDepth): by the water levels'
-	 * sample at the cell when they have water, else by bHasWater and WaterLevel. Where levels are world Z both are
+	 * Whether a cell's surface is deeper under the water than a walker wades (MaxWadeDepth): by the world's sample at
+	 * the cell when it is set (WaterSampler: the sea, a lake or a river reach over the cell), else by the water levels'
+	 * sample when they have water, else by bHasWater and WaterLevel. Where levels are world Z all three are
 	 * Height < level - MaxWadeDepth.
 	 *
 	 * @param X World X of the cell's centre
@@ -127,6 +136,11 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavParams
 	 */
 	bool IsUnderwater(double X, double Y, float Height) const
 	{
+		if (WaterSampler)
+		{
+			FVoxelWaterSample Over;
+			return WaterSampler(X, Y, Height, Over) && Over.Depth > MaxWadeDepth;
+		}
 		if (Water.HasWater())
 		{
 			FVoxelWaterSample Over;

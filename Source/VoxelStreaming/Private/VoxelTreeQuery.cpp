@@ -19,13 +19,13 @@ bool FVoxelTreeQuery::FindAt(const UVoxelWorldConfiguration& Config, const IVoxe
 	const FVector Relative = (WorldPos - Config.WorldOrigin) / VoxelSize;
 	const FIntVector GlobalVoxel(FMath::FloorToInt32(Relative.X), FMath::FloorToInt32(Relative.Y), FMath::FloorToInt32(Relative.Z));
 
-	// The water the trees stay out of, as injection has it: the levels' range over the chunk a candidate is planted in,
-	// one level while the range is uniform (it is with the sea alone), so the position's own chunk answers for all.
+	// The water the trees stay out of, as injection has it: the sea's level as one scalar, and with a lake or a river
+	// reach in the levels each candidate against the level over its own column (FVoxelTreeInjector's WaterOver).
 	const FVoxelWaterLevelRange TreeWater = Water.GetRange(FBox::BuildAABB(WorldPos, FVector(Config.GetChunkWorldSize())));
 	TArray<FVoxelTreeInstance> Candidates;
 	FVoxelTreeInjector::FindTreesWithTrunkAt(GlobalVoxel, Config.ChunkSize, VoxelSize, Config.WorldOrigin,
 		Config.WorldSeed, Config.TreeTemplates, Config.GetNoiseParams(), WorldMode, Config.TreeDensity,
-		Config.BiomeConfiguration, TreeWater.bAny, static_cast<float>(TreeWater.GetLevel()), Candidates, Conditioning);
+		Config.BiomeConfiguration, TreeWater.bAny, static_cast<float>(TreeWater.GetLevel()), Candidates, Conditioning, &Water);
 
 	// The voxel must still be that tree's trunk block; where two trunks touch, the tree with more of its trunk left wins.
 	const FVoxelData Voxel = ReadVoxel(GlobalVoxelToWorldCentre(&Config, GlobalVoxel));
@@ -76,7 +76,7 @@ void FVoxelTreeQuery::FindNear(const UVoxelWorldConfiguration& Config, const IVo
 				FBox(FVector(ColumnMin.X, ColumnMin.Y, -UE_LARGE_WORLD_MAX), FVector(ColumnMin.X + ChunkWorldSize, ColumnMin.Y + ChunkWorldSize, UE_LARGE_WORLD_MAX)));
 			FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), ChunkSize, VoxelSize, Config.WorldOrigin,
 				Config.WorldSeed, Config.GetNoiseParams(), WorldMode, Config.TreeDensity, Config.TreeTemplates,
-				Config.BiomeConfiguration, TreeWater.bAny, static_cast<float>(TreeWater.GetLevel()), Positions, Templates, Seeds, Conditioning);
+				Config.BiomeConfiguration, TreeWater.bAny, static_cast<float>(TreeWater.GetLevel()), Positions, Templates, Seeds, Conditioning, &Water);
 			for (int32 i = 0; i < Positions.Num(); ++i)
 			{
 				FVoxelTreeInstance Tree;

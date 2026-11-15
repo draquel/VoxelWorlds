@@ -23,7 +23,7 @@ void FVoxelConditioningSources::GatherOnSphere(const FVector& Direction, double 
 			Out.Lines.Add(Line);
 		}
 	}
-	if (Conditioner)
+	for (const IVoxelTerrainConditioner* Conditioner : Conditioners)
 	{
 		Conditioner->GatherConditioningOnSphere(Direction, AngularRadius, Out.Zones);
 		Conditioner->GatherConditioningLinesOnSphere(Direction, AngularRadius, Need, Out.Lines);
@@ -56,8 +56,8 @@ void FVoxelConditioningSources::GatherForRegion(const FBox2D& Region, EVoxelCond
 		}
 	}
 
-	// Dynamic (game-supplied) zones and lines for this region.
-	if (Conditioner)
+	// The dynamic conditioners' zones and lines for this region, in the order they were registered.
+	for (const IVoxelTerrainConditioner* Conditioner : Conditioners)
 	{
 		Conditioner->GatherConditioning(Region, Out.Zones);
 		Conditioner->GatherConditioningLines(Region, Need, Out.Lines);

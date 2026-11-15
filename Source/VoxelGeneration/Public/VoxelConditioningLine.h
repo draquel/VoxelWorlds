@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelPolyline.h"
 #include "VoxelConditioningLine.generated.h"
 
 struct FVoxelConditioningLine;
@@ -216,8 +217,8 @@ struct VOXELGENERATION_API FVoxelConditioningLineLimits
  */
 struct VOXELGENERATION_API FVoxelConditioningLine
 {
-	/** Segments in a block of the line's bounds hierarchy */
-	static constexpr int32 BlockSegments = 16;
+	/** Segments in a block of the line's bounds hierarchy (the polyline's, FVoxelPolylineBounds) */
+	static constexpr int32 BlockSegments = FVoxelPolylineBounds::BlockSegments;
 
 	/** Floats per segment in a chunk's segment list (FVoxelChunkLineSegments), in float4s */
 	static constexpr int32 SegmentStride = 5;
@@ -502,16 +503,9 @@ private:
 	/** HeightReach, or the clear half width where that is wider */
 	double Reach = 0.0;
 
-	/** A heightmap line: the vertices' XY box (not grown) and one per block of BlockSegments segments */
-	FBox2D Bounds = FBox2D(ForceInit);
-	TArray<FBox2D> BlockBounds;
-
 	/**
-	 * A planet line: a ball around the vertices on the unit sphere (a centre direction and the largest chord from it to
-	 * a vertex), and one per block. Chords, not angles: a point's chord to the centre is at most the ball's radius plus
-	 * its chord to the nearest segment, which lies in the vertices' hull.
+	 * The vertices' bounds in blocks and the nearest-segment search over them, shared with a river reach
+	 * (FVoxelWaterReach), whose level is read at the same place along the same segment as the bed's target.
 	 */
-	FVector CapCentre = FVector::UpVector;
-	double CapChordRadius = 0.0;
-	TArray<FVector4d> BlockBalls;
+	FVoxelPolylineBounds Polyline;
 };

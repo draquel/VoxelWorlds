@@ -1445,8 +1445,10 @@ double FDistanceBandLODStrategy::GetPlanetNearLayersCeiling(const FVector& Viewe
 	const FVector Relative = ViewerPosition - PlanetCenter;
 	const FVector Up = Relative.IsNearlyZero() ? FVector::UpVector : Relative.GetUnsafeNormal();
 	double Top = GetPlanetSurfaceEnvelope(Up, PlanetNearBandAngle, NearEnvelopeMemo).Max;
-	// The water's surface over the near disk, where it is higher: the levels' range over the disk's box.
-	const FVoxelWaterLevelRange NearWater = Water.GetRange(FBox::BuildAABB(ViewerPosition, FVector(PlanetNearBandAngle * ShellWindowOuterRadius)));
+	// The water's surface over the near disk, where it is higher: the levels' range over the disk's box, with the
+	// bodies at hand (the disk is wide and asked every update; a body worked out later drops the caches).
+	const FVoxelWaterLevelRange NearWater = GetWaterRange(FBox::BuildAABB(ViewerPosition, FVector(PlanetNearBandAngle * ShellWindowOuterRadius)),
+		EVoxelConditioningGather::Ready);
 	if (NearWater.bAny && NearWater.MaxLevel > 0.0)
 	{
 		Top = FMath::Max(Top, NearWater.MaxLevel - PlanetRadius);
@@ -1613,8 +1615,9 @@ void FDistanceBandLODStrategy::GetColumnSurfaceRange(int32 ChunkX, int32 ChunkY,
 	// above holds it per column.
 	if (bSurfaceSlabCulling)
 	{
-		const FVoxelWaterLevelRange ColumnWater = Water.GetRange(
-			FBox(FVector(MinXY.X, MinXY.Y, -UE_LARGE_WORLD_MAX), FVector(MaxXY.X, MaxXY.Y, UE_LARGE_WORLD_MAX)));
+		// Complete: the column's chunks are requested with every body over them, and the slab is cached.
+		const FVoxelWaterLevelRange ColumnWater = GetWaterRange(
+			FBox(FVector(MinXY.X, MinXY.Y, -UE_LARGE_WORLD_MAX), FVector(MaxXY.X, MaxXY.Y, UE_LARGE_WORLD_MAX)), EVoxelConditioningGather::Complete);
 		if (ColumnWater.bAny)
 		{
 			SurfMax = FMath::Max(SurfMax, static_cast<float>(ColumnWater.MaxLevel));

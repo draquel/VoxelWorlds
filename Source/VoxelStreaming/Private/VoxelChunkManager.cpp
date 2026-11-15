@@ -1083,9 +1083,19 @@ void UVoxelChunkManager::Initialize(
 	}
 
 	// Initialize LOD strategy
+	WaterPointCache.Reset();
+	WaterGatherStats = FWaterGatherStats();
 	if (LODStrategy)
 	{
 		LODStrategy->Initialize(Configuration);
+		// The window reads the water over a column and over a planet's near disk through this manager's gather, which
+		// knows the lakes and river reaches (the hydrology plan's section 5.5); with none it is the sea's range.
+		TWeakObjectPtr<UVoxelChunkManager> WeakManager(this);
+		LODStrategy->SetWaterRangeGather([WeakManager](const FBox& Box, EVoxelConditioningGather Need)
+		{
+			const UVoxelChunkManager* Manager = WeakManager.Get();
+			return Manager ? Manager->GetWaterRange(Box, Need) : FVoxelWaterLevelRange();
+		});
 	}
 
 	// Clear any existing state
@@ -1294,6 +1304,12 @@ void UVoxelChunkManager::Initialize(
 				GatherConditioningForRegion(FBox2D(FVector2D(ChunkBox.Min.X, ChunkBox.Min.Y), FVector2D(ChunkBox.Max.X, ChunkBox.Max.Y)),
 					EVoxelConditioningGather::Complete, Out);
 			}
+		});
+		// The water levels over a chunk (the sea, and the lakes and river reaches there): complete, as its conditioning.
+		// The box is grown by two voxels: an extraction tests points on the chunk's faces.
+		ScatterManager->SetWaterGatherer([this](const FBox& ChunkBox)
+		{
+			return GatherWaterLevels(ChunkBox.ExpandBy(2.0 * (Configuration ? Configuration->VoxelSize : 100.0f)), EVoxelConditioningGather::Complete);
 		});
 		// The edit layers, so a heightmap chunk's extraction knows the voxel over its top layer, the chunk above's bottom
 		// voxel with that chunk's edits applied (world modes review G26).
@@ -2877,7 +2893,7 @@ void UVoxelChunkManager::ApplyDescentPrefetch(FLODQueryContext& Context, float D
 		// The water over the camera's column where it lies higher (a level is a height in the same terms as SurfaceHeight:
 		// the distance from the centre on a planet, world Z otherwise).
 		FVoxelWaterSample Water;
-		if (GetWaterLevels().Sample(Camera, Water))
+		if (SampleWater(Camera, Water))
 		{
 			SurfaceHeight = FMath::Max(SurfaceHeight, Water.SurfaceLevel);
 		}
@@ -3262,8 +3278,10 @@ bool UVoxelChunkManager::FindVoxelTreeAt(const FVector& WorldPos, FVoxelTreeInst
 	}
 	FVoxelConditioning TreeConditioning;
 	GatherTreeConditioning(FBox2D(FVector2D(WorldPos.X, WorldPos.Y), FVector2D(WorldPos.X, WorldPos.Y)), TreeConditioning);
-	return FVoxelTreeQuery::FindAt(*Configuration, *WorldMode, GetWaterLevels(), WorldPos, [this](const FVector& P) { return GetVoxelAt(P); }, OutTree,
-		&TreeConditioning);
+	const FBox2D TreeRegion(FVector2D(WorldPos.X, WorldPos.Y), FVector2D(WorldPos.X, WorldPos.Y));
+	const TSharedPtr<const FVoxelWaterLevels> TreeWater = GatherTreeWater(TreeRegion);
+	return FVoxelTreeQuery::FindAt(*Configuration, *WorldMode, TreeWater.IsValid() ? *TreeWater : GetWaterLevels(), WorldPos,
+		[this](const FVector& P) { return GetVoxelAt(P); }, OutTree, &TreeConditioning);
 }
 
 void UVoxelChunkManager::GatherTreeConditioning(const FBox2D& Region, FVoxelConditioning& Out) const
@@ -3280,6 +3298,26 @@ void UVoxelChunkManager::GatherTreeConditioning(const FBox2D& Region, FVoxelCond
 	GatherConditioningForRegion(Region.ExpandBy(Grow), EVoxelConditioningGather::Complete, Out);
 }
 
+TSharedPtr<const FVoxelWaterLevels> UVoxelChunkManager::GatherTreeWater(const FBox2D& Region) const
+{
+	if (WaterBodySources.IsEmpty() || !Configuration)
+	{
+		return nullptr;
+	}
+	// The chunks a tree may be planted in around the region, as GatherTreeConditioning: each tree is tested against the
+	// level over its own column, so the levels must hold over every source chunk.
+	const double Grow = (FVoxelTreeInjector::GetSourceChunkRadius(Configuration->TreeTemplates, Configuration->ChunkSize) + 1)
+		* static_cast<double>(Configuration->GetChunkWorldSize());
+	const FBox2D Grown = Region.ExpandBy(Grow);
+	FVoxelWaterLevels Levels = GatherWaterLevels(FBox(FVector(Grown.Min.X, Grown.Min.Y, -UE_LARGE_WORLD_MAX), FVector(Grown.Max.X, Grown.Max.Y, UE_LARGE_WORLD_MAX)),
+		EVoxelConditioningGather::Complete);
+	if (Levels.IsSeaAlone())
+	{
+		return nullptr;
+	}
+	return MakeShared<const FVoxelWaterLevels>(MoveTemp(Levels));
+}
+
 void UVoxelChunkManager::FindVoxelTreesNear(const FVector& WorldPos, float Radius, TArray<FVoxelTreeInstance>& OutTrees) const
 {
 	OutTrees.Reset();
@@ -3289,8 +3327,10 @@ void UVoxelChunkManager::FindVoxelTreesNear(const FVector& WorldPos, float Radiu
 	}
 	FVoxelConditioning TreeConditioning;
 	GatherTreeConditioning(FBox2D(FVector2D(WorldPos.X - Radius, WorldPos.Y - Radius), FVector2D(WorldPos.X + Radius, WorldPos.Y + Radius)), TreeConditioning);
-	FVoxelTreeQuery::FindNear(*Configuration, *WorldMode, GetWaterLevels(), WorldPos, Radius, [this](const FVector& P) { return GetVoxelAt(P); }, OutTrees,
-		&TreeConditioning);
+	const TSharedPtr<const FVoxelWaterLevels> TreeWater = GatherTreeWater(
+		FBox2D(FVector2D(WorldPos.X - Radius, WorldPos.Y - Radius), FVector2D(WorldPos.X + Radius, WorldPos.Y + Radius)));
+	FVoxelTreeQuery::FindNear(*Configuration, *WorldMode, TreeWater.IsValid() ? *TreeWater : GetWaterLevels(), WorldPos, Radius,
+		[this](const FVector& P) { return GetVoxelAt(P); }, OutTrees, &TreeConditioning);
 }
 
 void UVoxelChunkManager::GetVoxelTreeBlocks(const FVoxelTreeInstance& Tree, TArray<FVoxelTreeVoxel>& OutBlocks) const
@@ -3358,6 +3398,249 @@ float UVoxelChunkManager::GetSeaDepthAt(const FVector& WorldPos) const
 {
 	// The sample's depth: FVoxelWaterSample::NoWaterDepth (-1e9) where there is no water.
 	return static_cast<float>(GetWaterLevels().GetDepth(WorldPos));
+}
+
+// ==================== Lakes and river reaches (the hydrology plan's H1) ====================
+
+void UVoxelChunkManager::AddWaterBody(const FVoxelWaterBody& Body)
+{
+	const bool bLake = Body.Kind == EVoxelWaterBodyKind::Lake && Body.Lake.IsValid() && Body.Lake->NumCells() > 0;
+	const bool bReach = Body.Kind == EVoxelWaterBodyKind::Reach && Body.Reach.IsValid() && Body.Reach->NumSegments() > 0;
+	if ((!bLake && !bReach) || Body.Id == FVoxelWaterBody::SeaId)
+	{
+		UE_LOG(LogVoxelStreaming, Warning,
+			TEXT("AddWaterBody: body %u was not added: a body is a lake with a footprint or a river reach with a segment, and its id is not the sea's (0)."),
+			Body.Id);
+		return;
+	}
+	NoteConditioningSourceRegistered(TEXT("A water body"));
+	WaterBodySources.AddBody(Body);
+
+	const bool bRadial = bLake ? Body.Lake->IsRadial() : Body.Reach->IsRadial();
+	if (bLake)
+	{
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Added %s water body %u: a lake at level %.0f over %d cells of %.0f uu; %d total."),
+			bRadial ? TEXT("planet") : TEXT("heightmap"), Body.Id, Body.Level, Body.Lake->NumCells(), Body.Lake->GetCellSize(), WaterBodySources.GetBodies().Num());
+	}
+	else
+	{
+		UE_LOG(LogVoxelStreaming, Log, TEXT("Added %s water body %u: a river reach of %d segments, surface %.0f down to %.0f, footprint to %.0f uu, speed %.0f uu/s; %d total."),
+			bRadial ? TEXT("planet") : TEXT("heightmap"), Body.Id, Body.Reach->NumSegments(), Body.Reach->GetMaxLevel(), Body.Reach->GetMinLevel(),
+			Body.Reach->GetReach(), Body.Reach->GetFlowSpeed(), WaterBodySources.GetBodies().Num());
+	}
+
+	const bool bPlanet = Configuration && Configuration->WorldMode == EWorldMode::SphericalPlanet;
+	if (Configuration && bRadial != bPlanet)
+	{
+		// A body of the other kind is kept but never applies (each kind's gather skips the other).
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("AddWaterBody: a %s body in a %s world has no effect (a planet body's footprint is on the sphere: FVoxelWaterLake::MakeOnSphere, a radial FVoxelWaterReach)."),
+			bRadial ? TEXT("planet") : TEXT("heightmap"), bPlanet ? TEXT("planet") : TEXT("heightmap"));
+		return;
+	}
+
+	// Where the body reaches: its cap on a planet, its footprint's box on a heightmap world.
+	if (bPlanet)
+	{
+		FVector CapDirection;
+		double CapAngle = 0.0;
+		const double PlanetRadius = FVoxelWorldModeFactory::MakePlanetParams(*Configuration).PlanetRadius;
+		if (bLake ? Body.Lake->GetCap(CapDirection, CapAngle) : Body.Reach->GetPolyline().GetCap(PlanetRadius, Body.Reach->GetReach(), CapDirection, CapAngle))
+		{
+			NotifyWaterBodiesChangedOnSphere(CapDirection, CapAngle);
+		}
+	}
+	else
+	{
+		const FBox2D Bounds = bLake ? Body.Lake->GetBounds2D() : Body.Reach->GetPolyline().GetBounds2D(Body.Reach->GetReach());
+		if (Bounds.bIsValid)
+		{
+			NotifyWaterBodiesChanged(Bounds);
+		}
+	}
+}
+
+void UVoxelChunkManager::AddWaterBodySource(IVoxelWaterBodySource* Source)
+{
+	if (!Source)
+	{
+		return;
+	}
+	NoteConditioningSourceRegistered(TEXT("A water body source"));
+	WaterBodySources.AddSource(Source);
+	// A source's bodies may lie anywhere.
+	BroadcastWaterBodiesChanged(FVoxelConditioningRegion::Everywhere());
+}
+
+void UVoxelChunkManager::RemoveWaterBodySource(IVoxelWaterBodySource* Source)
+{
+	const int32 Before = WaterBodySources.NumSources();
+	WaterBodySources.RemoveSource(Source);
+	if (WaterBodySources.NumSources() != Before)
+	{
+		BroadcastWaterBodiesChanged(FVoxelConditioningRegion::Everywhere());
+	}
+}
+
+void UVoxelChunkManager::BroadcastWaterBodiesChanged(const FVoxelConditioningRegion& Region)
+{
+	// What was kept from the water levels: the point gather's snapshots and the LOD window's column slabs.
+	WaterPointCache.Reset();
+	if (LODStrategy)
+	{
+		LODStrategy->NotifyWaterChanged();
+	}
+	OnWaterBodiesChanged.Broadcast(Region);
+}
+
+void UVoxelChunkManager::NotifyWaterBodiesChanged(const FBox2D& Region)
+{
+	if (FarField && Region.bIsValid && !(Configuration && Configuration->WorldMode == EWorldMode::SphericalPlanet))
+	{
+		// The far field's patches there are built again with the water over them (the underwater materials).
+		FVoxelFarFieldRegion FarRegion;
+		FarRegion.Box = Region;
+		FarField->InvalidateRegion(FarRegion);
+	}
+	BroadcastWaterBodiesChanged(FVoxelConditioningRegion::OfBox(Region));
+}
+
+void UVoxelChunkManager::NotifyWaterBodiesChangedOnSphere(const FVector& Direction, double AngularRadius)
+{
+	if (FarField && Configuration && Configuration->WorldMode == EWorldMode::SphericalPlanet)
+	{
+		FVoxelFarFieldRegion FarRegion;
+		FarRegion.bCap = true;
+		FarRegion.Direction = Direction.GetSafeNormal();
+		FarRegion.AngularRadius = AngularRadius;
+		FarField->InvalidateRegion(FarRegion);
+	}
+	BroadcastWaterBodiesChanged(FVoxelConditioningRegion::OfCap(Direction, AngularRadius));
+}
+
+FVoxelWaterLevels UVoxelChunkManager::GatherWaterLevels(const FBox& Box, EVoxelConditioningGather Need) const
+{
+	const FVoxelWaterLevels Sea = GetWaterLevels();
+	if (WaterBodySources.IsEmpty() || !Configuration)
+	{
+		return Sea;
+	}
+	++WaterGatherStats.BoxGathers;
+	// The bodies whose footprints may reach the box's columns: on a planet the cap the box subtends
+	// (GetPlanetCapOfBox), on a heightmap world its XY region.
+	TArray<FVoxelWaterBody> Bodies;
+	FVector CapDirection;
+	double CapAngle = 0.0;
+	if (GetPlanetCapOfBox(Box, CapDirection, CapAngle))
+	{
+		WaterBodySources.GatherOnSphere(CapDirection, CapAngle, Sea.GetFrame().DatumRadius, Need, Bodies);
+	}
+	else
+	{
+		WaterBodySources.GatherForRegion(FBox2D(FVector2D(Box.Min.X, Box.Min.Y), FVector2D(Box.Max.X, Box.Max.Y)), Need, Bodies);
+	}
+	return FVoxelWaterLevels::Make(Sea.GetSea(), Sea.GetFrame(), Box, MoveTemp(Bodies));
+}
+
+FVoxelWaterLevels UVoxelChunkManager::GatherWaterLevelsOnSphere(const FVector& Direction, double AngularRadius, EVoxelConditioningGather Need) const
+{
+	const FVoxelWaterLevels Sea = GetWaterLevels();
+	if (WaterBodySources.IsEmpty() || !Configuration || Configuration->WorldMode != EWorldMode::SphericalPlanet)
+	{
+		return Sea;
+	}
+	++WaterGatherStats.BoxGathers;
+	TArray<FVoxelWaterBody> Bodies;
+	WaterBodySources.GatherOnSphere(Direction, AngularRadius, Sea.GetFrame().DatumRadius, Need, Bodies);
+	// The bounds the snapshot holds over: a box around the cap on the datum sphere, or the world for a cap past a quarter turn.
+	const FVoxelWaterFrame& Frame = Sea.GetFrame();
+	const FBox Bounds = AngularRadius >= UE_DOUBLE_HALF_PI ? FVoxelWaterLevels::WholeWorld()
+		: FBox::BuildAABB(Frame.Center + Direction.GetSafeNormal() * Frame.DatumRadius, FVector(Frame.DatumRadius * (FMath::Sin(AngularRadius) + 1.0 - FMath::Cos(AngularRadius))));
+	return FVoxelWaterLevels::Make(Sea.GetSea(), Frame, Bounds, MoveTemp(Bodies));
+}
+
+FVoxelWaterLevels UVoxelChunkManager::GatherWaterLevelsForChunk(const FIntVector& ChunkCoord) const
+{
+	return GatherWaterLevels(GetChunkWorldBox(ChunkCoord), EVoxelConditioningGather::Complete);
+}
+
+FVoxelWaterLevelRange UVoxelChunkManager::GetWaterRange(const FBox& Box, EVoxelConditioningGather Need) const
+{
+	if (WaterBodySources.IsEmpty())
+	{
+		return GetWaterLevels().GetRange(Box);
+	}
+	return GatherWaterLevels(Box, Need).GetRange(Box);
+}
+
+const FVoxelWaterLevels& UVoxelChunkManager::FindOrGatherWaterAt(const FVector& WorldPos) const
+{
+	// The place: a cell a chunk across. On a heightmap world a column of the world (the bodies are gathered by XY); on a
+	// planet a cube, whose cap the gather takes.
+	const double CellSize = FMath::Max(static_cast<double>(Configuration->GetChunkWorldSize()), 1.0);
+	const bool bPlanet = Configuration->WorldMode == EWorldMode::SphericalPlanet;
+	const FIntVector Cell(FMath::FloorToInt32(WorldPos.X / CellSize), FMath::FloorToInt32(WorldPos.Y / CellSize),
+		bPlanet ? FMath::FloorToInt32(WorldPos.Z / CellSize) : 0);
+	++WaterGatherStats.PointSamples;
+	++WaterPointClock;
+	int32 Oldest = 0;
+	for (int32 Index = 0; Index < WaterPointCache.Num(); ++Index)
+	{
+		FWaterPointSnapshot& Kept = WaterPointCache[Index];
+		if (Kept.Cell == Cell)
+		{
+			Kept.LastUsed = WaterPointClock;
+			return Kept.Levels;
+		}
+		if (Kept.LastUsed < WaterPointCache[Oldest].LastUsed)
+		{
+			Oldest = Index;
+		}
+	}
+	++WaterGatherStats.PointGathers;
+	const FVector Min(Cell.X * CellSize, Cell.Y * CellSize, bPlanet ? Cell.Z * CellSize : -UE_LARGE_WORLD_MAX);
+	const FVector Max(Min.X + CellSize, Min.Y + CellSize, bPlanet ? Min.Z + CellSize : UE_LARGE_WORLD_MAX);
+	// Gathered before a slot is taken: a source answers a complete gather from its own data and must not ask for water,
+	// but the slots are not held across its call either way.
+	FVoxelWaterLevels Gathered = GatherWaterLevels(FBox(Min, Max), EVoxelConditioningGather::Complete);
+	FWaterPointSnapshot& Slot = (WaterPointCache.Num() < WaterPointCacheSize || !WaterPointCache.IsValidIndex(Oldest))
+		? WaterPointCache.AddDefaulted_GetRef() : WaterPointCache[Oldest];
+	Slot.Cell = Cell;
+	Slot.Levels = MoveTemp(Gathered);
+	Slot.LastUsed = WaterPointClock;
+	return Slot.Levels;
+}
+
+FVoxelWaterLevels UVoxelChunkManager::GatherWaterLevelsAt(const FVector& WorldPos) const
+{
+	if (WaterBodySources.IsEmpty() || !Configuration)
+	{
+		return GetWaterLevels();
+	}
+	return FindOrGatherWaterAt(WorldPos);
+}
+
+bool UVoxelChunkManager::SampleWater(const FVector& WorldPos, FVoxelWaterSample& Out) const
+{
+	// The sea alone: its own arithmetic, as before the hydrology plan.
+	if (WaterBodySources.IsEmpty() || !Configuration)
+	{
+		return GetWaterLevels().Sample(WorldPos, Out);
+	}
+	return FindOrGatherWaterAt(WorldPos).Sample(WorldPos, Out);
+}
+
+double UVoxelChunkManager::GetWaterDepth(const FVector& WorldPos) const
+{
+	if (WaterBodySources.IsEmpty() || !Configuration)
+	{
+		return GetWaterLevels().GetDepth(WorldPos);
+	}
+	return FindOrGatherWaterAt(WorldPos).GetDepth(WorldPos);
+}
+
+float UVoxelChunkManager::GetWaterDepthAt(const FVector& WorldPos) const
+{
+	return static_cast<float>(GetWaterDepth(WorldPos));
 }
 
 FBox UVoxelChunkManager::GetChunkWorldBox(const FIntVector& ChunkCoord) const
@@ -3470,7 +3753,7 @@ uint8 UVoxelChunkManager::ResolveFarSeabedMaterial(const FIslandBowlParams& Isla
 			uint8 Biome = 0;
 			// The water over the seabed sample (an island's sea is a plane: its level is a world Z).
 			FVoxelWaterSample Water;
-			const bool bWater = GetWaterLevels().Sample(FVector(P.X, P.Y, Height), Water);
+			const bool bWater = SampleWater(FVector(P.X, P.Y, Height), Water);
 			FVoxelSurfaceQuery::QuerySurfaceConditions(P.X, P.Y, Height, Configuration->VoxelSize, Snapshot,
 				Configuration->GetNoiseParams().Seed, bWater, static_cast<float>(Water.SurfaceLevel), Material, Biome);
 		}
@@ -3708,6 +3991,22 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 				Manager->GatherConditioningForRegion(Region.Box, EVoxelConditioningGather::Ready, Out);
 			}
 		}
+	});
+	// A build's water levels over its patch, where the world has a lake or a river reach: with what is at hand, as its
+	// conditioning.
+	FarField->SetWaterGatherer([WeakThis](const FVoxelFarFieldRegion& Region)
+	{
+		const UVoxelChunkManager* Manager = WeakThis.Get();
+		if (!Manager || !Manager->HasWaterBodies())
+		{
+			return FVoxelWaterLevels();
+		}
+		if (Region.bCap)
+		{
+			return Manager->GatherWaterLevelsOnSphere(Region.Direction, Region.AngularRadius, EVoxelConditioningGather::Ready);
+		}
+		return Manager->GatherWaterLevels(FBox(FVector(Region.Box.Min.X, Region.Box.Min.Y, -UE_LARGE_WORLD_MAX),
+			FVector(Region.Box.Max.X, Region.Box.Max.Y, UE_LARGE_WORLD_MAX)), EVoxelConditioningGather::Ready);
 	});
 	FarField->SetWaterTileQuery([WeakThis](const FIntPoint& Column)
 	{
@@ -4051,19 +4350,35 @@ void UVoxelChunkManager::NoteConditioningSourceRegistered(const TCHAR* What)
 	++LateConditioningSources;
 	RequestsBeforeLastLateSource = GenerationRequestsBuilt;
 	UE_LOG(LogVoxelStreaming, Warning,
-		TEXT("%s was registered after this world had built %lld generation request(s): the chunks requested before it generated without it and are not generated again (they keep the natural terrain until they unload and load). Register conditioning on UVoxelChunkManager::OnInitialized, before the first tick."),
+		TEXT("%s was registered after this world had built %lld generation request(s): the chunks requested before it generated without it and are not generated again (they keep the natural terrain until they unload and load). Register conditioning and water bodies on UVoxelChunkManager::OnInitialized, before the first tick."),
 		What, GenerationRequestsBuilt);
 }
 
-void UVoxelChunkManager::SetTerrainConditioner(IVoxelTerrainConditioner* InConditioner)
+void UVoxelChunkManager::AddTerrainConditioner(IVoxelTerrainConditioner* InConditioner)
 {
-	if (InConditioner)
+	if (!InConditioner)
 	{
-		NoteConditioningSourceRegistered(TEXT("The terrain conditioner"));
+		return;
 	}
-	ConditioningSources.SetConditioner(InConditioner);
+	const int32 Before = ConditioningSources.NumConditioners();
+	ConditioningSources.AddConditioner(InConditioner);
+	if (ConditioningSources.NumConditioners() == Before)
+	{
+		return;
+	}
+	NoteConditioningSourceRegistered(TEXT("A terrain conditioner"));
 	// A conditioner's zones and lines may lie anywhere.
 	BroadcastTerrainConditioningChanged(FVoxelConditioningRegion::Everywhere());
+}
+
+void UVoxelChunkManager::RemoveTerrainConditioner(IVoxelTerrainConditioner* InConditioner)
+{
+	const int32 Before = ConditioningSources.NumConditioners();
+	ConditioningSources.RemoveConditioner(InConditioner);
+	if (ConditioningSources.NumConditioners() != Before)
+	{
+		BroadcastTerrainConditioningChanged(FVoxelConditioningRegion::Everywhere());
+	}
 }
 
 void UVoxelChunkManager::BroadcastTerrainConditioningChanged(const FVoxelConditioningRegion& Region)
@@ -4368,7 +4683,7 @@ bool UVoxelChunkManager::QuerySurfacePoint(const FVector& WorldPos, EVoxelSurfac
 	}
 	const FVoxelBiomeSnapshot Snapshot = FVoxelBiomeSnapshot::FromConfig(Configuration->BiomeConfiguration);
 	OutSample = FVoxelSurfaceQuery::SampleSurfacePoint(*WM, WorldPos, Configuration->VoxelSize, Configuration->GetNoiseParams(), Snapshot,
-		GetWaterLevels(), !Conditioning.IsEmpty() ? &Conditioning : nullptr);
+		GatherWaterLevelsAt(WorldPos), !Conditioning.IsEmpty() ? &Conditioning : nullptr);
 	if (Layer == EVoxelSurfaceLayer::Generated && IsBlockSurface())
 	{
 		// A block world's generated surface is the block top GetGeneratedSurfacePoint gives (sampled at the column's corner).
@@ -4461,11 +4776,14 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 	float CapturedWaterLevel = 0.0f;
 	// The conditioning over the chunk and the chunks its trees may be planted in (the request's own set covers the chunk alone).
 	FVoxelConditioning TreeConditioning;
+	// The water levels over the same chunks where a lake or a river reach lies there (null: the sea's scalar below).
+	TSharedPtr<const FVoxelWaterLevels> TreeWaterOver;
 
 	if (bInjectTrees)
 	{
 		const FBox TreeBox = GetChunkWorldBox(ChunkCoord);
 		GatherTreeConditioning(FBox2D(FVector2D(TreeBox.Min.X, TreeBox.Min.Y), FVector2D(TreeBox.Max.X, TreeBox.Max.Y)), TreeConditioning);
+		TreeWaterOver = GatherTreeWater(FBox2D(FVector2D(TreeBox.Min.X, TreeBox.Min.Y), FVector2D(TreeBox.Max.X, TreeBox.Max.Y)));
 		CapturedTreeTemplates = Configuration->TreeTemplates;
 		CapturedTreeDensity = Configuration->TreeDensity;
 		CapturedWorldSeed = Configuration->WorldSeed;
@@ -4486,7 +4804,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 		bInjectTrees, CapturedTreeTemplates = MoveTemp(CapturedTreeTemplates),
 		CapturedTreeDensity, CapturedWorldSeed, CapturedWorldOrigin,
 		CapturedNoiseParams, CapturedWorldMode,
-		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel, TreeConditioning = MoveTemp(TreeConditioning)]() mutable
+		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel, TreeConditioning = MoveTemp(TreeConditioning), TreeWaterOver]() mutable
 	{
 		// Generate voxel data on background thread
 		TArray<FVoxelData> VoxelData;
@@ -4509,7 +4827,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 				CapturedEnableWaterLevel,
 				CapturedWaterLevel,
 				VoxelData,
-				&TreeConditioning);
+				&TreeConditioning, TreeWaterOver.Get());
 		}
 
 		// Queue result for game thread
@@ -4735,6 +5053,8 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 	FVoxelConditioning TreeConditioning;
 	const FBox TreeBox = GetChunkWorldBox(ChunkCoord);
 	GatherTreeConditioning(FBox2D(FVector2D(TreeBox.Min.X, TreeBox.Min.Y), FVector2D(TreeBox.Max.X, TreeBox.Max.Y)), TreeConditioning);
+	// The water levels over the same chunks where a lake or a river reach lies there (null: the sea's scalar above).
+	const TSharedPtr<const FVoxelWaterLevels> TreeWaterOver = GatherTreeWater(FBox2D(FVector2D(TreeBox.Min.X, TreeBox.Min.Y), FVector2D(TreeBox.Max.X, TreeBox.Max.Y)));
 
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 
@@ -4743,7 +5063,7 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 		CapturedTreeTemplates = MoveTemp(CapturedTreeTemplates),
 		CapturedTreeDensity, CapturedWorldSeed, CapturedWorldOrigin,
 		CapturedNoiseParams, CapturedWorldMode,
-		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel, TreeConditioning = MoveTemp(TreeConditioning)]() mutable
+		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel, TreeConditioning = MoveTemp(TreeConditioning), TreeWaterOver]() mutable
 	{
 		FVoxelTreeInjector::InjectTrees(
 			ChunkCoord,
@@ -4759,7 +5079,7 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 			CapturedEnableWaterLevel,
 			CapturedWaterLevel,
 			VoxelData,
-			&TreeConditioning);
+			&TreeConditioning, TreeWaterOver.Get());
 
 		if (UVoxelChunkManager* This = WeakThis.Get())
 		{
@@ -5514,7 +5834,7 @@ double UVoxelChunkManager::GetSurfaceOrSeaLevel(const FVector& WorldPos, bool& b
 	// heightmap world, the distance from the centre on a planet).
 	const FVoxelWaterLevels WaterLevels = GetWaterLevels();
 	FVoxelWaterSample Water;
-	const bool bWater = WaterLevels.Sample(WorldPos, Water);
+	const bool bWater = SampleWater(WorldPos, Water);
 	if (GetWorldBounds().Shape != EVoxelWorldBoundsShape::Shell)
 	{
 		// A heightmap world (WM-MP11): the generated ground's Z at (X, Y), or the water's surface where higher.
@@ -5635,7 +5955,7 @@ void UVoxelChunkManager::GetWorldReport(const FVoxelWorldReportNotes& Notes, TAr
 		OutLines.Add(FString::Printf(
 			TEXT("conditioning: %d zones and %d lines (%d segments) added to the world%s; within the view distance of the streaming viewer %d zones and %d lines (%d segments); %lld generation requests carried a line; %s"),
 			ConditioningSources.NumZones(), ConditioningSources.NumLines(), StaticSegments,
-			ConditioningSources.HasConditioner() ? TEXT(", and a conditioner") : TEXT(""),
+			ConditioningSources.NumConditioners() > 0 ? TEXT(", and a conditioner") : TEXT(""),
 			Window.Zones.Num(), Window.Lines.Num(), WindowSegments, LineConditionedRequests,
 			LateConditioningSources == 0 ? TEXT("every source registered before the first generation request")
 				: *FString::Printf(TEXT("%d source(s) REGISTERED LATE, the last after %lld generation requests (those chunks generated without it)"),

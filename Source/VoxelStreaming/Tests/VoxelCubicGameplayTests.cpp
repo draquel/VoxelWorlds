@@ -19,6 +19,7 @@
 #include "IVoxelMeshRenderer.h"
 #include "VoxelTerrainConditioning.h"
 #include "VoxelConditioningLine.h"
+#include "VoxelWaterLevels.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -873,6 +874,123 @@ bool FVoxelCubicVoxelTreesOnAPadTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Trees stand on the pad in the voxels (non-vacuous)"), StandingOnPad >= 3);
 	TestEqual(TEXT("Each tree on the pad stands in the pad's top layer, ground under its foot and the tree rising from it"), OnItsBlock, StandingOnPad);
 	TestTrue(TEXT("The trunk blocks of the trees on the pad find their tree"), TrunkBlocks >= 3 && Found >= TrunkBlocks * 95 / 100);
+
+	Test.Stop();
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Voxel trees at a lake (the hydrology plan's H1, section 5.4): a tree is tested against the water level over its own
+// column, so no tree stands in a pond and the ones beside it are as they were.
+//
+// - Cubic.VoxelTrees.Lake: a block world with trees and the sea off; a lake over the four chunks south-west of the
+//   viewer, its level over every piece of ground there. The injector's positions with the lake's water levels hold no
+//   tree in the footprint and the same trees as without them everywhere else; the streamed world has no trunk where a
+//   tree would have stood in the lake, and the chunk manager's tree queries find the trees around it and none in it.
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCubicVoxelTreesLakeTest,
+	"VoxelWorlds.Cubic.VoxelTrees.Lake",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelCubicVoxelTreesLakeTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelCubicGameplayTestUtils;
+
+	FGameplayWorld Test;
+	Test.Start(TEXT("VoxelCubicTreesLakeWorld"), EMeshingMode::Cubic, true, FVoxelConditioningZone(FVector2D::ZeroVector, 0.0f, 0.0f, 0.0f));
+	UVoxelChunkManager* Manager = Test.Manager;
+	const UVoxelWorldConfiguration* Config = Test.Config;
+	const int32 N = Config->ChunkSize;
+	const double ChunkWorldSize = Config->GetChunkWorldSize();
+	const float VoxelSize = Config->VoxelSize;
+
+	// The lake, added before the world's first tick: the chunks (-2, -2) to (-1, -1), a cell a voxel column, its level
+	// 300 over the highest ground under it.
+	const FVector2D LakeMin(Config->WorldOrigin.X - 2.0 * ChunkWorldSize, Config->WorldOrigin.Y - 2.0 * ChunkWorldSize);
+	double Highest = -TNumericLimits<double>::Max();
+	for (int32 I = 0; I <= 2 * N; I += 2)
+	{
+		for (int32 J = 0; J <= 2 * N; J += 2)
+		{
+			Highest = FMath::Max(Highest, static_cast<double>(Manager->GetGeneratedSurfacePoint(FVector(LakeMin.X + I * VoxelSize, LakeMin.Y + J * VoxelSize, 0.0)).Z));
+		}
+	}
+	const TSharedRef<const FVoxelWaterLake> LakeCells = FVoxelWaterLake::Make(LakeMin, VoxelSize, FIntPoint(2 * N, 2 * N), TBitArray<>(true, 4 * N * N));
+	const FVoxelWaterFrame Frame = Manager->GetWaterLevels().GetFrame();
+	Manager->AddWaterBody(FVoxelWaterBody::MakeLake(1, Highest + 300.0, LakeCells, Frame, 2000.0));
+	TestEqual(TEXT("The lake was added before any generation request"), Manager->GetNumLateConditioningSources(), 0);
+	TestTrue(TEXT("The pipeline settled"), Test.Settle());
+	TestTrue(TEXT("The world injects voxel trees"), Manager->HasVoxelTrees());
+
+	// The injector's trees over the chunks around the lake, without water and with the lake's levels.
+	const FBox Around(FVector(LakeMin.X - 2.0 * ChunkWorldSize, LakeMin.Y - 2.0 * ChunkWorldSize, -UE_LARGE_WORLD_MAX),
+		FVector(LakeMin.X + 4.0 * ChunkWorldSize, LakeMin.Y + 4.0 * ChunkWorldSize, UE_LARGE_WORLD_MAX));
+	const FVoxelWaterLevels Levels = Manager->GatherWaterLevels(Around, EVoxelConditioningGather::Complete);
+	TestFalse(TEXT("The gather over the chunks holds the lake"), Levels.IsSeaAlone());
+	const auto InLake = [&](const FIntVector& BaseVoxel)
+	{
+		const FVector Centre = Manager->GlobalVoxelToWorldCentre(BaseVoxel);
+		return LakeCells->Covers(Centre.X, Centre.Y);
+	};
+	TArray<FIntVector> Dry, Wet;
+	for (int32 CX = -3; CX <= 0; ++CX)
+	{
+		for (int32 CY = -3; CY <= 0; ++CY)
+		{
+			TArray<FIntVector> Positions;
+			TArray<int32> Templates;
+			TArray<uint32> Seeds;
+			FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), N, VoxelSize, Config->WorldOrigin, Config->WorldSeed,
+				Config->NoiseParams, *Manager->GetWorldMode(), Config->TreeDensity, Config->TreeTemplates, nullptr, false, 0.0f,
+				Positions, Templates, Seeds);
+			Dry.Append(Positions);
+			Positions.Reset();
+			Templates.Reset();
+			Seeds.Reset();
+			FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), N, VoxelSize, Config->WorldOrigin, Config->WorldSeed,
+				Config->NoiseParams, *Manager->GetWorldMode(), Config->TreeDensity, Config->TreeTemplates, nullptr, false, 0.0f,
+				Positions, Templates, Seeds, nullptr, &Levels);
+			Wet.Append(Positions);
+		}
+	}
+	TArray<FIntVector> DryInLake, DryOutside;
+	for (const FIntVector& Base : Dry)
+	{
+		(InLake(Base) ? DryInLake : DryOutside).Add(Base);
+	}
+	int32 WetInLake = 0;
+	for (const FIntVector& Base : Wet)
+	{
+		WetInLake += InLake(Base) ? 1 : 0;
+	}
+	AddInfo(FString::Printf(TEXT("%d trees over 16 chunks without water, %d of them in the lake's footprint; %d with the lake"), Dry.Num(), DryInLake.Num(), Wet.Num()));
+	TestTrue(TEXT("Trees would stand in the footprint without the lake (non-vacuous)"), DryInLake.Num() >= 3);
+	TestTrue(TEXT("Trees stand around it"), DryOutside.Num() >= 8);
+	TestEqual(TEXT("With the lake's levels no tree is placed in the footprint"), WetInLake, 0);
+	TestTrue(TEXT("... and the trees outside it are the same ones"), Wet == DryOutside);
+
+	// The streamed voxels: no trunk where a tree would have stood in the lake; the trees beside it are found.
+	const FVoxelTreeTemplate& AnyTemplate = Config->TreeTemplates[0];
+	int32 TrunksInLake = 0;
+	for (const FIntVector& Base : DryInLake)
+	{
+		const FVoxelData Voxel = Manager->GetVoxelAt(Manager->GlobalVoxelToWorldCentre(Base + FIntVector(0, 0, 1)));
+		TrunksInLake += (Voxel.IsSolid() && Voxel.MaterialID == AnyTemplate.TrunkMaterialID) ? 1 : 0;
+		FVoxelTreeInstance Hit;
+		TrunksInLake += Manager->FindVoxelTreeAt(Manager->GlobalVoxelToWorldCentre(Base + FIntVector(0, 0, 1)), Hit) ? 1 : 0;
+	}
+	TestEqual(TEXT("The streamed world has no trunk where the lake stands"), TrunksInLake, 0);
+	TArray<FVoxelTreeInstance> Standing;
+	const FVector LakeCentre(LakeMin.X + ChunkWorldSize, LakeMin.Y + ChunkWorldSize, Highest);
+	Manager->FindVoxelTreesNear(LakeCentre, static_cast<float>(2.5 * ChunkWorldSize), Standing);
+	int32 StandingInLake = 0;
+	for (const FVoxelTreeInstance& Tree : Standing)
+	{
+		StandingInLake += InLake(Tree.BaseVoxel) ? 1 : 0;
+	}
+	TestTrue(TEXT("The tree query finds the trees around the lake"), Standing.Num() >= 4);
+	TestEqual(TEXT("... and none in it"), StandingInLake, 0);
 
 	Test.Stop();
 	return true;

@@ -1,7 +1,7 @@
 # Water System Architecture
 
-> State as of 2026-11-13 (the water plan's W1: the material paragraphs; its W2: "The water levels", under "On a
-> Planet"; the rest as of code review CR5, 2026-11-02).
+> State as of 2026-11-15 (the hydrology plan's H1: "Lakes and river reaches", under "On a Planet"; the water plan's
+> W1, 2026-11-13: the material paragraphs; its W2: "The water levels"; the rest as of code review CR5, 2026-11-02).
 > Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelCore (flags, the sea, the water levels), VoxelGeneration (fill pass), VoxelMeshing (water mesher), VoxelStreaming (propagation, tiles, the far ocean), VoxelRendering (rendering)
@@ -35,7 +35,9 @@ The water system renders water surfaces where water-flagged air voxels exist in 
 - Greedy rectangle merging for minimal quad count
 - Separate water material (Single Layer Water; a translucent one draws too)
 - One query for every reader of the water: the water levels (`FVoxelWaterLevels`: the sample at a position, the range
-  over bounds, the sea), with the sea as their one body until lakes and river reaches exist
+  over bounds, the sea)
+- Lakes and river reaches as bodies of the water levels, gathered by bounds from the chunk manager; every reader but
+  generation, the pull, the flood and the drawing sees them (those follow in the hydrology plan's H2 and H3)
 
 ---
 
@@ -247,26 +249,22 @@ flooded them on the game thread when their meshes landed (2.9 ms a frame on aver
 (`UVoxelChunkManager::UsesWaterTiles`).
 
 **The water levels: one query for every reader (the water plan's W2, 2026-11-13; SP-E1 before it).** Nothing reads
-the configuration's `WaterLevel` or `WaterRadius` but the configuration, its validation and one builder. Every reader
-asks the world's water levels, `FVoxelWaterLevels` (VoxelCore): an immutable snapshot of the bodies of water, a value
-cheap to copy to a worker. The chunk manager hands it out (`GetWaterLevels`), built by `FVoxelWaterLevels::FromConfig`
-from the configuration as it is when asked, and that builder is the one caller of `FVoxelSeaSurface::FromConfig`. An
-owner built from a configuration alone calls the same builder (the LOD strategy, a scatter extraction context, the
-editor's field viewer, the POI placement's terrain context, the demo actor's fallback plane), as each builds its world
-mode from the one factory. The snapshot has one body today, the sea, as a record (`FVoxelWaterBody`: id 0, kind `Sea`,
-its level, the bounds it holds over), and three ways in, by what a reader does:
+the configuration's `WaterLevel` or `WaterRadius` but the configuration, its validation and one builder
+(`FVoxelWaterLevels::FromConfig`, the one caller of `FVoxelSeaSurface::FromConfig`). Every reader asks the water
+levels, `FVoxelWaterLevels` (VoxelCore): an immutable snapshot of the bodies of water over some bounds, a value cheap
+to copy to a worker, with three ways in, by what a reader does:
 
 | A reader that | Asks | Who |
 |---|---|---|
-| tests a point | `Sample(Position)`: whether a body covers the column, which body, its surface level there, the position's depth (positive under the surface, `FVoxelSeaSurface::GetDepth`'s sign; `NoWaterDepth`, -1e9, with no water), the surface's normal and, for a reach, its flow. The cheap forms for a reader that runs per voxel or per vertex: `GetDepth`, `IsUnder` (at or below the surface: the flood's own test, exact where a sphere's depth sign is not), `IsAbove` and `Crosses` for a box | swimming, breath, the underwater view and the crossing effects (`FVCTerrainQueryHelper`), the spawn search, the NPC deep-water test, scatter's underwater class, the navigation's cell test (`FVoxelSurfaceNavParams::IsUnderwater`), `GetSurfaceOrSeaLevel`, the descent prefetch, the cut-over's surface under the viewer, the water pull and the edit-driven flood (per voxel), the surface's material in the far field, the map and the PCG sampler (`FVoxelSurfaceQuery`), the debug commands |
-| copies one level for an area | `GetRange(Bounds)`: `bAny` (a body lies over or under a column of the box), `bUniform` (one level over it: the scalar is the truth there), the lowest and highest level, and the bounds asked, so a copy of a level always says where it holds | a chunk's generation request (and through it both generators and the shaders, which did not change), the tree injector and the tree query per chunk, the LOD window's slab per column and a planet's near layers over the near disk, the pull's and the flood's seed clip over their box, a water tile over its column, a map tile and its edit overlay, a navigation region's frame on a planet, the POI placement's water line and the planet's sky over the whole world |
+| tests a point | `Sample(Position)`: whether a body covers the column, which body, its surface level there, the position's depth (positive under the surface, `FVoxelSeaSurface::GetDepth`'s sign; `NoWaterDepth`, -1e9, with no water), the surface's normal and, for a river reach, its flow. The cheap forms for a reader that runs per voxel or per vertex: `GetDepth`, `IsUnder` (at or below the surface: the flood's own test, exact where a sphere's depth sign is not), `IsAbove` and `Crosses` for a box | swimming, breath, the underwater view and the crossing effects (`FVCTerrainQueryHelper`), the spawn search, the NPC deep-water test, scatter's underwater class, the navigation's cell test (`FVoxelSurfaceNavParams::IsUnderwater`), `GetSurfaceOrSeaLevel`, the descent prefetch, the cut-over's surface under the viewer, the water pull and the edit-driven flood (per voxel), the surface's material in the far field, the map and the PCG sampler (`FVoxelSurfaceQuery`), a map pixel where a lake or a river reach lies over its tile, a voxel tree where one lies over its chunks, the debug commands |
+| copies one level for an area | `GetRange(Bounds)`: `bAny` (a body lies over or under a column of the box), `bUniform` (one level over it: the scalar is the truth there; false wherever a lake's or a river reach's footprint may reach the box), the lowest and highest level, and the bounds asked, so a copy of a level always says where it holds | a chunk's generation request (and through it both generators and the shaders), the LOD window's slab per column and a planet's near layers over the near disk, the pull's and the flood's seed clip over their box, a water tile over its column, a map tile and its edit overlay while their range is uniform, a navigation region's frame on a planet, the POI placement's water line and the planet's sky over the whole world |
 | draws the sea itself | `GetSea()`: the sea body's surface, `FVoxelSeaSurface` | the far field's sea, the island's far ocean, a planet's ocean shell, the demo actor's fallback plane |
 
 A **water level** is a surface's height in the world's own vertical measure: world Z on a heightmap world, the
 distance from the planet centre on a planet (so the sea's is `WaterLevel` or `WaterRadius`). It is not an altitude,
 which is measured from the world mode's datum; a planet reader that wants the sea as an altitude subtracts the datum
-radius, in double, as it always did. `GetSeaSurface` and BlueprintPure `GetSeaDepthAt` stay as wrappers (the sea of the
-levels; the sample's depth) for Blueprints and the callers that mean the sea.
+radius, in double, as it always did. The snapshot carries the frame its levels are measured in (`FVoxelWaterFrame`:
+plain Z, or the planet's centre and datum radius), so a body is evaluated with the sea off too.
 
 In heightmap worlds the sea is the plane at its level in world Z, wherever `WorldOrigin` puts the chunk grid: the
 terrain's heights are world Z, generation floods air at or below the level, and the tiles draw there. Every plane test
@@ -275,14 +273,82 @@ works in world space, the water pull and the edit-driven flood included (world m
 
 W2 changed no output: with the sea alone every range is uniform and every sample is the sea's own arithmetic (tests
 `Core.WaterLevels.SeaOnPlaneAndPlanet`, `Core.WaterLevels.NoWater`, `Streaming.Water.LevelsQuery`; the gates in
-`Documentation/WATER_EPIC_PLAN.md`, W2's result). What it is for is the hydrology plan: a lake or a river reach is one
-more body in the snapshot, and a reader that asks the sample or the range needs no change to see it. Two rules keep a
-later change of a body's level possible (the plan's D112; no invalidation path is built): a reader holds a body as a
-record or asks again, never a level it has baked in for good, and every copy of a level names the bounds it was taken
-over (a request is one chunk's, a tile's level is its column's, the LOD slab's is cached per column). The source of
-further bodies is declared and unused: `IVoxelWaterBodySource` (`GatherWaterBodies(Bounds, OutBodies)` and
-`GatherWaterBodiesOnSphere`), the twin of `IVoxelTerrainConditioner`, with a reach as a polyline whose vertices carry a
-position, a bed level, a surface level and a half width (`FVoxelWaterReach`).
+`Documentation/WATER_EPIC_PLAN.md`, W2's result). Two rules keep a later change of a body's level possible (the water
+plan's D112; no level changes today): a reader holds a body as a record or asks again, never a level it has baked in
+for good, and every copy of a level names the bounds it was taken over (a request is one chunk's, a tile's level is its
+column's, the LOD slab's is cached per column and dropped when the bodies change).
+
+**Lakes and river reaches (the hydrology plan's H1, 2026-11-15).** A body of water beyond the sea is a record with a
+**footprint**, the columns it may hold water over (`FVoxelWaterBody`: an id that is not the sea's 0, a kind, a level,
+the bounds its water lies in, and the footprint). Water is in a column of the footprint where the generated ground
+lies under the level; the footprint does not draw the shore, it keeps the body's level off other low ground nearby.
+
+- **A lake** (`FVoxelWaterLake`, `FVoxelWaterBody::MakeLake`) has one level and a footprint that is a grid of cells:
+  in world XY on a heightmap world (`Make`; `MakeFromOutline` takes the cells whose centres lie inside a drawn polygon,
+  grown by one cell), in the plane tangent to the datum sphere at the lake's centre on a planet (`MakeOnSphere`: a
+  direction's cell is its datum point's offset from the centre's along the plane's two axes).
+- **A river reach** (`FVoxelWaterReach`, `FVoxelWaterBody::MakeReach`) is a polyline, upstream to downstream, each
+  vertex a position (world XY, or a unit direction on a planet), a bed level, a surface level and the footprint's half
+  width (the bed's half width and its falloff). Its level at a place is the surface level interpolated on the nearest
+  segment, so the surface is level across the river and slopes along it. The nearest segment is found by the search a
+  conditioning line uses (`FVoxelPolylineBounds`, VoxelCore: the blocks of segments with their bounds, the nearest
+  place on a segment, the earlier segment on a tie), and a reach merges coincident vertices by the line's own rule, so
+  a reach and a bed made from the same vertices are read at the same place along the same segment (test
+  `Streaming.Water.Bodies.BedAndReach`: the reach's bed level is the line's target at every point of the footprint, on
+  a plane and a planet).
+- **The sample** takes the bodies whose footprints cover the position's column and answers with the highest level
+  among them: a pond inside a larger lake where it stands higher, a river reach over the lake or the sea it runs into
+  until it comes down to that body's level. The sea's level stands until a body is strictly higher, and of two bodies
+  at one level the lower id answers. Over a river reach the normal is the local up tilted against the slope and the
+  flow is the direction downstream, along the surface, times the reach's speed (`GetFlowSpeed`; nothing reads the
+  flow until the plan's H6).
+- **The range** over a box holds the levels of the sea and of every body whose footprint may reach the box's columns
+  (a lake by its cells, a river reach by the blocks of its segments), and is uniform only when no such body does.
+- **The cheap forms** are the sea's own arithmetic while the snapshot holds the sea alone (`IsSeaAlone`), and with a
+  body the sample's depth and its sign (`IsAbove` and `Crosses` conservatively, by the bodies' levels over the box).
+
+**Gathering by bounds.** The chunk manager holds the bodies added to it (`AddWaterBody`: a hand-placed river or
+lake) and a list of sources (`AddWaterBodySource`, `IVoxelWaterBodySource`: `GatherWaterBodies(Bounds, Need,
+OutBodies)` and `GatherWaterBodiesOnSphere`, the twin of `IVoxelTerrainConditioner`), in `FVoxelWaterBodySources`, the
+twin of `FVoxelConditioningSources`. Both register on `OnInitialized`, before the first generation request, as
+conditioning does; one registered later is warned about and counted with the late conditioning sources. The gathers
+take the need the line gathers have (`EVoxelConditioningGather`, now in VoxelCore: `Complete` for a reader that must
+agree with the generated voxels, `Ready` for one whose region is too wide to wait for a body).
+
+| Entry | Gives | Who |
+|---|---|---|
+| `SampleWater(Position)`, `GetWaterDepth`, BlueprintPure `GetWaterDepthAt` | the point gather: the sample of the body over a position. With no body in the world it is the sea's own arithmetic; with one, the snapshot of the place (a cell a chunk across, gathered `Complete`) is kept for the 16 places asked last, so a sample stays a lookup | the swimmer, the breath, the underwater view and the crossing effects, a floating item and a body (through the character plugin's bridge), the spawn fallback, the NPC deep-water tests, the navigation's cell, the cut-over's surface under the camera, `GetSurfaceOrSeaLevel`, the island's seabed samples, the debug commands |
+| `GatherWaterLevelsAt(Position)` | that place's snapshot, for a reader that takes a few samples close together | `QuerySurfacePoint`, the surface NPC spawn check |
+| `GatherWaterLevels(Box, Need)`, `GatherWaterLevelsOnSphere`, `GatherWaterLevelsForChunk` | a snapshot of the sea and the bodies whose footprints may reach the box's columns (its XY on a heightmap world, the cap it subtends on a planet); with no body in the world, the sea's | a chunk's scatter extraction and the voxel trees over a chunk and the chunks around it (`Complete`); a far-field patch's build, a map tile and its edit overlay, the spawn search (`Ready`); the PCG sampler (the need its conditioning takes) |
+| `GetWaterRange(Box, Need)` | the range of that gather, with no snapshot made where the world has no body | the LOD window (`IVoxelLODStrategy::SetWaterRangeGather`: a column's slab `Complete`, a planet's near disk `Ready`) |
+| `GetWaterLevels()` | the sea's snapshot, over the whole world: for what means the sea itself | the water tiles, the far field's sea, the far ocean, the shell, the planet sky, the POI placement's water line, and until the plan's H2 the generation request, the pull and the flood |
+
+When a body is added, or a source announces one it worked out after a `Ready` gather missed it
+(`NotifyWaterBodiesChanged(Region)`, `NotifyWaterBodiesChangedOnSphere`), the chunk manager drops the point gather's
+snapshots and the LOD window's column slabs, rebuilds the far field's patches there and fires `OnWaterBodiesChanged`
+with the region (a body's footprint as a box or a cap, or everywhere for a source). The map draws the tiles the region
+meets again, and the character plugin's bridge passes it to the framework's `UCGFWaterSubsystem::NotifyWaterChanged`.
+`voxel.Water.Stats` lists the sea and the bodies added to the world, whether a source is registered, and the point
+gather's counters.
+
+**What each reader does with a level that varies** (the plan's section 5.5): a map pixel is water when its ground
+lies under the level over that pixel, and its depth shade is from that level (the tile's edit overlay takes a level a
+column); the navigation's cell asks the world's sample at the cell, in a planet's region frame too, and water deeper
+than the wade depth blocks a walker as the sea does; a voxel tree is tested against the level over its own column by
+the injector and by the tree query alike (`FVoxelTreeInjector`'s `WaterOver`), so no tree stands in a pond; scatter's
+underwater class, the far field's and the PCG sampler's surface material are the sample's over the point; the LOD
+window keeps a column's chunks up to the highest level over it. The water tiles, the far field's sea sections, the far
+ocean and the shell stay the sea's. Generation, the pull and the flood do not see a body yet (H2: a lake's column
+generates dry voxels, so the swimmer's voxel flag is not set there), and nothing draws one (H3).
+
+H1 changed no output: no world has a body, a gather with none is the sea's snapshot, and the gates read as the base
+(the plan's H1 result). The cost of the point gather was measured by `Streaming.Water.Bodies.Plane` and `.Planet` in a
+development editor: about 0.04 microseconds a sample on a plane and 0.07 on a planet with a lake over the place,
+against 0.06 and 0.08 with the sea alone (which builds its snapshot from the configuration at each call). Tests:
+`Core.WaterLevels.Lake`, `Core.WaterLevels.Reach` (the sample, the range and the cheap forms on a plane and a planet,
+at a bend, at a join, at a mouth, a pond inside a lake); `Streaming.Water.Bodies.Plane`, `.Planet` (the gathers, the
+point gather, a source, the announcement), `.BedAndReach`; `Map.WaterBodies.Plane`, `.Planet` (a pixel, and a pond
+announced after the tiles were drawn); `Navigation.WaterBodies`; `Cubic.VoxelTrees.Lake`.
 
 **The sea sphere (SP-E2).** A planet's sea surface is the chunk manager's `FVoxelPlanetOcean`: a cube sphere at
 `WaterRadius` on the surface coordinate's tangent warp, its resolution set so no quad sags more than 8 uu under the

@@ -5,32 +5,21 @@
 
 namespace VoxelConditioningLinePrivate
 {
-	/**
-	 * The nearest place on the segment AB to P.
-	 * @param OutT Where along AB it is, 0 at A to 1 at B (0 for a segment of no length)
-	 * @return The squared distance from P to it
-	 */
+	/** The nearest place on a segment, the chord's arc and the angle between directions: the polyline's (FVoxelPolylineBounds). */
 	template <typename VectorType>
 	double NearestOnSegment(const VectorType& P, const VectorType& A, const VectorType& B, double& OutT)
 	{
-		const VectorType AB = B - A;
-		const VectorType AP = P - A;
-		const double LengthSq = AB | AB;
-		OutT = LengthSq > UE_DOUBLE_SMALL_NUMBER ? FMath::Clamp((AP | AB) / LengthSq, 0.0, 1.0) : 0.0;
-		const VectorType D = AP - AB * OutT;
-		return D | D;
+		return FVoxelPolylineBounds::NearestOnSegment(P, A, B, OutT);
 	}
 
-	/** The arc on a sphere of radius R under a chord: 2 R asin(chord / 2R), as a planet zone measures its distance. */
 	double ChordToArc(double Chord, double Radius)
 	{
-		return 2.0 * Radius * FMath::Asin(FMath::Min(1.0, Chord / (2.0 * Radius)));
+		return FVoxelPolylineBounds::ChordToArc(Chord, Radius);
 	}
 
-	/** The angle between two unit directions, well conditioned at small angles. */
 	double AngleBetween(const FVector& A, const FVector& B)
 	{
-		return FMath::Atan2(FVector::CrossProduct(A, B).Size(), FVector::DotProduct(A, B));
+		return FVoxelPolylineBounds::AngleBetween(A, B);
 	}
 
 	/** The distance between two segments, as the least of the four end-to-segment distances (0 when they cross in the plane). */
@@ -137,218 +126,39 @@ void FVoxelConditioningLine::BuildBounds()
 	HeightReach = static_cast<double>(MaxHalfWidth) + FMath::Max(1.0, static_cast<double>(FalloffWidth));
 	Reach = FMath::Max(HeightReach, static_cast<double>(Surface.ClearHalfWidth));
 
-	Bounds = FBox2D(ForceInit);
-	BlockBounds.Reset();
-	CapCentre = FVector::UpVector;
-	CapChordRadius = 0.0;
-	BlockBalls.Reset();
-	const int32 Segments = NumSegments();
-	if (Segments == 0)
-	{
-		return;
-	}
-	const int32 Blocks = FMath::DivideAndRoundUp(Segments, BlockSegments);
-
-	if (!bRadial)
-	{
-		BlockBounds.Reserve(Blocks);
-		for (int32 Block = 0; Block < Blocks; ++Block)
-		{
-			// A block's segments [First, Last) read the vertices [First, Last].
-			const int32 First = Block * BlockSegments;
-			const int32 Last = FMath::Min(First + BlockSegments, Segments);
-			FBox2D Box(ForceInit);
-			for (int32 Index = First; Index <= Last; ++Index)
-			{
-				Box += FVector2D(Vertices[Index].Position.X, Vertices[Index].Position.Y);
-			}
-			BlockBounds.Add(Box);
-			Bounds += Box;
-		}
-		return;
-	}
-
-	// A ball around a run of unit directions: the normalized sum as the centre, the largest chord to a vertex as the radius.
-	const auto BallOf = [this](int32 FirstVertex, int32 LastVertex)
-	{
-		FVector Sum = FVector::ZeroVector;
-		for (int32 Index = FirstVertex; Index <= LastVertex; ++Index)
-		{
-			Sum += Vertices[Index].Position;
-		}
-		const FVector Centre = Sum.IsNearlyZero() ? Vertices[FirstVertex].Position : Sum.GetUnsafeNormal();
-		double Radius = 0.0;
-		for (int32 Index = FirstVertex; Index <= LastVertex; ++Index)
-		{
-			Radius = FMath::Max(Radius, (Vertices[Index].Position - Centre).Size());
-		}
-		return FVector4d(Centre.X, Centre.Y, Centre.Z, Radius);
-	};
-	BlockBalls.Reserve(Blocks);
-	for (int32 Block = 0; Block < Blocks; ++Block)
-	{
-		const int32 First = Block * BlockSegments;
-		BlockBalls.Add(BallOf(First, FMath::Min(First + BlockSegments, Segments)));
-	}
-	const FVector4d Whole = BallOf(0, Segments);
-	CapCentre = FVector(Whole.X, Whole.Y, Whole.Z);
-	CapChordRadius = Whole.W;
+	Polyline.Build(Vertices.Num(), bRadial, [this](int32 Index) -> const FVector& { return Vertices[Index].Position; });
 }
 
 FBox2D FVoxelConditioningLine::GetBounds2D() const
 {
-	if (bRadial || NumSegments() == 0)
-	{
-		return FBox2D(ForceInit);
-	}
-	return Bounds.ExpandBy(Reach);
+	return Polyline.GetBounds2D(Reach);
 }
 
 bool FVoxelConditioningLine::GetCap(double PlanetRadius, FVector& OutDirection, double& OutAngle) const
 {
-	if (!bRadial || NumSegments() == 0)
-	{
-		return false;
-	}
-	OutDirection = CapCentre;
-	OutAngle = 2.0 * FMath::Asin(FMath::Min(1.0, 0.5 * CapChordRadius)) + Reach / FMath::Max(PlanetRadius, 1.0);
-	return true;
+	return Polyline.GetCap(PlanetRadius, Reach, OutDirection, OutAngle);
 }
 
 bool FVoxelConditioningLine::MeetsRegion(const FBox2D& Region) const
 {
-	if (bRadial || NumSegments() == 0 || !Bounds.ExpandBy(Reach).Intersect(Region))
-	{
-		return false;
-	}
-	for (const FBox2D& Box : BlockBounds)
-	{
-		if (Box.ExpandBy(Reach).Intersect(Region))
-		{
-			return true;
-		}
-	}
-	return false;
+	return Polyline.MeetsRegion(Region, Reach);
 }
 
 bool FVoxelConditioningLine::MeetsCap(const FVector& CapDirection, double CapAngle, double PlanetRadius) const
 {
-	using namespace VoxelConditioningLinePrivate;
-	if (!bRadial || NumSegments() == 0)
-	{
-		return false;
-	}
-	if (CapAngle >= UE_DOUBLE_PI)
-	{
-		return true;
-	}
-	const double ReachAngle = Reach / FMath::Max(PlanetRadius, 1.0);
-	const auto BallMeets = [&](const FVector& Centre, double ChordRadius)
-	{
-		return AngleBetween(CapDirection, Centre) <= CapAngle + 2.0 * FMath::Asin(FMath::Min(1.0, 0.5 * ChordRadius)) + ReachAngle;
-	};
-	if (!BallMeets(CapCentre, CapChordRadius))
-	{
-		return false;
-	}
-	for (const FVector4d& Ball : BlockBalls)
-	{
-		if (BallMeets(FVector(Ball.X, Ball.Y, Ball.Z), Ball.W))
-		{
-			return true;
-		}
-	}
-	return false;
+	return Polyline.MeetsCap(CapDirection, CapAngle, PlanetRadius, Reach);
 }
 
 bool FVoxelConditioningLine::FindNearest(double X, double Y, double SearchReach, int32& OutSegment, double& OutT, double& OutDistSq) const
 {
-	using namespace VoxelConditioningLinePrivate;
-	if (bRadial || NumSegments() == 0
-		|| X < Bounds.Min.X - SearchReach || X > Bounds.Max.X + SearchReach || Y < Bounds.Min.Y - SearchReach || Y > Bounds.Max.Y + SearchReach)
-	{
-		return false;
-	}
-	// Only a segment nearer than the reach can give a weight, so the search starts there: a block farther than the reach
-	// cannot hold the nearest segment of a point the line changes.
-	const FVector2D P(X, Y);
-	const int32 Segments = NumSegments();
-	double Best = SearchReach * SearchReach;
-	bool bFound = false;
-	for (int32 Block = 0; Block < BlockBounds.Num(); ++Block)
-	{
-		const FBox2D& Box = BlockBounds[Block];
-		if (X < Box.Min.X - SearchReach || X > Box.Max.X + SearchReach || Y < Box.Min.Y - SearchReach || Y > Box.Max.Y + SearchReach)
-		{
-			continue;
-		}
-		const int32 First = Block * BlockSegments;
-		const int32 Last = FMath::Min(First + BlockSegments, Segments);
-		for (int32 Segment = First; Segment < Last; ++Segment)
-		{
-			double T = 0.0;
-			const double DistSq = NearestOnSegment(P,
-				FVector2D(Vertices[Segment].Position.X, Vertices[Segment].Position.Y),
-				FVector2D(Vertices[Segment + 1].Position.X, Vertices[Segment + 1].Position.Y), T);
-			// Strictly nearer: of two segments at the same distance the earlier one along the line answers, as in the
-			// generators' loop.
-			if (DistSq < Best)
-			{
-				Best = DistSq;
-				OutSegment = Segment;
-				OutT = T;
-				bFound = true;
-			}
-		}
-	}
-	OutDistSq = Best;
-	return bFound;
+	return Polyline.FindNearest(X, Y, SearchReach, [this](int32 Index) -> const FVector& { return Vertices[Index].Position; }, OutSegment, OutT, OutDistSq);
 }
 
 bool FVoxelConditioningLine::FindNearestOnSphere(const FVector& Point, double PlanetRadius, double SearchReach, int32& OutSegment, double& OutT,
 	double& OutDistSq) const
 {
-	using namespace VoxelConditioningLinePrivate;
-	if (!bRadial || NumSegments() == 0 || PlanetRadius <= 0.0)
-	{
-		return false;
-	}
-	// On the unit sphere: a point's chord to a ball's centre is at most the ball's radius plus its chord to the nearest
-	// segment, and a chord is no longer than its arc, so a ball farther than its radius plus the reach holds no segment
-	// within reach.
-	const double ReachChord = SearchReach / PlanetRadius;
-	if ((Point - CapCentre).SizeSquared() > FMath::Square(CapChordRadius + ReachChord))
-	{
-		return false;
-	}
-	const int32 Segments = NumSegments();
-	double Best = ReachChord * ReachChord;
-	bool bFound = false;
-	for (int32 Block = 0; Block < BlockBalls.Num(); ++Block)
-	{
-		const FVector4d& Ball = BlockBalls[Block];
-		if ((Point - FVector(Ball.X, Ball.Y, Ball.Z)).SizeSquared() > FMath::Square(Ball.W + ReachChord))
-		{
-			continue;
-		}
-		const int32 First = Block * BlockSegments;
-		const int32 Last = FMath::Min(First + BlockSegments, Segments);
-		for (int32 Segment = First; Segment < Last; ++Segment)
-		{
-			double T = 0.0;
-			const double DistSq = NearestOnSegment(Point, Vertices[Segment].Position, Vertices[Segment + 1].Position, T);
-			if (DistSq < Best)
-			{
-				Best = DistSq;
-				OutSegment = Segment;
-				OutT = T;
-				bFound = true;
-			}
-		}
-	}
-	// A chord on the datum sphere, in world units.
-	OutDistSq = Best * PlanetRadius * PlanetRadius;
-	return bFound;
+	return Polyline.FindNearestOnSphere(Point, PlanetRadius, SearchReach, [this](int32 Index) -> const FVector& { return Vertices[Index].Position; },
+		OutSegment, OutT, OutDistSq);
 }
 
 void FVoxelConditioningLine::FillSample(int32 Segment, double T, double Distance, double LeastHalfWidth, FVoxelConditioningLineSample& Out) const
@@ -460,15 +270,15 @@ void FVoxelConditioningLine::AppendChunkSegments(const FBox2D& ChunkBox, const F
 		return;
 	}
 	const FBox2D Grown = ChunkBox.ExpandBy(Reach);
-	if (!Bounds.Intersect(Grown))
+	if (!Polyline.Bounds.Intersect(Grown))
 	{
 		return;
 	}
 	const int32 Segments = NumSegments();
 	const FVector3f ReachExtent(static_cast<float>(Reach), static_cast<float>(Reach), 0.0f);
-	for (int32 Block = 0; Block < BlockBounds.Num(); ++Block)
+	for (int32 Block = 0; Block < Polyline.BlockBounds.Num(); ++Block)
 	{
-		if (!BlockBounds[Block].Intersect(Grown))
+		if (!Polyline.BlockBounds[Block].Intersect(Grown))
 		{
 			continue;
 		}
@@ -508,9 +318,9 @@ void FVoxelConditioningLine::AppendChunkSegmentsOnSphere(const FVector& AnchorDi
 	const FVector AnchorPoint = AnchorDirection * PlanetRadius;
 	const int32 Segments = NumSegments();
 	const FVector3f ReachExtent(static_cast<float>(Reach));
-	for (int32 Block = 0; Block < BlockBalls.Num(); ++Block)
+	for (int32 Block = 0; Block < Polyline.BlockBalls.Num(); ++Block)
 	{
-		const FVector4d& Ball = BlockBalls[Block];
+		const FVector4d& Ball = Polyline.BlockBalls[Block];
 		if (!bAll && (FVector(Ball.X, Ball.Y, Ball.Z) * PlanetRadius - AnchorPoint).SizeSquared() > FMath::Square(Ball.W * PlanetRadius + Near))
 		{
 			continue;
@@ -712,14 +522,14 @@ TArray<FString> FVoxelConditioningLine::GetWarnings(const FVoxelConditioningLine
 				// Blocks farther apart than the test's distance hold no pair.
 				if (bRadial)
 				{
-					const FVector4d& BallA = BlockBalls[BlockA];
-					const FVector4d& BallB = BlockBalls[BlockB];
+					const FVector4d& BallA = Polyline.BlockBalls[BlockA];
+					const FVector4d& BallB = Polyline.BlockBalls[BlockB];
 					if ((FVector(BallA.X, BallA.Y, BallA.Z) - FVector(BallB.X, BallB.Y, BallB.Z)).Size() * Scale > (BallA.W + BallB.W) * Scale + Close)
 					{
 						continue;
 					}
 				}
-				else if (!BlockBounds[BlockA].ExpandBy(Close).Intersect(BlockBounds[BlockB]))
+				else if (!Polyline.BlockBounds[BlockA].ExpandBy(Close).Intersect(Polyline.BlockBounds[BlockB]))
 				{
 					continue;
 				}

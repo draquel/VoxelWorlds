@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelGatherNeed.h"
 #include "VoxelConditioningLine.h"
 #include "VoxelTerrainConditioning.generated.h"
 
@@ -169,28 +170,6 @@ struct VOXELGENERATION_API FVoxelConditioningZone
 		const float R = InnerRadius + FMath::Max(0.0f, FalloffWidth);
 		return FBox2D(Center - FVector2D(R, R), Center + FVector2D(R, R));
 	}
-};
-
-/**
- * What a gather of conditioning is for, which decides how a conditioner answers for its lines. Zones are always complete:
- * a conditioner has them at hand. A line may have to be computed first (a road's route), and a caller either waits for
- * it or does not.
- */
-enum class EVoxelConditioningGather : uint8
-{
-	/**
-	 * Every line that reaches the place, computed then and there if it is not at hand: a chunk's generation request (its
-	 * voxels are generated once) and every reader that must agree with the generated voxels at a place (a surface query
-	 * at a point, a chunk's scatter, the PCG sampler).
-	 */
-	Complete,
-
-	/**
-	 * The lines that are at hand now, without computing any: the readers whose regions are too wide to wait for (the far
-	 * field, the map). The conditioner works out the rest later and announces them through the conditioning-changed
-	 * path (UVoxelChunkManager::OnTerrainConditioningChanged), and the reader draws again.
-	 */
-	Ready
 };
 
 /**

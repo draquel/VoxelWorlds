@@ -7,9 +7,11 @@
 
 /**
  * Where a chunk manager's terrain conditioning comes from (gen-time flattening under POIs and claims, levelling along
- * lines): the zones and the lines added to it (AddConditioningZone, AddConditioningLine) and the game's dynamic
- * conditioner (SetTerrainConditioner, not owned), which supplies zones and lines. The manager picks the cap or the XY region a box or a chunk takes from the world mode and asks these sources
- * for the conditioning there (FVoxelConditioning), which generation and the surface queries apply. Game thread.
+ * lines): the zones and the lines added to it (AddConditioningZone, AddConditioningLine) and the dynamic conditioners
+ * registered on it (AddTerrainConditioner, not owned), each of which supplies zones and lines: the game's POI layer
+ * (pads and roads) and, since the hydrology plan, whatever else makes beds. The manager picks the cap or the XY region
+ * a box or a chunk takes from the world mode and asks these sources for the conditioning there (FVoxelConditioning),
+ * which generation and the surface queries apply. Game thread.
  */
 class VOXELSTREAMING_API FVoxelConditioningSources
 {
@@ -17,20 +19,29 @@ public:
 	/** Add a static zone. */
 	void AddZone(const FVoxelConditioningZone& Zone) { Zones.Add(Zone); }
 
-	/** Set (or clear, with null) the game's dynamic conditioner. Not owned: the caller keeps it alive. */
-	void SetConditioner(IVoxelTerrainConditioner* InConditioner) { Conditioner = InConditioner; }
+	/** Register a dynamic conditioner. Not owned: the caller keeps it alive until RemoveConditioner. */
+	void AddConditioner(IVoxelTerrainConditioner* InConditioner)
+	{
+		if (InConditioner)
+		{
+			Conditioners.AddUnique(InConditioner);
+		}
+	}
+
+	/** Take a dynamic conditioner out. */
+	void RemoveConditioner(IVoxelTerrainConditioner* InConditioner) { Conditioners.Remove(InConditioner); }
 
 	/** Add a static line (shared: gathered by reference). */
 	void AddLine(const FVoxelConditioningLineRef& Line) { Lines.Add(Line); }
 
 	/** @return Whether there is nothing to gather: no static zone, no static line and no conditioner */
-	bool IsEmpty() const { return Zones.Num() == 0 && Lines.Num() == 0 && Conditioner == nullptr; }
+	bool IsEmpty() const { return Zones.Num() == 0 && Lines.Num() == 0 && Conditioners.Num() == 0; }
 
 	/** @return How many static zones there are */
 	int32 NumZones() const { return Zones.Num(); }
 
-	/** @return Whether the game's conditioner is set */
-	bool HasConditioner() const { return Conditioner != nullptr; }
+	/** @return How many dynamic conditioners are registered */
+	int32 NumConditioners() const { return Conditioners.Num(); }
 
 	/** @return How many static lines there are */
 	int32 NumLines() const { return Lines.Num(); }
@@ -40,7 +51,7 @@ public:
 
 	/**
 	 * Append the conditioning a cap of a planet meets: the static planet zones (FVoxelConditioningZone::MeetsCap) and
-	 * lines (FVoxelConditioningLine::MeetsCap), then the conditioner's zones and lines; the lines end in the order they
+	 * lines (FVoxelConditioningLine::MeetsCap), then each conditioner's zones and lines; the lines end in the order they
 	 * are applied (FVoxelConditioning::SortLines).
 	 * @param Direction      The cap's centre direction from the planet centre
 	 * @param AngularRadius  The cap's angular radius (radians)
@@ -53,7 +64,7 @@ public:
 
 	/**
 	 * Append the conditioning whose influence overlaps a world XY region: the static heightmap zones and lines
-	 * (FVoxelConditioningLine::MeetsRegion), then the conditioner's zones and lines; the lines end in the order they are
+	 * (FVoxelConditioningLine::MeetsRegion), then each conditioner's zones and lines; the lines end in the order they are
 	 * applied (FVoxelConditioning::SortLines).
 	 * @param Region  The region
 	 * @param Need    What the gather is for: every line (Complete) or the lines at hand (Ready); zones are always complete
@@ -68,6 +79,6 @@ private:
 	/** Static terrain conditioning lines */
 	TArray<FVoxelConditioningLineRef> Lines;
 
-	/** Optional game-supplied dynamic conditioner queried per chunk (not owned) */
-	IVoxelTerrainConditioner* Conditioner = nullptr;
+	/** The dynamic conditioners queried per chunk, in the order they were registered (not owned) */
+	TArray<IVoxelTerrainConditioner*> Conditioners;
 };
