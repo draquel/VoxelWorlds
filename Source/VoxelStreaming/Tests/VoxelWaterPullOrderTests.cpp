@@ -7,6 +7,7 @@
 #include "VoxelCoordinates.h"
 #include "VoxelData.h"
 #include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelWorldConfiguration.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -23,6 +24,10 @@
 //   water. Afterwards the flags must be closed under the flood: no dry air below the sea in a loaded chunk next to a
 //   flagged voxel, in its own chunk or across a face. With each neighbour pulling again when a chunk's water rises there
 //   is none (with one pull each, before G70, there were many).
+// - Streaming.Water.PullOrder.LakePlane / .LakePlanet (the hydrology plan's H2): the same with the sea off and a lake
+//   in its place, a footprint 4,800 uu across at the level the sea stood at, so the pull and the flood test a voxel
+//   against the level over its own column (the chunk's water columns): the flags are closed under that flood, and no
+//   voxel holds the flag over its column's level or outside the footprint.
 // ---------------------------------------------------------------------------
 
 namespace VoxelWaterPullOrderTestUtils
@@ -36,6 +41,8 @@ namespace VoxelWaterPullOrderTestUtils
 		int64 Missed = 0;
 		/** Chunks holding missed voxels. */
 		int32 ChunksMissed = 0;
+		/** Flagged voxels that are not at or under the water over their own column. */
+		int64 Stray = 0;
 		UVoxelChunkManager::FWaterRepullStats Repulls;
 	};
 
@@ -69,8 +76,17 @@ namespace VoxelWaterPullOrderTestUtils
 			const FIntVector L = Global - OutChunk * CS;
 			OutIndex = L.X + L.Y * CS + L.Z * CS * CS;
 		};
+		// With a lake or a river reach in the world, the level over the voxel's own column (the pull's test there).
+		const bool bBodies = W.Manager->HasWaterBodies();
 		auto IsBelowSea = [&](const FIntVector& Global)
 		{
+			if (bBodies)
+			{
+				FIntVector Chunk;
+				int32 Index;
+				Split(Global, Chunk, Index);
+				return W.Manager->IsVoxelUnderWater(Chunk, Global - Chunk * CS);
+			}
 			return Sea.IsBelow(W.Config->WorldOrigin + FVector(Global) * VS);
 		};
 		TSet<FIntVector> Missed;
@@ -105,6 +121,7 @@ namespace VoxelWaterPullOrderTestUtils
 				}
 				++Out.Flagged;
 				const FIntVector Global = Pair.Key * CS + FIntVector(Index % CS, (Index / CS) % CS, Index / (CS * CS));
+				Out.Stray += IsBelowSea(Global) ? 0 : 1;
 				for (const FIntVector& Step : Steps)
 				{
 					Visit(Global + Step);
@@ -134,7 +151,7 @@ namespace VoxelWaterPullOrderTestUtils
 
 	/** Stream the world and measure: the flood must miss nothing. */
 	void RunPullOrder(FAutomationTestBase& Test, const TCHAR* Name, TFunctionRef<void(VoxelTesting::FTestChunkWorld&)> Configure,
-		TFunctionRef<FVector(VoxelTesting::FTestChunkWorld&)> Viewer)
+		TFunctionRef<FVector(VoxelTesting::FTestChunkWorld&)> Viewer, TFunction<void(VoxelTesting::FTestChunkWorld&)> AddBodies = nullptr)
 	{
 		FPullResult Result;
 		{
@@ -142,6 +159,11 @@ namespace VoxelWaterPullOrderTestUtils
 			W.Create(TEXT("WaterPullOrder"));
 			Configure(W);
 			W.StartManager();
+			if (AddBodies)
+			{
+				// At the world's start, before the first generation request.
+				AddBodies(W);
+			}
 			W.SetViewer(Viewer(W));
 			Test.TestTrue(*FString::Printf(TEXT("%s: the pipeline settled"), Name), W.Settle());
 			// The second pulls run about a millisecond a tick: let the queue drain.
@@ -158,6 +180,7 @@ namespace VoxelWaterPullOrderTestUtils
 		}
 		Test.TestTrue(*FString::Printf(TEXT("%s: the sea floods (non-vacuous)"), Name), Result.Flagged > 10000);
 		Test.TestEqual(*FString::Printf(TEXT("%s: no dry voxel the flood reaches"), Name), Result.Missed, static_cast<int64>(0));
+		Test.TestEqual(*FString::Printf(TEXT("%s: no flagged voxel over the water over its column"), Name), Result.Stray, static_cast<int64>(0));
 		Test.TestEqual(*FString::Printf(TEXT("%s: the queue drained"), Name), Result.Repulls.Pending, 0);
 	}
 }
@@ -209,6 +232,63 @@ bool FVoxelWaterPullOrderPlanetTest::RunTest(const FString& Parameters)
 			const double Lon = FMath::DegreesToRadians(20.0);
 			const FVector Up(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
 			return W.Config->WorldOrigin + Up * (W.Config->WorldRadius - 1200.0);
+		});
+	return true;
+}
+
+/**
+ * The plane's pull order with a lake in the sea's place (the sea off): a footprint of 12 x 12 cells of 400 uu around the
+ * origin at level 2,900, the viewer 1,200 under the datum.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterPullOrderLakePlaneTest,
+	"VoxelWorlds.Streaming.Water.PullOrder.LakePlane",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelWaterPullOrderLakePlaneTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelWaterPullOrderTestUtils;
+	RunPullOrder(*this, TEXT("Lake on a plane"),
+		[](VoxelTesting::FTestChunkWorld& W)
+		{
+			W.ConfigureSmallPlane();
+			W.Config->bEnableWaterLevel = false;
+		},
+		[](VoxelTesting::FTestChunkWorld& W) { return FVector(0.0, 0.0, -1200.0); },
+		[](VoxelTesting::FTestChunkWorld& W)
+		{
+			const FVoxelWaterFrame Frame = W.Manager->GetWaterLevels().GetFrame();
+			W.Manager->AddWaterBody(FVoxelWaterBody::MakeLake(51, 2900.0,
+				FVoxelWaterLake::Make(FVector2D(-2400.0, -2400.0), 400.0, FIntPoint(12, 12), TBitArray<>(true, 144)), Frame, 6000.0));
+		});
+	return true;
+}
+
+/**
+ * The planet's pull order with a lake in the sea's place (the sea off): a footprint of 12 x 12 cells of 400 uu around
+ * 45N 20E, 2,300 over the datum, the viewer 1,200 under the datum there.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterPullOrderLakePlanetTest,
+	"VoxelWorlds.Streaming.Water.PullOrder.LakePlanet",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelWaterPullOrderLakePlanetTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelWaterPullOrderTestUtils;
+	const double Lat = FMath::DegreesToRadians(45.0);
+	const double Lon = FMath::DegreesToRadians(20.0);
+	const FVector Up(FMath::Cos(Lat) * FMath::Cos(Lon), FMath::Cos(Lat) * FMath::Sin(Lon), FMath::Sin(Lat));
+	RunPullOrder(*this, TEXT("Lake on a planet"),
+		[](VoxelTesting::FTestChunkWorld& W)
+		{
+			W.ConfigureSmallPlanet();
+			W.Config->bEnableWaterLevel = false;
+		},
+		[Up](VoxelTesting::FTestChunkWorld& W) { return W.Config->WorldOrigin + Up * (W.Config->WorldRadius - 1200.0); },
+		[Up](VoxelTesting::FTestChunkWorld& W)
+		{
+			const FVoxelWaterFrame Frame = W.Manager->GetWaterLevels().GetFrame();
+			W.Manager->AddWaterBody(FVoxelWaterBody::MakeLake(52, Frame.DatumRadius + 2300.0,
+				FVoxelWaterLake::MakeOnSphere(Up, Frame.DatumRadius, 400.0, FIntPoint(12, 12), TBitArray<>(true, 144)), Frame, 6000.0));
 		});
 	return true;
 }

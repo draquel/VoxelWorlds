@@ -217,8 +217,19 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     const float DepthBelowSurface = (TerrainAltitude - Altitude) / VoxelSize;
 
     // Height rules read the altitude above the datum (SP-B2); caves under the sea keep the underwater minimum depth (SP-B6).
-    // The sea is an altitude too.
-    const bool bUnderwaterColumn = (WaterLevelEnabled != 0) && (TerrainAltitude < PlanetWaterAltitude);
+    // The sea is an altitude too. With a lake or a river reach near, the water over the voxel is its down-line's row of
+    // the chunk's water columns (PlanetWaterColumn): the level as an altitude, and a lake's minimum cave depth.
+    bool bLineWater = (WaterLevelEnabled != 0);
+    float LineWaterAltitude = PlanetWaterAltitude;
+    [branch]
+    if (WaterColumnsEnabled != 0)
+    {
+        const float4 WaterRow = PlanetWaterColumn(VoxelCoord);
+        bLineWater = true;
+        LineWaterAltitude = WaterRow.x;
+        LineSurface.MinCaveDepth = max(LineSurface.MinCaveDepth, WaterRow.z);
+    }
+    const bool bUnderwaterColumn = bLineWater && (TerrainAltitude < LineWaterAltitude);
 
     const uint PreCaveDensity = Density;
     uint MaterialID;
@@ -245,7 +256,7 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         }
 
         // Underwater materials when the column's terrain is under the sea (GetBlendedMaterialWithWater by altitude)
-        const bool bUnderwaterMaterial = (WaterLevelEnabled != 0) && (EnableUnderwaterMaterials != 0) && (TerrainAltitude < PlanetWaterAltitude);
+        const bool bUnderwaterMaterial = bUnderwaterColumn && (EnableUnderwaterMaterials != 0);
         MaterialID = GpuBlendedMaterial(Blend, DepthBelowSurface, bUnderwaterMaterial, BlendDitherBase + int3(VoxelCoord));
 
         MaterialID = ApplyGpuHeightRules(MaterialID, Altitude, DepthBelowSurface);

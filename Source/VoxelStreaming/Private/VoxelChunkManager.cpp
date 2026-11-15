@@ -42,6 +42,7 @@
 #include "VoxelMaterialRegistry.h"
 #include "VoxelMaterialAtlas.h"
 #include "VoxelWaterPropagation.h"
+#include "VoxelChunkWaterColumns.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelWaterMesher.h"
 #include "VoxelCollisionManager.h"
@@ -1349,13 +1350,9 @@ void UVoxelChunkManager::Initialize(
 			Configuration->ScatterRadius);
 	}
 
-	// Create water propagation system if the world has water
-	const FVoxelWaterLevels WaterLevels = GetWaterLevels();
-	if (WaterLevels.HasWater())
-	{
-		WaterPropagation = NewObject<UVoxelWaterPropagation>(this);
-		WaterPropagation->Initialize(this, EditManager, WaterLevels);
-	}
+	// Create water propagation system if the world has water: a sea now, or a lake or a river reach when one is added
+	// (AddWaterBody, AddWaterBodySource: a world with the sea off and a lake floods a dig inside it too).
+	EnsureWaterPropagation();
 
 	bIsInitialized = true;
 
@@ -3183,10 +3180,26 @@ void UVoxelChunkManager::BuildChunkGenerationRequest(const FIntVector& ChunkCoor
 	// range is uniform with the sea alone; the per-column form comes with lakes). A level is world Z on a heightmap
 	// world and the distance from the centre on a planet, so each mode fills its own field.
 	const FVoxelWaterLevels WaterLevels = GetWaterLevels();
-	const FVoxelWaterLevelRange Water = WaterLevels.GetRange(GetChunkWorldBox(ChunkCoord));
+	const FBox ChunkBox = GetChunkWorldBox(ChunkCoord);
+	const FVoxelWaterLevelRange Water = WaterLevels.GetRange(ChunkBox);
 	OutRequest.bEnableWaterLevel = Water.bAny;
 	OutRequest.WaterLevel = WaterLevels.IsRadial() ? 0.0f : static_cast<float>(Water.GetLevel());
 	OutRequest.WaterRadius = WaterLevels.IsRadial() ? Water.GetLevel() : 0.0;
+
+	// Where a lake or a river reach may reach the chunk one level does not hold over it: the request carries the water
+	// levels gathered over the chunk (complete, as its conditioning) and the generators build its water columns from
+	// them, a level per column or per down-line (the hydrology plan's section 5.4). Every other chunk, and every chunk of
+	// a world with no body, keeps the one level above and builds nothing.
+	OutRequest.WaterBodies.Reset();
+	if (!WaterBodySources.IsEmpty())
+	{
+		FVoxelWaterLevels Gathered = GatherWaterLevelsForChunk(ChunkCoord);
+		if (!Gathered.GetRange(ChunkBox).bUniform)
+		{
+			OutRequest.WaterBodies = MakeShared<const FVoxelWaterLevels>(MoveTemp(Gathered));
+			++WaterColumnRequests;
+		}
+	}
 
 	// The terrain conditioning over this chunk (Phase 6c: flatten under POIs/claims, level along lines)
 	GatherConditioningForChunk(ChunkCoord, OutRequest.Conditioning);
@@ -3415,6 +3428,7 @@ void UVoxelChunkManager::AddWaterBody(const FVoxelWaterBody& Body)
 	}
 	NoteConditioningSourceRegistered(TEXT("A water body"));
 	WaterBodySources.AddBody(Body);
+	EnsureWaterPropagation();
 
 	const bool bRadial = bLake ? Body.Lake->IsRadial() : Body.Reach->IsRadial();
 	if (bLake)
@@ -3467,6 +3481,7 @@ void UVoxelChunkManager::AddWaterBodySource(IVoxelWaterBodySource* Source)
 	}
 	NoteConditioningSourceRegistered(TEXT("A water body source"));
 	WaterBodySources.AddSource(Source);
+	EnsureWaterPropagation();
 	// A source's bodies may lie anywhere.
 	BroadcastWaterBodiesChanged(FVoxelConditioningRegion::Everywhere());
 }
@@ -3483,8 +3498,11 @@ void UVoxelChunkManager::RemoveWaterBodySource(IVoxelWaterBodySource* Source)
 
 void UVoxelChunkManager::BroadcastWaterBodiesChanged(const FVoxelConditioningRegion& Region)
 {
-	// What was kept from the water levels: the point gather's snapshots and the LOD window's column slabs.
+	// What was kept from the water levels: the point gather's snapshots, the readers of the chunks' water columns and
+	// the LOD window's column slabs.
 	WaterPointCache.Reset();
+	ChunkWaterReaders.Reset();
+	LastChunkWaterReader = INDEX_NONE;
 	if (LODStrategy)
 	{
 		LODStrategy->NotifyWaterChanged();
@@ -3641,6 +3659,86 @@ double UVoxelChunkManager::GetWaterDepth(const FVector& WorldPos) const
 float UVoxelChunkManager::GetWaterDepthAt(const FVector& WorldPos) const
 {
 	return static_cast<float>(GetWaterDepth(WorldPos));
+}
+
+void UVoxelChunkManager::EnsureWaterPropagation()
+{
+	if (WaterPropagation || !Configuration || !EditManager)
+	{
+		return;
+	}
+	const FVoxelWaterLevels WaterLevels = GetWaterLevels();
+	if (WaterLevels.HasWater() || HasWaterBodies())
+	{
+		WaterPropagation = NewObject<UVoxelWaterPropagation>(this);
+		WaterPropagation->Initialize(this, EditManager, WaterLevels);
+	}
+}
+
+FVoxelChunkWaterReader* UVoxelChunkManager::FindChunkWaterReader(const FIntVector& ChunkCoord) const
+{
+	if (WaterBodySources.IsEmpty() || !Configuration)
+	{
+		return nullptr;
+	}
+	++ChunkWaterReaderClock;
+	// The chunk asked last, first: a flood asks voxel after voxel of one chunk.
+	if (ChunkWaterReaders.IsValidIndex(LastChunkWaterReader) && ChunkWaterReaders[LastChunkWaterReader].Chunk == ChunkCoord)
+	{
+		ChunkWaterReaders[LastChunkWaterReader].LastUsed = ChunkWaterReaderClock;
+		return ChunkWaterReaders[LastChunkWaterReader].Reader.Get();
+	}
+	int32 Oldest = 0;
+	for (int32 Index = 0; Index < ChunkWaterReaders.Num(); ++Index)
+	{
+		FChunkWaterReaderSlot& Kept = ChunkWaterReaders[Index];
+		if (Kept.Chunk == ChunkCoord)
+		{
+			Kept.LastUsed = ChunkWaterReaderClock;
+			LastChunkWaterReader = Index;
+			return Kept.Reader.Get();
+		}
+		if (Kept.LastUsed < ChunkWaterReaders[Oldest].LastUsed)
+		{
+			Oldest = Index;
+		}
+	}
+
+	// The chunk's request's own gather and test (BuildChunkGenerationRequest): a reader where the request carried the
+	// bodies, none where it kept the one level.
+	TSharedPtr<FVoxelChunkWaterReader> Reader;
+	FVoxelWaterLevels Gathered = GatherWaterLevelsForChunk(ChunkCoord);
+	if (!Gathered.GetRange(GetChunkWorldBox(ChunkCoord)).bUniform)
+	{
+		const bool bPlanet = Configuration->WorldMode == EWorldMode::SphericalPlanet;
+		const FVoxelWaterFrame& WaterFrame = Gathered.GetFrame();
+		Reader = MakeShared<FVoxelChunkWaterReader>(Gathered, FVoxelChunkWaterFrame::Make(ChunkCoord, Configuration->ChunkSize,
+			Configuration->VoxelSize, Configuration->WorldOrigin, bPlanet, WaterFrame.Center, WaterFrame.DatumRadius));
+		++WaterGatherStats.ChunkReaders;
+	}
+	const int32 SlotIndex = (ChunkWaterReaders.Num() < ChunkWaterReaderCacheSize || !ChunkWaterReaders.IsValidIndex(Oldest))
+		? ChunkWaterReaders.AddDefaulted() : Oldest;
+	FChunkWaterReaderSlot& Slot = ChunkWaterReaders[SlotIndex];
+	Slot.Chunk = ChunkCoord;
+	Slot.Reader = MoveTemp(Reader);
+	Slot.LastUsed = ChunkWaterReaderClock;
+	LastChunkWaterReader = SlotIndex;
+	return Slot.Reader.Get();
+}
+
+bool UVoxelChunkManager::IsVoxelUnderWater(const FIntVector& ChunkCoord, const FIntVector& Local) const
+{
+	if (!Configuration)
+	{
+		return false;
+	}
+	if (FVoxelChunkWaterReader* Reader = FindChunkWaterReader(ChunkCoord))
+	{
+		return Reader->IsVoxelUnder(Local);
+	}
+	// One level over the chunk: the sea's own test at the voxel's sample point, in world space (G19).
+	return GetWaterLevels().IsUnder(Configuration->WorldOrigin
+		+ FVector(ChunkCoord * Configuration->ChunkSize + Local) * Configuration->VoxelSize);
 }
 
 FBox UVoxelChunkManager::GetChunkWorldBox(const FIntVector& ChunkCoord) const
@@ -7798,7 +7896,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 		// Propagate water flags from loaded neighbors into this chunk's voxel data
 		// so caves connected across chunk boundaries receive consistent water flags.
-		if (Configuration && GetWaterLevels().HasWater())
+		if (Configuration && (GetWaterLevels().HasWater() || HasWaterBodies()))
 		{
 			const double WaterT0 = FPlatformTime::Seconds();
 			uint8 FloodedFaces = 0;
@@ -7892,8 +7990,12 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	{
 		*OutFloodedVoxels = 0;
 	}
-	// The water levels, taken once for the whole pull (the per-voxel tests below read this copy).
-	const FVoxelWaterLevels Water = GetWaterLevels();
+	// The water levels, taken once for the whole pull (the per-voxel tests below read this copy): the sea's, or where a
+	// lake or a river reach may reach the chunk the levels gathered over it, read through the chunk's water columns
+	// (the generation request's own gather and test, so the pull floods to the levels the fill did).
+	const FVoxelWaterLevels SeaLevels = GetWaterLevels();
+	FVoxelChunkWaterReader* const Reader = FindChunkWaterReader(ChunkCoord);
+	const FVoxelWaterLevels& Water = Reader ? Reader->GetWater() : SeaLevels;
 	if (!Configuration || !Water.HasWater())
 	{
 		return false;
@@ -7918,11 +8020,12 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 
 	// "Below the water" as generation's fill pass tests it: under the surface of the body over the voxel (the sea's
 	// plane, or a planet's sea sphere, SP-B8), in world space (the chunk grid is relative to WorldOrigin; a plane's
-	// level is world Z, as the terrain's heights are, G19). The per-voxel test is the sample's cheap form.
+	// level is world Z, as the terrain's heights are, G19). The per-voxel test is the sample's cheap form; with a lake or
+	// a river reach near, the voxel against the level over its own column (a down-line on a planet).
 	const FVector VoxelOrigin = ChunkWorldPos + Configuration->WorldOrigin;
-	auto IsBelowSea = [&Water, &VoxelOrigin, VS](int32 X, int32 Y, int32 Z)
+	auto IsBelowSea = [&Water, Reader, &VoxelOrigin, VS](int32 X, int32 Y, int32 Z)
 	{
-		return Water.IsUnder(VoxelOrigin + FVector(X, Y, Z) * VS);
+		return Reader ? Reader->IsVoxelUnder(FIntVector(X, Y, Z)) : Water.IsUnder(VoxelOrigin + FVector(X, Y, Z) * VS);
 	};
 
 	// Entirely above the water — no voxel can qualify as a seed (the per-voxel check
@@ -8162,7 +8265,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 void UVoxelChunkManager::QueueWaterRepulls(const FIntVector& ChunkCoord, uint8 FaceMask)
 {
 	const FVoxelWaterLevels WaterLevels = GetWaterLevels();
-	if (FaceMask == 0 || !Configuration || !WaterLevels.HasWater())
+	if (FaceMask == 0 || !Configuration || !(WaterLevels.HasWater() || HasWaterBodies()))
 	{
 		return;
 	}
@@ -8182,9 +8285,10 @@ void UVoxelChunkManager::QueueWaterRepulls(const FIntVector& ChunkCoord, uint8 F
 		{
 			continue;
 		}
-		// Wholly above the water: nothing to flood (PropagateWaterFromNeighbors' own test).
+		// Wholly above the water: nothing to flood (PropagateWaterFromNeighbors' own test, on the levels over the neighbour).
 		const FVector VoxelOrigin = FVoxelCoordinates::ChunkToWorld(Neighbour, CS, VS) + Configuration->WorldOrigin;
-		if (WaterLevels.IsAbove(FBox(VoxelOrigin, VoxelOrigin + FVector((CS - 1) * VS))))
+		const FVoxelChunkWaterReader* const NeighbourReader = FindChunkWaterReader(Neighbour);
+		if ((NeighbourReader ? NeighbourReader->GetWater() : WaterLevels).IsAbove(FBox(VoxelOrigin, VoxelOrigin + FVector((CS - 1) * VS))))
 		{
 			continue;
 		}

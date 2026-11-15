@@ -1,7 +1,8 @@
 # Water System Architecture
 
-> State as of 2026-11-15 (the hydrology plan's H1: "Lakes and river reaches", under "On a Planet"; the water plan's
-> W1, 2026-11-13: the material paragraphs; its W2: "The water levels"; the rest as of code review CR5, 2026-11-02).
+> State as of 2026-11-15 (the hydrology plan's H1 and H2: "Lakes and river reaches" and "A chunk's water columns",
+> under "On a Planet"; the water plan's W1, 2026-11-13: the material paragraphs; its W2: "The water levels"; the rest
+> as of code review CR5, 2026-11-02).
 > Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelCore (flags, the sea, the water levels), VoxelGeneration (fill pass), VoxelMeshing (water mesher), VoxelStreaming (propagation, tiles, the far ocean), VoxelRendering (rendering)
@@ -36,8 +37,9 @@ The water system renders water surfaces where water-flagged air voxels exist in 
 - Separate water material (Single Layer Water; a translucent one draws too)
 - One query for every reader of the water: the water levels (`FVoxelWaterLevels`: the sample at a position, the range
   over bounds, the sea)
-- Lakes and river reaches as bodies of the water levels, gathered by bounds from the chunk manager; every reader but
-  generation, the pull, the flood and the drawing sees them (those follow in the hydrology plan's H2 and H3)
+- Lakes and river reaches as bodies of the water levels, gathered by bounds from the chunk manager: generation floods
+  them to their own levels on the CPU and the GPU, and every reader but the drawing sees them (the drawing follows
+  in the hydrology plan's H3)
 
 ---
 
@@ -127,6 +129,10 @@ During chunk generation, `FVoxelCPUNoiseGenerator::ApplyWaterFillPass()` runs th
 2. **Flood**: a BFS spreads the flag through non-cave air below the sea
 3. **Clear** the cave flags (a temporary barrier: caves below the sea stay dry)
 
+Where a lake or a river reach may reach the chunk the pass reads a level per column in place of the one level ("A
+chunk's water columns", below): each column seeds from its own level, and the flood passes a voxel at or under the
+level over its own column.
+
 ### Cross-Chunk Boundary Propagation
 
 **File**: `VoxelStreaming/Private/VoxelChunkManager.cpp`
@@ -138,6 +144,10 @@ Called at each mesh submit of a chunk, before its water tile update. Ensures con
 2. Check boundary voxels: if our voxel is dry air below water level AND neighbor has water flag
 3. Seed the voxel and BFS flood fill within the chunk
 4. Returns true if any propagation occurred (the faces it flooded and the voxels, on request)
+
+"Below water level" is the sea's test at the voxel, or, in a chunk a lake or a river reach may reach, the voxel
+against the level over its own column (`UVoxelChunkManager::IsVoxelUnderWater`, "A chunk's water columns" below), so
+the pull floods to the levels generation's fill did.
 
 It reads and writes the chunk's **generated** voxels (`FChunkDescriptor`), not the edit layer. Water an edit-driven
 flood put in the edit layer crosses chunk faces through `UVoxelWaterPropagation` instead (the chunk-arrival face scans
@@ -211,6 +221,11 @@ generation's fill pass tests it.
   were before it, the flood there with them (an undo restores each voxel's previous edit, `FVoxelEditChange`), and its
   redo floods them again. Water the flood put beyond the edit's own voxels (a cave or a sealed pocket it opened) stays:
   nothing drains it
+- In a world with a lake or a river reach every "below the sea" above is "at or under the level over the voxel's own
+  column" (`UVoxelChunkManager::IsVoxelUnderWater`): a dig inside a body's footprint and under its level floods when
+  it reaches the water, outside the footprint it stays dry, and nothing drains (the hydrology plan's D149). The seed
+  clip takes the range over the edit's box and the face test the range over the face (a lake may stand over one end of
+  it). The flood is made when the world has a sea, a lake or a river reach: with the sea off and a lake too
 - `GetStats()` counts scans, reads, seeds (`FaceSeeds` of them from the face scans, `FaceScansQueued` faces), floods and
   flooded voxels, and times the scans (`ScanSeconds`, `MaxFrameScanSeconds`); `voxel.Water.Stats [x y | pawn]` logs them
   and the water tile's column there (`UVoxelChunkManager::GetWaterTileColumn`: the chunk layers that mark it wet); the log
@@ -321,7 +336,8 @@ agree with the generated voxels, `Ready` for one whose region is too wide to wai
 | `GatherWaterLevelsAt(Position)` | that place's snapshot, for a reader that takes a few samples close together | `QuerySurfacePoint`, the surface NPC spawn check |
 | `GatherWaterLevels(Box, Need)`, `GatherWaterLevelsOnSphere`, `GatherWaterLevelsForChunk` | a snapshot of the sea and the bodies whose footprints may reach the box's columns (its XY on a heightmap world, the cap it subtends on a planet); with no body in the world, the sea's | a chunk's scatter extraction and the voxel trees over a chunk and the chunks around it (`Complete`); a far-field patch's build, a map tile and its edit overlay, the spawn search (`Ready`); the PCG sampler (the need its conditioning takes) |
 | `GetWaterRange(Box, Need)` | the range of that gather, with no snapshot made where the world has no body | the LOD window (`IVoxelLODStrategy::SetWaterRangeGather`: a column's slab `Complete`, a planet's near disk `Ready`) |
-| `GetWaterLevels()` | the sea's snapshot, over the whole world: for what means the sea itself | the water tiles, the far field's sea, the far ocean, the shell, the planet sky, the POI placement's water line, and until the plan's H2 the generation request, the pull and the flood |
+| `GetWaterLevels()` | the sea's snapshot, over the whole world: for what means the sea itself | the water tiles, the far field's sea, the far ocean, the shell, the planet sky, the POI placement's water line, and a generation request's one level |
+| `GatherWaterLevelsForChunk(ChunkCoord)`, `IsVoxelUnderWater(ChunkCoord, Local)` | the levels a chunk generates with, and whether a voxel is at or under the level over its own column, as the fill tests it | a chunk's generation request (the bodies it carries), the water pull, the edit-driven flood |
 
 When a body is added, or a source announces one it worked out after a `Ready` gather missed it
 (`NotifyWaterBodiesChanged(Region)`, `NotifyWaterBodiesChangedOnSphere`), the chunk manager drops the point gather's
@@ -338,8 +354,60 @@ than the wade depth blocks a walker as the sea does; a voxel tree is tested agai
 the injector and by the tree query alike (`FVoxelTreeInjector`'s `WaterOver`), so no tree stands in a pond; scatter's
 underwater class, the far field's and the PCG sampler's surface material are the sample's over the point; the LOD
 window keeps a column's chunks up to the highest level over it. The water tiles, the far field's sea sections, the far
-ocean and the shell stay the sea's. Generation, the pull and the flood do not see a body yet (H2: a lake's column
-generates dry voxels, so the swimmer's voxel flag is not set there), and nothing draws one (H3).
+ocean and the shell stay the sea's. Generation, the pull and the flood read a level per column ("A chunk's water
+columns", next), so a lake's voxels carry the water flag and the swimmer, who asks the voxel's flag first, swims in
+one. Nothing draws a body yet (H3). Until then, in a world whose sea is on, a lake whose water lies in a chunk layer
+the sea's level reaches adds its columns to the sea's tile, which draws at the sea's level under them: a tile's mask
+is the columns that hold a flagged voxel, in the chunks at or under the sea's level.
+
+**A chunk's water columns (the hydrology plan's H2, 2026-11-15).** A generation request copies one level, the range
+over the chunk, and that stays so wherever the range is uniform: every chunk of a world with no body, and every chunk
+no body's footprint may reach. Where a lake or a river reach may reach the chunk, the request also carries the water
+levels gathered over it (`FVoxelNoiseGenerationRequest::WaterBodies`, from `GatherWaterLevelsForChunk`, complete, as
+its conditioning), and the generators build the chunk's water columns from them, `FVoxelChunkWaterColumns`
+(VoxelGeneration): the level over each XY column on a heightmap world, or over each down-line on a planet
+(`FVoxelDownLines`, the lines the post-passes walk: a planet chunk has no columns; a line takes the level over its
+first voxel in the chunk), with a value for no water. One function builds the list (`Build`) and every reader of "is
+this voxel under the water here" reads it, as with a chunk's conditioning line segments:
+
+- **The CPU generator.** The density loop compares a column's terrain with its own level for the underwater
+  materials and the caves' underwater minimum depth, so a lake's bed is an underwater bed; the fill seeds each column
+  from its own level and floods a voxel at or under its own column's level.
+- **The GPU.** The dispatch uploads the same float4s once: the density pass reads them as `WaterColumnData`, and the
+  fill runs four kernels that read them in place of the one level ([GPU_PIPELINE.md](GPU_PIPELINE.md), "The water
+  over a column", "Stage 2"). The kernels of a chunk with one level are as they were.
+- **The pull and the flood.** `UVoxelChunkManager::IsVoxelUnderWater` asks `FVoxelChunkWaterReader`, which makes
+  the same rows a column at a time, the first time a voxel of the column is asked about, from the same gather; the
+  chunk manager keeps the readers of the 64 chunks asked last and drops them when the bodies change. A chunk no body
+  may reach is answered by the sea's own arithmetic.
+
+A row holds the level twice, in the two forms the generators compare with (world Z on a heightmap world; on a planet
+the level as an altitude over the datum for the terrain, and the level less the chunk anchor's distance from the
+centre for a voxel, both formed in double), and a lake's **minimum cave depth** (`FVoxelWaterBody::MinCaveDepth`, 0
+by default): over the lake's footprint no cave opens above that depth, as under a conditioning line, in both
+generators and in `FVoxelSurfaceQuery`'s cave test. A river reach has none: its bed's line carries the caves' depth.
+
+What follows from a level per column: water stands in a column of a body's footprint where the ground is under the
+level and nowhere else, so low ground beside a lake stays dry and a lake ends in a wall of water where its footprint
+ends over ground under its level (a footprint reaches past the water by the bank's width, so a well-made body has
+none). Where the sea stands in a column of the footprint the higher level answers. A chunk under a lake takes the
+lake's water from its top layer, as a chunk under the sea does (G129), and a chunk over it takes none. On a small
+planet a down-line wanders from the radial by a voxel or two across a chunk, so the footprint's edge in the voxels
+follows the lines, not the sphere: the fill, the pull and the flood agree with each other exactly, and with the point
+gather's sample but along that edge.
+
+H2 changed no output: no world has a body, a request without one builds no list, and the gates read as the base (the
+plan's H2 result). Tests: `Generation.WaterColumns.Fill` (made ground: a column inside, the shore, low ground
+outside the footprint, a chunk the footprint crosses into, the chunks under and over the lake, a cave beside the
+water, with the sea off, under the ground and a voxel under the lake; a river reach along a channel),
+`Generation.WaterColumns.Planet` (a row a down-line against the sample at each voxel; the reader's rows are the
+list's; the fill), `Generation.WaterColumns.OneLevel` (a chunk generated column by column from a lake that covers
+none of its columns is the chunk generated from the one level, byte for byte); `Generation.GPUvsCPUWaterBodiesParity`
+(a lake and a river reach on its bed on a plane and a planet, a lake with a minimum cave depth over caves, a lake with
+the sea off, the chunk under a lake; in the editor); `Streaming.Water.PullOrder.LakePlane`, `.LakePlanet` (the pull's
+order with a lake in the sea's place); `Streaming.WaterPropagation.Lake.Plane`, `.Planet` (a streamed world with the
+sea off and a lake: generation against the columns, a dig in the lake's bed fills, a pit outside the footprint stays
+dry, a channel fills as far as the footprint goes).
 
 H1 changed no output: no world has a body, a gather with none is the sea's snapshot, and the gates read as the base
 (the plan's H1 result). The cost of the point gather was measured by `Streaming.Water.Bodies.Plane` and `.Planet` in a

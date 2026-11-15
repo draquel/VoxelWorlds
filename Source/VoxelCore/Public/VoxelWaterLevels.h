@@ -326,14 +326,24 @@ struct VOXELCORE_API FVoxelWaterBody
 	TSharedPtr<const FVoxelWaterLake> Lake;
 
 	/**
+	 * Kind Lake: the shallowest depth under the generated ground a cave may open at over the lake's footprint, in
+	 * voxels (the hydrology plan's section 5.4), beside the cave configuration's own minimum depths: each cave layer's
+	 * is at least this there, as under a conditioning line (FVoxelConditioningLineSurface). 0 leaves the caves their
+	 * own. A river reach has none: its bed's line carries it.
+	 */
+	float MinCaveDepth = 0.0f;
+
+	/**
 	 * A lake's record.
 	 * @param InId The body's id (not 0)
 	 * @param InLevel The lake's level
 	 * @param InLake Its footprint
 	 * @param Frame The world's frame (a planet lake's bounds are around its cap at the level)
 	 * @param MaxDepth How far under the level the lake's water may lie (the bounds' depth)
+	 * @param InMinCaveDepth The shallowest depth a cave may open at over the footprint, in voxels (MinCaveDepth)
 	 */
-	static FVoxelWaterBody MakeLake(uint32 InId, double InLevel, const TSharedRef<const FVoxelWaterLake>& InLake, const FVoxelWaterFrame& Frame, double MaxDepth);
+	static FVoxelWaterBody MakeLake(uint32 InId, double InLevel, const TSharedRef<const FVoxelWaterLake>& InLake, const FVoxelWaterFrame& Frame, double MaxDepth,
+		float InMinCaveDepth = 0.0f);
 
 	/**
 	 * A river reach's record.
@@ -374,6 +384,9 @@ struct FVoxelWaterSample
 
 	/** A river reach's current: its direction downstream times its speed; zero for the sea and a lake */
 	FVector Flow = FVector::ZeroVector;
+
+	/** The answering body's minimum cave depth, in voxels (FVoxelWaterBody::MinCaveDepth): a lake's; 0 otherwise */
+	float MinCaveDepth = 0.0f;
 };
 
 /**
