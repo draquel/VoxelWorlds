@@ -43,6 +43,7 @@
 #include "VoxelMaterialAtlas.h"
 #include "VoxelWaterPropagation.h"
 #include "VoxelChunkWaterColumns.h"
+#include "Diagnostics/VoxelWaterTestBodies.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelWaterMesher.h"
 #include "VoxelCollisionManager.h"
@@ -109,6 +110,22 @@ static TAutoConsoleVariable<int32> CVarFarOcean(
 		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
 		{
 			It->SetFarOceanVisible(Var->GetInt() != 0);
+		}
+	}),
+	ECVF_Default);
+
+// The drawn lakes and river reaches (the hydrology plan's H3): their visibility, for every live chunk manager.
+static TAutoConsoleVariable<int32> CVarWaterBodyMeshes(
+	TEXT("voxel.Water.BodyMeshes"),
+	1,
+	TEXT("The drawn surfaces of lakes and river reaches: one mesh a body, with the configuration's water and river materials.\n")
+	TEXT("  1 = drawn (default)\n")
+	TEXT("  0 = hidden (for before/after views; the voxels keep their water)"),
+	FConsoleVariableDelegate::CreateLambda([](IConsoleVariable* Var)
+	{
+		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
+		{
+			It->SetWaterBodyMeshesVisible(Var->GetInt() != 0);
 		}
 	}),
 	ECVF_Default);
@@ -905,6 +922,10 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 // A planet's sea surface shows its underside only while the viewer is in the sea (SP-E2).
 	PlanetOcean.UpdateUnderside(CurrentViewerPosition);
 
+	// === Lakes and river reaches (the hydrology plan's H3) ===
+	// One mesh a body, made when the bodies change or the viewer has moved far; a world with none pays one test.
+	UpdateWaterBodyMeshes();
+
 	// === Planet far field (spherical Phase 6, WM-BP9) ===
 	// After this tick's generation results, meshes and unloads: an edge patch shows in the tick its chunks leave and
 	// hides once they have been drawn a moment. Timed into FarFieldStats.UpdateMs (the bench's FarFieldMs).
@@ -1375,6 +1396,8 @@ void UVoxelChunkManager::Initialize(
 
 	// The world has started and no generation request is built yet: whatever supplies terrain conditioning registers now
 	// (the game's conditioner, the terrain line components), so the first chunks generate with it (G187).
+	// First the bodies a script laid for a look or a measurement (voxel.Water.TestBodies; development builds).
+	VoxelWaterTestBodies::Apply(*this);
 	OnInitialized.Broadcast(*this);
 }
 
@@ -1695,6 +1718,9 @@ void UVoxelChunkManager::Shutdown()
 	FarOcean.Destroy();
 	DestroyFarField();
 	PlanetOcean.Destroy();
+	WaterBodyMeshes.Destroy();
+	bWaterBodyMeshesGathered = false;
+	bWaterBodyMeshesDirty = false;
 
 	// Clear pending mesh queue
 	PendingMeshQueue.Empty();
@@ -3503,6 +3529,8 @@ void UVoxelChunkManager::BroadcastWaterBodiesChanged(const FVoxelConditioningReg
 	WaterPointCache.Reset();
 	ChunkWaterReaders.Reset();
 	LastChunkWaterReader = INDEX_NONE;
+	// The drawn bodies are gathered again on the next tick.
+	bWaterBodyMeshesDirty = true;
 	if (LODStrategy)
 	{
 		LODStrategy->NotifyWaterChanged();
@@ -3970,6 +3998,89 @@ void UVoxelChunkManager::RebuildPlanetOcean()
 void UVoxelChunkManager::SetPlanetOceanVisible(bool bVisible)
 {
 	PlanetOcean.SetVisible(bVisible);
+}
+
+// ==================== Lakes and river reaches drawn (the hydrology plan's H3) ====================
+
+void UVoxelChunkManager::SetWaterBodyMeshesVisible(bool bVisible)
+{
+	WaterBodyMeshes.SetVisible(bVisible);
+}
+
+void UVoxelChunkManager::UpdateWaterBodyMeshes()
+{
+	// The sea alone: nothing to draw here (the tiles, the far seas and the shell draw the sea).
+	if (WaterBodySources.IsEmpty())
+	{
+		if (WaterBodyMeshes.Num() > 0)
+		{
+			WaterBodyMeshes.Destroy();
+		}
+		return;
+	}
+	UWorld* World = GetWorld();
+	AActor* Owner = GetOwner();
+	// Visual only: a dedicated server draws nothing; and no water is drawn without a material for it.
+	UMaterialInterface* LakeMaterial = Configuration ? Configuration->WaterMeshMaterial.Get() : nullptr;
+	UMaterialInterface* RiverMaterial = Configuration ? Configuration->RiverMeshMaterial.Get() : nullptr;
+	if (!Configuration || !World || !Owner || !(LakeMaterial || RiverMaterial)
+		|| !DrawsWaterBodies(World->IsGameWorld(), World->GetNetMode() == NM_DedicatedServer))
+	{
+		if (WaterBodyMeshes.Num() > 0)
+		{
+			WaterBodyMeshes.Destroy();
+			bWaterBodyMeshesGathered = false;
+		}
+		return;
+	}
+
+	// How far out a body is drawn: as far as the far field draws the ground it lies in (a road's band shows that far).
+	const double Reach = FMath::Max(static_cast<double>(VoxelSettings::Resolve(CVarFarFieldDistance, Configuration->FarFieldDistance)),
+		4.0 * Configuration->GetChunkWorldSize());
+	const bool bMovedFar = bWaterBodyMeshesGathered
+		&& FVector::DistSquared(CurrentViewerPosition, WaterBodyMeshGatherPosition) > FMath::Square(Reach / 8.0);
+	if (bWaterBodyMeshesDirty || !bWaterBodyMeshesGathered || bMovedFar)
+	{
+		const double StartTime = FPlatformTime::Seconds();
+		const FVoxelWaterFrame Frame = GetWaterLevels().GetFrame();
+		// The bodies at hand within the reach: a source that works one out later announces it, and they are gathered again.
+		TArray<FVoxelWaterBody> Bodies;
+		if (Frame.bRadial)
+		{
+			const FVector Direction = Frame.UpAt(CurrentViewerPosition);
+			WaterBodySources.GatherOnSphere(Direction, FMath::Min(Reach / FMath::Max(Frame.DatumRadius, 1.0), UE_DOUBLE_PI), Frame.DatumRadius,
+				EVoxelConditioningGather::Ready, Bodies);
+		}
+		else
+		{
+			const FVector2D Viewer(CurrentViewerPosition.X, CurrentViewerPosition.Y);
+			WaterBodySources.GatherForRegion(FBox2D(Viewer - FVector2D(Reach), Viewer + FVector2D(Reach)), EVoxelConditioningGather::Ready, Bodies);
+		}
+		// Each body once, by id (a body may come from the static list and from a source's answer).
+		Bodies.StableSort([](const FVoxelWaterBody& A, const FVoxelWaterBody& B) { return A.Id < B.Id; });
+		for (int32 Index = Bodies.Num() - 1; Index > 0; --Index)
+		{
+			if (Bodies[Index].Id == Bodies[Index - 1].Id)
+			{
+				Bodies.RemoveAt(Index);
+			}
+		}
+		const FVoxelWaterBodyMeshOwner::FUpdateResult Result = WaterBodyMeshes.Update(Owner, Bodies, Frame, Configuration->VoxelSize,
+			LakeMaterial ? LakeMaterial : RiverMaterial, RiverMaterial, CVarWaterBodyMeshes.GetValueOnGameThread() != 0, CurrentCameraPosition);
+		bWaterBodyMeshesDirty = false;
+		bWaterBodyMeshesGathered = true;
+		WaterBodyMeshGatherPosition = CurrentViewerPosition;
+		if (Result.Built > 0 || Result.Removed > 0)
+		{
+			UE_LOG(LogVoxelStreaming, Log,
+				TEXT("Water body meshes: %d drawn (%d built, %d removed, %d kept; %d quads) within %.0f uu of the viewer, in %.2f ms"),
+				WaterBodyMeshes.Num(), Result.Built, Result.Removed, Result.Kept, WaterBodyMeshes.GetNumQuads(), Reach,
+				(FPlatformTime::Seconds() - StartTime) * 1000.0);
+		}
+	}
+	// Whether the view is under a body is the camera's place, not the streaming viewer's (which runs ahead of a
+	// descending camera), as with the far field's sea.
+	WaterBodyMeshes.UpdateUndersides(CurrentCameraPosition);
 }
 
 // ==================== The far field (spherical Phase 6 WM-BP9; every world mode since MP3) ====================
@@ -8382,6 +8493,31 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 	}
 	bool bAnyWater = FVoxelWaterMesher::BuildColumnMask(
 		EditMerged.IsValid() ? *EditMerged : State->Descriptor.GetVoxelDataForRead(), CS, PartialMask);
+
+	// The tiles are the sea's (the hydrology plan's section 5.5): a column whose level is not the sea's, a lake's or a
+	// river reach's, adds nothing to the mask. Its water is drawn by the body's own mesh. Only a chunk a body may reach
+	// has a reader of its water columns; every other chunk's mask is as it was.
+	if (bAnyWater)
+	{
+		if (FVoxelChunkWaterReader* Reader = FindChunkWaterReader(ChunkCoord))
+		{
+			const FVoxelSeaSurface& Sea = Reader->GetWater().GetSea();
+			const float SeaLevel = static_cast<float>(Sea.PlaneZ);
+			bAnyWater = false;
+			for (int32 Y = 0; Y < CS; ++Y)
+			{
+				for (int32 X = 0; X < CS; ++X)
+				{
+					bool& bWet = PartialMask[X + Y * CS];
+					if (bWet && !(Sea.bEnabled && Reader->GetRowOf(FIntVector(X, Y, 0)).Y == SeaLevel))
+					{
+						bWet = false;
+					}
+					bAnyWater |= bWet;
+				}
+			}
+		}
+	}
 
 	if (bAnyWater)
 	{

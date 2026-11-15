@@ -456,7 +456,12 @@ bool FVoxelWaterLake::MeetsCap(const FVector& CapDirection, double InCapAngle) c
 
 FVector FVoxelWaterLake::GetCellCentre(int32 CellX, int32 CellY, double Level, const FVector& PlanetCenter) const
 {
-	const FVector2D P = Origin + FVector2D((CellX + 0.5) * CellSize, (CellY + 0.5) * CellSize);
+	return GetGridPoint(CellX + 0.5, CellY + 0.5, Level, PlanetCenter);
+}
+
+FVector FVoxelWaterLake::GetGridPoint(double GridX, double GridY, double Level, const FVector& PlanetCenter) const
+{
+	const FVector2D P = Origin + FVector2D(GridX * CellSize, GridY * CellSize);
 	if (!bRadial)
 	{
 		return FVector(P.X, P.Y, Level);

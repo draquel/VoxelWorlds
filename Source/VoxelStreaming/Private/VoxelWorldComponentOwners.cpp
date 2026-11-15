@@ -10,6 +10,7 @@
 #include "Materials/MaterialInterface.h"
 #include "VoxelFarField.h"
 #include "VoxelFarFieldPatchComponent.h"
+#include "VoxelWaterBodyMesh.h"
 
 void FVoxelSeaUnderside::Update(bool bBelow, bool& bShown, TFunctionRef<void(bool)> Apply)
 {
@@ -343,6 +344,178 @@ void FVoxelPlanetOceanOwner::SetVisible(bool bVisible)
 		Component->SetVisibility(bVisible);
 		UE_LOG(LogVoxelStreaming, Log, TEXT("Planet ocean %s"), bVisible ? TEXT("shown") : TEXT("hidden"));
 	}
+}
+
+// ==================== Lakes and river reaches (the hydrology plan's H3) ====================
+
+namespace VoxelWaterBodyMeshPrivate
+{
+	/** Whether two records are the same body as drawn: the id, the level and the footprint's own data. */
+	bool IsSameBody(const FVoxelWaterBody& A, const FVoxelWaterBody& B)
+	{
+		return A.Id == B.Id && A.Kind == B.Kind && A.Level == B.Level && A.Lake == B.Lake && A.Reach == B.Reach;
+	}
+
+	TArray<FProcMeshTangent> MakeTangents(const TArray<FVector>& In)
+	{
+		TArray<FProcMeshTangent> Out;
+		Out.Reserve(In.Num());
+		for (const FVector& Tangent : In)
+		{
+			Out.Add(FProcMeshTangent(Tangent, false));
+		}
+		return Out;
+	}
+}
+
+FVoxelWaterBodyMeshOwner::FUpdateResult FVoxelWaterBodyMeshOwner::Update(AActor* Owner, TConstArrayView<FVoxelWaterBody> Bodies,
+	const FVoxelWaterFrame& Frame, double VoxelSize, UMaterialInterface* LakeMaterial, UMaterialInterface* RiverMaterial, bool bVisible,
+	const FVector& ViewerPosition)
+{
+	using namespace VoxelWaterBodyMeshPrivate;
+	FUpdateResult Result;
+
+	// What is no longer handed over goes (a body whose record changed counts as another body).
+	for (int32 Index = Entries.Num() - 1; Index >= 0; --Index)
+	{
+		const bool bStill = Bodies.ContainsByPredicate([&](const FVoxelWaterBody& Body) { return IsSameBody(Body, Entries[Index].Body); });
+		if (!bStill)
+		{
+			if (IsValid(Components[Index]))
+			{
+				Components[Index]->DestroyComponent();
+			}
+			Components.RemoveAt(Index);
+			Entries.RemoveAt(Index);
+			++Result.Removed;
+		}
+	}
+
+	if (!Owner)
+	{
+		return Result;
+	}
+	for (const FVoxelWaterBody& Body : Bodies)
+	{
+		if (Body.Kind == EVoxelWaterBodyKind::Sea)
+		{
+			continue;
+		}
+		if (Entries.ContainsByPredicate([&](const FEntry& Entry) { return IsSameBody(Entry.Body, Body); }))
+		{
+			++Result.Kept;
+			continue;
+		}
+		FVoxelWaterBodyMesh Mesh;
+		if (!FVoxelWaterBodyMesh::Build(Body, Frame, VoxelSize, Mesh))
+		{
+			continue;
+		}
+		UProceduralMeshComponent* Component = VoxelFarOceanManagerPrivate::MakeComponent(Owner,
+			*FString::Printf(TEXT("VoxelWaterBody_%u_%d"), Body.Id, Serial++), Mesh.Origin);
+		const TArray<FVector2D> NoUV;
+		Component->CreateMeshSection(0, Mesh.Top.Positions, Mesh.Top.Triangles, Mesh.Top.Normals, Mesh.Top.UV0, Mesh.Top.UV1, NoUV, NoUV,
+			Mesh.Top.Colors, MakeTangents(Mesh.Top.Tangents), /*bCreateCollision=*/false);
+		Component->CreateMeshSection(1, Mesh.Underside.Positions, Mesh.Underside.Triangles, Mesh.Underside.Normals, Mesh.Underside.UV0,
+			Mesh.Underside.UV1, NoUV, NoUV, Mesh.Underside.Colors, MakeTangents(Mesh.Underside.Tangents), /*bCreateCollision=*/false);
+		UMaterialInterface* Material = (Body.Kind == EVoxelWaterBodyKind::Reach && RiverMaterial) ? RiverMaterial : LakeMaterial;
+		if (Material)
+		{
+			Component->SetMaterial(0, Material);
+			Component->SetMaterial(1, Material);
+		}
+		Component->SetVisibility(bVisible);
+
+		FEntry& Entry = Entries.AddDefaulted_GetRef();
+		Entry.Body = Body;
+		Entry.Levels = FVoxelWaterLevels::Make(FVoxelSeaSurface(), Frame, Body.Bounds, { Body });
+		Entry.Quads = Mesh.Quads;
+		// Hidden until the viewer is found under it.
+		Entry.bUndersideShown = false;
+		Component->SetMeshSectionVisible(1, false);
+		Components.Add(Component);
+		++Result.Built;
+	}
+	UpdateUndersides(ViewerPosition);
+	return Result;
+}
+
+void FVoxelWaterBodyMeshOwner::Destroy()
+{
+	for (UProceduralMeshComponent* Component : Components)
+	{
+		if (IsValid(Component))
+		{
+			Component->DestroyComponent();
+		}
+	}
+	Components.Reset();
+	Entries.Reset();
+}
+
+void FVoxelWaterBodyMeshOwner::UpdateUndersides(const FVector& ViewerPosition)
+{
+	for (int32 Index = 0; Index < Entries.Num(); ++Index)
+	{
+		FEntry& Entry = Entries[Index];
+		// Under this body's surface, in its footprint: the body's own sample (the sea plays no part).
+		FVoxelWaterSample Sample;
+		const bool bBelow = Entry.Levels.Sample(ViewerPosition, Sample) && Sample.BodyId == Entry.Body.Id && Sample.Depth > 0.0;
+		UProceduralMeshComponent* Component = Components[Index];
+		FVoxelSeaUnderside::Update(bBelow, Entry.bUndersideShown, [Component](bool bShown)
+		{
+			if (IsValid(Component) && Component->GetNumSections() > 1)
+			{
+				Component->SetMeshSectionVisible(1, bShown);
+			}
+		});
+	}
+}
+
+void FVoxelWaterBodyMeshOwner::SetVisible(bool bVisible)
+{
+	for (UProceduralMeshComponent* Component : Components)
+	{
+		if (IsValid(Component))
+		{
+			Component->SetVisibility(bVisible);
+		}
+	}
+	UE_LOG(LogVoxelStreaming, Log, TEXT("Water body meshes %s (%d)"), bVisible ? TEXT("shown") : TEXT("hidden"), Components.Num());
+}
+
+UProceduralMeshComponent* FVoxelWaterBodyMeshOwner::Find(uint32 BodyId) const
+{
+	for (int32 Index = 0; Index < Entries.Num(); ++Index)
+	{
+		if (Entries[Index].Body.Id == BodyId)
+		{
+			return Components[Index];
+		}
+	}
+	return nullptr;
+}
+
+bool FVoxelWaterBodyMeshOwner::IsUndersideShown(uint32 BodyId) const
+{
+	for (const FEntry& Entry : Entries)
+	{
+		if (Entry.Body.Id == BodyId)
+		{
+			return Entry.bUndersideShown;
+		}
+	}
+	return false;
+}
+
+int32 FVoxelWaterBodyMeshOwner::GetNumQuads() const
+{
+	int32 Quads = 0;
+	for (const FEntry& Entry : Entries)
+	{
+		Quads += Entry.Quads;
+	}
+	return Quads;
 }
 
 // ==================== The far field's components (spherical Phase 6 WM-BP9; every world mode since MP3) ====================

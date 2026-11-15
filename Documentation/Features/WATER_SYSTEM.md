@@ -1,11 +1,11 @@
 # Water System Architecture
 
-> State as of 2026-11-15 (the hydrology plan's H1 and H2: "Lakes and river reaches" and "A chunk's water columns",
-> under "On a Planet"; the water plan's W1, 2026-11-13: the material paragraphs; its W2: "The water levels"; the rest
-> as of code review CR5, 2026-11-02).
+> State as of 2026-11-15 (the hydrology plan's H1 to H3: "Lakes and river reaches", "A chunk's water columns" and
+> "Lakes and river reaches drawn", under "On a Planet"; the water plan's W1, 2026-11-13: the material paragraphs; its
+> W2: "The water levels"; the rest as of code review CR5, 2026-11-02).
 > Terms: `Documentation/GLOSSARY.md`.
 
-**Module**: VoxelCore (flags, the sea, the water levels), VoxelGeneration (fill pass), VoxelMeshing (water mesher), VoxelStreaming (propagation, tiles, the far ocean), VoxelRendering (rendering)
+**Module**: VoxelCore (flags, the sea, the water levels), VoxelGeneration (fill pass), VoxelMeshing (water mesher), VoxelStreaming (propagation, tiles, the far ocean, the meshes of lakes and river reaches), VoxelRendering (rendering)
 
 ## Table of Contents
 
@@ -38,8 +38,8 @@ The water system renders water surfaces where water-flagged air voxels exist in 
 - One query for every reader of the water: the water levels (`FVoxelWaterLevels`: the sample at a position, the range
   over bounds, the sea)
 - Lakes and river reaches as bodies of the water levels, gathered by bounds from the chunk manager: generation floods
-  them to their own levels on the CPU and the GPU, and every reader but the drawing sees them (the drawing follows
-  in the hydrology plan's H3)
+  them to their own levels on the CPU and the GPU, every reader of the water sees them, and each is drawn by one mesh
+  of its own (the tiles, the far seas and the shell stay the sea's)
 
 ---
 
@@ -356,9 +356,8 @@ underwater class, the far field's and the PCG sampler's surface material are the
 window keeps a column's chunks up to the highest level over it. The water tiles, the far field's sea sections, the far
 ocean and the shell stay the sea's. Generation, the pull and the flood read a level per column ("A chunk's water
 columns", next), so a lake's voxels carry the water flag and the swimmer, who asks the voxel's flag first, swims in
-one. Nothing draws a body yet (H3). Until then, in a world whose sea is on, a lake whose water lies in a chunk layer
-the sea's level reaches adds its columns to the sea's tile, which draws at the sea's level under them: a tile's mask
-is the columns that hold a flagged voxel, in the chunks at or under the sea's level.
+one. A body is drawn by its own mesh ("Lakes and river reaches drawn", below), and a tile's mask holds the sea's
+columns only.
 
 **A chunk's water columns (the hydrology plan's H2, 2026-11-15).** A generation request copies one level, the range
 over the chunk, and that stays so wherever the range is uniform: every chunk of a world with no body, and every chunk
@@ -408,6 +407,52 @@ the sea off, the chunk under a lake; in the editor); `Streaming.Water.PullOrder.
 order with a lake in the sea's place); `Streaming.WaterPropagation.Lake.Plane`, `.Planet` (a streamed world with the
 sea off and a lake: generation against the columns, a dig in the lake's bed fills, a pit outside the footprint stays
 dry, a channel fills as far as the footprint goes).
+
+**Lakes and river reaches drawn (the hydrology plan's H3, 2026-11-15; D147).** Each lake and each river reach is
+drawn by one mesh of its own, made from its record, with an underside; the sea's drawing does not know them.
+
+- **The geometry** (`FVoxelWaterBodyMesh::Build`, VoxelStreaming; no engine object, so a test reads it). A lake on a
+  heightmap world is a level sheet over its footprint's cells, merged into rectangles; on a planet a quad a cell on
+  the sphere of the lake's level, the cells sharing their corners (`FVoxelWaterLake::GetGridPoint`). A river reach is
+  a ribbon: two vertices a reach vertex, half the footprint's width to either side of it at the vertex's surface
+  level, so the ribbon is level across the river and slopes along it as the sample's level does; at a bend the two
+  edges are mitred (to twice the half width at most). The sheet covers the whole footprint: the ground hides it where
+  the ground stands over the level, as the sea's sheet is hidden by a coast. A vertex is an offset from the mesh's
+  origin (the lake's middle, the reach's middle vertex), so the floats stay small on a far body. The first texture
+  coordinate counts voxels (across and along a reach; the grid's two axes on a lake), the second holds the water
+  material id and, on a reach, its flow speed; a reach's tangent is the direction downstream and its normal the local
+  up tilted against the slope. The underside is the top's vertices with the triangles turned and the top's normals,
+  as on the sea sphere.
+- **The components** (`FVoxelWaterBodyMeshOwner`, the chunk manager's `WaterBodyMeshes`): one procedural mesh
+  component a body, the top a section that always shows and the underside one that shows while the camera is under
+  that body's surface inside its footprint (the body's own sample at the camera, as the far seas use the camera and
+  not the streaming viewer). A lake takes the configuration's `WaterMeshMaterial`, a river reach its
+  `RiverMeshMaterial` (the lake's while that is unset). The bodies drawn are those a gather (`Ready`) finds within
+  the far field's distance of the viewer (four chunks at least): they are gathered when the bodies change
+  (`OnWaterBodiesChanged`'s cause) and when the viewer has moved an eighth of that distance, a body whose record is
+  the same keeps its component, and one beyond the distance loses it. Nothing is made on a dedicated server, in an
+  editor world, or with neither material set (`UVoxelChunkManager::DrawsWaterBodies`). `voxel.Water.BodyMeshes 0`
+  hides them; `voxel.Water.Stats` counts them.
+- **The tiles stay the sea's.** A tile's column mask takes a chunk's flagged columns; where the chunk has water
+  columns of its own (a body may reach it), a column counts only when its level is the sea's
+  (`UpdateWaterTileContribution`), so no tile draws under a lake or a river and the sea's tile beside a river mouth is
+  as it was. The far field's sea sections, the far ocean and the shell read the sea alone, as before.
+- **The river's look.** The master water material has a static switch, `RiverFlow` (off on the sea's instances, so
+  their shader is the one without it): with it on the ripples drift along the mesh's tangent, downstream, at the
+  reach's speed from the second texture coordinate (the material's `RiverSpeed` while a reach carries none), at full
+  strength whatever the wind. The instances and the configurations' `RiverMeshMaterial` are made by the parent
+  project's water material script.
+- **Bodies for a look** (`voxel.Water.TestBodies`, development builds): the path of a text file a world reads at its
+  start, a line a lake (flooded from a pit to a level over the cells whose generated ground lies under it) and a
+  block a river reach (its vertices; its bed is added as a lower-only conditioning line through them). The shot
+  script lays the lake and the river reach it photographs this way, until a river and a lake have their actors.
+
+Tests: `Streaming.Water.BodyMesh.Lake`, `.BodyMesh.Reach` (the geometry against the record on a plane and a planet:
+the level at each vertex, the sheet over every footprint cell and no other, the head and the mouth, the planet's
+vertices on the sphere of the level, the winding, the underside); `Streaming.Water.BodyMeshes.Plane`, `.Planet` (a
+streamed world with a lake and a river reach: a mesh a body with its material, the underside by the camera's place,
+the switch, a body kept across a change elsewhere, no tile layer wet in the lake's column while a sea column's is,
+nothing drawn without a material, the dedicated server's rule).
 
 H1 changed no output: no world has a body, a gather with none is the sea's snapshot, and the gates read as the base
 (the plan's H1 result). The cost of the point gather was measured by `Streaming.Water.Bodies.Plane` and `.Planet` in a
@@ -688,7 +733,9 @@ instances `MI_VoxelWater_Demo`, `_Megascans` and `_Cubic` (`/Game/PluginTesting/
 The master: two detail normals scrolled along `MPC_VoxelMaterial`'s `WindDirection` in two cross-faded phases, their
 slope by `RippleStrength` (the weather fills both), fading with distance; shore foam from the water's depth, skipped
 over a swimmer's body by custom depth; from below, no absorption inside Snell's window and an underside colour outside
-it. The parent's `Documentation/WATER_EPIC_PLAN.md` (W1's result) has the look's parameters and the shots.
+it. The parent's `Documentation/WATER_EPIC_PLAN.md` (W1's result) has the look's parameters and the shots. A river
+reach draws with `RiverMeshMaterial`: here an instance `MI_VoxelRiver_Demo`, `_Megascans` or `_Cubic`, a child of the
+world's look with the master's static switch `RiverFlow` on ("Lakes and river reaches drawn").
 
 ### Lumen: Translucency Reflections
 
