@@ -1,6 +1,7 @@
 # GPU Compute Pipeline
 
-> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-15 (the hydrology plan's H2: the water over a column, the column kernels; the rest as of code
+> review CR5, 2026-11-02). Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelGeneration
 **Dependencies**: VoxelCore
@@ -102,6 +103,22 @@ the CPU). Per voxel, in the CPU generator's order:
 3. **Caves**: `GpuCaveCarve` with the biome's overrides and the sea's minimum depth.
 4. **Material**: the blended biome material (dithered in blend zones, G39), underwater materials, height rules, the
    cave-wall override and ore veins.
+
+   **The water over a column** (the hydrology plan's H2; `WATER_SYSTEM.md`, "A chunk's water columns"). Steps 3 and
+   4 compare the column's terrain with the water over it: one level for the chunk (`WaterLevelEnabled`,
+   `WaterLevelHeight`, on a planet `PlanetWaterAltitude`), or, where a lake or a river reach may reach the chunk, the
+   chunk's water columns. The dispatch builds them with the function the CPU generator uses
+   (`FVoxelChunkWaterColumns::Build`, from the bodies the request carries) and uploads them once as
+   `WaterColumnData`, a `StructuredBuffer<float4>` with `WaterColumnsEnabled` set: a row a column on a heightmap world
+   (X + Y x the chunk size), and on a planet, which has no columns, the chunk size's rows of the down-lines' shifts and
+   then a row a down-line (`FVoxelDownLines`, the lines stage 2 walks; `PlanetWaterColumn` finds a voxel's line from the
+   shift rows, `WaterLineAxisA` and `WaterLineForward`). A row is `[the level the terrain is compared with, the level
+   a voxel is compared with, the minimum cave depth in voxels, 0]`: world Z on a heightmap world; on a planet the
+   level as an altitude over the datum and the level less the anchor's distance from the centre, both formed in
+   double; -1e30 where no body covers the column, which fails every comparison. The third value is a lake's minimum
+   cave depth over its footprint and deepens the caves' as a line's does. A chunk with one level uploads nothing: the
+   parameter stands on the line data's buffer and nothing reads it.
+   `VoxelWorlds.Generation.GPUvsCPUWaterBodiesParity` holds the two sides to each other.
 5. Pack density, material, biome and flags into one `uint` per voxel.
 
 ### Stage 2: Post-passes
@@ -112,6 +129,13 @@ thread does per-voxel work after it. Heightmap modes scan world-Z columns (`Wate
 `UndergroundColumnCS`, `UndergroundMarkCS`, `UndergroundApplyCS`); a planet scans digital lines along each chunk's local
 down (`WaterLineSeedCS`, `UndergroundLinesCS`, one thread per line, on the lines `FVoxelDownLines` computes for the CPU
 passes) and floods inside the sea sphere (`WaterFloodSweepRadialCS`).
+
+A chunk with water columns (a lake or a river reach may reach it) runs four other kernels for the water fill, which
+read the same buffer as `WaterColumns` in place of the one level: `WaterColumnSeedColumnsCS` (each column seeds from
+its own level, when that level is not under the chunk), `WaterFloodSweepColumnsCS` (a voxel takes water at or under
+its own column's level), and on a planet `WaterLineSeedColumnsCS` and `WaterFloodSweepRadialColumnsCS` (each
+down-line's own level; `DownLineOf` finds a voxel's line, and every line is walked). The kernels of a chunk with one
+level and their parameters are as they were, so a world with no lake and no river reach dispatches what it did.
 
 ### Stage 3: Readback
 
@@ -124,7 +148,8 @@ value (all air, all rock, open sea) so the chunk can be stored collapsed (G67). 
 ## Parity tests
 
 Generation on the GPU must equal the CPU's within float rounding. The `VoxelWorlds.Generation.GPUvsCPU*Parity` tests
-(`Material`, `BlendDither`, `IslandBowl`, `Caves`, `NoiseType`, `Water`, `OreVariant`, `Spherical`) and
+(`Material`, `BlendDither`, `IslandBowl`, `Caves`, `NoiseType`, `Water`, `OreVariant`, `Spherical`, `ClimateShaping`,
+`Line`, `WaterBodies`) and
 `Generation.GPUNoiseGeneratorAsync` compare whole chunks and log a CRC per case. They need a real RHI: under
 `-nullrhi` they skip themselves, so run them in the editor (the project `CLAUDE.md`, "Running correctness tests").
 

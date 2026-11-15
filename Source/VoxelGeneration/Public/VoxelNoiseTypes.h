@@ -11,6 +11,7 @@
 
 class UVoxelBiomeConfiguration;
 class UVoxelCaveConfiguration;
+class FVoxelWaterLevels;
 
 // Re-export EVoxelNoiseType and FVoxelNoiseParams from VoxelCoreTypes.h
 // These are defined in VoxelCore to avoid circular dependencies with VoxelWorldConfiguration
@@ -122,6 +123,15 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 	 * values; generation compares the sea as the altitude WaterRadius - PlanetRadius, formed in double.
 	 */
 	double WaterRadius = 0.0;
+
+	/**
+	 * The water levels gathered over this chunk where a lake or a river reach may reach it (the hydrology plan's
+	 * section 5.4; UVoxelChunkManager::GatherWaterLevelsForChunk), so one level does not hold over the chunk: the
+	 * generators build the chunk's water columns from it (FVoxelChunkWaterColumns::Build), a level per column or per
+	 * down-line, and read those in place of the three fields above. Null for every other chunk, which generates from
+	 * the one level as it always did. Shared and immutable: a copy of the request shares it.
+	 */
+	TSharedPtr<const FVoxelWaterLevels> WaterBodies;
 
 	// ==================== Terrain Conditioning (Phase 6c) ====================
 

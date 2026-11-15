@@ -70,14 +70,44 @@ struct FVoxelDownLines
 	 */
 	static FVector PlanetChunkDown(const FVoxelNoiseGenerationRequest& Request)
 	{
-		const FVector ChunkCenter = Request.GetChunkWorldPosition() + FVector(0.5 * Request.ChunkSize * Request.VoxelSize);
-		return -FSphericalPlanetWorldMode::GetDirectionFromCenter(ChunkCenter, Request.SphericalPlanetParams.PlanetCenter);
+		return PlanetChunkDown(Request.GetChunkWorldPosition(), Request.ChunkSize, Request.VoxelSize, Request.SphericalPlanetParams.PlanetCenter);
+	}
+
+	/**
+	 * The local down direction at a planet chunk's centre, from the chunk itself (a reader that holds no request: a
+	 * chunk's water columns on the game thread).
+	 *
+	 * @param ChunkWorldPos The chunk's origin corner in world space
+	 * @param InChunkSize Voxels per chunk edge
+	 * @param VoxelSize The base voxel size
+	 * @param PlanetCenter The planet centre
+	 * @return Unit down direction
+	 */
+	static FVector PlanetChunkDown(const FVector& ChunkWorldPos, int32 InChunkSize, float VoxelSize, const FVector& PlanetCenter)
+	{
+		const FVector ChunkCenter = ChunkWorldPos + FVector(0.5 * InChunkSize * VoxelSize);
+		return -FSphericalPlanetWorldMode::GetDirectionFromCenter(ChunkCenter, PlanetCenter);
 	}
 
 	/** Line ids ForEach hands out: [0, NumLines()). Ids span [-ChunkSize, 2 * ChunkSize) on each sheared axis. */
 	int32 NumLines() const
 	{
 		return 9 * ChunkSize * ChunkSize;
+	}
+
+	/**
+	 * The line a voxel of the chunk is on: the id ForEach hands out for it.
+	 *
+	 * @param Local The voxel's local coordinates, each in [0, ChunkSize)
+	 * @return The line's id, in [0, NumLines())
+	 */
+	int32 LineOf(const FIntVector& Local) const
+	{
+		const int32 A = Local[AxisA];
+		const int32 K = bForward ? A : ChunkSize - 1 - A;
+		const int32 B = Local[(AxisA + 1) % 3];
+		const int32 C = Local[(AxisA + 2) % 3];
+		return (B - Shifts[K].X + ChunkSize) + (C - Shifts[K].Y + ChunkSize) * 3 * ChunkSize;
 	}
 
 	/**

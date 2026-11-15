@@ -81,9 +81,9 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 					bEverywhere ? TEXT("over the whole world") : *FString::Printf(TEXT("bounds %s"), *Body.Bounds.ToString()));
 			}
 			const UVoxelChunkManager::FWaterGatherStats G = CM->GetWaterGatherStats();
-			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: %s; the point gather: %lld samples, %lld gathered a place (%d places kept); %lld gathers by bounds"),
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: %s; the point gather: %lld samples, %lld gathered a place (%d places kept); %lld gathers by bounds; %lld generation requests carried bodies (water columns); %lld chunks' columns read by the pull or the flood"),
 				*TargetWorld->GetName(), CM->HasWaterBodies() ? TEXT("lakes or river reaches may lie in the world (a body or a source is registered)") : TEXT("the sea alone (no lake, no river reach, no source)"),
-				G.PointSamples, G.PointGathers, G.PointSnapshots, G.BoxGathers);
+				G.PointSamples, G.PointGathers, G.PointSnapshots, G.BoxGathers, G.ColumnRequests, G.ChunkReaders);
 			if (bColumn)
 			{
 				FVoxelWaterSample Sample;

@@ -15,6 +15,7 @@
 #include "VoxelMaterialRegistry.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelDownLines.h"
+#include "VoxelChunkWaterColumns.h"
 #include "VoxelNoise.h"
 #include "Async/Async.h"
 
@@ -100,6 +101,11 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 
 	OutVoxelData.SetNum(TotalVoxels);
 
+	// The chunk's water columns where a lake or a river reach may reach it (the request carries the bodies): a level
+	// per column or per down-line, read by the density loop and the fill. Empty for every other chunk.
+	FVoxelChunkWaterColumns WaterColumns;
+	FVoxelChunkWaterColumns::Build(Request, WaterColumns);
+
 	// Check world mode and delegate to appropriate generation method
 	if (Request.WorldMode == EWorldMode::InfinitePlane)
 	{
@@ -107,7 +113,7 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 		FWorldModeTerrainParams TerrainParams(Request.SeaLevel, Request.HeightScale, Request.BaseHeight);
 		FInfinitePlaneWorldMode WorldMode(TerrainParams);
 
-		GenerateChunkHeightmap(Request, WorldMode, OutVoxelData);
+		GenerateChunkHeightmap(Request, WorldMode, WaterColumns, OutVoxelData);
 	}
 	else if (Request.WorldMode == EWorldMode::IslandBowl)
 	{
@@ -117,7 +123,7 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 		// The request carries the island params as FVoxelWorldModeFactory built them (absolute centre).
 		FIslandBowlWorldMode WorldMode(TerrainParams, Request.IslandParams);
 
-		GenerateChunkHeightmap(Request, WorldMode, OutVoxelData);
+		GenerateChunkHeightmap(Request, WorldMode, WaterColumns, OutVoxelData);
 	}
 	else if (Request.WorldMode == EWorldMode::SphericalPlanet)
 	{
@@ -126,7 +132,7 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 
 		FSphericalPlanetWorldMode WorldMode(TerrainParams, Request.SphericalPlanetParams);
 
-		GenerateChunkSphericalPlanet(Request, WorldMode, OutVoxelData);
+		GenerateChunkSphericalPlanet(Request, WorldMode, WaterColumns, OutVoxelData);
 	}
 	else
 	{
@@ -135,7 +141,7 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 	}
 
 	// Post-generation: mark water voxels via column scan
-	ApplyWaterFillPass(Request, OutVoxelData);
+	ApplyWaterFillPass(Request, WaterColumns, OutVoxelData);
 
 	// Post-generation: classify underground air (caves, enclosed voids)
 	ApplyUndergroundClassificationPass(Request, OutVoxelData);
@@ -146,6 +152,7 @@ bool FVoxelCPUNoiseGenerator::GenerateChunkCPU(
 void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 	const FVoxelNoiseGenerationRequest& Request,
 	const IVoxelWorldMode& WorldMode,
+	const FVoxelChunkWaterColumns& WaterColumns,
 	TArray<FVoxelData>& OutVoxelData)
 {
 	// The one heightmap body (code review CR2, CORE-23): the plane's and the island's differ only in the height step
@@ -220,6 +227,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 	const bool bLineSurfaces = LineColumns.HasSurfaces();
 	const bool bZones = Request.Conditioning.Zones.Num() > 0;
 	const FVoxelChunkLineSurface NoLineSurface;
+	// The water over each column: the request's one level, or with a lake or a river reach near the column's own row
+	// (FVoxelChunkWaterColumns: the level its terrain is compared with, a lake's minimum cave depth).
+	const bool bWaterColumns = !WaterColumns.IsEmpty();
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
@@ -270,7 +280,19 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 				}
 				// The surface the lines leave at this column: the band's material and depth, the caves' minimum depth.
 				const FVoxelChunkLineSurface& LineSurface = bLineSurfaces ? LineColumns.Surfaces[X + Y * ChunkSize] : NoLineSurface;
-				const float LineCaveDepth = LineSurface.MinCaveDepth;
+				float LineCaveDepth = LineSurface.MinCaveDepth;
+
+				// The water over this column: whether a body covers it, its level, and over a lake's footprint the
+				// lake's minimum cave depth, which deepens the caves' as a line's does.
+				bool bColumnWater = Request.bEnableWaterLevel;
+				float ColumnWaterLevel = Request.WaterLevel;
+				if (bWaterColumns)
+				{
+					const FVector4f& WaterRow = WaterColumns.GetRow(X + Y * ChunkSize);
+					bColumnWater = WaterRow.X != FVoxelChunkWaterColumns::NoWater;
+					ColumnWaterLevel = WaterRow.X;
+					LineCaveDepth = FMath::Max(LineCaveDepth, WaterRow.Z);
+				}
 
 				// Calculate signed distance to surface
 				float SignedDistance = FInfinitePlaneWorldMode::CalculateSignedDistance(
@@ -309,7 +331,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 					float CaveDensity = 0.0f;
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
+						const bool bUnderwater = bColumnWater && TerrainHeight < ColumnWaterLevel;
 						CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, nullptr, LineCaveDepth);
 						if (CaveDensity > 0.0f)
 						{
@@ -319,10 +341,10 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 					}
 
 					// Get material considering blend weights and water level
-					if (Request.bEnableWaterLevel)
+					if (bColumnWater)
 					{
 						MaterialID = BiomeConfig->GetBlendedMaterialWithWater(
-							Blend, DepthBelowSurface, TerrainHeight, Request.WaterLevel, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
+							Blend, DepthBelowSurface, TerrainHeight, ColumnWaterLevel, FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
 					}
 					else
 					{
@@ -383,7 +405,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 					// Cave carving for fallback path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
+						const bool bUnderwater = bColumnWater && TerrainHeight < ColumnWaterLevel;
 						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, BiomeID, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, nullptr, LineCaveDepth);
 						if (CaveDensity > 0.0f)
 						{
@@ -404,7 +426,7 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 					// Cave carving for non-biome path
 					if (Request.bEnableCaves && Density >= VOXEL_SURFACE_THRESHOLD && DepthBelowSurface > 0.0f)
 					{
-						const bool bUnderwater = Request.bEnableWaterLevel && TerrainHeight < Request.WaterLevel;
+						const bool bUnderwater = bColumnWater && TerrainHeight < ColumnWaterLevel;
 						float CaveDensity = CalculateCaveDensity(WorldPos, DepthBelowSurface, 0, Request.CaveConfiguration, Request.NoiseParams.Seed, bUnderwater, nullptr, LineCaveDepth);
 						if (CaveDensity > 0.0f)
 						{
@@ -481,6 +503,7 @@ float FVoxelCPUNoiseGenerator::FBM3D(const FVector& Position, const FVoxelNoiseP
 void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	const FVoxelNoiseGenerationRequest& Request,
 	const FSphericalPlanetWorldMode& WorldMode,
+	const FVoxelChunkWaterColumns& WaterColumns,
 	TArray<FVoxelData>& OutVoxelData)
 {
 	const int32 ChunkSize = Request.ChunkSize;
@@ -526,6 +549,9 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	const bool bLines = LineSegments.Num() > 0;
 	const bool bZones = Request.Conditioning.Zones.Num() > 0;
 	const FVector AnchorDirection = FSphericalPlanetWorldMode::GetDirectionFromCenter(Request.GetPlanetAnchorRelative(), FVector::ZeroVector);
+	// The water over each voxel's down-line: the request's one sea, or with a lake or a river reach near the line's own
+	// row (FVoxelChunkWaterColumns: the level as an altitude, a lake's minimum cave depth). A planet chunk has no columns.
+	const bool bWaterColumns = !WaterColumns.IsEmpty();
 
 	for (int32 Z = 0; Z < ChunkSize; ++Z)
 	{
@@ -588,7 +614,17 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				// (SP-B2; the radius put every surface past the snow line). Caves under the sea keep their underwater
 				// minimum depth (SP-B6).
 				const float Altitude = static_cast<float>(VoxelAltitude);
-				const bool bUnderwater = Request.bEnableWaterLevel && TerrainAltitude < WaterAltitude;
+				bool bLineWater = Request.bEnableWaterLevel;
+				float LineWaterAltitude = static_cast<float>(WaterAltitude);
+				bool bUnderwater = Request.bEnableWaterLevel && TerrainAltitude < WaterAltitude;
+				if (bWaterColumns)
+				{
+					const FVector4f& WaterRow = WaterColumns.GetRowOf(FIntVector(X, Y, Z));
+					bLineWater = WaterRow.X != FVoxelChunkWaterColumns::NoWater;
+					LineWaterAltitude = WaterRow.X;
+					bUnderwater = bLineWater && TerrainAltitude < LineWaterAltitude;
+					LineSurface.MinCaveDepth = FMath::Max(LineSurface.MinCaveDepth, WaterRow.Z);
+				}
 
 				// Save pre-cave density to detect cave carving (solid → air transition)
 				const uint8 PreCaveDensity = Density;
@@ -624,10 +660,10 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 
 					// Get material considering blend weights and water level
 					// For spherical planets: underwater if the terrain's altitude is under the sea's (WM-BP4: altitudes)
-					if (Request.bEnableWaterLevel)
+					if (bLineWater)
 					{
 						MaterialID = BiomeConfig->GetBlendedMaterialWithWater(
-							Blend, DepthBelowSurface, TerrainAltitude, static_cast<float>(WaterAltitude),
+							Blend, DepthBelowSurface, TerrainAltitude, LineWaterAltitude,
 							FVoxelBlendDitherKey(DitherBase + FIntVector(X, Y, Z), DitherSeed));
 					}
 					else

@@ -10,6 +10,7 @@ class FInfinitePlaneWorldMode;
 class FIslandBowlWorldMode;
 class FSphericalPlanetWorldMode;
 struct FSphericalPlanetParams;
+struct FVoxelChunkWaterColumns;
 class UVoxelCaveConfiguration;
 struct FCaveLayerConfig;
 
@@ -96,18 +97,26 @@ private:
 	 * Generate a chunk of a heightmap world mode (InfinitePlane, IslandBowl): 2D noise to a height, the island's edge
 	 * falloff composed on it, biomes, caves and ores by the column's depth. One body for both modes (code review CR2,
 	 * CORE-23); the GPU has one heightmap branch too.
+	 *
+	 * @param WaterColumns The chunk's water columns (FVoxelChunkWaterColumns::Build from the request), empty for a
+	 *        chunk with one level: with them the underwater materials and the caves' minimum depth read each
+	 *        column's own level in place of the request's
 	 */
 	void GenerateChunkHeightmap(
 		const FVoxelNoiseGenerationRequest& Request,
 		const IVoxelWorldMode& WorldMode,
+		const FVoxelChunkWaterColumns& WaterColumns,
 		TArray<FVoxelData>& OutVoxelData);
 
 	/**
 	 * Generate chunk using Spherical Planet world mode (radial terrain on sphere).
+	 *
+	 * @param WaterColumns The chunk's water columns, as GenerateChunkHeightmap takes them: a level per down-line
 	 */
 	void GenerateChunkSphericalPlanet(
 		const FVoxelNoiseGenerationRequest& Request,
 		const FSphericalPlanetWorldMode& WorldMode,
+		const FVoxelChunkWaterColumns& WaterColumns,
 		TArray<FVoxelData>& OutVoxelData);
 
 	// ==================== Cave Generation Helpers ====================
@@ -233,9 +242,16 @@ private:
 
 	// ==================== Water Fill Pass ====================
 
-	/** Post-generation: mark air voxels below water level as water via column scan. */
+	/**
+	 * Post-generation: mark air voxels below water level as water via column scan.
+	 *
+	 * @param WaterColumns The chunk's water columns, empty for a chunk with one level (the request's). With them each
+	 *        column seeds from its own level and the flood passes a voxel at or under its own column's level (the
+	 *        hydrology plan's section 5.4); on a planet, each down-line's
+	 */
 	static void ApplyWaterFillPass(
 		const FVoxelNoiseGenerationRequest& Request,
+		const FVoxelChunkWaterColumns& WaterColumns,
 		TArray<FVoxelData>& OutVoxelData);
 
 	/**
@@ -244,6 +260,7 @@ private:
 	 */
 	static void ApplyRadialWaterFillPass(
 		const FVoxelNoiseGenerationRequest& Request,
+		const FVoxelChunkWaterColumns& WaterColumns,
 		TArray<FVoxelData>& OutVoxelData);
 
 	/** Post-generation: mark air voxels below terrain surface as underground (caves, enclosed voids). */

@@ -15,6 +15,9 @@
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelTerrainConditioning.h"
 #include "VoxelChunkLineSegments.h"
+#include "VoxelChunkWaterColumns.h"
+#include "VoxelConditioningLine.h"
+#include "VoxelWaterLevels.h"
 #include "RenderingThread.h"
 #include "RHI.h"             // GUsingNullRHI: GPU tests skip under -nullrhi
 
@@ -2311,5 +2314,369 @@ bool FVoxelGPUvsCPULineParityTest::RunTest(const FString& Parameters)
 	LineCaves->RemoveFromRoot();
 	TestTrue(TEXT("The lines move every test chunk"), bAllMoved);
 	TestTrue(TEXT("GPU==CPU parity with conditioning lines, plane and planet, across LOD 0/1/2"), bAllPass);
+	return true;
+}
+
+// Lakes and river reaches on the GPU (Documentation/HYDROLOGY_PLAN.md, H2): a chunk's water columns
+// (FVoxelChunkWaterColumns), built from the bodies its request carries, are uploaded as WaterColumnData (the density
+// pass: the underwater materials and the caves' minimum depth per column) and WaterColumns (the post-passes: the seed
+// and the flood per column, or per down-line on a planet), and give what the CPU generator gives from the same list,
+// at LOD 0/1/2. On a plane far from the world's origin: a lake whose footprint ends inside the chunk and whose shore
+// lies inside its footprint, over a sea under the ground; the same lake in a world with the sea off; a lake with a
+// minimum cave depth over a cave layer that opens at the surface; the chunk under a lake; and a river reach on its bed
+// (a lower-only conditioning line from the same vertices), sloping across the chunk. On a planet: a lake and a river
+// reach on its bed at latitude 45, where the down-lines shear, and a lake over the caves. A CPU run without the bodies
+// shows they change the voxels of each chunk (non-vacuous).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUWaterBodiesParityTest, "VoxelWorlds.Generation.GPUvsCPUWaterBodiesParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelGPUvsCPUWaterBodiesParityTest::RunTest(const FString& Parameters)
+{
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+	using namespace VoxelSphericalParity;
+	using EBlend = EVoxelConditioningLineBlend;
+
+	// Underwater materials no biome gives on dry land, so a lake's bed shows in the material channel.
+	auto MakeBiomes = [](bool bContinentalness)
+	{
+		UVoxelBiomeConfiguration* Biomes = NewObject<UVoxelBiomeConfiguration>();
+		Biomes->AddToRoot();
+		Biomes->InitializeDefaults();
+		Biomes->bEnableUnderwaterMaterials = true;
+		for (FBiomeDefinition& Biome : Biomes->Biomes)
+		{
+			Biome.UnderwaterSurfaceMaterial = 20;
+			Biome.UnderwaterSubsurfaceMaterial = 21;
+		}
+		Biomes->bEnableContinentalness = bContinentalness;
+		Biomes->RebuildCaches();
+		Biomes->BuildGpuData();
+		return Biomes;
+	};
+	UVoxelBiomeConfiguration* BiomeConfig = MakeBiomes(false);
+	UVoxelBiomeConfiguration* PlanetBiomes = MakeBiomes(true);
+
+	FVoxelGPUNoiseGenerator GPUGenerator;
+	GPUGenerator.Initialize();
+	FVoxelCPUNoiseGenerator CPUGenerator;
+	CPUGenerator.Initialize();
+
+	struct FSite
+	{
+		FString Name;
+		FVoxelNoiseGenerationRequest Request;
+		/** How many voxels the bodies must change on the CPU (0: a chunk under a body, which may hold none of its water) */
+		int32 MinChanged = 50;
+		/** How many voxels must hold the water flag with the bodies */
+		int32 MinWater = 200;
+	};
+	TArray<FSite> Sites;
+	const float VoxelSize = 75.0f;
+	const int32 ChunkSize = 32;
+	const double ChunkWorldSize = ChunkSize * VoxelSize;
+	const float BedHalfWidth = 3.0f * VoxelSize;
+	const float BedFalloff = 4.0f * VoxelSize;
+	const double Spacing = 2.0 * VoxelSize;
+
+	// A cave layer that opens at the surface and carves about half the ground: what a lake's minimum cave depth holds back.
+	UVoxelCaveConfiguration* Caves = NewObject<UVoxelCaveConfiguration>();
+	Caves->AddToRoot();
+	Caves->bEnableCaves = true;
+	Caves->UnderwaterMinDepth = 0.0f;
+	Caves->BiomeOverrides.Empty();
+	Caves->CaveLayers.Empty();
+	{
+		FCaveLayerConfig Cheese;
+		Cheese.bEnabled = true;
+		Cheese.CaveType = ECaveType::Cheese;
+		Cheese.SeedOffset = 977;
+		Cheese.Frequency = 0.0022f; Cheese.Octaves = 2; Cheese.Persistence = 0.5f; Cheese.Lacunarity = 2.0f;
+		Cheese.Threshold = -0.05f; Cheese.CarveStrength = 1.0f; Cheese.CarveFalloff = 0.2f;
+		Cheese.MinDepth = 2.0f; Cheese.MaxDepth = 0.0f; Cheese.DepthFadeWidth = 2.0f; Cheese.VerticalScale = 1.0f;
+		Caves->CaveLayers.Add(Cheese);
+	}
+
+	// The water levels a chunk's request carries: the sea and the bodies, over the chunk's box.
+	auto Carry = [](FVoxelNoiseGenerationRequest& Request, const FVoxelSeaSurface& Sea, const FVoxelWaterFrame& Frame, TArray<FVoxelWaterBody> Bodies)
+	{
+		const FVector Min = Request.GetChunkWorldPosition();
+		Request.WaterBodies = MakeShared<const FVoxelWaterLevels>(FVoxelWaterLevels::Make(Sea, Frame,
+			FBox(Min, Min + FVector(Request.ChunkSize * Request.VoxelSize)), MoveTemp(Bodies)));
+	};
+
+	// ---- The plane, its grid origin 1,000 km from the world's, a sea at 300 under its ground.
+	const FVector PlaneOrigin(1.0e6 + 37.5, -2.0e6 + 112.5, 0.0);
+	const float PlaneSeaLevel = 300.0f;
+	auto MakePlaneRequest = [&](const FIntVector& ChunkCoord, bool bSea)
+	{
+		FVoxelNoiseGenerationRequest Request;
+		Request.ChunkCoord = ChunkCoord;
+		Request.ChunkSize = ChunkSize;
+		Request.VoxelSize = VoxelSize;
+		Request.WorldOrigin = PlaneOrigin;
+		Request.NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+		Request.NoiseParams.Seed = 4325;
+		Request.NoiseParams.Frequency = 0.0006f;
+		Request.NoiseParams.Octaves = 4;
+		Request.NoiseParams.Lacunarity = 2.0f;
+		Request.NoiseParams.Persistence = 0.5f;
+		Request.WorldMode = EWorldMode::InfinitePlane;
+		Request.SeaLevel = 0.0f;
+		Request.HeightScale = 1400.0f;
+		Request.BaseHeight = 1200.0f;
+		Request.bEnableBiomes = true;
+		Request.BiomeConfiguration = BiomeConfig;
+		Request.bEnableWaterLevel = bSea;
+		Request.WaterLevel = bSea ? PlaneSeaLevel : 0.0f;
+		return Request;
+	};
+	const FVoxelWaterFrame PlaneFrame;
+	const FVoxelSeaSurface PlaneSea = FVoxelSeaSurface::MakePlane(PlaneSeaLevel);
+	{
+		// Chunk (3, 1, 0): X 7,200 to 9,600, Y 2,400 to 4,800, Z 0 to 2,400 from the grid origin. The lake's footprint:
+		// 10 x 10 cells of 150 uu from (7,650, 2,850), so it ends inside the chunk on every side.
+		const FIntVector Chunk(3, 1, 0);
+		const FVector2D FootMin(7650.0, 2850.0);
+		const double FootSize = 1500.0;
+		const TSharedRef<const FVoxelWaterLake> Footprint = FVoxelWaterLake::Make(FVector2D(PlaneOrigin.X + FootMin.X, PlaneOrigin.Y + FootMin.Y),
+			150.0, FIntPoint(10, 10), TBitArray<>(true, 100));
+
+		// The lake's level: over the median ground of the footprint's columns by a fraction of a voxel, so about half of
+		// them hold water and the shore lies inside the footprint. The ground is read from a CPU run without water.
+		TArray<FVoxelData> Dry;
+		CPUGenerator.GenerateChunkCPU(MakePlaneRequest(Chunk, false), Dry);
+		TArray<int32> Tops;
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			for (int32 X = 0; X < ChunkSize; ++X)
+			{
+				const FVector2D P(Chunk.X * ChunkWorldSize + X * VoxelSize, Chunk.Y * ChunkWorldSize + Y * VoxelSize);
+				if (P.X < FootMin.X || P.X >= FootMin.X + FootSize || P.Y < FootMin.Y || P.Y >= FootMin.Y + FootSize)
+				{
+					continue;
+				}
+				int32 Top = 0;
+				for (int32 Z = ChunkSize - 1; Z >= 0; --Z)
+				{
+					if (Dry[X + Y * ChunkSize + Z * ChunkSize * ChunkSize].IsSolid())
+					{
+						Top = Z;
+						break;
+					}
+				}
+				Tops.Add(Top);
+			}
+		}
+		Tops.Sort();
+		const double LakeLevel = Chunk.Z * ChunkWorldSize + (Tops[Tops.Num() / 2] + 1.4) * VoxelSize;
+		AddInfo(FString::Printf(TEXT("Plane lake: %d columns in the footprint, ground tops %d to %d voxels (median %d), level %.1f"),
+			Tops.Num(), Tops[0], Tops.Last(), Tops[Tops.Num() / 2], LakeLevel));
+		auto Lake = [&](float MinCaveDepth) { return FVoxelWaterBody::MakeLake(21, LakeLevel, Footprint, PlaneFrame, 3000.0, MinCaveDepth); };
+
+		FSite& Plain = Sites.AddDefaulted_GetRef();
+		Plain.Name = TEXT("Water plane lake, its shore and its footprint's edge in the chunk");
+		Plain.Request = MakePlaneRequest(Chunk, true);
+		Carry(Plain.Request, PlaneSea, PlaneFrame, { Lake(0.0f) });
+
+		FSite& NoSea = Sites.AddDefaulted_GetRef();
+		NoSea.Name = TEXT("Water plane lake in a world with the sea off");
+		NoSea.Request = MakePlaneRequest(Chunk, false);
+		Carry(NoSea.Request, FVoxelSeaSurface(), PlaneFrame, { Lake(0.0f) });
+
+		FSite& Cave = Sites.AddDefaulted_GetRef();
+		Cave.Name = TEXT("Water plane lake with a minimum cave depth over caves");
+		Cave.Request = MakePlaneRequest(Chunk, true);
+		Cave.Request.bEnableCaves = true;
+		Cave.Request.CaveConfiguration = Caves;
+		Carry(Cave.Request, PlaneSea, PlaneFrame, { Lake(12.0f) });
+
+		FSite& Under = Sites.AddDefaulted_GetRef();
+		Under.Name = TEXT("Water plane chunk under the lake, over caves");
+		Under.Request = MakePlaneRequest(Chunk + FIntVector(0, 0, -1), true);
+		Under.Request.bEnableCaves = true;
+		Under.Request.CaveConfiguration = Caves;
+		Carry(Under.Request, PlaneSea, PlaneFrame, { Lake(12.0f) });
+		Under.MinChanged = 0;
+		Under.MinWater = 0;
+
+		// A river reach across the chunk on its bed: the bed a lower-only line 2.5 voxels under the surface, the reach's
+		// footprint the bed's half width and its falloff, the surface falling 400 uu along it.
+		FVoxelConditioningLineParams BedParams;
+		BedParams.FalloffWidth = BedFalloff;
+		BedParams.Blend = EBlend::LowerOnly;
+		BedParams.Id = 1;
+		TArray<FVoxelWaterReachVertex> ReachVertices;
+		const FVector2D A(6600.0, 1900.0), B(10200.0, 5300.0);
+		const int32 Steps = FMath::CeilToInt32((B - A).Size() / Spacing);
+		for (int32 Step = 0; Step <= Steps; ++Step)
+		{
+			const double T = static_cast<double>(Step) / Steps;
+			const FVector2D P = FMath::Lerp(A, B, T);
+			const double Surface = FMath::Lerp(1500.0, 1100.0, T);
+			const FVector Position(PlaneOrigin.X + P.X, PlaneOrigin.Y + P.Y, 0.0);
+			BedParams.Vertices.Add(FVoxelConditioningLineVertex(Position, static_cast<float>(Surface - 2.5 * VoxelSize), BedHalfWidth));
+			ReachVertices.Add(FVoxelWaterReachVertex(Position, Surface - 2.5 * VoxelSize, Surface, BedHalfWidth + BedFalloff));
+		}
+		FSite& River = Sites.AddDefaulted_GetRef();
+		River.Name = TEXT("Water plane river reach on its bed");
+		River.Request = MakePlaneRequest(Chunk, true);
+		River.Request.Conditioning.Lines.Add(FVoxelConditioningLine::Make(BedParams));
+		Carry(River.Request, PlaneSea, PlaneFrame, { FVoxelWaterBody::MakeReach(22, FVoxelWaterReach::Make(ReachVertices, false, 150.0f), PlaneFrame) });
+	}
+
+	// ---- The planet: Review_Planet's size and terrain, off the world origin, biomes and a sea 500 under the datum.
+	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+	Config->AddToRoot();
+	Config->WorldMode = EWorldMode::SphericalPlanet;
+	Config->WorldOrigin = FVector(12345.0, 54321.0, 0.0);
+	Config->WorldRadius = Radius;
+	Config->PlanetHeightScale = 6000.0f;
+	Config->BaseHeight = 0.0f;
+	Config->PlanetMaxTerrainHeight = 6500.0f;
+	Config->PlanetMaxTerrainDepth = 6500.0f;
+	Config->VoxelSize = VoxelSize;
+	Config->ChunkSize = ChunkSize;
+	Config->NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	Config->NoiseParams.Seed = 248675;
+	Config->NoiseParams.Octaves = 3;
+	Config->NoiseParams.Frequency = 0.000025f;
+	Config->NoiseParams.Lacunarity = 1.681f;
+	Config->NoiseParams.Persistence = 0.5f;
+	Config->BiomeConfiguration = PlanetBiomes;
+	Config->bEnableBiomes = true;
+	Config->bEnableCaves = false;
+	Config->bEnableWaterLevel = true;
+	Config->WaterRadius = WaterRadius;
+	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
+	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*Mode);
+	const FVector Origin = Config->WorldOrigin;
+	const FVoxelWaterLevels PlanetSeaLevels = FVoxelWaterLevels::FromConfig(*Config);
+	const FVoxelWaterFrame PlanetFrame = PlanetSeaLevels.GetFrame();
+	auto MakePlanetRequest = [&](const FIntVector& ChunkCoord)
+	{
+		FVoxelNoiseGenerationRequest Request;
+		Request.ChunkCoord = ChunkCoord;
+		Request.ChunkSize = Config->ChunkSize;
+		Request.VoxelSize = Config->VoxelSize;
+		Request.NoiseParams = Config->NoiseParams;
+		FVoxelWorldModeFactory::FillGenerationRequest(*Config, Request);
+		Request.bEnableBiomes = true;
+		Request.BiomeConfiguration = Config->BiomeConfiguration;
+		Request.bEnableWaterLevel = true;
+		Request.WaterRadius = Config->WaterRadius;
+		return Request;
+	};
+	auto ChunkAt = [&](const FVector& WorldPos)
+	{
+		const FVector Local = (WorldPos - Origin) / ChunkWorldSize;
+		return FIntVector(FMath::FloorToInt(Local.X), FMath::FloorToInt(Local.Y), FMath::FloorToInt(Local.Z));
+	};
+	{
+		// Latitude 45, where a chunk's down-lines shear: a lake 12 x 12 cells of 150 uu around the site, its level a
+		// little over the site's ground, in the chunk that holds the level there.
+		const FVector Dir45 = LatLonDirection(45.0, 3.0);
+		const double Natural = Planet.GetTerrainAltitude(Dir45, Config->NoiseParams);
+		const double LakeLevel = Radius + Natural + 130.4;
+		const TSharedRef<const FVoxelWaterLake> Footprint = FVoxelWaterLake::MakeOnSphere(Dir45, Radius, 150.0, FIntPoint(12, 12), TBitArray<>(true, 144));
+		const FIntVector LakeChunk = ChunkAt(Origin + Dir45 * LakeLevel);
+		auto Lake = [&](float MinCaveDepth) { return FVoxelWaterBody::MakeLake(31, LakeLevel, Footprint, PlanetFrame, 3000.0, MinCaveDepth); };
+		AddInfo(FString::Printf(TEXT("Planet lake: ground %.1f over the datum at the site, level %.1f over it, chunk (%d, %d, %d)"),
+			Natural, LakeLevel - Radius, LakeChunk.X, LakeChunk.Y, LakeChunk.Z));
+
+		FSite& Plain = Sites.AddDefaulted_GetRef();
+		Plain.Name = TEXT("Water planet lake at latitude 45");
+		Plain.Request = MakePlanetRequest(LakeChunk);
+		Carry(Plain.Request, PlanetSeaLevels.GetSea(), PlanetFrame, { Lake(0.0f) });
+
+		FSite& Cave = Sites.AddDefaulted_GetRef();
+		Cave.Name = TEXT("Water planet lake with a minimum cave depth over caves");
+		Cave.Request = MakePlanetRequest(LakeChunk);
+		Cave.Request.bEnableCaves = true;
+		Cave.Request.CaveConfiguration = Caves;
+		Carry(Cave.Request, PlanetSeaLevels.GetSea(), PlanetFrame, { Lake(12.0f) });
+
+		// A river reach through the site on its bed, falling 300 uu over 4,800 along an arc diagonal to the chunk grid.
+		const FVector Toward = FVector(0.3, 1.0, 0.6).GetSafeNormal();
+		const FVector Tangent = (Toward - Dir45 * FVector::DotProduct(Toward, Dir45)).GetSafeNormal();
+		FVoxelConditioningLineParams BedParams;
+		BedParams.bRadial = true;
+		BedParams.FalloffWidth = BedFalloff;
+		BedParams.Blend = EBlend::LowerOnly;
+		TArray<FVoxelWaterReachVertex> ReachVertices;
+		const int32 HalfSteps = 16;
+		for (int32 Step = -HalfSteps; Step <= HalfSteps; ++Step)
+		{
+			const double Angle = Step * Spacing / Radius;
+			const FVector Direction = (Dir45 * FMath::Cos(Angle) + Tangent * FMath::Sin(Angle)).GetSafeNormal();
+			const double SurfaceAltitude = Natural + FMath::Lerp(150.0, -150.0, 0.5 + 0.5 * Step / HalfSteps);
+			BedParams.Vertices.Add(FVoxelConditioningLineVertex(Direction, static_cast<float>(SurfaceAltitude - 2.5 * VoxelSize), BedHalfWidth));
+			ReachVertices.Add(FVoxelWaterReachVertex(Direction, Radius + SurfaceAltitude - 2.5 * VoxelSize, Radius + SurfaceAltitude, BedHalfWidth + BedFalloff));
+		}
+		FSite& River = Sites.AddDefaulted_GetRef();
+		River.Name = TEXT("Water planet river reach on its bed");
+		River.Request = MakePlanetRequest(ChunkAt(Origin + Dir45 * (Radius + Natural)));
+		River.Request.Conditioning.Lines.Add(FVoxelConditioningLine::Make(BedParams));
+		Carry(River.Request, PlanetSeaLevels.GetSea(), PlanetFrame, { FVoxelWaterBody::MakeReach(32, FVoxelWaterReach::Make(ReachVertices, true, 150.0f), PlanetFrame) });
+	}
+
+	// Non-vacuous: the bodies change each chunk's voxels on the CPU (flags, or materials under the water), put water in
+	// it, and each chunk builds a list of water columns.
+	bool bAllChanged = true;
+	for (const FSite& Site : Sites)
+	{
+		FVoxelNoiseGenerationRequest Without = Site.Request;
+		Without.WaterBodies.Reset();
+		TArray<FVoxelData> With, Bare;
+		CPUGenerator.GenerateChunkCPU(Site.Request, With);
+		CPUGenerator.GenerateChunkCPU(Without, Bare);
+		int32 Differ = 0;
+		for (int32 Index = 0; Index < With.Num() && Index < Bare.Num(); ++Index)
+		{
+			Differ += (With[Index].Density != Bare[Index].Density || With[Index].MaterialID != Bare[Index].MaterialID
+				|| With[Index].Metadata != Bare[Index].Metadata) ? 1 : 0;
+		}
+		const FCounts WithCounts = Count(With);
+		const FCounts BareCounts = Count(Bare);
+		FVoxelChunkWaterColumns Columns;
+		FVoxelChunkWaterColumns::Build(Site.Request, Columns);
+		int32 Covered = 0;
+		for (int32 Column = 0; Column < Columns.NumColumns(); ++Column)
+		{
+			Covered += Columns.GetRow(Column).Y != FVoxelChunkWaterColumns::NoWater ? 1 : 0;
+		}
+		AddInfo(FString::Printf(TEXT("%s: chunk (%d, %d, %d), %d water columns (%d with a level), %d voxels changed by the bodies, water %d against %d without, underwater materials %d against %d, underground air %d against %d"),
+			*Site.Name, Site.Request.ChunkCoord.X, Site.Request.ChunkCoord.Y, Site.Request.ChunkCoord.Z, Columns.NumColumns(), Covered, Differ,
+			WithCounts.Water, BareCounts.Water, WithCounts.UnderwaterMaterial, BareCounts.UnderwaterMaterial, WithCounts.UndergroundAir, BareCounts.UndergroundAir));
+		if (Columns.IsEmpty() || Covered == 0 || Differ < Site.MinChanged || WithCounts.Water < Site.MinWater)
+		{
+			AddError(FString::Printf(TEXT("%s: the bodies do not change the chunk as meant (%d columns, %d with a level, %d voxels changed, %d water)"),
+				*Site.Name, Columns.NumColumns(), Covered, Differ, WithCounts.Water));
+			bAllChanged = false;
+		}
+	}
+	CPUGenerator.Shutdown();
+
+	VoxelParityHarness::FParityThresholds Thresholds;
+	Thresholds.DensityClose = 99.5f;
+	Thresholds.Mat = 99.0f;
+	Thresholds.Biome = 99.9f;
+	Thresholds.Meta = 99.9f;
+	Thresholds.MatWhenDensEq = 99.5f;
+	bool bAllPass = true;
+	for (const FSite& Site : Sites)
+	{
+		if (!VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Site.Request, *Site.Name, Thresholds))
+		{
+			bAllPass = false;
+		}
+	}
+
+	GPUGenerator.Shutdown();
+	BiomeConfig->RemoveFromRoot();
+	PlanetBiomes->RemoveFromRoot();
+	Config->RemoveFromRoot();
+	Caves->RemoveFromRoot();
+	TestTrue(TEXT("The bodies change every test chunk"), bAllChanged);
+	TestTrue(TEXT("GPU==CPU parity with a lake and a river reach, plane and planet, across LOD 0/1/2"), bAllPass);
 	return true;
 }

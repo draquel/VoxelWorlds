@@ -1699,4 +1699,343 @@ bool FVoxelWaterUndoPlanetTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// The hydrology plan's H2 (Documentation/HYDROLOGY_PLAN.md, sections 5.4 and 5.10; D149): a lake in a streamed world.
+//
+// - Streaming.WaterPropagation.Lake.Plane / .Planet: a small world with the sea off and a lake added when it starts:
+//   a footprint of 9 x 9 cells of 200 uu around a site with the 3 x 3 cells in its middle left out (a dry well: its
+//   ground lies under the lake's level, and no level holds over it), the level 8 voxels over the site's ground. The
+//   world streams on the CPU. Generation: the chunks hold flagged water, every wet voxel is air at or under the level
+//   over its own column (UVoxelChunkManager::IsVoxelUnderWater, the chunk's water columns), no dry air under its
+//   column's level touches water (the pull's closure, across chunk faces too), the columns of the well hold none though
+//   air under the lake's level stands in them, and a voxel in the lake reads as water (what the swimmer asks first).
+//   The flood: it exists with the sea off; a shaft dug into the lake's bed and a player's dig on it fill; a pit dug in
+//   the well stays dry beside the water standing round it; and a channel dug from the lake into the well fills as far
+//   as the footprint goes and stays dry past it. Nothing changes but by taking the flag.
+// ---------------------------------------------------------------------------
+
+namespace VoxelWaterPropagationTest
+{
+	void RunLake(FAutomationTestBase& Test, bool bPlanet)
+	{
+		const FString Name = bPlanet ? TEXT("Planet") : TEXT("Plane");
+		VoxelTesting::FTestChunkWorld W;
+		W.Create(bPlanet ? TEXT("VoxelLakeFloodPlanetWorld") : TEXT("VoxelLakeFloodPlaneWorld"));
+		if (bPlanet)
+		{
+			W.ConfigureSmallPlanet();
+		}
+		else
+		{
+			W.ConfigureSmallPlane();
+			W.Config->WorldOrigin = FVector(13.0, -21.0, 7.0); // off the voxel grid by a fraction of a voxel
+		}
+		W.Config->bEnableWaterLevel = false; // no sea: the lake alone
+		W.StartManager();
+		UVoxelChunkManager* Manager = W.Manager;
+		const float VS = W.Config->VoxelSize;
+		const int32 CS = W.Config->ChunkSize;
+		const FVoxelWaterFrame Frame = Manager->GetWaterLevels().GetFrame();
+
+		// The site: a point of the ground, its local up and two directions along the surface.
+		const FVector Site = bPlanet ? Manager->GetGeneratedSurfacePoint(Frame.Center + FVector(0.5, 0.3, 0.8).GetSafeNormal() * Frame.DatumRadius)
+			: Manager->GetGeneratedSurfacePoint(FVector(2300.0, -1700.0, 0.0));
+		const FVector Up = Manager->GetUpVectorAt(Site);
+		const FVector East = bPlanet ? FVector::CrossProduct(FVector::UpVector, Up).GetSafeNormal() : FVector::ForwardVector;
+		const FVector North = FVector::CrossProduct(Up, East);
+		const double SiteHeight = Frame.HeightOf(Site);
+		const double LakeLevel = SiteHeight + 8.0 * VS + 0.37 * VS; // between two voxel layers
+		// A point Along and Across the surface from the site, at a height in the frame's terms.
+		const auto At = [&](double Along, double Across, double Height)
+		{
+			if (!bPlanet)
+			{
+				return FVector(Site.X + Along, Site.Y + Across, Height);
+			}
+			return Frame.Center + (Up * Frame.DatumRadius + East * Along + North * Across).GetSafeNormal() * Height;
+		};
+		// The ground's height at a point Along and Across from the site.
+		const auto GroundAt = [&](double Along, double Across)
+		{
+			return Frame.HeightOf(Manager->GetGeneratedSurfacePoint(At(Along, Across, SiteHeight)));
+		};
+
+		// The footprint: 9 x 9 cells of 200 uu, the 3 x 3 in the middle left out.
+		TBitArray<> Cells(true, 81);
+		for (int32 Y = 3; Y <= 5; ++Y)
+		{
+			for (int32 X = 3; X <= 5; ++X)
+			{
+				Cells[Y * 9 + X] = false;
+			}
+		}
+		const TSharedRef<const FVoxelWaterLake> Footprint = bPlanet
+			? FVoxelWaterLake::MakeOnSphere(Up, Frame.DatumRadius, 200.0, FIntPoint(9, 9), Cells)
+			: FVoxelWaterLake::Make(FVector2D(Site.X - 900.0, Site.Y - 900.0), 200.0, FIntPoint(9, 9), Cells);
+		Manager->AddWaterBody(FVoxelWaterBody::MakeLake(41, LakeLevel, Footprint, Frame, 3000.0));
+		Test.TestTrue(*FString::Printf(TEXT("%s: a world with the sea off and a lake has the edit-driven flood"), *Name), Manager->GetWaterPropagation() != nullptr);
+		Test.TestEqual(*FString::Printf(TEXT("%s: a lake added at the world's start is not late"), *Name), Manager->GetNumLateConditioningSources(), 0);
+
+		W.SetViewer(Site + Up * 300.0);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the world settles"), *Name), SettleWater(W));
+
+		// ---- Generation: every loaded voxel against the level over its own column.
+		TArray<FIntVector> Loaded;
+		Manager->GetLoadedChunks(Loaded);
+		TMap<FIntVector, TSharedPtr<const TArray<FVoxelData>>> Voxels;
+		for (const FIntVector& Coord : Loaded)
+		{
+			if (TSharedPtr<const TArray<FVoxelData>> Snapshot = Manager->GetVoxelSnapshot(Coord))
+			{
+				Voxels.Add(Coord, Snapshot);
+			}
+		}
+		const auto WetAt = [&](const FIntVector& Global, bool& bOutLoaded, bool& bOutAir)
+		{
+			const FIntVector Chunk(FMath::FloorToInt32(static_cast<double>(Global.X) / CS), FMath::FloorToInt32(static_cast<double>(Global.Y) / CS),
+				FMath::FloorToInt32(static_cast<double>(Global.Z) / CS));
+			const TSharedPtr<const TArray<FVoxelData>>* Data = Voxels.Find(Chunk);
+			bOutLoaded = Data != nullptr;
+			if (!Data)
+			{
+				bOutAir = false;
+				return false;
+			}
+			const FIntVector L = Global - Chunk * CS;
+			const FVoxelData& Voxel = (**Data)[L.X + L.Y * CS + L.Z * CS * CS];
+			bOutAir = Voxel.IsAir();
+			return Voxel.IsAir() && Voxel.HasWaterFlag();
+		};
+		static const FIntVector Steps[6] = { {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1} };
+		int64 Wet = 0, WetNotAir = 0, WetOverLevel = 0, DryBesideWater = 0, WetBySample = 0, WetInWell = 0, WellAirUnderLevel = 0;
+		for (const TPair<FIntVector, TSharedPtr<const TArray<FVoxelData>>>& Pair : Voxels)
+		{
+			const TArray<FVoxelData>& Data = *Pair.Value;
+			for (int32 Index = 0; Index < Data.Num(); ++Index)
+			{
+				const FIntVector Local(Index % CS, (Index / CS) % CS, Index / (CS * CS));
+				const FIntVector Global = Pair.Key * CS + Local;
+				const FVoxelData& Voxel = Data[Index];
+				const FVector Position = W.Config->WorldOrigin + FVector(Global) * VS;
+				// The well's middle: 150 uu or more inside it on every side (a planet's lines wander a voxel or two).
+				const FVector Offset = Position - Site;
+				const bool bInWell = FMath::Abs(FVector::DotProduct(Offset, East)) < 150.0 && FMath::Abs(FVector::DotProduct(Offset, North)) < 150.0;
+				if (bInWell && Voxel.IsAir() && Frame.HeightOf(Position) <= LakeLevel)
+				{
+					++WellAirUnderLevel;
+					WetInWell += Voxel.HasWaterFlag() ? 1 : 0;
+				}
+				if (!Voxel.HasWaterFlag())
+				{
+					continue;
+				}
+				++Wet;
+				WetNotAir += Voxel.IsAir() ? 0 : 1;
+				const bool bUnder = Manager->IsVoxelUnderWater(Pair.Key, Local);
+				WetOverLevel += bUnder ? 0 : 1;
+				FVoxelWaterSample Sample;
+				WetBySample += (Manager->SampleWater(Position, Sample) && Sample.Kind == EVoxelWaterBodyKind::Lake && Sample.Depth >= -0.01) ? 1 : 0;
+				// The closure: no dry air at or under its own column's level beside this water.
+				for (const FIntVector& Step : Steps)
+				{
+					const FIntVector Next = Global + Step;
+					bool bLoaded = false, bAir = false;
+					if (!WetAt(Next, bLoaded, bAir) && bLoaded && bAir)
+					{
+						const FIntVector NextChunk(FMath::FloorToInt32(static_cast<double>(Next.X) / CS), FMath::FloorToInt32(static_cast<double>(Next.Y) / CS),
+							FMath::FloorToInt32(static_cast<double>(Next.Z) / CS));
+						DryBesideWater += Manager->IsVoxelUnderWater(NextChunk, Next - NextChunk * CS) ? 1 : 0;
+					}
+				}
+			}
+		}
+		const UVoxelChunkManager::FWaterGatherStats Gather = Manager->GetWaterGatherStats();
+		Test.AddInfo(FString::Printf(TEXT("%s: %d chunks, %lld wet voxels (%lld of them over the lake by the point gather's own sample), %lld dry voxels under their column's level beside water; the well holds %lld air voxels under the lake's level, %lld of them wet; %lld requests carried the lake, %lld chunks' columns read by the pull"),
+			*Name, Voxels.Num(), Wet, WetBySample, DryBesideWater, WellAirUnderLevel, WetInWell, Gather.ColumnRequests, Gather.ChunkReaders));
+		Test.TestTrue(*FString::Printf(TEXT("%s: the lake holds flagged water (non-vacuous)"), *Name), Wet > 800);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the chunks the lake reaches generated from its levels"), *Name), Gather.ColumnRequests > 0);
+		Test.TestEqual(*FString::Printf(TEXT("%s: only air is wet"), *Name), WetNotAir, static_cast<int64>(0));
+		Test.TestEqual(*FString::Printf(TEXT("%s: every wet voxel is at or under the level over its own column"), *Name), WetOverLevel, static_cast<int64>(0));
+		Test.TestEqual(*FString::Printf(TEXT("%s: no dry air under its column's level touches the water"), *Name), DryBesideWater, static_cast<int64>(0));
+		// On a plane a column is a column: the sample agrees for every voxel. On a planet a down-line wanders from the
+		// radial by a voxel or two across a chunk of this small planet, so a few voxels along the footprint's edges differ.
+		Test.TestTrue(*FString::Printf(TEXT("%s: the wet voxels lie in the lake by the point gather too"), *Name),
+			bPlanet ? WetBySample >= Wet * 9 / 10 : WetBySample == Wet);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the well holds air under the lake's level (non-vacuous)"), *Name), WellAirUnderLevel > 100);
+		Test.TestEqual(*FString::Printf(TEXT("%s: the well, outside the footprint, holds no water"), *Name), WetInWell, static_cast<int64>(0));
+
+		// ---- A place in the lake: the lowest ground on a ring 500 uu from the site (in the footprint), three voxels or
+		// more under the level. A voxel of its water reads as water: what the swimmer asks first.
+		double BestAlong = 0.0, BestAcross = 0.0, BestGround = TNumericLimits<double>::Max();
+		for (int32 Step = 0; Step < 16; ++Step)
+		{
+			const double Angle = Step * UE_DOUBLE_TWO_PI / 16.0;
+			// On the footprint's ring, clear of its corners' cells and of the well: 450 to 650 from the site on one axis.
+			const double Along = 550.0 * FMath::Cos(Angle), Across = 550.0 * FMath::Sin(Angle);
+			if (FMath::Max(FMath::Abs(Along), FMath::Abs(Across)) < 450.0)
+			{
+				continue;
+			}
+			const double Ground = GroundAt(Along, Across);
+			if (Ground < BestGround)
+			{
+				BestGround = Ground;
+				BestAlong = Along;
+				BestAcross = Across;
+			}
+		}
+		if (!Test.TestTrue(*FString::Printf(TEXT("%s: the lake is three voxels deep or more somewhere on its ring"), *Name), LakeLevel - BestGround >= 3.0 * VS))
+		{
+			return;
+		}
+		const FVector InLake = At(BestAlong, BestAcross, BestGround + 1.5 * VS);
+		Test.TestTrue(*FString::Printf(TEXT("%s: a voxel in the lake holds the water flag"), *Name), IsWater(Merged(W, KeyOf(W, InLake))));
+
+		// The region the digs touch, captured before them.
+		TSet<FIntVector> RegionSet;
+		for (const FIntVector& Key : Ball(W, At(BestAlong, BestAcross, BestGround), 10.0f))
+		{
+			RegionSet.Add(Key);
+		}
+		for (const FIntVector& Key : Ball(W, At(0.0, 0.0, SiteHeight), 14.0f))
+		{
+			RegionSet.Add(Key);
+		}
+		const TArray<FIntVector> Region = RegionSet.Array();
+		TMap<FIntVector, FVoxelData> Before = Capture(W, Region);
+		const FVoxelData DugAir = FVoxelData(EVoxelMaterial::Stone, 40, 0, 0);
+		const auto MakeDug = [&](const FIntVector&) { return DugAir; };
+		const auto UnderLevel = [&](const FIntVector& Key)
+		{
+			const FIntVector Chunk(FMath::FloorToInt32(static_cast<double>(Key.X) / CS), FMath::FloorToInt32(static_cast<double>(Key.Y) / CS),
+				FMath::FloorToInt32(static_cast<double>(Key.Z) / CS));
+			return Manager->IsVoxelUnderWater(Chunk, Key - Chunk * CS);
+		};
+
+		// A. A shaft into the lake's bed: a system edit of single voxels, four voxels down from the bed. A voxel wide
+		// each way round its line, so its voxels touch by their faces whatever the line's direction on the grid (the
+		// flood spreads through faces; on a planet local down is oblique to the grid).
+		const TArray<FIntVector> Shaft = Tube(W, At(BestAlong, BestAcross, BestGround + 0.5 * VS), At(BestAlong, BestAcross, BestGround - 4.0 * VS), 1.0f);
+		SystemSet(W, Shaft, MakeDug);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the flood settles after the shaft"), *Name), SettleWater(W));
+		int32 ShaftWet = 0;
+		for (const FIntVector& Key : Shaft)
+		{
+			ShaftWet += IsWater(Merged(W, Key)) ? 1 : 0;
+		}
+		Test.TestTrue(*FString::Printf(TEXT("%s: the shaft has voxels (non-vacuous)"), *Name), Shaft.Num() >= 4);
+		Test.TestEqual(*FString::Printf(TEXT("%s: a shaft dug into the lake's bed fills"), *Name), ShaftWet, Shaft.Num());
+
+		// A player's dig in the bed round the shaft, under the lake's water: every voxel it turned to air under the level fills.
+		const FVector BrushCenter = At(BestAlong, BestAcross, BestGround - 1.5 * VS);
+		PlayerBrush(W, BrushCenter, 3.0f, EEditMode::Subtract, EVoxelBrushFalloff::Smooth);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the flood settles after the player's dig"), *Name), SettleWater(W));
+		int32 BrushAir = 0, BrushWet = 0;
+		for (const FIntVector& Key : BrushKeys(W, BrushCenter, 3.0f))
+		{
+			const FVoxelData Now = Merged(W, Key);
+			const FVoxelData* Was = Before.Find(Key);
+			if (Was && Was->IsSolid() && Now.IsAir() && UnderLevel(Key))
+			{
+				++BrushAir;
+				BrushWet += IsWater(Now) ? 1 : 0;
+			}
+		}
+		Test.TestTrue(*FString::Printf(TEXT("%s: the player's dig opened voxels under the level (non-vacuous)"), *Name), BrushAir >= 3);
+		Test.TestEqual(*FString::Printf(TEXT("%s: a player's dig on the lake's bed fills"), *Name), BrushWet, BrushAir);
+
+		// B. A pit in the well, in its middle: five voxels down from the ground, 3 x 3 across. Outside the footprint it
+		// stays dry, though the lake's level stands over it and water stands round the well.
+		const TArray<FIntVector> Pit = Tube(W, At(0.0, 0.0, SiteHeight + 0.5 * VS), At(0.0, 0.0, SiteHeight - 5.0 * VS), 1.6f);
+		SystemSet(W, Pit, MakeDug);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the flood settles after the pit"), *Name), SettleWater(W));
+		int32 PitWet = 0, PitUnder = 0;
+		for (const FIntVector& Key : Pit)
+		{
+			PitWet += IsWater(Merged(W, Key)) ? 1 : 0;
+			PitUnder += UnderLevel(Key) ? 1 : 0;
+		}
+		Test.TestTrue(*FString::Printf(TEXT("%s: the pit has voxels (non-vacuous)"), *Name), Pit.Num() >= 20);
+		Test.TestEqual(*FString::Printf(TEXT("%s: no level holds over the pit's columns"), *Name), PitUnder, 0);
+		Test.TestEqual(*FString::Printf(TEXT("%s: a pit dug outside the footprint stays dry"), *Name), PitWet, 0);
+
+		// C. A channel from the lake into the well, two voxels under the level: from the lake's place, in its water,
+		// straight to the site, a voxel wide each way round its line (face-connected). It fills as far as the footprint
+		// goes and stays dry past it: every voxel of it 100 uu or more inside the footprint is wet, every voxel 100 uu or
+		// more inside the well is dry, and no voxel with no level over its column is wet (between the two a planet's
+		// down-lines decide, a voxel or two either way).
+		const double ChannelHeight = LakeLevel - 2.0 * VS;
+		const TArray<FIntVector> Channel = Tube(W, At(BestAlong, BestAcross, ChannelHeight), At(0.0, 0.0, ChannelHeight), 1.0f);
+		SystemSet(W, Channel, MakeDug);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the flood settles after the channel"), *Name), SettleWater(W));
+		int32 ChannelWet = 0, ChannelDry = 0, ChannelWrong = 0, LakeSide = 0, WellSide = 0;
+		for (const FIntVector& Key : Channel)
+		{
+			const FVector Offset = CenterOf(W, Key) - Site;
+			// How far out from the site on the footprint's own axes: the well ends at 300 on either.
+			const double Out = FMath::Max(FMath::Abs(FVector::DotProduct(Offset, East)), FMath::Abs(FVector::DotProduct(Offset, North)));
+			const bool bWet = IsWater(Merged(W, Key));
+			ChannelWet += bWet ? 1 : 0;
+			ChannelDry += bWet ? 0 : 1;
+			LakeSide += Out >= 400.0 ? 1 : 0;
+			WellSide += Out <= 200.0 ? 1 : 0;
+			ChannelWrong += ((Out >= 400.0 && !bWet) || (Out <= 200.0 && bWet) || (bWet && !UnderLevel(Key))) ? 1 : 0;
+		}
+		Test.AddInfo(FString::Printf(TEXT("%s: the channel: %d voxels, %d wet, %d dry; %d of them well inside the footprint, %d well inside the well"),
+			*Name, Channel.Num(), ChannelWet, ChannelDry, LakeSide, WellSide));
+		Test.TestTrue(*FString::Printf(TEXT("%s: the channel crosses the footprint's edge (voxels on the lake's side and in the well)"), *Name),
+			LakeSide >= 6 && WellSide >= 6);
+		Test.TestEqual(*FString::Printf(TEXT("%s: the channel fills as far as the footprint goes and stays dry past it"), *Name), ChannelWrong, 0);
+
+		// Around the digs nothing changed but the digs themselves and the flags the water took.
+		TSet<FIntVector> Dug;
+		Dug.Append(Shaft);
+		Dug.Append(Pit);
+		Dug.Append(Channel);
+		Dug.Append(BrushKeys(W, BrushCenter, 3.0f));
+		int32 Changed = 0, FlagsWrong = 0;
+		const TMap<FIntVector, FVoxelData> After = Capture(W, Region);
+		for (const TPair<FIntVector, FVoxelData>& Pair : Before)
+		{
+			if (Dug.Contains(Pair.Key))
+			{
+				continue;
+			}
+			const FVoxelData& Now = After[Pair.Key];
+			FVoxelData WasFlagged = Pair.Value, NowFlagged = Now;
+			WasFlagged.SetWaterFlag(true);
+			NowFlagged.SetWaterFlag(true);
+			Changed += (WasFlagged == NowFlagged) ? 0 : 1;
+			// A voxel the digs did not touch takes the flag only as air under its column's level, and loses none.
+			FlagsWrong += (Pair.Value.HasWaterFlag() && !Now.HasWaterFlag()) ? 1 : 0;
+			FlagsWrong += (!Pair.Value.HasWaterFlag() && Now.HasWaterFlag() && !(Now.IsAir() && UnderLevel(Pair.Key))) ? 1 : 0;
+		}
+		Test.TestEqual(*FString::Printf(TEXT("%s: no voxel beside the digs changed its density, material or biome"), *Name), Changed, 0);
+		Test.TestEqual(*FString::Printf(TEXT("%s: no voxel beside the digs lost the flag or took it over its level"), *Name), FlagsWrong, 0);
+		const UVoxelWaterPropagation::FStats Stats = Manager->GetWaterPropagation()->GetStats();
+		Test.AddInfo(FString::Printf(TEXT("%s: the flood: %lld scans queued, %lld seeds, %lld voxels flooded in %lld floods"),
+			*Name, Stats.ScansQueued, Stats.Seeds, Stats.FloodedVoxels, Stats.FloodsFinished));
+		Test.TestEqual(*FString::Printf(TEXT("%s: no source registered late"), *Name), Manager->GetNumLateConditioningSources(), 0);
+		W.Stop();
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterPropagationLakePlaneTest, "VoxelWorlds.Streaming.WaterPropagation.Lake.Plane",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FVoxelWaterPropagationLakePlaneTest::RunTest(const FString& Parameters)
+{
+	VoxelWaterPropagationTest::RunLake(*this, false);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterPropagationLakePlanetTest, "VoxelWorlds.Streaming.WaterPropagation.Lake.Planet",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FVoxelWaterPropagationLakePlanetTest::RunTest(const FString& Parameters)
+{
+	VoxelWaterPropagationTest::RunLake(*this, true);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

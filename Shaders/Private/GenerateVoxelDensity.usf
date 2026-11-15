@@ -75,6 +75,18 @@ float4 CaveLayerVerticalScale;
 // Water level parameters
 int WaterLevelEnabled;
 float WaterLevelHeight;
+// The chunk's water columns (FVoxelChunkWaterColumns; the hydrology plan's section 5.4): where a lake or a river reach
+// may reach the chunk, the water level over each column in place of the one level above. On a heightmap world a row a
+// column, X + Y x ChunkSize. On a planet, which has no columns, a row a down-line (FVoxelDownLines, the lines the
+// post-passes walk): ChunkSize rows of the lines' shifts first, [shift on B, shift on C, 0, 0] per step, then the lines
+// by id. A row: [the level the column's terrain is compared with (world Z; a planet: an altitude over the datum), the
+// level a voxel is compared with (VoxelPostPasses.usf), the minimum cave depth in voxels (a lake's), 0]; -1e30 in both
+// levels where no body covers the column, which fails every comparison. WaterColumnsEnabled 0: the buffer is a
+// stand-in and nothing reads it.
+int WaterColumnsEnabled;
+uint WaterLineAxisA;      // a planet's down-lines: the axis nearest to local down (FVoxelDownLines::AxisA)
+uint WaterLineForward;    // ... and 1 when down points along +WaterLineAxisA
+StructuredBuffer<float4> WaterColumnData;
 
 // Biome / material parameters (Phase B) — see BiomeMaterial.ush + UVoxelBiomeConfiguration::BuildGpuData.
 // BiomeCount == 0 falls back to the legacy depth-based material.
@@ -179,6 +191,26 @@ RWStructuredBuffer<uint> OutputVoxelData;
 PlanetVoxelFrame MakePlanetVoxelFrame(uint3 VoxelCoord, float InVoxelSize)
 {
     return MakePlanetFrameAt(float3(VoxelCoord) * InVoxelSize - PlanetAnchorLocal, PlanetAnchorDir, PlanetAnchorDist);
+}
+
+/**
+ * A planet voxel's row of the chunk's water columns: the row of the down-line the voxel is on
+ * (FVoxelDownLines::LineOf: with K the step along the lines' axis from the chunk's upper side, the line of voxel
+ * (a, b, c) is (b - shift B at K, c - shift C at K), the shifts being the list's first ChunkSize rows).
+ *
+ * @param VoxelCoord Voxel index in the chunk
+ * @return The row: [the level as an altitude, the level over the anchor's distance, the minimum cave depth, 0]
+ */
+float4 PlanetWaterColumn(uint3 VoxelCoord)
+{
+    const uint A = (WaterLineAxisA == 0u) ? VoxelCoord.x : ((WaterLineAxisA == 1u) ? VoxelCoord.y : VoxelCoord.z);
+    const uint B = (WaterLineAxisA == 0u) ? VoxelCoord.y : ((WaterLineAxisA == 1u) ? VoxelCoord.z : VoxelCoord.x);
+    const uint C = (WaterLineAxisA == 0u) ? VoxelCoord.z : ((WaterLineAxisA == 1u) ? VoxelCoord.x : VoxelCoord.y);
+    const uint K = (WaterLineForward != 0u) ? A : ChunkSize - 1u - A;
+    const float4 Shift = WaterColumnData[K];
+    const int LineB = (int)B - (int)Shift.x + (int)ChunkSize;
+    const int LineC = (int)C - (int)Shift.y + (int)ChunkSize;
+    return WaterColumnData[ChunkSize + (uint)LineB + (uint)LineC * 3u * ChunkSize];
 }
 
 /**
@@ -508,15 +540,30 @@ void MainCS(
             OreCount = Dominant.OreCount;
         }
 
+        // The water over this column: the request's one level, or with a lake or a river reach near the column's own row
+        // of the chunk's water columns (its level, and over a lake's footprint the lake's minimum cave depth, which
+        // deepens the caves' as a line's does). A row no body covers holds -1e30, under every terrain height.
+        bool bColumnWater = (WaterLevelEnabled != 0);
+        float ColumnWaterLevel = WaterLevelHeight;
+        float ColumnMinCaveDepth = LineSurface.MinCaveDepth;
+        [branch]
+        if (WaterColumnsEnabled != 0)
+        {
+            const float4 WaterRow = WaterColumnData[VoxelCoord.x + VoxelCoord.y * ChunkSize];
+            bColumnWater = true;
+            ColumnWaterLevel = WaterRow.x;
+            ColumnMinCaveDepth = max(ColumnMinCaveDepth, WaterRow.z);
+        }
+
         // Cave carving BEFORE material selection (matches CPU order), with the biome's overrides and, where the column's
-        // terrain is under the sea, the underwater minimum depth. Keep the carve for the cave-wall material override and
+        // terrain is under the water, the underwater minimum depth. Keep the carve for the cave-wall material override and
         // the solid->air transition flag.
-        const bool bUnderwaterColumn = (WaterLevelEnabled != 0) && (TerrainHeight < WaterLevelHeight);
+        const bool bUnderwaterColumn = bColumnWater && (TerrainHeight < ColumnWaterLevel);
         uint PreCaveDensity = Density;
         float CaveCarve = 0.0f;
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            CaveCarve = GpuCaveCarve(VoxelOffset, (PlanetVoxelFrame)0, DepthBelowSurface, BiomeID, bUnderwaterColumn, false, LineSurface.MinCaveDepth);
+            CaveCarve = GpuCaveCarve(VoxelOffset, (PlanetVoxelFrame)0, DepthBelowSurface, BiomeID, bUnderwaterColumn, false, ColumnMinCaveDepth);
             Density = ApplyCaveCarve(Density, CaveCarve);
         }
 
