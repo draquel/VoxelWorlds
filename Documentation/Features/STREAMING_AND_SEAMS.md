@@ -53,7 +53,8 @@ Each queue is a priority-sorted array with a set beside it for duplicate checks 
    re-meshed and the seam buckets are re-sent from the slots the manager keeps (G15); paused, see below (F3.4).
 2. The query context (`BuildStreamingContext`): the camera, the streaming viewer ahead of a descending camera
    (`ApplyDescentPrefetch`), the viewer's speed for the speed-adaptive load budget (`voxel.Stream.SpeedAdaptive`).
-3. The LOD strategy's update, the cut-over (a suspended window lets every chunk go), then the streaming decisions
+3. The LOD strategy's update, the cut-over (a suspended window lets every chunk go), the further viewers' ground
+   windows (`UpdateGroundWindows`, every tick: a server's other players, below), then the streaming decisions
    when the viewer changed chunk: `UpdateLoadDecisions` (new requests, edit-pinned chunks), `UpdateUnloadDecisions`
    (every tick), `ReprioritizeQueues`.
 4. Generation: `ProcessGenerationQueue`, `ProcessPendingGPUReadbacks`, `ProcessCompletedAsyncGenerations`.
@@ -289,7 +290,8 @@ a point read of a uniform chunk reads its value. `voxel.FarCompression.Stats` lo
 
 `UVoxelCollisionManager` decides which chunks get collision (a radius around the focus with a velocity lead, chunks
 ahead and below a falling pawn first; the `voxel.Collision.*` tuning in `Documentation/EDITOR_CONSOLE_GUIDE.md` §3.7)
-and cooks them on workers. `PrepareCollisionMeshRequest` hands a cook the chunk's snapshot and its 26 neighbours'
+and cooks them on workers. The focus is the first player's pawn; on a server every other player's pawn is a further
+focus with a shell of its own (Further viewers and their ground windows, below). `PrepareCollisionMeshRequest` hands a cook the chunk's snapshot and its 26 neighbours'
 face slabs; the cook meshes the whole chunk with the main mesher at the collision LOD.
 
 A neighbour without voxel data at cook time is read as air. The cook records those neighbours
@@ -314,6 +316,76 @@ floor there. Tests `Collision.StaticBase` (a plane, a block world and a planet: 
 the static root, at its chunk's corner and no dynamic base, across a re-cook) and, in the editor, the game module's
 `VoxelEngine.Replication.TerrainBase` (a dedicated server and a client on `VoxelDemo`: the client walks, the server
 moves and teleports its pawn, the client follows).
+
+## Further viewers and their ground windows
+
+The streaming has one **streaming viewer**: the camera of the world's first player controller
+(`BuildQueryContext`), with the collision shell centred on that controller's pawn. A client and a standalone game have
+no other player. A server has: every other player's pawn is a **further viewer** (`GatherFurtherViewers`: every player
+controller of the world but the first; a player with no pawn is none), and each gets a **ground window**, so the server
+has ground under each of its players (G217: before, a second player beyond the first's collision radius stood on
+nothing on a dedicated or a listen server, the NPCs the server spawned around it had no floor, and its moves were
+checked against no terrain).
+
+- **The window** (`UpdateGroundWindows`, every tick after the strategy's update): the chunks the LOD strategy's window
+  holds for a viewer standing at the pawn (`IVoxelLODStrategy::GetWindowChunksAround`: the column's slab and the near
+  layers on a heightmap world, the chunk's slab and the near band on a planet, the island's footprint, the shell),
+  out to the collision shell's radius for that pawn (`UVoxelCollisionManager::GetFocusRadius`: the configured radius
+  plus its speed's lead) and `GroundWindowMarginChunks` (2) chunk widths more: a cook reads its 26 neighbours' voxels (a
+  chunk's diagonal), and an eighth of a chunk each for the pawn's move and its radius's change before the windows are
+  worked out again. The edited chunks within that reach are in it wherever the analytic window puts them (a dungeon's
+  stamp under the slab, a build over it), as the streaming viewer's edit pins. A chunk more is kept (the strategy's keep
+  window), so a pawn pacing at an edge or changing layer reloads nothing. The cut-over (the streaming viewer's
+  altitude) does not empty a ground window.
+- **Its chunks are ordinary chunks**: generated, meshed at the LOD their distance from the streaming viewer gives (far
+  from it, the coarsest), with their seams, water pull and scatter hand-off, and unloaded as any chunk. Only who wants
+  them differs: the load pass queues the window's untracked chunks (priority by the distance from the nearest viewer,
+  as every queue's since), and the unload decisions, the generation queue's eviction and the mesh dispatch's stale
+  cull leave a chunk of the keep set alone (`IsChunkInGroundWindow`). Far compression judges such a chunk by the
+  distance band of its nearest viewer (`IVoxelLODStrategy::GetDistanceBandLODAround`): the chunks around a further
+  player stay resident, as the first player's near bands do, and the rest of its window is compressed as the rest of
+  the first's is (its cooks decode them on workers, as the first's). So the server reads the same
+  things there as under its first player: voxels (water flags for swimming, digs, block breaks), cooked collision,
+  scatter. A dedicated server meshes them as it meshes the first player's window; a listen server's host draws a far
+  player's disc of coarse chunks over the far field.
+- **Collision**: the chunk manager hands the collision manager the further viewers as foci (`SetFurtherFoci`). A chunk
+  gets collision within the radius of any focus, cooks in the order of its distance from the nearest, and loses it
+  outside every one's; the path coverage runs under each (its velocity is its pawn's).
+- **Scatter**: every distance the scatter manager decides by is a chunk's distance from the nearest viewer
+  (`UVoxelScatterManager::SetFurtherViewers`, `GetViewerDistance`), so the server has the scatter's collision and what
+  a player chops around each player.
+- **Nothing is kept per player.** The viewers are gathered every tick and the windows are two sets (the chunks to load,
+  the chunks to keep) replaced whole whenever a viewer came, left, moved an eighth of a chunk, changed its radius by as
+  much, an edit reached a chunk nobody tracks, or a second passed. A chunk two players need is loaded once; a player
+  who dies, respawns or leaves releases what no other viewer needs at the next unload decision; when the first player
+  leaves, the next is the streaming viewer. Nothing is replicated and no client's streaming is read.
+- **Cost.** A further viewer adds its window's chunks to the server: with the shell radius R and chunks of width W, the
+  window's chunks within R + 2 W (R + 3 W kept). On `VoxelDemo` (chunks of 4,800 uu, a view distance of 40,000, a
+  shell radius of 20,000) a player far from every other adds 557 to 566 loaded chunks to the server (855 to 875 kept
+  at most), about half of a full window (a client holds 980 to 1,110), and about 100 of them resident (its near
+  bands): with two players 7.6 km apart a server held 1,570 to 1,670 chunks, 191 or 192 of them resident (220 MB of
+  voxel data), about 215 uniform and the rest compressed, once the compression sweep had caught up with the new
+  window (two to three minutes after the second player arrived; 40 s after, a run read 438 resident). Players
+  standing together share theirs. A steady tick's streaming decisions grow by the unload
+  decision's pass over those chunks (each is a candidate of the strategy's every tick, refused by one set lookup): on
+  the test worlds 0.006, 0.017 and 0.040 ms a tick with one, two and four viewers on the plane (180 chunks a viewer)
+  and 0.011, 0.027 and 0.113 ms on the planet; the windows themselves cost a rebuild a second per viewer (0.002 and
+  0.028 ms a tick of those, with four).
+- `voxel.Stream.GroundWindows 0` is the first player only, as before (a comparison); `voxel.World.Viewers` logs every
+  world's streaming viewer, its further viewers with their shell radius and the chunk under each, and the windows'
+  sizes. `SetBenchmarkView`'s fixed view has no further viewer (the bench runs the same with players in the world);
+  tests set them with `SetFurtherViewerOverride`.
+
+Tests: `Streaming.FurtherViewers.{Plane,Planet}` (a further viewer's shell is cooked as a streaming viewer's there, from
+the same voxels; the streaming viewer's window and shell do not change; a chunk two viewers need is loaded once and
+released with the last; edits made before and under a further viewer collide; a walking viewer has collision under its
+feet at every tick; far compression takes a ground window's far chunks and none near its viewer; with no further
+viewer the world holds what one viewer's did), `Streaming.FurtherViewers.Scatter` (a further viewer's chunks hold the
+spawn points a streaming viewer's there do),
+`Streaming.FurtherViewers.Players` (the viewers are the players' pawns: join, no pawn, death, respawn, leave, the
+first player leaving, the cvar). In a play session: `Scripts/qa/server_ground.py` (a dedicated server and two clients,
+or a listen server and a client: the second player walks out of the first's shell and is teleported 7.6 km away, and
+stands on the server's own collision).
 
 ## What an edit re-meshes
 
@@ -376,6 +448,8 @@ far compression, §3.7 collision, §3.8 editing). The ones for this system:
 |---|---|
 | `voxel.Stream.AuditResidency` | residency findings (0 = healthy) |
 | `voxel.World.Stats`, `vox.World` | the manager's stats; the window's reach and the cut-over |
+| `voxel.World.Viewers` | every world's streaming viewer, a server's further viewers and their ground windows |
+| `voxel.Stream.GroundWindows 0\|1` | 0: the first player only, as before G217 (a comparison) |
 | `voxel.Seam.LogLatency N` | seam scheduler latency every N ticks |
 | `voxel.Snapshot.Stats [reset]` | the snapshot and face-slab cache |
 | `voxel.FarCompression.Stats`, `voxel.FarCompression.Decodes [reset]` | residency by kind; in-place expansions per reader |

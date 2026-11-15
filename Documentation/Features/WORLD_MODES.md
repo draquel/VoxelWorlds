@@ -163,14 +163,13 @@ is immutable and shared from then on.
   bound leaves there (`GetMaxGradeForTurn`, with a margin of a tenth), the start at a given height or the ground's, the end at a given height or where the grades bring it.
   A line made from those targets steps by less than a tenth of a voxel across every bisector whatever its turns: a
   tight bend on a slope is levelled, with more cut and fill, which the caller judges against its cap. The roads
-  between POIs are made with it (VoxelWorldPOI's `FPOIRoads`); the hand-placed line's component does not call it
-  yet (the plan's L5) and warns.
+  between POIs are made with it (VoxelWorldPOI's `FPOIRoads`), and so is a hand-placed line whose spline breaks the
+  bend bound ("The hand-placed line", below; the plan's L5).
 - **Roads between POIs** are VoxelWorldPOI's, in every world mode (the plan's R1 and R2; `POI_SYSTEM.md` section
   5.1): heightmap lines on the plane, the island and block worlds, radial lines on a planet, gathered through
   `IVoxelTerrainConditioner::GatherConditioningLines` and `GatherConditioningLinesOnSphere`.
-- **Not built yet:** the hand-placed line's bends (L5).
 
-**The hand-placed line** (the plan's section 4.5 and phase L4; the how-to is `Guides/TERRAIN_LINES.md`).
+**The hand-placed line** (the plan's section 4.5 and phases L4 and L5; the how-to is `Guides/TERRAIN_LINES.md`).
 `UVoxelTerrainLineComponent` (`VoxelStreaming/Public/VoxelTerrainLineComponent.h`) turns a `USplineComponent` on its
 actor into a conditioning line of the level's voxel world; `AVoxelTerrainLineActor` ("Voxel Terrain Line" in the Place
 Actors panel) is a spline with the component, to drop into a level. When the world starts the component samples the
@@ -193,11 +192,46 @@ spline to a polyline and adds it to the chunk manager (`AddConditioningLine`):
   (`GetLineId`): stable for the same level, the same on every machine (a PIE world's package is renamed, its actors
   are not; a client's copy of a level actor carries the server's name), and where lines meet the higher order is
   applied later and wins on its core. Lines of order 0 have ids from 0 to 2^32 - 1.
-- **The limits** are checked on the sampled line when it is registered (`UVoxelChunkManager::GetConditioningLineWarnings`)
-  and logged as warnings with the actor's name; the component keeps them (`GetLineWarnings`) and adds the line
-  whatever they say. A hand-drawn spline breaks the bend bound easily: a tight curve on a grade, or a corner.
+- **The bends** (D134, the plan's L5). A hand-drawn spline breaks the bend bound easily: a tight curve on a grade, or
+  a corner. The line above is judged first as sampled, by the bound's two checks as one number
+  (`FVoxelTerrainLineBends::DrawnBendRatio`: the worst vertex's turn over the turn the bound allows there; the
+  arithmetic of `FVoxelConditioningLine::GetWarnings` on the same vertices). At 1 or under, the sampled line is the
+  line, vertex for vertex, and nothing below runs. Over 1 the component makes the line again with
+  `FVoxelConditioningLineShape`:
+  - **The corners.** The sampled points (world X and Y; on a planet the points on the datum sphere, before they become
+    directions again) are spread with `SpreadCorners` over one more vertex each way per try and sampled evenly
+    (`ResampleEvenly`), until the try's worst vertex is within 0.9 of the bound, so a corner is rounded as far as
+    the bound asks and no further; the two ends stay. The spreading stops at twice the line's reach each way. That
+    brings a corner of up to about 100 degrees within the bound and leaves the line within two thirds of the reach of
+    its spline (a 6-voxel road, reach 525 uu: a 60 degree corner is spread over 296 uu and the line runs up to 75 uu
+    from the spline; a right angle 741 uu and 222 uu; 100 degrees the whole 1,037 uu and 310 uu). A sharper corner
+    would need more than the averaging does well (120 degrees: 1,944 uu, which moves the corner twice as far as an
+    arc of the reach's radius would; G225), so the line then takes the try that came nearest the bound (the sampled
+    points, when no spreading helped, as on legs too short to spread a corner over) and keeps the warning. A try is judged as a line: following the terrain by its turns alone (its profile comes after), at the
+    spline's height with the spline's heights on it.
+  - **Along the spline.** Each spread point is a sampled point moved, so it keeps that point's distance along the
+    spline, and a vertex of the even sampling reads the spline between two of them: its half width (the scale Y) and,
+    at the spline's height, its target. The rounded line is shorter through a corner than the spline, so it climbs the
+    same rise there on a steeper grade (a 60 degree corner on 15 %: 17.3 % at its middle), which is why a corner at
+    the spline's height is spread further than one that follows the terrain, and why a right angle on 15 % or more
+    stays outside the bound.
+  - **The profile,** following the terrain: `MakeProfile` on the rounded vertices with the natural ground under them,
+    the component's `SmoothingDistance` and `MaxGrade` and the widest half width. It is the profile above with the
+    grade held, at each vertex that turns, to what the bend bound leaves there, so the target steps by less than a
+    tenth of a voxel across every bisector whatever turn is left. A line whose turns are within the bound as sampled
+    and that only stepped on its grade keeps its vertices and gets this profile alone.
+  - **What is said.** `GetLineBends` has the numbers (`FVoxelTerrainLineBends`: the ratio as sampled and as made, the
+    distance the corners were spread over, the farthest the line runs from the spline, measured from each vertex to
+    the stretch of the sampled spline it came from, whether the profile was made again), and the first sentence of
+    `GetLineWarnings` says them: "the spline breaks the bend bound (its sharpest bend turns 4.1 times what the bound
+    allows there): the line's corners are rounded over 296 uu each way along it, so the line runs up to 75 uu from its
+    spline, and its profile is flatter through the bends".
+- **The limits** are checked on the line as made when it is registered (`UVoxelChunkManager::GetConditioningLineWarnings`)
+  and logged as warnings with the actor's name; the component keeps them after the sentence about its bends
+  (`GetLineWarnings`) and adds the line whatever they say. A bend the rounding could not bring within the bound is
+  named there.
 - **Multiplayer.** The actor is in the level on every machine and is not replicated: the server and each client sample
-  the same spline in the same world and generate the same terrain. A line spawned at runtime is not supported: it is
+  the same spline in the same world, round the same corners and generate the same terrain. A line spawned at runtime is not supported: it is
   added, with the chunk manager's warning, and the chunks generated before it keep their terrain.
 - There is no editor preview: the terrain shows the line in PIE.
 

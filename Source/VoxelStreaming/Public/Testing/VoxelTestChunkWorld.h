@@ -283,6 +283,12 @@ namespace VoxelTesting
 			Manager->SetBenchmarkView(true, Viewer);
 		}
 
+		/** The viewers beside SetViewer's (G217: a server's other players), each standing still; none again with an empty list. */
+		void SetFurtherViewers(const TArray<FVector>& Viewers)
+		{
+			Manager->SetFurtherViewerOverride(Viewers.Num() > 0, Viewers);
+		}
+
 		/** The viewer ViewerAltitude above the planet's natural surface along a direction (the planet streaming suite's). */
 		FVector ViewerOverSurface(const FVector& Direction, float ViewerAltitude) const
 		{

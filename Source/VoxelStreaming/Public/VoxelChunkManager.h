@@ -381,6 +381,19 @@ struct TStructOpsTypeTraits<FVoxelFarFieldCameraTickFunction> : public TStructOp
 	};
 };
 
+/**
+ * A viewer beside the streaming viewer (G217): on a server, the pawn of a player other than the first, whose camera the
+ * streaming follows. The chunk manager gathers them every tick (UVoxelChunkManager::GetFurtherViewers).
+ */
+struct FVoxelFurtherViewer
+{
+	/** The pawn's position */
+	FVector Position = FVector::ZeroVector;
+
+	/** The pawn's velocity (its collision shell's lead and path coverage) */
+	FVector Velocity = FVector::ZeroVector;
+};
+
 UCLASS(ClassGroup = (Voxel), meta = (BlueprintSpawnableComponent))
 class VOXELSTREAMING_API UVoxelChunkManager : public UActorComponent
 {
@@ -641,6 +654,15 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|ChunkManager")
 	bool HasChunkVoxelData(const FIntVector& ChunkCoord) const;
+
+	/**
+	 * Whether a chunk's voxels are held far-compressed (EVoxelDataResidency::Compressed): a settled chunk of a far band
+	 * of the streaming viewer's and, in a further viewer's ground window, of that viewer's too (G217).
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @return True if the chunk is tracked and its voxel data is in the compressed side buffer
+	 */
+	bool IsChunkFarCompressed(const FIntVector& ChunkCoord) const;
 
 	/**
 	 * Whether a chunk's water flags are in place: it has voxel data and has submitted a mesh since that data arrived, which
@@ -1592,6 +1614,61 @@ public:
 	/** Drive streaming from a fixed position instead of the camera (deterministic benchmark). */
 	void SetBenchmarkView(bool bActive, const FVector& Position) { bBenchmarkViewActive = bActive; BenchmarkViewPosition = Position; }
 
+	// ==================== Further viewers and their ground windows (G217) ====================
+
+	/**
+	 * The further viewers given by hand instead of the world's players (tests; beside SetBenchmarkView's fixed view, which
+	 * alone has none). Each stands still. Inactive, the further viewers are the pawns of the world's players other than
+	 * the first.
+	 *
+	 * @param bActive Whether Positions replace the players
+	 * @param Positions The further viewers
+	 */
+	void SetFurtherViewerOverride(bool bActive, const TArray<FVector>& Positions = TArray<FVector>());
+
+	/**
+	 * The viewers beside the streaming viewer, as the last tick found them (G217): the pawn of every player controller
+	 * of the world but the first, whose camera the streaming follows; a player with no pawn is none. A client and a
+	 * standalone game have none. Each gets a ground window: the chunks of the LOD strategy's window for a viewer
+	 * standing there, out to its collision shell's radius and two chunks more (GroundWindowMarginChunks), loaded as any chunk is (voxels, a mesh
+	 * at the LOD its distance from the streaming viewer gives, scatter, water) and kept while a viewer needs them; the
+	 * collision manager cooks its shell around each, and the scatter manager measures from the nearest. Worked out
+	 * again every tick: nothing is kept per player.
+	 */
+	const TArray<FVoxelFurtherViewer>& GetFurtherViewers() const { return FurtherViewers; }
+
+	/**
+	 * How far past its collision shell's radius a further viewer's ground window streams chunks in, in chunk widths: a
+	 * chunk's diagonal (a cook reads its 26 neighbours' voxels) and GroundWindowStepChunks twice (the viewer's move and
+	 * its radius's change before the windows are worked out again). A chunk more is kept.
+	 */
+	static constexpr float GroundWindowMarginChunks = 2.0f;
+
+	/** A further viewer's move, or its shell radius's change, that works the ground windows out again, in chunk widths. */
+	static constexpr float GroundWindowStepChunks = 0.125f;
+
+	/** @return Whether a chunk is in a further viewer's ground window (kept loaded whatever the streaming viewer's window says) */
+	bool IsChunkInGroundWindow(const FIntVector& ChunkCoord) const { return GroundKeepChunks.Contains(ChunkCoord); }
+
+	/** @return The chunks the ground windows stream in (their load windows' union) */
+	int32 GetGroundWindowLoadCount() const { return GroundLoadChunks.Num(); }
+
+	/** @return The chunks the ground windows keep (their keep windows' union, a superset of what is loaded) */
+	int32 GetGroundWindowKeepCount() const { return GroundKeepChunks.Num(); }
+
+	/** @return How many times the ground windows were worked out (a viewer came, left, moved an eighth of a chunk, or a second passed) */
+	int64 GetGroundWindowRebuilds() const { return GroundWindowRebuilds; }
+
+	/** @return The game-thread time the last tick spent on the further viewers (gathering them, their windows, their loads), ms */
+	float GetLastGroundWindowMs() const { return LastGroundWindowMs; }
+
+	/**
+	 * The further viewers and their ground windows in lines (voxel.World.Viewers): the streaming viewer, each further
+	 * viewer with its shell's radius and whether the chunk under it has collision, the windows' sizes and what of them
+	 * is loaded, and the last tick's cost.
+	 */
+	void GetViewersReport(TArray<FString>& OutLines) const;
+
 	/** Queue depths for benchmark sampling. */
 	int32 GetPendingUnloadCount() const { return UnloadQueue.Num(); }
 	int32 GetPendingMeshUploadCount() const { return PendingMeshQueue.Num(); }
@@ -1809,6 +1886,31 @@ protected:
 
 	/** BuildQueryContext with the streaming viewer where the tick put it (under the camera by StreamingViewerLead). */
 	FLODQueryContext BuildStreamingContext() const;
+
+	/**
+	 * This tick's further viewers (G217): the override's when one is set; none under the bench's fixed view or with
+	 * voxel.Stream.GroundWindows 0; else every player controller's pawn but the first controller's.
+	 */
+	void GatherFurtherViewers(TArray<FVoxelFurtherViewer>& OutViewers) const;
+
+	/**
+	 * The further viewers' ground windows (G217), every tick after the LOD strategy's update: gathers the viewers, works
+	 * the windows out again when one came, left, moved an eighth of a chunk or changed its shell's radius by as much, when an
+	 * edit reached a chunk nobody tracks, and once a second (IVoxelLODStrategy::GetWindowChunksAround for each, plus the
+	 * edited chunks within reach, as the streaming viewer's edit pins), queues the generation of their chunks that are
+	 * not tracked, and hands the collision and the scatter managers the viewers. The unload decisions, the queues'
+	 * eviction and the stale cull leave a chunk of the keep set alone (IsChunkInGroundWindow), and far compression
+	 * judges it by the nearest viewer's distance band.
+	 *
+	 * @param Context The streaming viewer's context (the world's origin and mode; the LOD a ground chunk meshes at)
+	 */
+	void UpdateGroundWindows(const FLODQueryContext& Context);
+
+	/**
+	 * A point's distance from the nearest viewer, given its distance from the streaming viewer: that distance without
+	 * further viewers (the same arithmetic as before them), else the least of them all. The queues order by it.
+	 */
+	float GetNearestViewerDistance(const FVector& Point, float StreamingViewerDistance) const;
 
 	/**
 	 * Planets: move the context's viewer (the camera) down along local up by the descent prefetch's lead
@@ -3043,6 +3145,38 @@ private:
 
 	/** Active benchmark run, ticked from TickComponent; reset when it finishes. */
 	TUniquePtr<FVoxelStreamingBenchmark> ActiveBenchmark;
+
+	// ==================== Further viewers and their ground windows (G217) ====================
+
+	/** This tick's further viewers (GatherFurtherViewers). */
+	TArray<FVoxelFurtherViewer> FurtherViewers;
+
+	/** The further viewers given by hand (SetFurtherViewerOverride), and whether they replace the players. */
+	TArray<FVector> FurtherViewerOverride;
+	bool bFurtherViewerOverride = false;
+
+	/** The ground windows' chunks to stream in (the load windows' union, no repeats). */
+	TArray<FIntVector> GroundLoadChunks;
+
+	/** The ground windows' chunks to keep (the keep windows' union, the load chunks among them). */
+	TSet<FIntVector> GroundKeepChunks;
+
+	/** What the windows were worked out for: each viewer's position and shell radius then, and the tick. */
+	TArray<FVector4> GroundWindowBuiltFor;
+	int64 GroundWindowBuiltFrame = 0;
+
+	/** Work the windows out again at the next tick (an edit reached a chunk nobody tracks). */
+	bool bGroundWindowsDirty = false;
+
+	/** The collision and the scatter managers hold further viewers from the last tick (they are told once more when the last leaves). */
+	bool bFurtherViewersHandedOn = false;
+
+	/** Ground chunks the last load pass found untracked and could not queue (the per-tick cap): the next tick goes on. */
+	int32 GroundChunksUnqueued = 0;
+
+	/** GetGroundWindowRebuilds, GetLastGroundWindowMs. */
+	int64 GroundWindowRebuilds = 0;
+	float LastGroundWindowMs = 0.0f;
 
 	/** What the bench counts inside the pipeline (FVoxelStreamingCounters; ResetBenchCounters at a run's start) */
 	FVoxelStreamingCounters BenchCounters;

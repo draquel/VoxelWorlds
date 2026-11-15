@@ -51,6 +51,28 @@ static FAutoConsoleCommandWithWorld GVoxelWorldStatsCmd(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorld GVoxelWorldViewersCmd(
+	TEXT("voxel.World.Viewers"),
+	TEXT("Log, for every live chunk manager (every play world: a server's and each client's), the streaming viewer and the further viewers (G217: on a server the pawns of the players beside the first), each further viewer's collision shell radius and whether the chunk under it is loaded and has collision, the ground windows' chunks (to load, loaded, kept) and the last tick's cost."),
+	FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld*)
+	{
+		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
+		{
+			const UWorld* World = It->GetWorld();
+			if (World && World->IsGameWorld())
+			{
+				const TCHAR* Net = World->GetNetMode() == NM_DedicatedServer ? TEXT("Server") : World->GetNetMode() == NM_ListenServer ? TEXT("Listen")
+					: World->GetNetMode() == NM_Client ? TEXT("Client") : TEXT("Standalone");
+				TArray<FString> Lines;
+				It->GetViewersReport(Lines);
+				for (const FString& Line : Lines)
+				{
+					UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.Viewers: net=%s %s"), Net, *Line);
+				}
+			}
+		}
+	}));
+
 static FAutoConsoleCommandWithWorld GVoxelFarOceanStatsCmd(
 	TEXT("voxel.World.FarOceanStats"),
 	TEXT("Log the far ocean's state for every live chunk manager (open columns, grid quads, rebuilds, extent)."),

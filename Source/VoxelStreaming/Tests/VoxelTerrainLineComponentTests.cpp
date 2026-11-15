@@ -4,6 +4,7 @@
 #include "Misc/AutomationTest.h"
 #include "Testing/VoxelTestChunkWorld.h"
 #include "Components/SplineComponent.h"
+#include "IVoxelWorldMode.h"
 #include "VoxelChunkManager.h"
 #include "VoxelConditioningLine.h"
 #include "VoxelSurfaceQuery.h"
@@ -24,22 +25,32 @@
 //   before any generation request is built, and the world's first chunks generate with the line (the streamed voxels on
 //   the core are at the target). A component that begins play after chunks have generated is the case the guarantee
 //   prevents: the chunk manager counts it and warns, and those chunks keep the natural terrain.
-// - Warnings: a spline with a sharp corner on a grade is added with the bend bound's warning, which the component keeps.
+// - Bends (L5, D134): a spline that keeps the bend bound makes the line L4 made, vertex for vertex (the arithmetic is kept
+//   here as the record); a corner that breaks it is rounded, the line then steps by no more than the bound across any
+//   bisector and stays within the bound's radius of its spline, and two worlds make the same line; at the spline's
+//   height the rounded line keeps the spline's heights along it; on a planet the vertices stay directions.
+// - Warnings: what the component says of a spline that breaks the bend bound: how far the rounded line runs from it,
+//   and, for a corner at the spline's height on a grade too steep to round within the bound, the bend bound's warning.
 // ---------------------------------------------------------------------------
 
 namespace VoxelTerrainLineTestUtils
 {
-	/** A terrain line actor whose spline runs straight through the points given (world space). */
-	AVoxelTerrainLineActor* SpawnLine(UWorld* World, const TArray<FVector>& Points)
+	/** Run a spline straight through the points given (world space). */
+	void SetSplineThrough(USplineComponent* Spline, const TArray<FVector>& Points)
 	{
-		AVoxelTerrainLineActor* Actor = World->SpawnActor<AVoxelTerrainLineActor>();
-		USplineComponent* Spline = Actor->GetSpline();
 		Spline->SetSplinePoints(Points, ESplineCoordinateSpace::World, false);
 		for (int32 Index = 0; Index < Points.Num(); ++Index)
 		{
 			Spline->SetSplinePointType(Index, ESplinePointType::Linear, false);
 		}
 		Spline->UpdateSpline();
+	}
+
+	/** A terrain line actor whose spline runs straight through the points given (world space). */
+	AVoxelTerrainLineActor* SpawnLine(UWorld* World, const TArray<FVector>& Points)
+	{
+		AVoxelTerrainLineActor* Actor = World->SpawnActor<AVoxelTerrainLineActor>();
+		SetSplineThrough(Actor->GetSpline(), Points);
 		return Actor;
 	}
 
@@ -49,6 +60,186 @@ namespace VoxelTerrainLineTestUtils
 		const FVector2D A = Site - Direction * HalfLength;
 		const FVector2D B = Site + Direction * HalfLength;
 		return { FVector(A.X, A.Y, Z0), FVector(B.X, B.Y, Z1) };
+	}
+
+	/** A unit vector in the XY plane, Degrees from +X toward +Y. */
+	FVector2D Heading(double Degrees)
+	{
+		return FVector2D(FMath::Cos(FMath::DegreesToRadians(Degrees)), FMath::Sin(FMath::DegreesToRadians(Degrees)));
+	}
+
+	/**
+	 * The points of two straight legs that meet at a corner on a plane: the first arrives along ArriveDegrees, the second
+	 * leaves TurnDegrees to its left, each Leg long. The spline's own Z is Z0 at the start, Z1 at the corner, Z2 at the end.
+	 */
+	TArray<FVector> PlaneCorner(const FVector2D& Corner, double ArriveDegrees, double TurnDegrees, double Leg, double Z0 = 0.0, double Z1 = 0.0, double Z2 = 0.0)
+	{
+		const FVector2D A = Corner - Heading(ArriveDegrees) * Leg;
+		const FVector2D B = Corner + Heading(ArriveDegrees + TurnDegrees) * Leg;
+		return { FVector(A.X, A.Y, Z0), FVector(Corner.X, Corner.Y, Z1), FVector(B.X, B.Y, Z2) };
+	}
+
+	/**
+	 * The line the component made of a spline on a heightmap world before it looked at bends (L4): the spline sampled
+	 * every VertexSpacingVoxels voxels along its length, and following the terrain the natural height averaged over the
+	 * smoothing distance each way (less toward the ends), held to the grade from both ends, plus the offset. Kept here,
+	 * as it was, as the record of "the line L4 made": a spline that keeps the bend bound must still make exactly this.
+	 */
+	FVoxelConditioningLineParams SampledLine(const UVoxelTerrainLineComponent& Line, const UVoxelChunkManager& Manager)
+	{
+		const USplineComponent* Spline = Line.GetSpline();
+		const UVoxelWorldConfiguration* Configuration = Manager.GetConfiguration();
+		const IVoxelWorldMode* WorldMode = Manager.GetWorldMode();
+		const FVoxelNoiseParams NoiseParams = Configuration->GetNoiseParams();
+		const double Length = Spline->GetSplineLength();
+		const double Spacing = FMath::Max(Line.VertexSpacingVoxels, 0.25f) * Configuration->VoxelSize;
+		const int32 Steps = FMath::Max(1, FMath::CeilToInt32(Length / Spacing - 0.01));
+		const double Step = Length / Steps;
+		TArray<FVector> Positions;
+		TArray<float> SplineHeights;
+		TArray<float> Natural;
+		TArray<float> HalfWidths;
+		for (int32 Index = 0; Index <= Steps; ++Index)
+		{
+			const float Distance = static_cast<float>(FMath::Min(Index * Step, Length));
+			const FVector World = Spline->GetLocationAtDistanceAlongSpline(Distance, ESplineCoordinateSpace::World);
+			Positions.Add(FVector(World.X, World.Y, 0.0));
+			SplineHeights.Add(static_cast<float>(World.Z));
+			Natural.Add(static_cast<float>(WorldMode->GetSurfaceOnUpLine(FVector(World.X, World.Y, 0.0), NoiseParams).Position.Z));
+			HalfWidths.Add(Line.HalfWidth * FMath::Abs(static_cast<float>(Spline->GetScaleAtDistanceAlongSpline(Distance).Y)));
+		}
+		TArray<float> Targets;
+		if (Line.HeightMode == EVoxelTerrainLineHeight::SplineHeight)
+		{
+			Targets = MoveTemp(SplineHeights);
+		}
+		else
+		{
+			const int32 Window = FMath::Max(0, FMath::RoundToInt32(Line.SmoothingDistance / Step));
+			Targets.SetNumUninitialized(Natural.Num());
+			for (int32 Index = 0; Index < Natural.Num(); ++Index)
+			{
+				const int32 Reach = FMath::Min3(Window, Index, Natural.Num() - 1 - Index);
+				double Sum = 0.0;
+				for (int32 Other = Index - Reach; Other <= Index + Reach; ++Other)
+				{
+					Sum += Natural[Other];
+				}
+				Targets[Index] = static_cast<float>(Sum / (2 * Reach + 1));
+			}
+			if (Line.MaxGrade > 0.0f)
+			{
+				const float MaxStep = static_cast<float>(Line.MaxGrade * Step);
+				for (int32 Index = 1; Index < Targets.Num(); ++Index)
+				{
+					Targets[Index] = FMath::Clamp(Targets[Index], Targets[Index - 1] - MaxStep, Targets[Index - 1] + MaxStep);
+				}
+				for (int32 Index = Targets.Num() - 2; Index >= 0; --Index)
+				{
+					Targets[Index] = FMath::Clamp(Targets[Index], Targets[Index + 1] - MaxStep, Targets[Index + 1] + MaxStep);
+				}
+			}
+			for (float& Target : Targets)
+			{
+				Target += Line.TerrainOffset;
+			}
+		}
+		FVoxelConditioningLineParams Params;
+		for (int32 Index = 0; Index < Positions.Num(); ++Index)
+		{
+			Params.Vertices.Add(FVoxelConditioningLineVertex(Positions[Index], Targets[Index], HalfWidths[Index]));
+		}
+		Params.FalloffWidth = Line.FalloffWidth;
+		Params.Strength = Line.Strength;
+		Params.Blend = Line.Blend;
+		Params.Id = Line.GetLineId();
+		Params.Surface = Line.Surface;
+		return Params;
+	}
+
+	/** Whether two lines' vertices are the same, value for value. */
+	bool SameVertices(const FVoxelConditioningLineParams& A, const FVoxelConditioningLineParams& B)
+	{
+		if (A.Vertices.Num() != B.Vertices.Num())
+		{
+			return false;
+		}
+		for (int32 Index = 0; Index < A.Vertices.Num(); ++Index)
+		{
+			if (A.Vertices[Index].Position != B.Vertices[Index].Position || A.Vertices[Index].TargetHeight != B.Vertices[Index].TargetHeight
+				|| A.Vertices[Index].HalfWidth != B.Vertices[Index].HalfWidth)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * The bend bound's measure on a heightmap line, sampled from the line itself: across the bisector of each vertex that
+	 * turns, on the inside of the bend, the target on one side less the target on the other (two points a unit apart),
+	 * times the weight there; the largest over every such vertex and every distance out to the reach. A line whose
+	 * nearest segment changes there with a step shows it; along a line with no step the two points differ by the grade.
+	 */
+	double WorstStepAcrossBisectors(const FVoxelConditioningLine& Line)
+	{
+		const TArray<FVoxelConditioningLineVertex>& Vertices = Line.GetVertices();
+		double Worst = 0.0;
+		for (int32 Index = 1; Index + 1 < Vertices.Num(); ++Index)
+		{
+			const FVector2D P(Vertices[Index].Position.X, Vertices[Index].Position.Y);
+			const FVector2D In = (P - FVector2D(Vertices[Index - 1].Position.X, Vertices[Index - 1].Position.Y)).GetSafeNormal();
+			const FVector2D Out = (FVector2D(Vertices[Index + 1].Position.X, Vertices[Index + 1].Position.Y) - P).GetSafeNormal();
+			if (FMath::Abs(FVector2D::CrossProduct(In, Out)) < 1e-4)
+			{
+				continue;
+			}
+			const FVector2D Inward = (Out - In).GetSafeNormal();
+			const FVector2D Tangent = (In + Out).GetSafeNormal();
+			for (int32 Step = 1; Step <= 32; ++Step)
+			{
+				const FVector2D Q = P + Inward * (Line.GetHeightReach() * Step / 32.0);
+				float TargetA = 0.0f, WeightA = 0.0f, TargetB = 0.0f, WeightB = 0.0f;
+				if (Line.Evaluate(Q.X - 0.5 * Tangent.X, Q.Y - 0.5 * Tangent.Y, TargetA, WeightA)
+					&& Line.Evaluate(Q.X + 0.5 * Tangent.X, Q.Y + 0.5 * Tangent.Y, TargetB, WeightB))
+				{
+					Worst = FMath::Max(Worst, static_cast<double>(FMath::Abs(TargetB - TargetA)) * FMath::Min(WeightA, WeightB));
+				}
+			}
+		}
+		return Worst;
+	}
+
+	/** The farthest any vertex of a heightmap line lies from a spline, over the ground (the spline read every 5 uu). */
+	double FarthestFromSpline(const FVoxelConditioningLineParams& Params, const USplineComponent& Spline)
+	{
+		TArray<FVector2D> Samples;
+		const double Length = Spline.GetSplineLength();
+		for (double Distance = 0.0; Distance < Length; Distance += 5.0)
+		{
+			Samples.Add(FVector2D(Spline.GetLocationAtDistanceAlongSpline(static_cast<float>(Distance), ESplineCoordinateSpace::World)));
+		}
+		Samples.Add(FVector2D(Spline.GetLocationAtDistanceAlongSpline(static_cast<float>(Length), ESplineCoordinateSpace::World)));
+		double Farthest = 0.0;
+		for (const FVoxelConditioningLineVertex& Vertex : Params.Vertices)
+		{
+			double Nearest = TNumericLimits<double>::Max();
+			for (const FVector2D& Sample : Samples)
+			{
+				Nearest = FMath::Min(Nearest, FVector2D::DistSquared(Sample, FVector2D(Vertex.Position.X, Vertex.Position.Y)));
+			}
+			Farthest = FMath::Max(Farthest, FMath::Sqrt(Nearest));
+		}
+		return Farthest;
+	}
+
+	/** Whether any of a line's warnings is one of the bend bound's two. */
+	bool HasBendWarning(const TArray<FString>& Warnings)
+	{
+		return Warnings.ContainsByPredicate([](const FString& Text)
+		{
+			return Text.Contains(TEXT("vertices break the bend bound")) || Text.Contains(TEXT("bisector meets a neighbour's inside the reach"));
+		});
 	}
 }
 
@@ -451,6 +642,247 @@ bool FVoxelTerrainLineRegistersBeforeFirstRequestTest::RunTest(const FString& Pa
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelTerrainLineBendsTest,
+	"VoxelWorlds.Streaming.TerrainLine.Bends",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelTerrainLineBendsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelTerrainLineTestUtils;
+
+	// A road 6 voxels wide with a falloff of 4: a reach of 7 voxels, the radius the bend bound asks a corner for.
+	const auto ConfigureRoad = [](UVoxelTerrainLineComponent* Line, float VoxelSize, EVoxelTerrainLineHeight HeightMode, float MaxGrade)
+	{
+		Line->HalfWidth = 3.0f * VoxelSize;
+		Line->FalloffWidth = 4.0f * VoxelSize;
+		Line->HeightMode = HeightMode;
+		Line->SmoothingDistance = 1200.0f;
+		Line->MaxGrade = MaxGrade;
+	};
+
+	VoxelTesting::FTestChunkWorld W;
+	W.Create(TEXT("TerrainLineBends"));
+	W.ConfigureSmallPlane();
+	W.StartManager();
+	const float VoxelSize = W.Config->VoxelSize;
+	const double Reach = 7.0 * VoxelSize;
+	const double Bound = 0.1 * VoxelSize;
+
+	// 1. A spline that keeps the bound: a gentle S curve. The line is the one L4 made, vertex for vertex, in both height
+	//    modes, and nothing is said about bends.
+	{
+		AVoxelTerrainLineActor* Actor = W.World->SpawnActor<AVoxelTerrainLineActor>();
+		Actor->GetSpline()->SetSplinePoints({ FVector(-1500.0, -900.0, 4000.0), FVector(-500.0, -750.0, 4040.0), FVector(500.0, -1050.0, 4080.0), FVector(1500.0, -900.0, 4120.0) },
+			ESplineCoordinateSpace::World, true);
+		UVoxelTerrainLineComponent* Line = Actor->GetTerrainLine();
+		for (const EVoxelTerrainLineHeight HeightMode : { EVoxelTerrainLineHeight::FollowTerrain, EVoxelTerrainLineHeight::SplineHeight })
+		{
+			const TCHAR* Name = HeightMode == EVoxelTerrainLineHeight::FollowTerrain ? TEXT("following the terrain") : TEXT("at the spline's height");
+			ConfigureRoad(Line, VoxelSize, HeightMode, 0.08f);
+			FVoxelConditioningLineParams Params;
+			FVoxelTerrainLineBends Bends;
+			if (!TestTrue(FString::Printf(TEXT("Within the bound, %s: a line is made"), Name), Line->BuildLineParams(*W.Manager, Params, &Bends)))
+			{
+				continue;
+			}
+			AddInfo(FString::Printf(TEXT("Within the bound, %s: %d vertices, the worst vertex turns %.2f of what the bound allows"), Name, Params.Vertices.Num(), Bends.DrawnBendRatio));
+			TestTrue(FString::Printf(TEXT("Within the bound, %s: the curve turns, within the bound (non-vacuous)"), Name), Bends.DrawnBendRatio > 0.2 && Bends.DrawnBendRatio <= 1.0);
+			TestFalse(FString::Printf(TEXT("Within the bound, %s: the spline does not break the bound"), Name), Bends.bBrokeBound);
+			TestTrue(FString::Printf(TEXT("Within the bound, %s: no corner is rounded and the profile is left"), Name),
+				!Bends.WasRounded() && Bends.FarthestFromSpline == 0.0 && !Bends.bProfileFlattened && Bends.BendRatio == Bends.DrawnBendRatio);
+			TestTrue(FString::Printf(TEXT("Within the bound, %s: the line is the one L4 made, vertex for vertex"), Name), SameVertices(Params, SampledLine(*Line, *W.Manager)));
+			TestFalse(FString::Printf(TEXT("Within the bound, %s: the engine's check has no bend warning"), Name),
+				HasBendWarning(W.Manager->GetConditioningLineWarnings(*FVoxelConditioningLine::Make(Params))));
+		}
+	}
+
+	// 2. The corner of L4's shots: two straight legs that meet at 60 degrees on a slope, following the terrain held to a
+	//    grade of 20 %. The corner is put where the drawn line steps most, of 25 places and 6 directions.
+	FVoxelConditioningLineParams CornerParams;
+	FVoxelTerrainLineBends CornerBends;
+	TArray<FVector> CornerPoints;
+	{
+		AVoxelTerrainLineActor* Actor = SpawnLine(W.World, PlaneCorner(FVector2D::ZeroVector, 0.0, 60.0, 1500.0));
+		UVoxelTerrainLineComponent* Line = Actor->GetTerrainLine();
+		ConfigureRoad(Line, VoxelSize, EVoxelTerrainLineHeight::FollowTerrain, 0.2f);
+		double DrawnStep = 0.0;
+		for (int32 X = -2; X <= 2; ++X)
+		{
+			for (int32 Y = -2; Y <= 2; ++Y)
+			{
+				for (int32 Direction = 0; Direction < 6; ++Direction)
+				{
+					const TArray<FVector> Points = PlaneCorner(FVector2D(1500.0 * X, 1500.0 * Y), 60.0 * Direction, 60.0, 1500.0);
+					SetSplineThrough(Actor->GetSpline(), Points);
+					const double Step = WorstStepAcrossBisectors(*FVoxelConditioningLine::Make(SampledLine(*Line, *W.Manager)));
+					if (Step > DrawnStep)
+					{
+						DrawnStep = Step;
+						CornerPoints = Points;
+					}
+				}
+			}
+		}
+		SetSplineThrough(Actor->GetSpline(), CornerPoints);
+		const FVoxelConditioningLineRef Drawn = FVoxelConditioningLine::Make(SampledLine(*Line, *W.Manager));
+		TestTrue(TEXT("Corner: as drawn the target steps by over twice the bound across the bisector (non-vacuous)"), DrawnStep > 2.0 * Bound);
+		TestTrue(TEXT("Corner: as drawn the engine's check warns of the bend"), HasBendWarning(W.Manager->GetConditioningLineWarnings(*Drawn)));
+
+		if (TestTrue(TEXT("Corner: a line is made"), Line->BuildLineParams(*W.Manager, CornerParams, &CornerBends)))
+		{
+			const FVoxelConditioningLineRef Made = FVoxelConditioningLine::Make(CornerParams);
+			const double MadeStep = WorstStepAcrossBisectors(*Made);
+			const double Independent = FarthestFromSpline(CornerParams, *Actor->GetSpline());
+			AddInfo(FString::Printf(TEXT("Corner at (%.0f, %.0f): as drawn the target steps by %.1f uu across the bisector (the bound %.1f; %.1f times what the bound allows); "
+				"as made by %.2f uu (%.2f times), the corners spread over %.0f uu each way, %d vertices, up to %.1f uu from the spline (measured: %.1f)"),
+				CornerPoints[1].X, CornerPoints[1].Y, DrawnStep, Bound, CornerBends.DrawnBendRatio, MadeStep, CornerBends.BendRatio, CornerBends.CornerDistance,
+				CornerParams.Vertices.Num(), CornerBends.FarthestFromSpline, Independent));
+			TestTrue(TEXT("Corner: the spline breaks the bound"), CornerBends.bBrokeBound && CornerBends.DrawnBendRatio > 1.0);
+			TestTrue(TEXT("Corner: the corner is rounded and the profile made again"), CornerBends.WasRounded() && CornerBends.bProfileFlattened);
+			// Two points a unit apart differ by the grade where nothing steps: 0.2 uu of slack.
+			TestTrue(TEXT("Corner: the line as made steps by no more than the bound across any bisector"), MadeStep <= Bound + 0.25);
+			TestTrue(TEXT("Corner: every vertex is within the bound"), CornerBends.BendRatio <= 1.0);
+			TestFalse(TEXT("Corner: the engine's check has no bend warning left"), HasBendWarning(W.Manager->GetConditioningLineWarnings(*Made)));
+
+			// Within the radius the bound asks for (the reach) of the spline, and the component says how far.
+			TestTrue(TEXT("Corner: the line leaves the spline (non-vacuous), by no more than the bound's radius"),
+				CornerBends.FarthestFromSpline > 1.0 && CornerBends.FarthestFromSpline <= Reach);
+			TestTrue(TEXT("Corner: measured against the spline itself, the line is no farther than the component says"),
+				Independent > 1.0 && Independent <= CornerBends.FarthestFromSpline + 5.0);
+			TestTrue(TEXT("Corner: the corners are spread over no more than twice the reach"), CornerBends.CornerDistance <= 2.0 * Reach);
+			TestTrue(TEXT("Corner: the line starts where the spline does"), FVector2D::Distance(FVector2D(CornerParams.Vertices[0].Position), FVector2D(CornerPoints[0])) < 0.1);
+			TestTrue(TEXT("Corner: and ends where it does"), FVector2D::Distance(FVector2D(CornerParams.Vertices.Last().Position), FVector2D(CornerPoints[2])) < 0.1);
+			double LongestSegment = 0.0, SteepestGrade = 0.0;
+			float NarrowestHalfWidth = TNumericLimits<float>::Max(), WidestHalfWidth = 0.0f;
+			for (int32 Index = 0; Index < CornerParams.Vertices.Num(); ++Index)
+			{
+				NarrowestHalfWidth = FMath::Min(NarrowestHalfWidth, CornerParams.Vertices[Index].HalfWidth);
+				WidestHalfWidth = FMath::Max(WidestHalfWidth, CornerParams.Vertices[Index].HalfWidth);
+				if (Index > 0)
+				{
+					const double Length = FVector::Dist(CornerParams.Vertices[Index].Position, CornerParams.Vertices[Index - 1].Position);
+					LongestSegment = FMath::Max(LongestSegment, Length);
+					SteepestGrade = FMath::Max(SteepestGrade, FMath::Abs(CornerParams.Vertices[Index].TargetHeight - CornerParams.Vertices[Index - 1].TargetHeight) / Length);
+				}
+			}
+			TestTrue(TEXT("Corner: a vertex every two voxels at most"), LongestSegment <= 2.0 * VoxelSize + 0.01);
+			TestTrue(TEXT("Corner: no segment steeper than the grade"), SteepestGrade <= 0.2 + 1e-3);
+			TestTrue(TEXT("Corner: the half width is the component's along the line"), NarrowestHalfWidth == 3.0f * VoxelSize && WidestHalfWidth == 3.0f * VoxelSize);
+		}
+	}
+
+	// 3. A server and a client: the same actor in another world of the same configuration makes the same line, value for
+	//    value (nothing of the line is replicated: each machine makes it from the level's actor).
+	if (CornerPoints.Num() == 3)
+	{
+		VoxelTesting::FTestChunkWorld Other;
+		Other.Create(TEXT("TerrainLineBendsOther"));
+		Other.ConfigureSmallPlane();
+		Other.StartManager();
+		AVoxelTerrainLineActor* Actor = SpawnLine(Other.World, CornerPoints);
+		ConfigureRoad(Actor->GetTerrainLine(), VoxelSize, EVoxelTerrainLineHeight::FollowTerrain, 0.2f);
+		FVoxelConditioningLineParams Params;
+		FVoxelTerrainLineBends Bends;
+		if (TestTrue(TEXT("Another world: a line is made"), Actor->GetTerrainLine()->BuildLineParams(*Other.Manager, Params, &Bends)))
+		{
+			TestTrue(TEXT("Another world: the rounded line is the same, vertex for vertex"), SameVertices(Params, CornerParams));
+			TestTrue(TEXT("Another world: and so is what was done about its bends"),
+				Bends.bBrokeBound == CornerBends.bBrokeBound && Bends.DrawnBendRatio == CornerBends.DrawnBendRatio && Bends.BendRatio == CornerBends.BendRatio
+				&& Bends.CornerDistance == CornerBends.CornerDistance && Bends.FarthestFromSpline == CornerBends.FarthestFromSpline
+				&& Bends.bProfileFlattened == CornerBends.bProfileFlattened);
+		}
+		Other.Stop();
+	}
+
+	// 4. At the spline's own height: a 60 degree corner on a 15 % grade. The corner is rounded further than one that
+	//    follows the terrain (the profile is the designer's, so the turn itself must fit the grade), and the line keeps
+	//    the spline's heights along it.
+	{
+		const float Ground = static_cast<float>(W.Manager->GetSurfacePointAt(FVector(0.0, 0.0, 0.0)).Position.Z);
+		AVoxelTerrainLineActor* Actor = SpawnLine(W.World, PlaneCorner(FVector2D::ZeroVector, 0.0, 60.0, 1500.0, Ground - 225.0, Ground, Ground + 225.0));
+		UVoxelTerrainLineComponent* Line = Actor->GetTerrainLine();
+		ConfigureRoad(Line, VoxelSize, EVoxelTerrainLineHeight::SplineHeight, 0.0f);
+		FVoxelConditioningLineParams Params;
+		FVoxelTerrainLineBends Bends;
+		if (TestTrue(TEXT("Spline height: a line is made"), Line->BuildLineParams(*W.Manager, Params, &Bends)))
+		{
+			const FVoxelConditioningLineRef Made = FVoxelConditioningLine::Make(Params);
+			AddInfo(FString::Printf(TEXT("Spline height: as drawn %.1f times what the bound allows; as made %.2f times, the corners spread over %.0f uu each way, up to %.1f uu from the spline, the target steps by %.2f uu"),
+				Bends.DrawnBendRatio, Bends.BendRatio, Bends.CornerDistance, Bends.FarthestFromSpline, WorstStepAcrossBisectors(*Made)));
+			TestTrue(TEXT("Spline height: the spline breaks the bound and its corner is rounded"), Bends.bBrokeBound && Bends.WasRounded());
+			TestFalse(TEXT("Spline height: the profile is not made again"), Bends.bProfileFlattened);
+			TestTrue(TEXT("Spline height: every vertex is within the bound"), Bends.BendRatio <= 1.0);
+			TestFalse(TEXT("Spline height: the engine's check has no bend warning left"), HasBendWarning(W.Manager->GetConditioningLineWarnings(*Made)));
+			TestTrue(TEXT("Spline height: the line as made steps by no more than the bound across any bisector"), WorstStepAcrossBisectors(*Made) <= Bound + 0.25);
+			TestTrue(TEXT("Spline height: the line is no farther from the spline than the component says, and no farther than the bound's radius"),
+				FarthestFromSpline(Params, *Actor->GetSpline()) <= Bends.FarthestFromSpline + 5.0 && Bends.FarthestFromSpline <= Reach);
+			TestTrue(TEXT("Spline height: the corner is spread further than the same corner following the terrain"), Bends.CornerDistance > CornerBends.CornerDistance);
+			TestEqual(TEXT("Spline height: the spline's height at the start"), Params.Vertices[0].TargetHeight, Ground - 225.0f, 0.01f);
+			TestEqual(TEXT("Spline height: at the end"), Params.Vertices.Last().TargetHeight, Ground + 225.0f, 0.01f);
+			// The spline climbs 15 % along both legs; the rounded line, shorter through the corner, climbs the same rise there.
+			double GentlestGrade = TNumericLimits<double>::Max(), SteepestGrade = 0.0;
+			for (int32 Index = 1; Index < Params.Vertices.Num(); ++Index)
+			{
+				const double Grade = (Params.Vertices[Index].TargetHeight - Params.Vertices[Index - 1].TargetHeight)
+					/ FVector::Dist(Params.Vertices[Index].Position, Params.Vertices[Index - 1].Position);
+				GentlestGrade = FMath::Min(GentlestGrade, Grade);
+				SteepestGrade = FMath::Max(SteepestGrade, Grade);
+			}
+			AddInfo(FString::Printf(TEXT("Spline height: the line climbs between %.1f %% and %.1f %% a segment"), 100.0 * GentlestGrade, 100.0 * SteepestGrade));
+			TestTrue(TEXT("Spline height: the line climbs all the way, at the spline's 15 % on the legs and a little more through the shorter corner"),
+				GentlestGrade > 0.14 && SteepestGrade < 0.19);
+		}
+	}
+	W.Stop();
+
+	// 5. A planet: the corner is rounded on the sampled points, which then become directions again.
+	{
+		VoxelTesting::FTestChunkWorld P;
+		P.Create(TEXT("TerrainLineBendsPlanet"));
+		P.ConfigureSmallPlanet();
+		P.StartManager();
+		const FVector Center = P.Config->WorldOrigin;
+		const double Radius = P.Config->WorldRadius;
+		const float PlanetVoxel = P.Config->VoxelSize;
+		const FVector Site = FVector(0.7, 0.6, 0.4).GetSafeNormal();
+		const FVector East = FVector::CrossProduct(FVector::UpVector, Site).GetSafeNormal();
+		const FVector North = FVector::CrossProduct(Site, East);
+		const FVector Start = (Site * FMath::Cos(800.0 / Radius) - East * FMath::Sin(800.0 / Radius)).GetSafeNormal();
+		const FVector End = (Site * FMath::Cos(800.0 / Radius) + North * FMath::Sin(800.0 / Radius)).GetSafeNormal();
+		AVoxelTerrainLineActor* Actor = SpawnLine(P.World, { Center + Start * (Radius + 300.0), Center + Site * (Radius + 300.0), Center + End * (Radius + 300.0) });
+		UVoxelTerrainLineComponent* Line = Actor->GetTerrainLine();
+		ConfigureRoad(Line, PlanetVoxel, EVoxelTerrainLineHeight::FollowTerrain, 0.15f);
+		FVoxelConditioningLineParams Params;
+		FVoxelTerrainLineBends Bends;
+		if (TestTrue(TEXT("Planet: a line is made"), Line->BuildLineParams(*P.Manager, Params, &Bends)))
+		{
+			AddInfo(FString::Printf(TEXT("Planet: as drawn %.1f times what the bound allows; as made %.2f times, the corners spread over %.0f uu each way, %d vertices, up to %.1f uu from the spline"),
+				Bends.DrawnBendRatio, Bends.BendRatio, Bends.CornerDistance, Params.Vertices.Num(), Bends.FarthestFromSpline));
+			TestTrue(TEXT("Planet: a planet line"), Params.bRadial);
+			TestTrue(TEXT("Planet: the spline breaks the bound, its corner is rounded and its profile made again"), Bends.bBrokeBound && Bends.WasRounded() && Bends.bProfileFlattened);
+			TestTrue(TEXT("Planet: every vertex is within the bound"), Bends.BendRatio <= 1.0);
+			TestFalse(TEXT("Planet: the engine's check has no bend warning left"), HasBendWarning(P.Manager->GetConditioningLineWarnings(*FVoxelConditioningLine::Make(Params))));
+			TestTrue(TEXT("Planet: the line leaves the spline by no more than the bound's radius"),
+				Bends.FarthestFromSpline > 1.0 && Bends.FarthestFromSpline <= 7.0 * PlanetVoxel);
+			double WorstLength = 0.0, LongestSegment = 0.0;
+			for (int32 Index = 0; Index < Params.Vertices.Num(); ++Index)
+			{
+				WorstLength = FMath::Max(WorstLength, FMath::Abs(Params.Vertices[Index].Position.Size() - 1.0));
+				if (Index > 0)
+				{
+					LongestSegment = FMath::Max(LongestSegment, FVector::Dist(Params.Vertices[Index].Position, Params.Vertices[Index - 1].Position) * Radius);
+				}
+			}
+			TestTrue(TEXT("Planet: the vertices are unit directions"), WorstLength < 1e-9);
+			TestTrue(TEXT("Planet: a vertex every two voxels at most"), LongestSegment <= 2.0 * PlanetVoxel + 0.01);
+			TestTrue(TEXT("Planet: the line starts where the spline does"), Params.Vertices[0].Position.Equals(Start, 1e-9));
+			TestTrue(TEXT("Planet: and ends where it does"), Params.Vertices.Last().Position.Equals(End, 1e-9));
+		}
+		P.Stop();
+	}
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelTerrainLineWarningsTest,
 	"VoxelWorlds.Streaming.TerrainLine.Warnings",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -458,32 +890,83 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelTerrainLineWarningsTest,
 bool FVoxelTerrainLineWarningsTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelTerrainLineTestUtils;
-	// A spline with a right-angle corner, at its own height on a 20 % grade: every vertex is on a straight leg but the
-	// corner's, which turns far more than the bend bound allows.
-	AddExpectedMessagePlain(TEXT("that their bisector meets a neighbour's inside the reach"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
-	AddExpectedMessagePlain(TEXT("break the bend bound"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	// What the component says of a spline that breaks the bend bound, in the log and in GetLineWarnings: both lines below
+	// log what was done; the second also keeps the engine's warning for the bound it still breaks.
+	AddExpectedMessagePlain(TEXT("the spline breaks the bend bound"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
+	AddExpectedMessagePlain(TEXT("vertices break the bend bound"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
 	VoxelTesting::FTestChunkWorld W;
 	W.Create(TEXT("TerrainLineWarnings"));
 	W.ConfigureSmallPlane();
 	W.StartManager();
-	const float Ground = static_cast<float>(W.Manager->GetSurfacePointAt(FVector(0.0, 0.0, 0.0)).Position.Z);
-	AVoxelTerrainLineActor* Actor = SpawnLine(W.World, { FVector(-1000.0, 0.0, Ground - 100.0), FVector(0.0, 0.0, Ground + 100.0), FVector(0.0, 1000.0, Ground + 300.0) });
-	UVoxelTerrainLineComponent* Line = Actor->GetTerrainLine();
-	Line->HalfWidth = 3.0f * W.Config->VoxelSize;
-	Line->FalloffWidth = 4.0f * W.Config->VoxelSize;
-	Line->HeightMode = EVoxelTerrainLineHeight::SplineHeight;
-	Actor->DispatchBeginPlay();
-	TestTrue(TEXT("A line that breaks the bend bound is still added"), Line->IsLineRegistered() && W.Manager->GetNumConditioningLines() == 1);
-	const TArray<FString>& Warnings = Line->GetLineWarnings();
-	for (const FString& Warning : Warnings)
+	const float VoxelSize = W.Config->VoxelSize;
+
+	// 1. A 60 degree corner at the spline's own height on a 15 % grade: the corner is rounded within the bound, and the
+	//    one thing said is how far the line runs from the spline.
 	{
-		AddInfo(Warning);
+		const float Ground = static_cast<float>(W.Manager->GetSurfacePointAt(FVector(0.0, 0.0, 0.0)).Position.Z);
+		AVoxelTerrainLineActor* Actor = SpawnLine(W.World, PlaneCorner(FVector2D::ZeroVector, 0.0, 60.0, 1500.0, Ground - 225.0, Ground, Ground + 225.0));
+		UVoxelTerrainLineComponent* Line = Actor->GetTerrainLine();
+		Line->HalfWidth = 3.0f * VoxelSize;
+		Line->FalloffWidth = 4.0f * VoxelSize;
+		Line->HeightMode = EVoxelTerrainLineHeight::SplineHeight;
+		Actor->DispatchBeginPlay();
+		TestTrue(TEXT("Rounded: the line is added"), Line->IsLineRegistered() && W.Manager->GetNumConditioningLines() == 1);
+		const TArray<FString>& Warnings = Line->GetLineWarnings();
+		for (const FString& Warning : Warnings)
+		{
+			AddInfo(TEXT("Rounded: ") + Warning);
+		}
+		const FVoxelTerrainLineBends& Bends = Line->GetLineBends();
+		TestTrue(TEXT("Rounded: the component keeps what was done about the bends"), Bends.bBrokeBound && Bends.WasRounded() && Bends.BendRatio <= 1.0);
+		if (TestEqual(TEXT("Rounded: one sentence, and no limit broken"), Warnings.Num(), 1))
+		{
+			TestTrue(TEXT("Rounded: it says the spline broke the bend bound"), Warnings[0].Contains(TEXT("the spline breaks the bend bound")));
+			TestTrue(TEXT("Rounded: and how far the line runs from its spline at most"),
+				Warnings[0].Contains(FString::Printf(TEXT("runs up to %.0f uu from its spline"), Bends.FarthestFromSpline)));
+			TestTrue(TEXT("Rounded: and that the heights are the spline's"), Warnings[0].Contains(TEXT("at the spline's heights along it")));
+		}
+		if (Line->IsLineRegistered())
+		{
+			// As drawn the line passes within 25 uu of the corner; rounded, it cuts well inside it.
+			double NearestToCorner = TNumericLimits<double>::Max();
+			for (const FVoxelConditioningLineVertex& Vertex : Line->GetRegisteredLine()->GetVertices())
+			{
+				NearestToCorner = FMath::Min(NearestToCorner, FVector2D(Vertex.Position).Size());
+			}
+			TestTrue(TEXT("Rounded: the registered line is the rounded one"), NearestToCorner > 60.0);
+		}
 	}
-	TestTrue(TEXT("The component keeps the bend bound's warning"),
-		Warnings.ContainsByPredicate([](const FString& Text) { return Text.Contains(TEXT("break the bend bound")); }));
-	TestTrue(TEXT("And the sharp turn's"),
-		Warnings.ContainsByPredicate([](const FString& Text) { return Text.Contains(TEXT("bisector meets a neighbour's inside the reach")); }));
-	TestEqual(TEXT("Nothing else is wrong with the line"), Warnings.Num(), 2);
+
+	// 2. A right-angle corner at the spline's own height on a 40 % grade: no spreading within twice the reach brings the
+	//    turn under what that grade allows. The line is rounded as far as helps, and keeps the bend bound's warning.
+	{
+		const FVector2D Corner(0.0, -4000.0);
+		const float Ground = static_cast<float>(W.Manager->GetSurfacePointAt(FVector(Corner.X, Corner.Y, 0.0)).Position.Z);
+		AVoxelTerrainLineActor* Actor = SpawnLine(W.World, PlaneCorner(Corner, 0.0, 90.0, 1000.0, Ground - 400.0, Ground, Ground + 400.0));
+		UVoxelTerrainLineComponent* Line = Actor->GetTerrainLine();
+		Line->HalfWidth = 3.0f * VoxelSize;
+		Line->FalloffWidth = 4.0f * VoxelSize;
+		Line->HeightMode = EVoxelTerrainLineHeight::SplineHeight;
+		Actor->DispatchBeginPlay();
+		TestTrue(TEXT("Steep: a line that still breaks the bend bound is added"), Line->IsLineRegistered() && W.Manager->GetNumConditioningLines() == 2);
+		const TArray<FString>& Warnings = Line->GetLineWarnings();
+		for (const FString& Warning : Warnings)
+		{
+			AddInfo(TEXT("Steep: ") + Warning);
+		}
+		const FVoxelTerrainLineBends& Bends = Line->GetLineBends();
+		AddInfo(FString::Printf(TEXT("Steep: as drawn %.1f times what the bound allows; as made %.1f times, the corners spread over %.0f uu each way, up to %.1f uu from the spline"),
+			Bends.DrawnBendRatio, Bends.BendRatio, Bends.CornerDistance, Bends.FarthestFromSpline));
+		TestTrue(TEXT("Steep: the corner is rounded, over no more than twice the reach"), Bends.WasRounded() && Bends.CornerDistance <= 14.0 * VoxelSize);
+		TestTrue(TEXT("Steep: which brings it nearer the bound, not within it"), Bends.BendRatio > 1.0 && Bends.BendRatio < Bends.DrawnBendRatio);
+		if (TestTrue(TEXT("Steep: two sentences or more"), Warnings.Num() >= 2))
+		{
+			TestTrue(TEXT("Steep: the first says what was done, and that the line still breaks the bound"),
+				Warnings[0].Contains(TEXT("the spline breaks the bend bound")) && Warnings[0].Contains(TEXT("the line still breaks the bound")));
+			TestTrue(TEXT("Steep: the engine's bend bound warning follows"),
+				Warnings.ContainsByPredicate([](const FString& Text) { return Text.Contains(TEXT("vertices break the bend bound")); }));
+		}
+	}
 	W.Stop();
 	return true;
 }

@@ -503,6 +503,16 @@ void UVoxelScatterManager::Shutdown()
 
 // ==================== Per-Frame Update ====================
 
+float UVoxelScatterManager::GetViewerDistance(const FVector& Point) const
+{
+	float Distance = FVector::Dist(Point, LastViewerPosition);
+	for (const FVector& Viewer : FurtherViewers)
+	{
+		Distance = FMath::Min(Distance, static_cast<float>(FVector::Dist(Point, Viewer)));
+	}
+	return Distance;
+}
+
 void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime)
 {
 	if (!bIsInitialized)
@@ -676,7 +686,7 @@ void UVoxelScatterManager::HandOffChunkVoxels(const FIntVector& ChunkCoord, cons
 
 	const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
 		FVector(Configuration->GetChunkWorldSize() * 0.5f);
-	const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+	const float ChunkDistance = GetViewerDistance(ChunkCenter);
 
 	// Get the set of scatter types already generated for this chunk (never regenerated)
 	const TSet<int32>* CompletedTypes = CompletedScatterTypes.Find(ChunkCoord);
@@ -1258,7 +1268,7 @@ void UVoxelScatterManager::ProcessPendingExclusionRegrow()
 		}
 
 		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) + FVector(Configuration->GetChunkWorldSize() * 0.5f);
-		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+		const float ChunkDistance = GetViewerDistance(ChunkCenter);
 		TArray<FScatterDefinition> Definitions = BuildEligibleDefinitionsForDistance(ChunkDistance);
 		if (Definitions.Num() == 0)
 		{
@@ -1690,7 +1700,7 @@ void UVoxelScatterManager::ProcessDeferredFirstExtractions()
 	for (const FIntVector& ChunkCoord : ChunksAwaitingFirstExtraction)
 	{
 		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) + FVector(ChunkWorldSize * 0.5f);
-		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+		const float ChunkDistance = GetViewerDistance(ChunkCenter);
 		if (ChunkDistance <= Horizon)
 		{
 			Candidates.Add({ ChunkCoord, ChunkDistance });
@@ -1794,7 +1804,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 
 		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
 			FVector(ChunkWorldSize * 0.5f);
-		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+		const float ChunkDistance = GetViewerDistance(ChunkCenter);
 
 		TArray<int32> TypesToRemove;
 		for (const FDistanceLimitedDef& Limited : DistanceLimitedDefs)
@@ -1884,7 +1894,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 
 		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
 			FVector(ChunkWorldSize * 0.5f);
-		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+		const float ChunkDistance = GetViewerDistance(ChunkCenter);
 
 		// Get completed types for this chunk
 		const TSet<int32>* CompletedTypes = CompletedScatterTypes.Find(ChunkCoord);
