@@ -60,7 +60,10 @@ section true on its date); the Features docs are the current truth.
   `GetWaterLevels` only for what means the sea itself (`GetSea` for geometry drawn at it). Never copy the sea's
   snapshot for a reader of "the water here": a lake stands over it. `FVoxelWaterLevels::FromConfig` is the only reader
   of the configuration's `WaterLevel` and `WaterRadius` (WATER_SYSTEM.md, "The water levels", "Lakes and river
-  reaches").
+  reaches"). What draws water is split the same way: the tiles, the far field's sea, the far ocean and the shell
+  draw the sea alone, and a lake or a river reach is drawn by its own mesh from its record (`FVoxelWaterBodyMesh`,
+  the chunk manager's `FVoxelWaterBodyMeshOwner`); a new kind of body is drawn there, not by teaching the sea's
+  drawing a second level.
 - **The surface ladder.** `UVoxelChunkManager::QuerySurfacePoint` with `EVoxelSurfaceLayer`: `Natural` (the world
   mode's), `Generated` (conditioning lines and zones applied, block tops on a cubic world; `GetGeneratedSurfacePoint`) or `EditMerged`
   (the loaded voxels; `QueryEditMergedSurfacePoint`). Pick the rung you mean; `GetTerrainHeightAt` is a heightmap's

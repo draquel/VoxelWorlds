@@ -267,6 +267,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water", meta = (EditCondition = "bEnableWaterLevel"))
 	TObjectPtr<UMaterialInterface> WaterMeshMaterial;
 
+	/**
+	 * Material for a river reach's drawn surface (the hydrology plan's D147): an instance of the water's master whose
+	 * ripples move downstream along the ribbon (its tangent) at the reach's speed in place of the wind's direction. If
+	 * null a river reach draws with WaterMeshMaterial, as a lake does; with neither, no lake and no river reach is drawn.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water")
+	TObjectPtr<UMaterialInterface> RiverMeshMaterial;
+
 	// ==================== Terrain Generation Settings ====================
 
 	/** Sea level height - base elevation of terrain (world units) */

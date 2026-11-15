@@ -10,6 +10,7 @@
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
 #include "HAL/IConsoleManager.h"
+#include "UObject/UObjectIterator.h"
 
 // Console: voxel.Water.Stats [x y | pawn]
 // The world's water levels (the water plan's W2: the bodies, and with a position the sample there), then
@@ -84,6 +85,19 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: %s; the point gather: %lld samples, %lld gathered a place (%d places kept); %lld gathers by bounds; %lld generation requests carried bodies (water columns); %lld chunks' columns read by the pull or the flood"),
 				*TargetWorld->GetName(), CM->HasWaterBodies() ? TEXT("lakes or river reaches may lie in the world (a body or a source is registered)") : TEXT("the sea alone (no lake, no river reach, no source)"),
 				G.PointSamples, G.PointGathers, G.PointSnapshots, G.BoxGathers, G.ColumnRequests, G.ChunkReaders);
+			// The lakes and river reaches drawn, in every play world (a dedicated server's and each client's): one mesh a
+			// body within the far field's distance of the viewer, none on a dedicated server or without a water material.
+			for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
+			{
+				const UWorld* PlayWorld = It->GetWorld();
+				if (PlayWorld && PlayWorld->IsGameWorld())
+				{
+					const TCHAR* Net = PlayWorld->GetNetMode() == NM_DedicatedServer ? TEXT("Server") : PlayWorld->GetNetMode() == NM_ListenServer ? TEXT("Listen")
+						: PlayWorld->GetNetMode() == NM_Client ? TEXT("Client") : TEXT("Standalone");
+					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: net=%s: %d lake(s) and river reach(es) added to the world, %d drawn (%d quads)"),
+						*PlayWorld->GetName(), Net, It->GetStaticWaterBodies().Num(), It->GetWaterBodyMeshes().Num(), It->GetWaterBodyMeshes().GetNumQuads());
+				}
+			}
 			if (bColumn)
 			{
 				FVoxelWaterSample Sample;

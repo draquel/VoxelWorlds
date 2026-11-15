@@ -270,6 +270,25 @@ struct VOXELCORE_API FVoxelWaterLake
 	/** @return The world position of a cell's centre at a water level: (X, Y, Level), or on a planet the point at that distance from PlanetCenter */
 	FVector GetCellCentre(int32 CellX, int32 CellY, double Level, const FVector& PlanetCenter) const;
 
+	/**
+	 * The world position of a point of the grid at a water level, in cells from the grid's minimum corner: whole numbers
+	 * are the cells' corners, halves their centres (what a lake's drawn sheet is made of).
+	 * @param GridX Cells along the grid's first axis (may lie outside the grid)
+	 * @param GridY Cells along its second axis
+	 * @param Level The water level: world Z, or on a planet the distance from PlanetCenter
+	 * @param PlanetCenter The planet centre (a planet lake)
+	 * @return (X, Y, Level), or on a planet the point at that distance along the direction the grid point stands for
+	 */
+	FVector GetGridPoint(double GridX, double GridY, double Level, const FVector& PlanetCenter) const;
+
+	/** @return A planet lake's tangent axes at its centre and the centre's direction (unset for a heightmap lake) */
+	void GetTangentFrame(FVector& OutAxisX, FVector& OutAxisY, FVector& OutCentre) const
+	{
+		OutAxisX = AxisX;
+		OutAxisY = AxisY;
+		OutCentre = Centre;
+	}
+
 private:
 	/** Count the cells and build the bounds. */
 	void Finish();

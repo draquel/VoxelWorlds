@@ -1198,6 +1198,27 @@ public:
 	/** Show or hide the planet ocean (voxel.World.PlanetOcean). */
 	void SetPlanetOceanVisible(bool bVisible);
 
+	// ==================== Lakes and river reaches drawn (the hydrology plan's H3) ====================
+
+	/**
+	 * The drawn lakes and river reaches: one mesh a body (FVoxelWaterBodyMeshOwner), for the bodies a Ready gather finds
+	 * within the far field's distance of the streaming viewer. Made when the bodies change (OnWaterBodiesChanged) and
+	 * when the viewer has moved an eighth of that distance; none on a dedicated server, outside a game world, or
+	 * without a water material.
+	 */
+	const FVoxelWaterBodyMeshOwner& GetWaterBodyMeshes() const { return WaterBodyMeshes; }
+
+	/** Show or hide the lakes' and river reaches' meshes (voxel.Water.BodyMeshes). */
+	void SetWaterBodyMeshesVisible(bool bVisible);
+
+	/**
+	 * Whether a world draws its lakes and river reaches: a game world that is not a dedicated server's (the rule the
+	 * far ocean, a planet's shell and the far field keep).
+	 * @param bGameWorld Whether the world is a game world (PIE or a game)
+	 * @param bDedicatedServer Whether it is a dedicated server's
+	 */
+	static bool DrawsWaterBodies(bool bGameWorld, bool bDedicatedServer) { return bGameWorld && !bDedicatedServer; }
+
 	// ==================== Far Field (spherical Phase 6, WM-BP9; heightmap worlds WM-MP1) ====================
 
 	/**
@@ -3263,6 +3284,25 @@ private:
 	 */
 	UPROPERTY(Transient)
 	FVoxelPlanetOceanOwner PlanetOcean;
+
+	// ==================== Lakes and river reaches drawn (the hydrology plan's H3) ====================
+
+	/** One mesh component per drawn lake or river reach (owned by this component's actor) */
+	UPROPERTY(Transient)
+	FVoxelWaterBodyMeshOwner WaterBodyMeshes;
+
+	/** The bodies changed since the meshes were last made (a body added, a source's announcement) */
+	bool bWaterBodyMeshesDirty = false;
+
+	/** Whether the meshes were ever gathered, and where the viewer stood then */
+	bool bWaterBodyMeshesGathered = false;
+	FVector WaterBodyMeshGatherPosition = FVector::ZeroVector;
+
+	/**
+	 * Each tick: gather the bodies to draw again when they changed or the viewer moved far enough, hand them to the
+	 * owner, and show each underside while the camera is under its body. A world with no body pays one test.
+	 */
+	void UpdateWaterBodyMeshes();
 
 	/**
 	 * Build the planet ocean (game worlds, planets with water on and a WaterMeshMaterial), unless the far field draws the
