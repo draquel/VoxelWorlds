@@ -180,6 +180,11 @@ struct VOXELNAVIGATION_API FVoxelSurfacePathStats
  * MaxStepRise (× √2 on diagonals); its cost grows with the slope. Routes are string-pulled so the walker
  * gets a few waypoints, not one per cell.
  *
+ * An optional cost query makes some cells dear without closing them (the hydrology plan's H5: a trail between POIs
+ * crosses a river reach at a cost): entering such a cell adds its cost to the route's, so a route goes round the cells
+ * when the way round is cheaper and crosses them by the fewest cells when it is not. The string-pulling never
+ * straightens a route through a cell with a cost, so the cells a route pays for are the ones the search chose.
+ *
  * Each cell is sampled and judged walkable once per search and kept with the search's bookkeeping in FCellGrid; ties
  * in the open list go to the node nearer the goal; a search that runs long checks whether the goal is in a small pocket
  * it cannot reach (PocketCheckNodes) and stops there (G73).
@@ -196,8 +201,20 @@ public:
 	using FHeightSampler = TFunction<float(double X, double Y)>;
 	/** True when a cell may not be entered (structures, temporary blocks). Optional. */
 	using FBlockedQuery = TFunction<bool(const FIntPoint& Cell)>;
+	/**
+	 * What entering a cell costs on top of the step into it, in world units of route length (0 or less: nothing).
+	 * Optional; asked for each step considered, so it should be cheap or keep its own answers.
+	 */
+	using FCostQuery = TFunction<float(const FIntPoint& Cell)>;
 
-	FVoxelSurfacePathfinder(const FVoxelSurfaceNavParams& InParams, FHeightSampler InSampler, FBlockedQuery InBlocked = nullptr);
+	/**
+	 * @param InParams  The search's tunables
+	 * @param InSampler Surface Z at a world (X, Y)
+	 * @param InBlocked Cells that may not be entered (optional)
+	 * @param InCost    Cells that cost more to enter (optional; unset, a search is what it was without it)
+	 */
+	FVoxelSurfacePathfinder(const FVoxelSurfaceNavParams& InParams, FHeightSampler InSampler, FBlockedQuery InBlocked = nullptr,
+		FCostQuery InCost = nullptr);
 
 	const FVoxelSurfaceNavParams& GetParams() const { return Params; }
 
@@ -230,7 +247,10 @@ public:
 	/** Drop intermediate cells wherever the straight run between the kept cells is walkable. */
 	void SimplifyPath(TArray<FIntPoint>& Cells) const;
 
-	/** Every cell on the straight line between two cells is walkable and each step is within the rise limit. */
+	/**
+	 * Every cell on the straight line between two cells is walkable and each step is within the rise limit; with a
+	 * cost query, no cell on it past the first has a cost, nor a cell beside a diagonal step of it.
+	 */
 	bool IsStraightRunWalkable(const FIntPoint& From, const FIntPoint& To) const;
 
 	/** Forget sampled heights (a new search starts with an empty cache anyway). */
@@ -287,6 +307,7 @@ private:
 	FVoxelSurfaceNavParams Params;
 	FHeightSampler Sampler;
 	FBlockedQuery Blocked;
+	FCostQuery Cost;
 
 	mutable FCellGrid Cells;
 	mutable int32 SampleCount = 0;
