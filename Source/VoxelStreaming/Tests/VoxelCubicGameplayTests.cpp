@@ -745,4 +745,137 @@ bool FVoxelCubicVoxelTreesLineClearWidthTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// Voxel trees on a conditioning zone (G206), through the chunk manager: a block world streamed with a pad around the
+// viewer, flat at a height the natural ground is blocks above and blocks below. The injection and the tree queries
+// gather the same conditioning, zones and all (UVoxelChunkManager::GatherTreeConditioning), so a tree whose column is
+// on the pad stands on it: its foot is in the pad's top layer, ground under it (it was planted at the natural height, in
+// the air over a pad cut into a slope and under the ground of a raised one). A world with no conditioning
+// plants exactly the trees it planted.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCubicVoxelTreesOnAPadTest,
+	"VoxelWorlds.Cubic.VoxelTrees.OnAPad",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelCubicVoxelTreesOnAPadTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelCubicGameplayTestUtils;
+
+	// The pad: 1,350 uu of flat around the viewer's column and a ring of 600, at a height inside the hills' range.
+	const FVector2D Site(1234.5, -543.25); // the fixture's WorldOrigin
+	const FVoxelConditioningZone Pad(Site, 1350.0f, 600.0f, 120.0f);
+	FGameplayWorld Test;
+	Test.Start(TEXT("VoxelCubicTreesPadWorld"), EMeshingMode::Cubic, true, Pad);
+	UVoxelChunkManager* Manager = Test.Manager;
+	const UVoxelWorldConfiguration* Config = Test.Config;
+	const float VoxelSize = Config->VoxelSize;
+	const int32 N = Config->ChunkSize;
+	TestTrue(TEXT("The pad is at the viewer's column"), FVector2D(Config->WorldOrigin.X, Config->WorldOrigin.Y).Equals(Site));
+	TestTrue(TEXT("The pipeline settled"), Test.Settle());
+	FVoxelConditioning Conditioning;
+	Conditioning.Zones.Add(Pad);
+	const FVoxelConditioning Empty;
+
+	// The trees of the chunks around the viewer: with the pad, with no conditioning at all, and with a set that holds
+	// nothing.
+	int32 OnPad = 0, OnPadMoved = 0, OffLevel = 0, InRing = 0, RingOffLevel = 0, Outside = 0, OutsideMissing = 0, EmptyDifferent = 0, Natural = 0;
+	for (int32 CX = -3; CX <= 2; ++CX)
+	{
+		for (int32 CY = -3; CY <= 2; ++CY)
+		{
+			TArray<FIntVector> With, Without, WithEmpty;
+			TArray<int32> WithTemplates, WithoutTemplates, EmptyTemplates;
+			TArray<uint32> WithSeeds, WithoutSeeds, EmptySeeds;
+			auto Compute = [&](const FVoxelConditioning* Set, TArray<FIntVector>& Positions, TArray<int32>& Templates, TArray<uint32>& Seeds)
+			{
+				FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), N, VoxelSize, Config->WorldOrigin, Config->WorldSeed,
+					Config->NoiseParams, *Manager->GetWorldMode(), Config->TreeDensity, Config->TreeTemplates, nullptr, false, 0.0f,
+					Positions, Templates, Seeds, Set);
+			};
+			Compute(&Conditioning, With, WithTemplates, WithSeeds);
+			Compute(nullptr, Without, WithoutTemplates, WithoutSeeds);
+			Compute(&Empty, WithEmpty, EmptyTemplates, EmptySeeds);
+			Natural += Without.Num();
+			// No conditioning, whichever way it is said: the same trees, value for value.
+			EmptyDifferent += (WithEmpty == Without && EmptyTemplates == WithoutTemplates && EmptySeeds == WithoutSeeds) ? 0 : 1;
+			for (const FIntVector& Base : With)
+			{
+				// The injector judges a tree at its column's corner.
+				const FVector Centre = Manager->GlobalVoxelToWorldCentre(Base);
+				const double X = Centre.X - 0.5 * VoxelSize;
+				const double Y = Centre.Y - 0.5 * VoxelSize;
+				const float Ground = static_cast<float>(Manager->GetWorldMode()->GetSurfaceOnUpLine(FVector(X, Y, 0.0), Config->NoiseParams).Position.Z);
+				const float Weight = Pad.GetWeightAt(X, Y);
+				const int32 Expected = FMath::FloorToInt32((Conditioning.ApplyToHeight(X, Y, Ground) - Config->WorldOrigin.Z) / VoxelSize);
+				if (Weight >= 1.0f)
+				{
+					++OnPad;
+					OnPadMoved += FMath::Abs(Pad.TargetHeight - Ground) >= VoxelSize ? 1 : 0;
+					// On the flat: the pad's own level, whatever the natural ground there.
+					OffLevel += Base.Z == FMath::FloorToInt32((Pad.TargetHeight - Config->WorldOrigin.Z) / VoxelSize) ? 0 : 1;
+				}
+				else if (Weight > 0.0f)
+				{
+					++InRing;
+					RingOffLevel += Base.Z == Expected ? 0 : 1;
+				}
+				else
+				{
+					++Outside;
+					// Clear of the pad: the tree the natural ground has there.
+					OutsideMissing += Without.Contains(Base) ? 0 : 1;
+				}
+			}
+		}
+	}
+	TestTrue(TEXT("Trees are planted on the pad where it moved the ground a block or more, in its ring and clear of it (non-vacuous)"), OnPadMoved >= 3 && InRing >= 1 && Outside >= 10);
+	TestEqual(TEXT("A tree on the pad's flat stands at the pad's level"), OffLevel, 0);
+	TestEqual(TEXT("A tree in the pad's ring stands on the ground the ring makes"), RingOffLevel, 0);
+	TestEqual(TEXT("A tree clear of the pad is the natural ground's"), OutsideMissing, 0);
+	TestEqual(TEXT("With no conditioning the trees are the ones planted without it, for a null set and for an empty one"), EmptyDifferent, 0);
+
+	// In the streamed voxels: each tree the manager finds on the pad has the pad's top block under it and its trunk on it.
+	TArray<FVoxelTreeInstance> Standing;
+	Manager->FindVoxelTreesNear(FVector(Site.X, Site.Y, Pad.TargetHeight), 1900.0f, Standing);
+	const uint8 TrunkMaterial = Config->TreeTemplates[0].TrunkMaterialID;
+	const uint8 LeafMaterial = Config->TreeTemplates[0].LeafMaterialID;
+	int32 StandingOnPad = 0, OnItsBlock = 0, Found = 0, TrunkBlocks = 0;
+	for (const FVoxelTreeInstance& Tree : Standing)
+	{
+		const FVector Centre = Manager->GlobalVoxelToWorldCentre(Tree.BaseVoxel);
+		if (Pad.GetWeightAt(Centre.X - 0.5 * VoxelSize, Centre.Y - 0.5 * VoxelSize) < 1.0f)
+		{
+			continue;
+		}
+		++StandingOnPad;
+		// A tree's lowest block is set into the ground's top layer, as on natural ground: the base voxel is in the pad's top
+		// layer (the generated surface is its top face), the tree's blocks rise from it, and the block under it is ground
+		// (with the natural height the foot of a tree on a cut pad had air under it, and one on a raised pad was buried).
+		auto IsTree = [&](const FVoxelData& Voxel) { return Voxel.IsSolid() && (Voxel.MaterialID == TrunkMaterial || Voxel.MaterialID == LeafMaterial); };
+		const FVoxelData Below = Manager->GetVoxelAt(Centre - FVector(0.0, 0.0, VoxelSize));
+		const FVoxelData Foot = Manager->GetVoxelAt(Centre);
+		const FVoxelData Over = Manager->GetVoxelAt(Centre + FVector(0.0, 0.0, VoxelSize));
+		const double Top = Manager->GetGeneratedSurfacePoint(FVector(Centre.X, Centre.Y, 0.0)).Z;
+		OnItsBlock += (Below.IsSolid() && !IsTree(Below) && IsTree(Foot) && IsTree(Over) && FMath::Abs(Top - (Centre.Z + 0.5 * VoxelSize)) < 0.5) ? 1 : 0;
+		TArray<FVoxelTreeVoxel> Blocks;
+		Manager->GetVoxelTreeBlocks(Tree, Blocks);
+		for (const FVoxelTreeVoxel& Block : Blocks)
+		{
+			if (!Block.bTrunk)
+			{
+				continue;
+			}
+			++TrunkBlocks;
+			FVoxelTreeInstance Hit;
+			Found += (Manager->FindVoxelTreeAt(Manager->GlobalVoxelToWorldCentre(Block.GlobalVoxel), Hit) && Hit.BaseVoxel == Tree.BaseVoxel) ? 1 : 0;
+		}
+	}
+	AddInfo(FString::Printf(TEXT("%d trees planted on the pad's flat (%d where the natural ground is a block or more off the pad), %d in its ring, %d clear of it (%d without the pad in the same chunks); %d standing on the flat in the voxels, %d with their foot in the pad's top layer and ground under it; %d of their %d trunk blocks found their tree"),
+		OnPad, OnPadMoved, InRing, Outside, Natural, StandingOnPad, OnItsBlock, Found, TrunkBlocks));
+	TestTrue(TEXT("Trees stand on the pad in the voxels (non-vacuous)"), StandingOnPad >= 3);
+	TestEqual(TEXT("Each tree on the pad stands in the pad's top layer, ground under its foot and the tree rising from it"), OnItsBlock, StandingOnPad);
+	TestTrue(TEXT("The trunk blocks of the trees on the pad find their tree"), TrunkBlocks >= 3 && Found >= TrunkBlocks * 95 / 100);
+
+	Test.Stop();
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

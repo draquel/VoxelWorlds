@@ -156,7 +156,9 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 	{
 		return;
 	}
-	const bool bLines = Conditioning && Conditioning->Lines.Num() > 0;
+	// A world with no conditioning here plants exactly the trees it planted before conditioning was read (G206).
+	const bool bConditioned = Conditioning && !Conditioning->IsEmpty();
+	const bool bLines = bConditioned && Conditioning->Lines.Num() > 0;
 
 	uint32 ChunkSeed = ComputeTreeChunkSeed(SourceChunkCoord, WorldSeed);
 
@@ -203,15 +205,17 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 		// Advance seed state to maintain determinism (must happen before any continue)
 		RandomFromSeed(ChunkSeed);
 
-		// Conditioning lines: no tree inside a line's clear width, and beside a line that moves the ground the tree stands
-		// on the ground the line leaves there.
-		if (bLines)
+		// The conditioning: no tree inside a line's clear width, and where a line or a zone moves the ground (a road, a
+		// POI's pad and its ring) the tree stands on the ground generation makes there, the lines' blend and then the
+		// zones' (G206: with the natural height a tree on a pad cut into a slope began in the air over it, and one on a
+		// raised pad under its ground).
+		if (bConditioned)
 		{
-			if (Conditioning->IsClearedAt(WorldX, WorldY))
+			if (bLines && Conditioning->IsClearedAt(WorldX, WorldY))
 			{
 				continue;
 			}
-			TerrainHeight = Conditioning->ApplyLinesToHeight(WorldX, WorldY, TerrainHeight);
+			TerrainHeight = Conditioning->ApplyToHeight(WorldX, WorldY, TerrainHeight);
 		}
 
 		// ==================== Placement Filtering ====================

@@ -76,7 +76,7 @@ public:
 	 * @param WaterLevel Water level height (trees below this are skipped)
 	 * @param InOutVoxelData Voxel data to modify (must be ChunkSize^3 elements)
 	 * @param Conditioning The conditioning over the chunk and the source chunks around it (GetSourceChunkRadius of them
-	 *        each way), or null: its lines (ComputeTreePositionsForChunk)
+	 *        each way), or null: its lines and its zones (ComputeTreePositionsForChunk)
 	 */
 	static void InjectTrees(
 		const FIntVector& ChunkCoord,
@@ -120,10 +120,13 @@ public:
 	 * @param OutGlobalVoxelPositions Global voxel coordinates of tree base positions
 	 * @param OutTemplateIDs Template ID for each tree
 	 * @param OutSeeds Per-tree random seed
-	 * @param Conditioning The conditioning over the source chunk, or null. Its lines only (the terrain lines plan's L3):
-	 *        no tree is planted inside a line's clear width, and a tree beside a line that moves the ground stands on the
-	 *        ground the line leaves. Its zones are not read: a tree on a POI's pad stands at the natural height, as before
-	 *        (G206). Every caller passes the same lines for a place (a complete gather), so the trees are the same ones
+	 * @param Conditioning The conditioning over the source chunk, or null. No tree is planted inside a line's clear width
+	 *        (the terrain lines plan's L3), and a tree stands on the ground generation makes at its column: the natural
+	 *        height with the lines' blend and then the zones' (FVoxelConditioning::ApplyToHeight; G206), so a tree beside
+	 *        a road stands on the ground the road leaves and a tree on a POI's pad on the pad. Its height rule, its water
+	 *        check and its surface material are judged at that height. With no conditioning (null, or a set with no line
+	 *        and no zone) the trees are the natural ground's. Every caller passes the same conditioning for a place (a
+	 *        complete gather), so the trees are the same ones
 	 */
 	static void ComputeTreePositionsForChunk(
 		const FIntVector& SourceChunkCoord,
