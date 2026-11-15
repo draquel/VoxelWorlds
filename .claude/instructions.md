@@ -52,19 +52,23 @@ section true on its date); the Features docs are the current truth.
   a compressed chunk on the game thread.
 - **World modes through `IVoxelWorldMode`.** Build modes and their params only through `FVoxelWorldModeFactory`; game code
   reaches bounds, local up, altitude and the surface coordinate through the chunk manager (`Voxel|World` functions).
-  Never assume +Z is up or compare a Z with `WaterLevel`: water is read through the world's water levels
-  (`UVoxelChunkManager::GetWaterLevels`: `Sample` at a position, `GetRange` over the bounds a level is copied for,
-  `GetSea` for geometry drawn at the sea), and `FVoxelWaterLevels::FromConfig` is the only reader of the
-  configuration's `WaterLevel` and `WaterRadius` (WATER_SYSTEM.md, "The water levels").
+  Never assume +Z is up or compare a Z with `WaterLevel`: water is read through the world's water levels, which hold
+  the sea, the lakes and the river reaches: `UVoxelChunkManager::SampleWater` at a position,
+  `GatherWaterLevels` over the bounds a reader works on (then `Sample` and `GetRange` on that snapshot), and
+  `GetWaterLevels` only for what means the sea itself (`GetSea` for geometry drawn at it). Never copy the sea's
+  snapshot for a reader of "the water here": a lake stands over it. `FVoxelWaterLevels::FromConfig` is the only reader
+  of the configuration's `WaterLevel` and `WaterRadius` (WATER_SYSTEM.md, "The water levels", "Lakes and river
+  reaches").
 - **The surface ladder.** `UVoxelChunkManager::QuerySurfacePoint` with `EVoxelSurfaceLayer`: `Natural` (the world
   mode's), `Generated` (conditioning lines and zones applied, block tops on a cubic world; `GetGeneratedSurfacePoint`) or `EditMerged`
   (the loaded voxels; `QueryEditMergedSurfacePoint`). Pick the rung you mean; `GetTerrainHeightAt` is a heightmap's
   natural height and degrades on a planet.
-- **Conditioning registers at the world's start.** A chunk generates with the conditioning (zones, lines, the game's
-  conditioner) its request gathered, once. Whatever supplies conditioning registers before the chunk manager's first
-  tick, on `UVoxelChunkManager::OnInitialized` (fired at the end of `Initialize`), as `UVoxelTerrainLineComponent` and
-  the game's POI conditioner do; a source registered after a request was built is warned about and counted
-  (`GetNumLateConditioningSources`, G187). A test adds its zones and lines before it sets a viewer.
+- **Conditioning and water bodies register at the world's start.** A chunk generates with the conditioning (zones,
+  lines, the conditioners' own) and the water bodies its request gathered, once. Whatever supplies either registers
+  before the chunk manager's first tick, on `UVoxelChunkManager::OnInitialized` (fired at the end of `Initialize`), as
+  `UVoxelTerrainLineComponent` and the game's POI conditioner do (`AddTerrainConditioner`: a world may have several;
+  `AddWaterBody`, `AddWaterBodySource`); a source registered after a request was built is warned about and counted
+  (`GetNumLateConditioningSources`, G187). A test adds its zones, lines and bodies before it sets a viewer.
 - **Precision.** Planets are precise to about 1,000 km and heightmaps to the double range of a position: never hold a
   value of size R in float (altitudes in double on the CPU, the chunk's frame on the GPU, `PlanetFrame.ush`); primitives
   sit at their render region's origin (`FVoxelRenderRegions`) and store float offsets from it.

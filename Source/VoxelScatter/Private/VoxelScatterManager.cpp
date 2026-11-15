@@ -3308,8 +3308,17 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 	if (Configuration)
 	{
 		Context.NoiseParams = Configuration->GetNoiseParams();
-		// The configuration's water levels, from the one builder (what the chunk manager that owns this manager hands out).
-		Context.Water = FVoxelWaterLevels::FromConfig(*Configuration);
+		// The water levels over the chunk: the chunk manager's gather (the sea, and the lakes and river reaches there),
+		// or without one the configuration's sea, from the one builder.
+		if (WaterGatherer)
+		{
+			const FVector ChunkMin = GetChunkWorldOrigin(ChunkCoord);
+			Context.Water = WaterGatherer(FBox(ChunkMin, ChunkMin + FVector(Configuration->GetChunkWorldSize())));
+		}
+		else
+		{
+			Context.Water = FVoxelWaterLevels::FromConfig(*Configuration);
+		}
 		// The voxels a chunk's extraction reads past its own data are carved as generation carves them (G28, G72).
 		Context.CaveConfiguration = Configuration->bEnableCaves ? Configuration->CaveConfiguration.Get() : nullptr;
 		Context.bEnableBiomes = Configuration->bEnableBiomes;

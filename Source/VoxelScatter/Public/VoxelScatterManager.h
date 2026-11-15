@@ -7,6 +7,7 @@
 #include "VoxelData.h"
 #include "VoxelEditTypes.h"
 #include "VoxelScatterTypes.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelScatterManager.generated.h"
 
 class UMaterialInstanceDynamic;
@@ -641,6 +642,17 @@ public:
 	}
 
 	/**
+	 * How to gather the water levels over a chunk's world box (UVoxelChunkManager::GatherWaterLevels, complete): the sea
+	 * and the lakes and river reaches there, which decide an instance's underwater class at its own position (the
+	 * hydrology plan's section 5.5). Called on the game thread when a chunk's extraction is set up
+	 * (FScatterExtractionContext::Water). Unset: the configuration's sea.
+	 */
+	void SetWaterGatherer(TFunction<FVoxelWaterLevels(const FBox& /*ChunkBox*/)> InGatherer)
+	{
+		WaterGatherer = MoveTemp(InGatherer);
+	}
+
+	/**
 	 * Where a chunk's edit layer lives (the chunk manager's edit manager), so a heightmap chunk's extraction knows the
 	 * voxel over its top layer, the chunk above's bottom voxel (world modes review G26): MakeExtractionContext copies the
 	 * chunk above's edits on that layer into FScatterExtractionContext::OutsideEdits (keyed at Z = ChunkSize). On a planet
@@ -758,6 +770,9 @@ protected:
 
 	/** The chunk's conditioning (see SetConditioningGatherer). */
 	TFunction<void(const FBox&, FVoxelConditioning&)> ConditioningGatherer;
+
+	/** The chunk's water levels (see SetWaterGatherer). */
+	TFunction<FVoxelWaterLevels(const FBox&)> WaterGatherer;
 
 	/** A chunk's edit layer (see SetEditLayerSource). */
 	TFunction<const FChunkEditLayer*(const FIntVector&)> EditLayerSource;

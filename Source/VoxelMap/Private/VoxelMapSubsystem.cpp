@@ -258,6 +258,8 @@ void UVoxelMapSubsystem::Deinitialize()
 		CachedChunkManagerWeak->OnChunkGenerated.RemoveDynamic(this, &UVoxelMapSubsystem::OnChunkGenerated);
 		CachedChunkManagerWeak->OnTerrainConditioningChangedIn.Remove(ConditioningChangedHandle);
 		ConditioningChangedHandle.Reset();
+		CachedChunkManagerWeak->OnWaterBodiesChanged.Remove(WaterBodiesChangedHandle);
+		WaterBodiesChangedHandle.Reset();
 		bDelegatesBound = false;
 	}
 	if (UVoxelEditManager* EditManager = CachedEditManagerWeak.Get())
@@ -434,6 +436,10 @@ bool UVoxelMapSubsystem::ResolveChunkManager()
 	{
 		ChunkMgr->OnChunkGenerated.AddDynamic(this, &UVoxelMapSubsystem::OnChunkGenerated);
 		ConditioningChangedHandle = ChunkMgr->OnTerrainConditioningChangedIn.AddUObject(
+			this, &UVoxelMapSubsystem::HandleTerrainConditioningChanged);
+		// A lake or a river reach added, or worked out after a tile was drawn without it: the tiles there draw again, as
+		// for a conditioning change (a tile's water is the levels over its own bounds).
+		WaterBodiesChangedHandle = ChunkMgr->OnWaterBodiesChanged.AddUObject(
 			this, &UVoxelMapSubsystem::HandleTerrainConditioningChanged);
 		bDelegatesBound = true;
 
@@ -1283,10 +1289,28 @@ TSharedPtr<FVoxelMapOverlayBuildInput> UVoxelMapSubsystem::GatherOverlayInput(FI
 	Input->ChunkSize = CS;
 	Input->VoxelSize = CachedVoxelSize;
 	Input->WorldOriginZ = CachedWorldOrigin.Z;
-	// The tile's water: the levels' range over the tile (a heightmap tile's level is a world Z).
-	const FVoxelWaterLevelRange TileWater = TileFrame.GetTileWater(FVoxelMapTileId(TileCoord, 0));
+	// The tile's water: the levels' range over the tile (a heightmap tile's level is a world Z), and with a lake or a
+	// river reach over it the level over each column (no water: a level under every voxel).
+	const FVoxelMapTileId Tile0(TileCoord, 0);
+	const FBox TileBounds = TileFrame.GetTileBounds(Tile0);
+	const FVoxelWaterLevels TileLevels = ChunkMgr->HasWaterBodies() ? ChunkMgr->GatherWaterLevels(TileBounds, EVoxelConditioningGather::Ready) : TileFrame.Water;
+	const FVoxelWaterLevelRange TileWater = TileLevels.GetRange(TileBounds);
 	Input->bUseWater = TileWater.bAny;
 	Input->WaterLevel = static_cast<float>(TileWater.GetLevel());
+	if (!TileWater.bUniform)
+	{
+		Input->ColumnWaterLevels.SetNumUninitialized(CS * CS);
+		for (int32 PY = 0; PY < CS; ++PY)
+		{
+			for (int32 PX = 0; PX < CS; ++PX)
+			{
+				const FVoxelMapTileSample ColumnSample = TileFrame.SampleAt(Tile0, PX + 1, PY + 1);
+				FVoxelWaterSample Over;
+				Input->ColumnWaterLevels[PY * CS + PX] = TileLevels.Sample(FVector(ColumnSample.X, ColumnSample.Y, 0.0), Over)
+					? static_cast<float>(Over.SurfaceLevel) : -TNumericLimits<float>::Max();
+			}
+		}
+	}
 
 	const int32 VolumeSize = CS * CS * CS;
 	auto Snapshot = [ChunkMgr, VolumeSize](const FIntVector& Coord) -> TSharedPtr<const TArray<FVoxelData>>
@@ -1372,10 +1396,28 @@ TSharedPtr<FVoxelMapPlanetOverlayInput> UVoxelMapSubsystem::GatherPlanetOverlayI
 	Input->Origin = CachedWorldOrigin;
 	Input->Center = TileFrame.Center;
 	Input->PlanetRadius = TileFrame.Radius;
-	// The tile's water: the levels' range over the tile (a planet's level is a distance from the centre).
-	const FVoxelWaterLevelRange TileWater = TileFrame.GetTileWater(FVoxelMapTileId(TileCoord, 0));
+	// The tile's water: the levels' range over the tile (a planet's level is a distance from the centre), and with a
+	// lake or a river reach over it the level along each column's direction (no water: a radius of 0).
+	const FVoxelMapTileId Tile0(TileCoord, 0);
+	const FBox TileBounds = TileFrame.GetTileBounds(Tile0);
+	const FVoxelWaterLevels TileLevels = ChunkMgr->HasWaterBodies() ? ChunkMgr->GatherWaterLevels(TileBounds, EVoxelConditioningGather::Ready) : TileFrame.Water;
+	const FVoxelWaterLevelRange TileWater = TileLevels.GetRange(TileBounds);
 	Input->bUseWater = TileWater.bAny && TileFrame.Water.IsRadial();
 	Input->WaterRadius = TileWater.GetLevel();
+	if (!TileWater.bUniform)
+	{
+		Input->ColumnWaterRadii.SetNumUninitialized(CS * CS);
+		for (int32 PY = 0; PY < CS; ++PY)
+		{
+			for (int32 PX = 0; PX < CS; ++PX)
+			{
+				const FVoxelMapTileSample ColumnSample = TileFrame.SampleAt(Tile0, PX + 1, PY + 1);
+				FVoxelWaterSample Over;
+				Input->ColumnWaterRadii[PY * CS + PX] = TileLevels.Sample(TileFrame.Center + ColumnSample.Direction * TileFrame.Radius, Over)
+					? Over.SurfaceLevel : 0.0;
+			}
+		}
+	}
 
 	const TArray<FIntVector>* EditedChunks = TileEditedChunks.Find(PackTileKey(TileCoord));
 	if (!EditedChunks)

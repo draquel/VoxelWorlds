@@ -21,6 +21,7 @@
 #include "VoxelWaterTiles.h"
 #include "VoxelStreamingViewerPolicy.h"
 #include "VoxelConditioningSources.h"
+#include "VoxelWaterBodySources.h"
 #include "VoxelWaterLevels.h"
 #include <atomic>
 #include "VoxelChunkManager.generated.h"
@@ -445,9 +446,10 @@ public:
 
 	/**
 	 * A chunk manager has started: fired at the end of every manager's Initialize, in every world, before that manager's
-	 * first tick. Whatever supplies terrain conditioning registers on it (SetTerrainConditioner, AddConditioningLine,
-	 * AddConditioningZone), since a chunk whose generation request is built before a source is registered generates
-	 * without it and is not generated again: the game's POI conditioner and UVoxelTerrainLineComponent both do (G187).
+	 * first tick. Whatever supplies terrain conditioning or water bodies registers on it (AddTerrainConditioner,
+	 * AddConditioningLine, AddConditioningZone, AddWaterBody, AddWaterBodySource), since a chunk whose generation request
+	 * is built before a source is registered generates without it and is not generated again: the game's POI conditioner
+	 * and UVoxelTerrainLineComponent both do (G187).
 	 * A handler checks the manager's world against its own. Static, so a subsystem made before the world's actors can
 	 * bind before any manager exists.
 	 */
@@ -732,11 +734,12 @@ public:
 	FVector GetGeneratedSurfacePoint(const FVector& WorldPos) const;
 
 	/**
-	 * The level of the surface under a position (the generated terrain on the up-line through it, or the sea where that
-	 * lies higher), as a flight level: a distance from the centre on a planet, world Z on a heightmap world (what debug
-	 * flight holds, UVCMovementComponent::GetFlightLevel; code review CR2, FW-20).
+	 * The level of the surface under a position (the generated terrain on the up-line through it, or the water over it
+	 * where that lies higher: the sea, a lake or a river reach, SampleWater), as a flight level: a distance from the
+	 * centre on a planet, world Z on a heightmap world (what debug flight holds, UVCMovementComponent::GetFlightLevel;
+	 * code review CR2, FW-20).
 	 * @param WorldPos Any position on the up-line
-	 * @param bOutSea Whether the sea is the surface there
+	 * @param bOutSea Whether water is the surface there
 	 * @return The level
 	 */
 	double GetSurfaceOrSeaLevel(const FVector& WorldPos, bool& bOutSea) const;
@@ -908,11 +911,12 @@ public:
 	FVector GetSpawnPosition() const;
 
 	/**
-	 * The world's water levels (the water plan's W2): the bodies of water as an immutable snapshot, with the sea as
-	 * its one body. What every reader of the water asks: Sample at a position (the surface, the depth, the body),
-	 * GetRange over the bounds a reader works on, GetSea for the geometry drawn at the sea. Built from the configuration
-	 * as it is when asked (the one place this component reads the configuration's water), over the whole world; a
-	 * value, safe to hand to a worker. A reader in a loop takes it once.
+	 * The sea's water levels (the water plan's W2): an immutable snapshot whose one body is the sea, holding over the
+	 * whole world. For what means the sea itself: GetSea for the geometry drawn at it, HasWater, IsRadial, and the
+	 * readers the hydrology plan leaves on the sea (the water tiles, the far ocean, a planet's shell). A reader of "the
+	 * water here" asks SampleWater at a point or GatherWaterLevels over its bounds, which know the lakes and river
+	 * reaches too. Built from the configuration as it is when asked (the one place this component reads the
+	 * configuration's water); a value, safe to hand to a worker.
 	 *
 	 * @return The snapshot (no water before Initialize)
 	 */
@@ -937,6 +941,157 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|World")
 	float GetSeaDepthAt(const FVector& WorldPos) const;
+
+	// ==================== Lakes and river reaches (the hydrology plan's H1) ====================
+
+	/**
+	 * Add a lake or a river reach to the world (a hand-placed one: FVoxelWaterBody::MakeLake, MakeReach). Every reader
+	 * of the water levels sees it from the next gather; the readers that keep something per place are told
+	 * (OnWaterBodiesChanged). Add bodies when the world starts (OnInitialized), as conditioning: a body added after a
+	 * generation request was built is warned about and counted (GetNumLateConditioningSources), since the chunks
+	 * requested before it generated without it. A body of the other kind of world (a planet lake on a heightmap world)
+	 * is kept and never applies; the sea's record and a body with no footprint are refused.
+	 * @param Body The record
+	 */
+	void AddWaterBody(const FVoxelWaterBody& Body);
+
+	/** @return How many lakes and river reaches were added to this manager (AddWaterBody; a source's are not counted) */
+	int32 GetNumWaterBodies() const { return WaterBodySources.GetBodies().Num(); }
+
+	/** @return The lakes and river reaches added to this manager, in the order they were added */
+	const TArray<FVoxelWaterBody>& GetStaticWaterBodies() const { return WaterBodySources.GetBodies(); }
+
+	/**
+	 * Register a source of lakes and river reaches, gathered by bounds (IVoxelWaterBodySource: the hydrology
+	 * generator's network). Not owned; the caller removes it before it dies. Register on OnInitialized, as a
+	 * conditioner: a source registered after a generation request was built is warned about and counted.
+	 * @param Source The source (null is ignored)
+	 */
+	void AddWaterBodySource(IVoxelWaterBodySource* Source);
+
+	/** Take a source of water bodies out (RemoveWaterBodySource of one never added does nothing). */
+	void RemoveWaterBodySource(IVoxelWaterBodySource* Source);
+
+	/** @return Whether the world may hold a lake or a river reach: a static body or a source is registered */
+	bool HasWaterBodies() const { return !WaterBodySources.IsEmpty(); }
+
+	/**
+	 * The water levels over a world box, in any mode: the sea and the lakes and river reaches whose footprints may
+	 * reach the box's columns (its XY on a heightmap world, the cap it subtends on a planet). A value, safe to hand to
+	 * a worker; it holds over the box and says nothing true outside it. With no body in the world it is the sea's
+	 * (GetWaterLevels). Game thread.
+	 *
+	 * @param Box  The bounds the reader works on
+	 * @param Need Complete for a reader that must agree with the generated voxels (a chunk, a point, scatter), Ready
+	 *             for one whose region is too wide to wait for a body (the far field, the map): it is told later
+	 *             (OnWaterBodiesChanged)
+	 * @return The snapshot
+	 */
+	FVoxelWaterLevels GatherWaterLevels(const FBox& Box, EVoxelConditioningGather Need) const;
+
+	/**
+	 * Planets: the water levels over a cap of the sphere, as GatherWaterLevels.
+	 * @param Direction     Unit direction from the planet centre to the cap's centre
+	 * @param AngularRadius The cap's half-angle (radians)
+	 * @param Need          Complete or Ready
+	 * @return The snapshot (the sea's on a heightmap world)
+	 */
+	FVoxelWaterLevels GatherWaterLevelsOnSphere(const FVector& Direction, double AngularRadius, EVoxelConditioningGather Need) const;
+
+	/** The water levels over a chunk, complete: what its voxels are generated and read with. */
+	FVoxelWaterLevels GatherWaterLevelsForChunk(const FIntVector& ChunkCoord) const;
+
+	/**
+	 * The water levels around a world position: the snapshot of the place the point gather keeps (a cell a chunk
+	 * across), complete. For a reader that samples a few points close together; one point asks SampleWater.
+	 * @param WorldPos World position
+	 * @return The snapshot (the sea's with no body in the world)
+	 */
+	FVoxelWaterLevels GatherWaterLevelsAt(const FVector& WorldPos) const;
+
+	/**
+	 * The range of the water levels over a world box (FVoxelWaterLevels::GetRange of the gather over it), without
+	 * making a snapshot where the world has no body.
+	 * @param Box  The bounds a level is copied for
+	 * @param Need Complete or Ready, as GatherWaterLevels
+	 * @return The range
+	 */
+	FVoxelWaterLevelRange GetWaterRange(const FBox& Box, EVoxelConditioningGather Need) const;
+
+	/**
+	 * The water over a world position (the point gather): the body covering its column (the highest level, where
+	 * several do), its surface there and the position's depth under it. What a swimmer, the breath, the underwater
+	 * view, a floating item, the spawn search and an NPC's deep-water test ask. With no body in the world it is the
+	 * sea's own arithmetic; with one, the snapshots of the places asked last are kept, so a sample stays a lookup. Game
+	 * thread.
+	 *
+	 * @param WorldPos World position
+	 * @param Out The sample (bWater false and Depth NoWaterDepth where no body covers the position)
+	 * @return True when a body covers the position's column
+	 */
+	bool SampleWater(const FVector& WorldPos, FVoxelWaterSample& Out) const;
+
+	/**
+	 * Signed depth of a world position below the water over it, the sea, a lake or a river reach (SampleWater's depth).
+	 *
+	 * @param WorldPos World position
+	 * @return Positive below the surface, negative above; a large negative value where there is no water
+	 */
+	UFUNCTION(BlueprintPure, Category = "Voxel|World")
+	float GetWaterDepthAt(const FVector& WorldPos) const;
+
+	/**
+	 * GetWaterDepthAt in double, for C++ (the cheap form of SampleWater: the depth alone).
+	 * @param WorldPos World position
+	 * @return Positive below the surface; FVoxelWaterSample::NoWaterDepth where no body covers the position
+	 */
+	double GetWaterDepth(const FVector& WorldPos) const;
+
+	/**
+	 * Heightmap worlds: tell the readers that the lakes or river reaches over a world XY region changed after they may
+	 * have read them. The entry a source calls when it has worked out a body a Ready gather did not get: the point
+	 * gather and the LOD window drop what they kept, the far field rebuilds its patches there, and
+	 * OnWaterBodiesChanged fires. Chunks generated earlier keep their voxels.
+	 * @param Region The region whose bodies changed (a body's footprint)
+	 */
+	void NotifyWaterBodiesChanged(const FBox2D& Region);
+
+	/**
+	 * Planets: NotifyWaterBodiesChanged for a cap on the sphere.
+	 * @param Direction     Unit direction from the planet centre to the cap's centre
+	 * @param AngularRadius The cap's half-angle in radians
+	 */
+	void NotifyWaterBodiesChangedOnSphere(const FVector& Direction, double AngularRadius);
+
+	/**
+	 * Fired when the world's lakes or river reaches change, with where: a body added (its footprint), the region a
+	 * source named (NotifyWaterBodiesChanged), or everywhere (a source was registered or removed). The map draws the
+	 * tiles there again, and the character plugin's bridge passes it to the framework's water subsystem
+	 * (UCGFWaterSubsystem::NotifyWaterChanged), so a floating item rests again.
+	 */
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnVoxelWaterBodiesChanged, const FVoxelConditioningRegion& /*Region*/);
+	FOnVoxelWaterBodiesChanged OnWaterBodiesChanged;
+
+	/** What the point gather did (voxel.Water.Stats). */
+	struct FWaterGatherStats
+	{
+		/** SampleWater and GetWaterDepthAt calls answered from a kept or a new snapshot (a world with bodies) */
+		int64 PointSamples = 0;
+		/** Of those, the ones that gathered a new snapshot */
+		int64 PointGathers = 0;
+		/** Snapshots kept now */
+		int32 PointSnapshots = 0;
+		/** GatherWaterLevels calls that asked the sources (a world with bodies) */
+		int64 BoxGathers = 0;
+	};
+
+	/** @return The point gather's counters since Initialize */
+	FWaterGatherStats GetWaterGatherStats() const
+	{
+		FWaterGatherStats Out = WaterGatherStats;
+		Out.PointSnapshots = WaterPointCache.Num();
+		return Out;
+	}
 
 	/**
 	 * Where KillZ has to be for a planet and the space around it not to be cut by it (spherical SP-F5, Phase 6): one
@@ -1332,17 +1487,27 @@ public:
 	void NotifyTerrainConditioningChangedOnSphere(const FVector& Direction, double AngularRadius);
 
 	/**
-	 * Register a dynamic terrain conditioner (game-side, boundary-safe — e.g. supplying zones from POI
-	 * claims). Queried per chunk at generation-request build time. Not owned; caller manages lifetime.
-	 * Broadcasts OnTerrainConditioningChanged. Set it on OnInitialized: a conditioner set after a generation request
-	 * was built is warned about and counted (GetNumLateConditioningSources), since the chunks requested before it
-	 * generated without it (G187).
-	 * @param InConditioner The conditioner, or null to clear it
+	 * Register a dynamic terrain conditioner (game-side, boundary-safe: the POI layer's zones from claims and lines
+	 * from roads; since the hydrology plan a world may have more than one, each supplying its own beds). Queried per
+	 * chunk at generation-request build time, in the order they were registered. Not owned; the caller removes it
+	 * before it dies (RemoveTerrainConditioner). Broadcasts OnTerrainConditioningChanged. Register on OnInitialized: a
+	 * conditioner registered after a generation request was built is warned about and counted
+	 * (GetNumLateConditioningSources), since the chunks requested before it generated without it (G187).
+	 * @param InConditioner The conditioner (null, or one registered already, is ignored)
 	 */
-	void SetTerrainConditioner(IVoxelTerrainConditioner* InConditioner);
+	void AddTerrainConditioner(IVoxelTerrainConditioner* InConditioner);
 
-	/** @return Whether the game's conditioner is set (SetTerrainConditioner) */
-	bool HasTerrainConditioner() const { return ConditioningSources.HasConditioner(); }
+	/**
+	 * Take a dynamic terrain conditioner out. Broadcasts OnTerrainConditioningChanged when it was registered.
+	 * @param InConditioner The conditioner
+	 */
+	void RemoveTerrainConditioner(IVoxelTerrainConditioner* InConditioner);
+
+	/** @return Whether a dynamic conditioner is registered (AddTerrainConditioner) */
+	bool HasTerrainConditioner() const { return ConditioningSources.NumConditioners() > 0; }
+
+	/** @return How many dynamic conditioners are registered */
+	int32 GetNumTerrainConditioners() const { return ConditioningSources.NumConditioners(); }
 
 	/** Fire OnTerrainConditioningChanged and OnTerrainConditioningChangedIn for a region. */
 	void BroadcastTerrainConditioningChanged(const FVoxelConditioningRegion& Region);
@@ -1418,7 +1583,7 @@ public:
 	/**
 	 * Fired with OnTerrainConditioningChanged, with where the conditioning changed: a zone's or a line's reach, the
 	 * region a conditioner named (NotifyTerrainConditioningChanged: a road worked out after a Ready gather), or
-	 * everywhere (a conditioner was set). The map draws again only the tiles the region meets: a conditioner's lines
+	 * everywhere (a conditioner was registered or removed). The map draws again only the tiles the region meets: a conditioner's lines
 	 * arrive one by one, and each used to make every tile stale.
 	 */
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnVoxelTerrainConditioningChangedIn, const FVoxelConditioningRegion& /*Region*/);
@@ -2700,8 +2865,40 @@ private:
 	 */
 	TSharedPtr<const FVoxelMaterialTable> MaterialTable;
 
-	/** The static terrain conditioning zones and lines (gen-time flattening under POIs/claims; Phase 6c) and the game's conditioner */
+	/** The static terrain conditioning zones and lines (gen-time flattening under POIs/claims; Phase 6c) and the dynamic conditioners */
 	FVoxelConditioningSources ConditioningSources;
+
+	/** The lakes and river reaches added to the world and the sources of more (the hydrology plan's section 5.2) */
+	FVoxelWaterBodySources WaterBodySources;
+
+	/** One place the point gather keeps: a cell a chunk across (its key) and the water levels gathered over it */
+	struct FWaterPointSnapshot
+	{
+		FIntVector Cell = FIntVector::ZeroValue;
+		FVoxelWaterLevels Levels;
+		uint32 LastUsed = 0;
+	};
+
+	/** How many places the point gather keeps: the swimmers, the items and the NPCs asked last */
+	static constexpr int32 WaterPointCacheSize = 16;
+
+	/** The point gather's snapshots, least recently used replaced (SampleWater); emptied when the bodies change */
+	mutable TArray<FWaterPointSnapshot, TInlineAllocator<WaterPointCacheSize>> WaterPointCache;
+	mutable uint32 WaterPointClock = 0;
+	mutable FWaterGatherStats WaterGatherStats;
+
+	/** The point gather's snapshot for the place holding a position (a world with bodies), gathered when it is not kept. */
+	const FVoxelWaterLevels& FindOrGatherWaterAt(const FVector& WorldPos) const;
+
+	/** Drop what was kept from the water levels and fire OnWaterBodiesChanged. */
+	void BroadcastWaterBodiesChanged(const FVoxelConditioningRegion& Region);
+
+	/**
+	 * The water levels the voxel trees over a world XY region are planted with, where a lake or a river reach lies
+	 * there: a complete gather over the region grown as GatherTreeConditioning grows it. Null with the sea alone (the
+	 * injector then tests the chunk's scalar, as before).
+	 */
+	TSharedPtr<const FVoxelWaterLevels> GatherTreeWater(const FBox2D& Region) const;
 
 	/** Generation requests built with at least one conditioning line gathered over the chunk (the world report) */
 	mutable int64 LineConditionedRequests = 0;

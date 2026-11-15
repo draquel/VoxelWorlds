@@ -80,7 +80,7 @@ bool FVoxelConditioningLineGathersTest::RunTest(const FString& Parameters)
 		W.Create(TEXT("ConditioningLineGathersPlane"));
 		W.ConfigureSmallPlane();
 		W.StartManager();
-		W.Manager->SetTerrainConditioner(&Conditioner);
+		W.Manager->AddTerrainConditioner(&Conditioner);
 
 		const FBox2D Region(FVector2D(-800.0, -800.0), FVector2D(800.0, 800.0));
 		FVoxelConditioning Complete;
@@ -108,7 +108,7 @@ bool FVoxelConditioningLineGathersTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Plane: a point query asks Complete"), Conditioner.RegionComplete, 2);
 		TestEqual(TEXT("Plane: the generated surface under a line is the natural one"), Generated, W.Manager->GetSurfacePointAt(Probe).Position.Z, 1e-3);
 
-		W.Manager->SetTerrainConditioner(nullptr);
+		W.Manager->RemoveTerrainConditioner(&Conditioner);
 	}
 
 	// A planet: the cap gathers.
@@ -118,7 +118,7 @@ bool FVoxelConditioningLineGathersTest::RunTest(const FString& Parameters)
 		W.Create(TEXT("ConditioningLineGathersPlanet"));
 		W.ConfigureSmallPlanet();
 		W.StartManager();
-		W.Manager->SetTerrainConditioner(&Conditioner);
+		W.Manager->AddTerrainConditioner(&Conditioner);
 
 		const FVector Direction = FVector(1.0, 0.5, 0.25).GetSafeNormal();
 		FVoxelConditioning Complete;
@@ -139,7 +139,7 @@ bool FVoxelConditioningLineGathersTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Planet: the conditioner was asked Ready once"), Conditioner.SphereReady, 1);
 		TestEqual(TEXT("Planet: the region gather was not used"), Conditioner.RegionComplete + Conditioner.RegionReady, 0);
 
-		W.Manager->SetTerrainConditioner(nullptr);
+		W.Manager->RemoveTerrainConditioner(&Conditioner);
 	}
 	return true;
 }
@@ -600,9 +600,20 @@ bool FVoxelConditioningChangedRegionTest::RunTest(const FString& Parameters)
 		W.Manager->AddConditioningZone(Zone);
 		TestTrue(TEXT("Plane: adding a zone names its bounds"), Regions.Num() == 3 && !Regions[2].bEverywhere && Regions[2].Box == Zone.GetBounds2D());
 
-		W.Manager->SetTerrainConditioner(nullptr);
-		TestTrue(TEXT("Plane: a conditioner set or cleared may change the conditioning anywhere"), Regions.Num() == 4 && Regions[3].bEverywhere);
+		// A conditioner registered, then removed: each may change the conditioning anywhere. Registering it again, or
+		// removing one that is not registered, changes nothing.
+		VoxelConditioningGatherTestUtils::FLineConditioner Late;
+		W.Manager->AddTerrainConditioner(&Late);
+		TestTrue(TEXT("Plane: a conditioner registered may change the conditioning anywhere"), Regions.Num() == 4 && Regions[3].bEverywhere);
 		TestEqual(TEXT("Plane: the delegate without a region fires for each change too"), Broadcasts, 4);
+		W.Manager->AddTerrainConditioner(&Late);
+		TestEqual(TEXT("Plane: a conditioner registered twice is one conditioner"), W.Manager->GetNumTerrainConditioners(), 1);
+		TestEqual(TEXT("Plane: ... and registering it again announces nothing"), Regions.Num(), 4);
+		W.Manager->RemoveTerrainConditioner(&Late);
+		TestTrue(TEXT("Plane: a conditioner removed may change the conditioning anywhere"), Regions.Num() == 5 && Regions[4].bEverywhere);
+		W.Manager->RemoveTerrainConditioner(&Late);
+		TestTrue(TEXT("Plane: removing a conditioner that is not registered announces nothing"),
+			Regions.Num() == 5 && !W.Manager->HasTerrainConditioner());
 		W.Manager->OnTerrainConditioningChanged.Remove(Handle);
 		W.Manager->OnTerrainConditioningChangedIn.Remove(InHandle);
 		W.Stop();

@@ -580,6 +580,9 @@ private:
 	/** Binding on the chunk manager's OnTerrainConditioningChangedIn. */
 	FDelegateHandle ConditioningChangedHandle;
 
+	/** Binding on the chunk manager's OnWaterBodiesChanged (the same handler: the tiles the region meets draw again). */
+	FDelegateHandle WaterBodiesChangedHandle;
+
 	FCriticalSection TileMutex;		// Guards TileStore writes (made on the game thread when a drawing completes)
 
 	/** Max concurrent async tile generation tasks. */

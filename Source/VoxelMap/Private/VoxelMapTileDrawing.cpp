@@ -89,9 +89,21 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 	// Terrain conditioning over the tile's area and its apron (POI pads, campsites): generation layers these onto the
 	// base height, so the map must too (QA W-05). Gathered here on the game thread; plain data.
 	FVoxelConditioning Conditioning;
+	// The water over the tile where the world has a lake or a river reach: the levels gathered over the tile's own
+	// bounds, with what is at hand (the tile is drawn again when a body arrives: UVoxelChunkManager::OnWaterBodiesChanged).
+	// Null with the sea alone: the frame's own serves, one level a tile.
+	TSharedPtr<const FVoxelWaterLevels> TileWaterOver;
 	if (UVoxelChunkManager* ChunkMgr = CachedChunkManagerWeak.Get())
 	{
 		Frame.GatherConditioning(*ChunkMgr, Id, Conditioning);
+		if (ChunkMgr->HasWaterBodies())
+		{
+			FVoxelWaterLevels Gathered = ChunkMgr->GatherWaterLevels(Frame.GetTileBounds(Id), EVoxelConditioningGather::Ready);
+			if (!Gathered.IsSeaAlone())
+			{
+				TileWaterOver = MakeShared<const FVoxelWaterLevels>(MoveTemp(Gathered));
+			}
+		}
 	}
 
 	// Edit overlays (R22), all level 0's. A level-0 tile: its own and its neighbours' (the hillshade apron reads their
@@ -160,7 +172,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
 		[WeakThis, Id, Generation, WorldMode, Frame, NoiseParams, bUseBiomes, BiomeSnapshot,
 		 FallbackTempNoiseParams, FallbackMoistureNoiseParams, MaterialPalette = MoveTemp(MaterialPalette),
-		 Conditioning = MoveTemp(Conditioning), OwnOverlay, SourceOverlays = MoveTemp(SourceOverlays), RebuildInput, bRebuild]() mutable
+		 Conditioning = MoveTemp(Conditioning), TileWaterOver, OwnOverlay, SourceOverlays = MoveTemp(SourceOverlays), RebuildInput, bRebuild]() mutable
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelMap_DrawTile);
 		const double DrawStart = FPlatformTime::Seconds();
@@ -194,7 +206,8 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 		auto AnalyticMaterialAt = [&](const FVoxelMapTileSample& Sample, float Altitude) -> uint8
 		{
 			return FVoxelSurfaceQuery::QueryMapSurfaceMaterial(*WorldMode, Frame.PositionAt(Sample, Altitude), Sample.Direction, Altitude,
-				Frame.VoxelSize, NoiseParams, BiomeSnapshot, bUseBiomes, Frame.Water, &Conditioning, FallbackTempNoiseParams, FallbackMoistureNoiseParams);
+				Frame.VoxelSize, NoiseParams, BiomeSnapshot, bUseBiomes, TileWaterOver.IsValid() ? *TileWaterOver : Frame.Water, &Conditioning,
+				FallbackTempNoiseParams, FallbackMoistureNoiseParams);
 		};
 
 		// The tile's own pixels: the overlay build compares against them, and the game thread keeps a level-0 tile's
@@ -314,11 +327,16 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 
 		// Shading ranges from the world's own height bounds (see ResolveChunkManager): land from the water (or the lowest
 		// terrain) to the highest, water depth from the water down to the lowest.
-		// The tile's water: the levels' range over the tile's own bounds, one level a tile.
-		const FVoxelWaterLevelRange TileWater = Frame.GetTileWater(Id);
+		// The tile's water: the levels' range over the tile's own bounds. One level a tile while the range is uniform (the
+		// sea alone); with a lake or a river reach over the tile each pixel asks the level over itself.
+		const FVoxelWaterLevelRange TileWater = TileWaterOver.IsValid() ? TileWaterOver->GetRange(Frame.GetTileBounds(Id)) : Frame.GetTileWater(Id);
+		const bool bWaterByPixel = TileWaterOver.IsValid() && !TileWater.bUniform;
+		// The shading's reference is the sea's level in either case (the lowest terrain with the sea off): a lake stands
+		// over land, which is tinted from the sea up as on a tile with no lake.
+		const FVoxelWaterLevelRange ShadeWater = bWaterByPixel ? Frame.GetTileWater(Id) : TileWater;
 		float LandBase = 0.0f, LandSpan = 1.0f, DepthSpan = 1.0f;
-		Frame.GetShadingSpans(TileWater, LandBase, LandSpan, DepthSpan);
-		const float WaterAltitude = Frame.GetWaterAltitude(TileWater);
+		Frame.GetShadingSpans(ShadeWater, LandBase, LandSpan, DepthSpan);
+		const float WaterAltitude = Frame.GetWaterAltitude(ShadeWater);
 
 		// --- Pass 2: colour ---
 		TArray<FColor> PixelData;
@@ -336,6 +354,18 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 				// below the water line stays land until water floods it), not from the analytic altitude test.
 				uint8 MaterialID = 0;
 				bool bWater = false;
+				// The water over this pixel: the tile's one level, or the level of the body over the pixel's own column.
+				bool bPixelWater = false;
+				float PixelWaterAltitude = WaterAltitude;
+				if (bWaterByPixel)
+				{
+					FVoxelWaterSample Over;
+					if (TileWaterOver->Sample(Frame.PositionAt(Samples[G], Altitude), Over))
+					{
+						bPixelWater = Over.Depth > 0.0;
+						PixelWaterAltitude = static_cast<float>(Frame.bPlanet ? Over.SurfaceLevel - Frame.Radius : Over.SurfaceLevel);
+					}
+				}
 				const int32 Index = PY * Resolution + PX;
 				const int32 Slot = OverlaySlot[Index];
 				if (Slot != INDEX_NONE)
@@ -347,7 +377,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 				else
 				{
 					MaterialID = AnalyticMaterialAt(Samples[G], Altitude);
-					bWater = Frame.IsWater(TileWater, Altitude);
+					bWater = bWaterByPixel ? bPixelWater : Frame.IsWater(TileWater, Altitude);
 				}
 
 				FColor Color;
@@ -355,7 +385,7 @@ void UVoxelMapSubsystem::GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Gen
 				{
 					// Submerged terrain — render as water, deeper = darker blue. Depth is normalized against the world's
 					// own terrain floor rather than a fixed constant, so shallow-water configs still get a readable gradient.
-					const float Depth = WaterAltitude - Altitude;
+					const float Depth = PixelWaterAltitude - Altitude;
 					const float DepthFactor = FMath::Lerp(1.0f, 0.3f, FMath::Clamp(Depth / DepthSpan, 0.0f, 1.0f));
 					Color.R = FMath::Clamp(static_cast<int32>(20 * DepthFactor), 0, 255);
 					Color.G = FMath::Clamp(static_cast<int32>(80 * DepthFactor), 0, 255);

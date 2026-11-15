@@ -30,7 +30,8 @@ void FVoxelTreeInjector::InjectTrees(
 	const UVoxelBiomeConfiguration* BiomeConfig,
 	bool bEnableWaterLevel, float WaterLevel,
 	TArray<FVoxelData>& InOutVoxelData,
-	const FVoxelConditioning* Conditioning)
+	const FVoxelConditioning* Conditioning,
+	const FVoxelWaterLevels* WaterOver)
 {
 	if (Templates.Num() == 0 || TreeDensity <= 0.0f)
 	{
@@ -63,7 +64,7 @@ void FVoxelTreeInjector::InjectTrees(
 				NoiseParams, WorldMode,
 				TreeDensity, Templates,
 				BiomeConfig, bEnableWaterLevel, WaterLevel,
-				TreePositions, TemplateIDs, TreeSeeds, Conditioning);
+				TreePositions, TemplateIDs, TreeSeeds, Conditioning, WaterOver);
 
 			// Stamp each tree that could overlap this chunk
 			for (int32 i = 0; i < TreePositions.Num(); ++i)
@@ -150,7 +151,8 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 	TArray<FIntVector>& OutGlobalVoxelPositions,
 	TArray<int32>& OutTemplateIDs,
 	TArray<uint32>& OutSeeds,
-	const FVoxelConditioning* Conditioning)
+	const FVoxelConditioning* Conditioning,
+	const FVoxelWaterLevels* WaterOver)
 {
 	if (Templates.Num() == 0 || TreeDensity <= 0.0f)
 	{
@@ -221,8 +223,19 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 		// ==================== Placement Filtering ====================
 		const FVoxelTreeTemplate& Tmpl = Templates[TemplateIdx];
 
+		// The water over the tree's own column where a lake or a river reach is gathered (the hydrology plan's section
+		// 5.4): a pond's level holds over its footprint and nowhere else. With the sea alone it is the chunk's scalar.
+		bool bTreeWater = bEnableWaterLevel;
+		float TreeWaterLevel = WaterLevel;
+		if (WaterOver && !WaterOver->IsSeaAlone())
+		{
+			FVoxelWaterSample Over;
+			bTreeWater = WaterOver->Sample(FVector(WorldX, WorldY, TerrainHeight), Over);
+			TreeWaterLevel = static_cast<float>(Over.SurfaceLevel);
+		}
+
 		// Water level check: skip trees below water
-		if (bEnableWaterLevel && TerrainHeight < WaterLevel)
+		if (bTreeWater && TerrainHeight < TreeWaterLevel)
 		{
 			continue;
 		}
@@ -234,7 +247,7 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 		uint8 SurfaceMaterial = 0;
 		uint8 BiomeID = 0;
 		FVoxelSurfaceQuery::QuerySurfaceConditions(WorldX, WorldY, TerrainHeight, VoxelSize,
-			BiomeSnapshot, WorldSeed, bEnableWaterLevel, WaterLevel,
+			BiomeSnapshot, WorldSeed, bTreeWater, TreeWaterLevel,
 			SurfaceMaterial, BiomeID);
 
 		// Check per-template placement rules
@@ -423,7 +436,8 @@ void FVoxelTreeInjector::FindTreesWithTrunkAt(
 	const UVoxelBiomeConfiguration* BiomeConfig,
 	bool bEnableWaterLevel, float WaterLevel,
 	TArray<FVoxelTreeInstance>& OutTrees,
-	const FVoxelConditioning* Conditioning)
+	const FVoxelConditioning* Conditioning,
+	const FVoxelWaterLevels* WaterOver)
 {
 	if (Templates.Num() == 0 || TreeDensity <= 0.0f || ChunkSize <= 0)
 	{
@@ -453,7 +467,7 @@ void FVoxelTreeInjector::FindTreesWithTrunkAt(
 			TArray<uint32> TreeSeeds;
 			ComputeTreePositionsForChunk(FIntVector(Chunk.X + DX, Chunk.Y + DY, Chunk.Z), ChunkSize, VoxelSize, WorldOrigin, WorldSeed,
 				NoiseParams, WorldMode, TreeDensity, Templates, BiomeConfig, bEnableWaterLevel, WaterLevel,
-				TreePositions, TemplateIDs, TreeSeeds, Conditioning);
+				TreePositions, TemplateIDs, TreeSeeds, Conditioning, WaterOver);
 
 			for (int32 i = 0; i < TreePositions.Num(); ++i)
 			{

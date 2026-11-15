@@ -245,7 +245,7 @@ manager, before it has built a request. A source binds to it and checks the mana
 actor begins play before the world's first tick), and the game's POI conditioner does (`POI_SYSTEM.md`). Until
 2026-11-13 the POI conditioner registered on its subsystem's first tick, after the chunk manager's: 8 requests were
 built first in every start (G187). The chunk manager counts the requests it builds (`GetNumGenerationRequestsBuilt`)
-and a source registered after the first (`SetTerrainConditioner`, `AddConditioningLine`, `AddConditioningZone`) is
+and a source registered after the first (`AddTerrainConditioner`, `AddConditioningLine`, `AddConditioningZone`) is
 warned about in the log and counted (`GetNumLateConditioningSources`); `voxel.World.Stats`' conditioning line ends
 "every source registered before the first generation request" or names the late ones. `Scripts/qa/startup_order.py`
 at the project root starts a map in PIE, or with a dedicated server and a client, and reports those lines.

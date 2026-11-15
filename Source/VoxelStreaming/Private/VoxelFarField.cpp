@@ -189,15 +189,15 @@ float FVoxelFarFieldSurface::SampleHeight(double WorldX, double WorldY, const FV
 }
 
 void FVoxelFarFieldSurface::SampleConditionsXY(double WorldX, double WorldY, float Height, uint8& OutMaterial, uint8& OutBiome,
-	const FVoxelConditioning* Conditioning) const
+	const FVoxelConditioning* Conditioning, const FVoxelWaterLevels& Over) const
 {
 	if (Biomes.bIsValid)
 	{
 		// The water over this column (a heightmap world's level is a world Z).
-		FVoxelWaterSample Over;
-		const bool bWater = Water.Sample(FVector(WorldX, WorldY, Height), Over);
+		FVoxelWaterSample Column;
+		const bool bWater = Over.Sample(FVector(WorldX, WorldY, Height), Column);
 		FVoxelSurfaceQuery::QuerySurfaceConditions(static_cast<float>(WorldX), static_cast<float>(WorldY), Height, VoxelSize, Biomes, WorldSeed,
-			bWater, static_cast<float>(Over.SurfaceLevel), OutMaterial, OutBiome, Conditioning);
+			bWater, static_cast<float>(Column.SurfaceLevel), OutMaterial, OutBiome, Conditioning);
 		return;
 	}
 	// No biomes: generation's material by depth (the surface's at depth 0), a conditioning line's band over it.
@@ -209,18 +209,19 @@ void FVoxelFarFieldSurface::SampleConditionsXY(double WorldX, double WorldY, flo
 	}
 }
 
-FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMixXY(double WorldX, double WorldY, float Height, const FVoxelConditioning* Conditioning) const
+FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMixXY(double WorldX, double WorldY, float Height, const FVoxelConditioning* Conditioning,
+	const FVoxelWaterLevels& Over) const
 {
 	if (Biomes.bIsValid)
 	{
-		FVoxelWaterSample Over;
-		const bool bWater = Water.Sample(FVector(WorldX, WorldY, Height), Over);
+		FVoxelWaterSample Column;
+		const bool bWater = Over.Sample(FVector(WorldX, WorldY, Height), Column);
 		return FVoxelSurfaceQuery::QuerySurfaceMaterialMix(static_cast<float>(WorldX), static_cast<float>(WorldY), Height, Biomes, WorldSeed,
-			bWater, static_cast<float>(Over.SurfaceLevel), Conditioning);
+			bWater, static_cast<float>(Column.SurfaceLevel), Conditioning);
 	}
 	FVoxelSurfaceMaterialMix Mix;
 	uint8 Biome = 0;
-	SampleConditionsXY(WorldX, WorldY, Height, Mix.Materials[0], Biome, Conditioning);
+	SampleConditionsXY(WorldX, WorldY, Height, Mix.Materials[0], Biome, Conditioning, Over);
 	Mix.Materials[1] = Mix.Materials[0];
 	Mix.BiomeID = Biome;
 	return Mix;
@@ -251,13 +252,13 @@ float FVoxelFarFieldSurface::SampleAltitude(const FVector& Direction, const FVox
 }
 
 void FVoxelFarFieldSurface::SampleConditions(const FVector& Direction, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome,
-	const FVoxelConditioning* Conditioning) const
+	const FVoxelConditioning* Conditioning, const FVoxelWaterLevels& Over) const
 {
 	const FSphericalPlanetWorldMode& Planet = GetPlanet();
 	if (Biomes.bIsValid)
 	{
 		FVoxelSurfaceQuery::QueryPlanetSurfaceConditionsAt(Planet, Direction, Altitude, Continentalness, Altitude, VoxelSize, NoiseParams,
-			Biomes, Water, OutMaterial, OutBiome, Conditioning);
+			Biomes, Over, OutMaterial, OutBiome, Conditioning);
 		return;
 	}
 	// No biomes: generation's material by depth (the surface's at depth 0), a conditioning line's band over it.
@@ -271,16 +272,16 @@ void FVoxelFarFieldSurface::SampleConditions(const FVector& Direction, float Alt
 }
 
 FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMix(const FVector& Direction, float Altitude, float Continentalness,
-	const FVoxelConditioning* Conditioning) const
+	const FVoxelConditioning* Conditioning, const FVoxelWaterLevels& Over) const
 {
 	const FSphericalPlanetWorldMode& Planet = GetPlanet();
 	if (Biomes.bIsValid)
 	{
-		return FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(Planet, Direction, Altitude, Continentalness, NoiseParams, Biomes, Water, Conditioning);
+		return FVoxelSurfaceQuery::QueryPlanetSurfaceMaterialMixAt(Planet, Direction, Altitude, Continentalness, NoiseParams, Biomes, Over, Conditioning);
 	}
 	FVoxelSurfaceMaterialMix Mix;
 	uint8 Biome = 0;
-	SampleConditions(Direction, Altitude, Continentalness, Mix.Materials[0], Biome, Conditioning);
+	SampleConditions(Direction, Altitude, Continentalness, Mix.Materials[0], Biome, Conditioning, Over);
 	Mix.Materials[1] = Mix.Materials[0];
 	Mix.BiomeID = Biome;
 	return Mix;
@@ -300,24 +301,26 @@ float FVoxelFarFieldSurface::SampleAltitude(const FVoxelFarFieldSample& Sample, 
 }
 
 void FVoxelFarFieldSurface::SampleConditions(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness, uint8& OutMaterial, uint8& OutBiome,
-	const FVoxelConditioning* Conditioning) const
+	const FVoxelConditioning* Conditioning, const FVoxelWaterLevels* WaterOver) const
 {
+	const FVoxelWaterLevels& Over = WaterOver ? *WaterOver : Water;
 	if (bHeightmap)
 	{
-		SampleConditionsXY(Sample.XY.X, Sample.XY.Y, Altitude, OutMaterial, OutBiome, Conditioning);
+		SampleConditionsXY(Sample.XY.X, Sample.XY.Y, Altitude, OutMaterial, OutBiome, Conditioning, Over);
 		return;
 	}
-	SampleConditions(Sample.Direction, Altitude, Continentalness, OutMaterial, OutBiome, Conditioning);
+	SampleConditions(Sample.Direction, Altitude, Continentalness, OutMaterial, OutBiome, Conditioning, Over);
 }
 
 FVoxelSurfaceMaterialMix FVoxelFarFieldSurface::SampleMaterialMix(const FVoxelFarFieldSample& Sample, float Altitude, float Continentalness,
-	const FVoxelConditioning* Conditioning) const
+	const FVoxelConditioning* Conditioning, const FVoxelWaterLevels* WaterOver) const
 {
+	const FVoxelWaterLevels& Over = WaterOver ? *WaterOver : Water;
 	if (bHeightmap)
 	{
-		return SampleMaterialMixXY(Sample.XY.X, Sample.XY.Y, Altitude, Conditioning);
+		return SampleMaterialMixXY(Sample.XY.X, Sample.XY.Y, Altitude, Conditioning, Over);
 	}
-	return SampleMaterialMix(Sample.Direction, Altitude, Continentalness, Conditioning);
+	return SampleMaterialMix(Sample.Direction, Altitude, Continentalness, Conditioning, Over);
 }
 
 // ==================== FVoxelFarField: statics ====================
@@ -794,7 +797,7 @@ FVoxelFarFieldPatchKey FVoxelFarFieldFrame::ChildKeyOf(const FVoxelFarFieldPatch
 }
 
 void FVoxelFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, const FVoxelFarFieldSurface& Surface,
-	const FVoxelConditioning& Conditioning, const FVoxelFarFieldPatchKey& Key, FVoxelFarFieldPatchMesh& Out)
+	const FVoxelConditioning& Conditioning, const FVoxelFarFieldPatchKey& Key, FVoxelFarFieldPatchMesh& Out, const FVoxelWaterLevels* WaterOver)
 {
 	using namespace VoxelFarFieldPrivate;
 	const double StartTime = FPlatformTime::Seconds();
@@ -885,7 +888,7 @@ void FVoxelFarField::BuildPatch(const FVoxelFarFieldSettings& Settings, const FV
 			}
 			Normals[I + J * Row] = FVector3f(Normal);
 			FVoxelSurfaceMaterialMix& Mix = Mixes[I + J * Row];
-			Mix = Surface.SampleMaterialMix(Samples[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index], &Conditioning);
+			Mix = Surface.SampleMaterialMix(Samples[Index], static_cast<float>(Altitudes[Index]), Continentalness[Index], &Conditioning, WaterOver);
 			Materials[I + J * Row] = Mix.Materials[0];
 			Biomes[I + J * Row] = Mix.BiomeID;
 			Out.MinAltitude = FMath::Min(Out.MinAltitude, static_cast<float>(Altitudes[Index]));
@@ -1922,6 +1925,18 @@ void FVoxelFarField::LaunchBuilds()
 			++Waiting;
 			continue;
 		}
+		// The water over the patch, where a lake or a river reach lies there: with what is at hand, as the conditioning
+		// (a patch's region is too wide to wait for a body; it is rebuilt when one arrives). The sea alone needs no
+		// snapshot of its own: the surface's serves.
+		TSharedPtr<const FVoxelWaterLevels> PatchWater;
+		if (WaterGatherer && Frame.TakesZones(*Patch))
+		{
+			FVoxelWaterLevels Gathered = WaterGatherer(Frame.RegionOf(*Patch));
+			if (!Gathered.IsSeaAlone())
+			{
+				PatchWater = MakeShared<const FVoxelWaterLevels>(MoveTemp(Gathered));
+			}
+		}
 		FVoxelConditioning Conditioning;
 		if (ConditioningGatherer && Frame.TakesZones(*Patch))
 		{
@@ -1939,10 +1954,10 @@ void FVoxelFarField::LaunchBuilds()
 		--Slots;
 		const FVoxelFarFieldPatchKey Key = Patch->Key;
 		TSharedPtr<FBuildSink, ESPMode::ThreadSafe> TaskSink = Sink;
-		auto Build = [TaskSink, BuildSettings = Settings, SharedSurface, Conditioning = MoveTemp(Conditioning), Key, Serial]()
+		auto Build = [TaskSink, BuildSettings = Settings, SharedSurface, Conditioning = MoveTemp(Conditioning), PatchWater, Key, Serial]()
 		{
 			TSharedPtr<FVoxelFarFieldPatchMesh> Mesh = MakeShared<FVoxelFarFieldPatchMesh>();
-			BuildPatch(BuildSettings, *SharedSurface, Conditioning, Key, *Mesh);
+			BuildPatch(BuildSettings, *SharedSurface, Conditioning, Key, *Mesh, PatchWater.Get());
 			FScopeLock Lock(&TaskSink->Lock);
 			TaskSink->Done.Add({ Key.Pack(), Serial, MoveTemp(Mesh) });
 		};

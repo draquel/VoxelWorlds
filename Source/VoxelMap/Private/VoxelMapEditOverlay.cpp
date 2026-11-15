@@ -125,6 +125,8 @@ FVoxelMapEditOverlay FVoxelMapEditOverlay::Build(
 		const int32 PX = Col % CS;
 		const int32 PY = Col / CS;
 		const float AnalyticHeight = AnalyticHeights[Col];
+		// The water level over this column: its own where a lake or a river reach lies over the tile, else the tile's.
+		const float ColumnWaterLevel = Input.ColumnWaterLevels.Num() == NumColumns ? Input.ColumnWaterLevels[Col] : Input.WaterLevel;
 		const int32 AnalyticChunk = FMath::FloorToInt((AnalyticHeight - Input.WorldOriginZ) / ChunkWorldSize);
 
 		// Scan from one chunk above the highest edited (or analytic surface) chunk, so a build reaching the top of
@@ -171,7 +173,7 @@ FVoxelMapEditOverlay FVoxelMapEditOverlay::Build(
 					FVoxelData Voxel = FVoxelData::Air();
 					Voxel.Density = static_cast<uint8>(FMath::Clamp(
 						FMath::FloorToInt(VOXEL_SURFACE_THRESHOLD + (AnalyticHeight - Z) / VS * 128.0f), 0, 255));
-					if (Voxel.IsAir() && Input.bUseWater && Z < Input.WaterLevel)
+					if (Voxel.IsAir() && Input.bUseWater && Z < ColumnWaterLevel)
 					{
 						Voxel.SetWaterFlag(true);
 					}
@@ -225,7 +227,7 @@ FVoxelMapEditOverlay FVoxelMapEditOverlay::Build(
 				break;
 			}
 		}
-		const bool bAnalyticWater = Input.bUseWater && AnalyticHeight < Input.WaterLevel;
+		const bool bAnalyticWater = Input.bUseWater && AnalyticHeight < ColumnWaterLevel;
 		if (FMath::Abs(Height - AnalyticHeight) <= 0.5f * VS && bWater == bAnalyticWater
 			&& MaterialID == AnalyticMaterial(PX, PY))
 		{
@@ -320,6 +322,8 @@ FVoxelMapEditOverlay FVoxelMapEditOverlay::BuildPlanet(
 		const FVector D = PixelDirections[Col];
 		const float AnalyticAltitude = AnalyticAltitudes[Col];
 		const double AnalyticRadius = Radius + AnalyticAltitude;
+		// The water level along this column: its own where a lake or a river reach lies over the tile, else the tile's.
+		const double ColumnWaterRadius = Input.ColumnWaterRadii.Num() == NumColumns ? Input.ColumnWaterRadii[Col] : Input.WaterRadius;
 
 		double EditMin = TNumericLimits<double>::Max();
 		double EditMax = TNumericLimits<double>::Lowest();
@@ -363,7 +367,7 @@ FVoxelMapEditOverlay FVoxelMapEditOverlay::BuildPlanet(
 			const double R = FVector::Dist(Input.Origin + FVector(I) * VS, Center);
 			OutVoxel = FVoxelData::Air();
 			OutVoxel.Density = static_cast<uint8>(FMath::Clamp(FMath::FloorToInt32(Iso + (AnalyticRadius - R) / VS * 128.0), 0, 255));
-			if (OutVoxel.IsAir() && Input.bUseWater && R < Input.WaterRadius)
+			if (OutVoxel.IsAir() && Input.bUseWater && R < ColumnWaterRadius)
 			{
 				OutVoxel.SetWaterFlag(true);
 			}
@@ -491,7 +495,7 @@ FVoxelMapEditOverlay FVoxelMapEditOverlay::BuildPlanet(
 		}
 
 		const float Altitude = static_cast<float>(HitT - Radius);
-		const bool bAnalyticWater = Input.bUseWater && AnalyticRadius < Input.WaterRadius;
+		const bool bAnalyticWater = Input.bUseWater && AnalyticRadius < ColumnWaterRadius;
 		const int32 PX = Col % CS;
 		const int32 PY = Col / CS;
 		if (FMath::Abs(Altitude - AnalyticAltitude) <= 0.5 * VS && bWater == bAnalyticWater

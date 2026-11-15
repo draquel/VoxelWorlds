@@ -48,6 +48,13 @@ struct VOXELMAP_API FVoxelMapOverlayBuildInput
 	float WaterLevel = 0.0f;
 
 	/**
+	 * The water level over each column (ChunkSize x ChunkSize, row by row) where a lake or a river reach lies over the
+	 * tile, in place of WaterLevel: a column no body covers carries a level under every voxel. Empty: WaterLevel holds
+	 * over the tile (the sea alone).
+	 */
+	TArray<float> ColumnWaterLevels;
+
+	/**
 	 * The tile's chunks that carry edits (loaded or not) plus loaded unedited chunks around them, in any order.
 	 * Chunks that are not listed read as the analytic terrain: solid below the analytic height, air above it.
 	 */
@@ -104,6 +111,13 @@ struct VOXELMAP_API FVoxelMapPlanetOverlayInput
 	/** The tile has water (the water levels' range over it); terrain inside WaterRadius, its level, of the centre reads as under water in the analytic map. */
 	bool bUseWater = false;
 	double WaterRadius = 0.0;
+
+	/**
+	 * The water level along each column's direction (ChunkSize x ChunkSize, row by row) where a lake or a river reach
+	 * lies over the tile, in place of WaterRadius: a column no body covers carries 0. Empty: WaterRadius holds over the
+	 * tile (the sea alone).
+	 */
+	TArray<double> ColumnWaterRadii;
 
 	/**
 	 * The chunks that carry edits on the tile (loaded or not) plus loaded unedited chunks around them. Voxels in chunks

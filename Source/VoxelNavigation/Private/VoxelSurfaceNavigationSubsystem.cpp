@@ -238,6 +238,19 @@ void UVoxelSurfaceNavigationSubsystem::ApplyCVars()
 			// sphere on a planet.
 			Params.Water = ChunkMgr->GetWaterLevels();
 			Params.bHasWater = Params.Water.HasWater();
+			// With a lake or a river reach in the world a cell asks the world's point gather: the level over the cell
+			// itself (the hydrology plan's section 5.5). Water deeper than the wade depth blocks a walker, as the sea does.
+			Params.WaterSampler = nullptr;
+			if (ChunkMgr->HasWaterBodies())
+			{
+				TWeakObjectPtr<const UVoxelChunkManager> WeakManager(ChunkMgr);
+				Params.WaterSampler = [WeakManager](double X, double Y, float Height, FVoxelWaterSample& Out)
+				{
+					const UVoxelChunkManager* Manager = WeakManager.Get();
+					return Manager && Manager->SampleWater(FVector(X, Y, Height), Out);
+				};
+				Params.bHasWater = true;
+			}
 			// The scalar the parameters show (and the fallback reads): the level over the whole world a search may cover,
 			// as a world Z; none where levels are radii.
 			Params.WaterLevel = Params.Water.IsRadial() ? 0.0f
@@ -694,6 +707,19 @@ FVoxelSurfaceNavParams UVoxelSurfaceNavigationSubsystem::ParamsIn(const FRegionC
 	}
 	// A planet: altitudes for heights, the water over the region the altitude plane level - PlanetRadius.
 	FVoxelSurfaceNavParams FrameParams = Params;
+	if (Params.WaterSampler)
+	{
+		// A lake or a river reach in the world: each cell asks the world at its own place, the frame's point taken back
+		// to the world (in place of one level a region).
+		TWeakObjectPtr<const UVoxelChunkManager> WeakManager(ChunkManager.Get());
+		const FVoxelNavFrame Frame = Region.Frame;
+		FrameParams.WaterSampler = [WeakManager, Frame](double X, double Y, float Height, FVoxelWaterSample& Out)
+		{
+			const UVoxelChunkManager* Manager = WeakManager.Get();
+			return Manager && Manager->SampleWater(Frame.ToWorld(FVector(X, Y, Height)), Out);
+		};
+		return FrameParams;
+	}
 	FrameParams.bHasWater = false;
 	FrameParams.Water = FVoxelWaterLevels();
 	const FVoxelWaterLevelRange Range = RegionWater(Region);
@@ -715,6 +741,13 @@ bool UVoxelSurfaceNavigationSubsystem::IsUnderwaterIn(const FRegionCache& Region
 	if (Region.Frame.bIdentity)
 	{
 		return Params.IsUnderwater(X, Y, Height);
+	}
+	if (Params.WaterSampler)
+	{
+		// Per cell, at its own place in the world.
+		const UVoxelChunkManager* ChunkMgr = ChunkManager.Get();
+		FVoxelWaterSample Over;
+		return ChunkMgr && ChunkMgr->SampleWater(Region.Frame.ToWorld(FVector(X, Y, Height)), Over) && Over.Depth > Params.MaxWadeDepth;
 	}
 	const FVoxelWaterLevelRange Range = RegionWater(Region);
 	return Range.bAny && PlanetWater.IsRadial() && PlanetRadius + Height < Range.GetLevel() - Params.MaxWadeDepth;

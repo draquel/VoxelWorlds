@@ -60,7 +60,8 @@ namespace
 		const UVoxelBiomeConfiguration* BiomeConfig = nullptr;
 		int32 WorldSeed = 0;
 		float VoxelSize = 100.0f;
-		// The world's water levels, as generation sees them (UVoxelChunkManager::GetWaterLevels).
+		// The sea's water levels (UVoxelChunkManager::GetWaterLevels); a run gathers the levels over its own bounds,
+		// which know the lakes and river reaches (GatherWaterLevels).
 		FVoxelWaterLevels Water;
 		// Live chunk manager for the edit-aware near band (edit-merged voxel surface query).
 		const UVoxelChunkManager* ChunkManager = nullptr;
@@ -288,11 +289,18 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 	// wider than the lines' gather limit take only the lines at hand: a complete gather there would have a conditioner
 	// work out every line over many placement cells on the game thread.
 	FVoxelConditioning Conditioning;
+	// The water over the bounds, gathered with the same need: the sea, and the lakes and river reaches there, which
+	// decide each point's surface material (a lake's bed is an underwater bed).
+	FVoxelWaterLevels WaterOver = VoxelCtx.Water;
 	if (VoxelCtx.ChunkManager)
 	{
 		const UVoxelWorldConfiguration* Configuration = VoxelCtx.ChunkManager->GetConfiguration();
-		VoxelCtx.ChunkManager->GatherConditioning(Bounds,
-			GetConditioningNeed(Bounds, Configuration ? static_cast<double>(Configuration->GetChunkWorldSize()) : 0.0), Conditioning);
+		const EVoxelConditioningGather Need = GetConditioningNeed(Bounds, Configuration ? static_cast<double>(Configuration->GetChunkWorldSize()) : 0.0);
+		VoxelCtx.ChunkManager->GatherConditioning(Bounds, Need, Conditioning);
+		if (VoxelCtx.ChunkManager->HasWaterBodies())
+		{
+			WaterOver = VoxelCtx.ChunkManager->GatherWaterLevels(Bounds, Need);
+		}
 	}
 	// A conditioning line's clear width takes no point.
 	const bool bLineSurfaces = Conditioning.Lines.Num() > 0 && Conditioning.HasLineSurfaces();
@@ -310,7 +318,7 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 		if (!bNear)
 		{
 			Sample = FVoxelSurfaceQuery::SampleSurfacePoint(*VoxelCtx.WorldMode, Site.Query, VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
-				BiomeSnapshot, VoxelCtx.Water, &Conditioning);
+				BiomeSnapshot, WaterOver, &Conditioning);
 		}
 		if (bClipToBounds && !Bounds.IsInsideOrOn(Sample.Position))
 		{

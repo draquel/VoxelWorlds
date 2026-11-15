@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "LODTypes.h"
+#include "VoxelWaterLevels.h"
 
 // Forward declarations
 class UWorld;
@@ -306,6 +307,26 @@ public:
 	 * first Update too. Default: nothing to set.
 	 */
 	virtual void SetFarFieldActive(bool bActive)
+	{
+	}
+
+	/**
+	 * Hand the strategy the world's gather of the water levels over a box (UVoxelChunkManager::GetWaterRange), in place
+	 * of the configuration's sea it was initialized with: a strategy that keeps a column's chunks up to the water over
+	 * it then sees a lake's level too (the hydrology plan's section 5.5). Default: nothing to set.
+	 *
+	 * @param InGather The range over a world box, by column; Complete for a column the chunks of which are about to be
+	 *                 requested, Ready for a wide region asked every update
+	 */
+	virtual void SetWaterRangeGather(TFunction<FVoxelWaterLevelRange(const FBox& Box, EVoxelConditioningGather Need)> InGather)
+	{
+	}
+
+	/**
+	 * The world's lakes or river reaches changed (one was added, or a source worked one out late): a strategy drops
+	 * what it cached from the water levels. Default: nothing kept.
+	 */
+	virtual void NotifyWaterChanged()
 	{
 	}
 	virtual double GetViewerSurfaceAltitude() const

@@ -242,6 +242,12 @@ public:
 
 	/** IVoxelLODStrategy: the far-field gate between Updates (the chunk manager, when the far field is built or released). */
 	virtual void SetFarFieldActive(bool bActive) override { bCutoverAllowed = bActive; }
+	virtual void SetWaterRangeGather(TFunction<FVoxelWaterLevelRange(const FBox& Box, EVoxelConditioningGather Need)> InGather) override
+	{
+		WaterRangeGather = MoveTemp(InGather);
+		ColumnSurfaceCache.Reset();
+	}
+	virtual void NotifyWaterChanged() override { ColumnSurfaceCache.Reset(); }
 
 	/** The viewer's layer ± this many layers is streamed in columns near the viewer (heightmap worlds, D8). */
 	static constexpr int32 NearLayers = 2;
@@ -750,6 +756,18 @@ protected:
 	 * and the cut-over is measured over the water under the viewer where it lies above the terrain.
 	 */
 	FVoxelWaterLevels Water;
+
+	/**
+	 * The world's gather of the water levels over a box (SetWaterRangeGather: the chunk manager's, which knows the
+	 * lakes and river reaches). Unset: the sea of Water, which a strategy used on its own (a test) reads.
+	 */
+	TFunction<FVoxelWaterLevelRange(const FBox& Box, EVoxelConditioningGather Need)> WaterRangeGather;
+
+	/** The water levels over a box: the gather's, or the sea's. */
+	FVoxelWaterLevelRange GetWaterRange(const FBox& Box, EVoxelConditioningGather Need) const
+	{
+		return WaterRangeGather ? WaterRangeGather(Box, Need) : Water.GetRange(Box);
+	}
 
 	/**
 	 * Column (chunk XY) -> [min, max] analytic surface height over the chunk footprint
