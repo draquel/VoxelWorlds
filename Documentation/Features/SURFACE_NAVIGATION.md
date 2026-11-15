@@ -1,6 +1,6 @@
 # Surface Navigation (VoxelNavigation module)
 
-> State as of 2026-11-04 (G73: the search's cost at scale). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-15 (the hydrology plan's H5: the cost query; G73: the search's cost at scale). Terms: `Documentation/GLOSSARY.md`.
 
 Pathfinding over the voxel terrain without an engine navmesh. Built for surface NPCs (game feature 10), usable by
 anything that needs "how do I walk from A to B over the terrain" — on loaded chunks and beyond them.
@@ -18,7 +18,7 @@ already opt out of navigation. The terrain, however, is a function: the generate
 | Piece | File | Role |
 |-------|------|------|
 | `FVoxelSurfaceNavParams` | `Public/VoxelSurfacePathfinder.h` | Cell size (150 = two demo voxels), `MaxStepRise` (100: ~34° per cell, a wide margin under a capsule's walkable angle because voxel terrain is locally steeper than the cell average), water level + `MaxWadeDepth`, slope cost, `MaxNodes`, `MaxSearchRadius`, goal snapping, partial routes. |
-| `FVoxelSurfacePathfinder` | `Public/VoxelSurfacePathfinder.h` | Pure A* over cells. Height comes from a `TFunction` sampler, blocked cells from an optional query: unit-testable without a world. 8-connected, no corner cutting, octile heuristic, slope-weighted cost, string-pulled output, nearest-walkable goal snap, partial route to the closest cell when the budget runs out, an early stop when the goal is in a pocket out of reach (below). |
+| `FVoxelSurfacePathfinder` | `Public/VoxelSurfacePathfinder.h` | Pure A* over cells. Height comes from a `TFunction` sampler, blocked cells from an optional query, and cells that cost more to enter from another (`FCostQuery`, the hydrology plan's H5: a trail between POIs crosses a river reach at a cost; a route goes round such cells when the way round is cheaper and crosses them by the fewest when it is not, and the string-pulling never straightens a route through one; unset, a search is what it was): unit-testable without a world. 8-connected, no corner cutting, octile heuristic, slope-weighted cost, string-pulled output, nearest-walkable goal snap, partial route to the closest cell when the budget runs out, an early stop when the goal is in a pocket out of reach (below). |
 | `FVoxelNavFrame` | `Public/VoxelSurfaceNavigationSubsystem.h` | A search's frame: the identity on a heightmap world (one region holds every cell), a region's tangent frame on a planet (below). |
 | `UVoxelSurfaceNavigationSubsystem` | `Public/VoxelSurfaceNavigationSubsystem.h` | World subsystem (Game / PIE). Finds the chunk manager, caches heights per cell in 32 × 32 tiles per region (edit-merged when loaded, analytic otherwise; analytic cells re-sample when their chunk loads, edited cells drop on `OnChunkEdited`), blocked boxes + temporary blocked cells, cvars, stats, debug drawing. Every search, projection and walkability test runs in the frame of its start's region. |
 
