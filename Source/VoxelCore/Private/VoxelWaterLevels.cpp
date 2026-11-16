@@ -66,6 +66,53 @@ namespace VoxelWaterLevelsPrivate
 		}
 		return bInside;
 	}
+
+	/**
+	 * The cells of a grid whose centres lie inside a closed polygon, grown by one cell (a drawn outline's footprint: it
+	 * reaches past the outline's own columns).
+	 * @param GridOrigin The grid's minimum corner, in the polygon's coordinates
+	 * @param Cell A cell's width
+	 * @param GridSize How many cells along the two axes
+	 * @param Outline The polygon's corners, in order
+	 * @param Keep Asked of each cell inside the polygon, with its centre in the polygon's coordinates: a cell it refuses
+	 *             is left out before the growth (null: every cell inside is kept)
+	 * @return GridSize.X * GridSize.Y bits, row by row
+	 */
+	TBitArray<> OutlineCells(const FVector2D& GridOrigin, double Cell, const FIntPoint& GridSize, TConstArrayView<FVector2D> Outline,
+		const TFunctionRef<bool(const FVector2D&)>* Keep = nullptr)
+	{
+		TBitArray<> Inside(false, GridSize.X * GridSize.Y);
+		for (int32 Y = 0; Y < GridSize.Y; ++Y)
+		{
+			for (int32 X = 0; X < GridSize.X; ++X)
+			{
+				const FVector2D Centre = GridOrigin + FVector2D((X + 0.5) * Cell, (Y + 0.5) * Cell);
+				if (IsInsidePolygon(Centre, Outline) && (!Keep || (*Keep)(Centre)))
+				{
+					Inside[Y * GridSize.X + X] = true;
+				}
+			}
+		}
+		TBitArray<> Grown(false, GridSize.X * GridSize.Y);
+		for (int32 Y = 0; Y < GridSize.Y; ++Y)
+		{
+			for (int32 X = 0; X < GridSize.X; ++X)
+			{
+				bool bNear = false;
+				for (int32 DY = -1; DY <= 1 && !bNear; ++DY)
+				{
+					for (int32 DX = -1; DX <= 1 && !bNear; ++DX)
+					{
+						const int32 NX = X + DX;
+						const int32 NY = Y + DY;
+						bNear = NX >= 0 && NY >= 0 && NX < GridSize.X && NY < GridSize.Y && Inside[NY * GridSize.X + NX];
+					}
+				}
+				Grown[Y * GridSize.X + X] = bNear;
+			}
+		}
+		return Grown;
+	}
 }
 
 // ==================== The frame ====================
@@ -295,6 +342,16 @@ TSharedRef<const FVoxelWaterLake> FVoxelWaterLake::MakeOnSphere(const FVector& I
 
 TSharedRef<const FVoxelWaterLake> FVoxelWaterLake::MakeFromOutline(TConstArrayView<FVector2D> Outline, double InCellSize)
 {
+	return MakeFromOutlineCells(Outline, InCellSize, nullptr);
+}
+
+TSharedRef<const FVoxelWaterLake> FVoxelWaterLake::MakeFromOutline(TConstArrayView<FVector2D> Outline, double InCellSize, TFunctionRef<bool(const FVector&)> Keep)
+{
+	return MakeFromOutlineCells(Outline, InCellSize, &Keep);
+}
+
+TSharedRef<const FVoxelWaterLake> FVoxelWaterLake::MakeFromOutlineCells(TConstArrayView<FVector2D> Outline, double InCellSize, const TFunctionRef<bool(const FVector&)>* Keep)
+{
 	const double Cell = FMath::Max(InCellSize, 1.0);
 	FBox2D Box(ForceInit);
 	for (const FVector2D& Corner : Outline)
@@ -311,37 +368,84 @@ TSharedRef<const FVoxelWaterLake> FVoxelWaterLake::MakeFromOutline(TConstArrayVi
 	const FIntPoint GridSize(MaxCell.X - MinCell.X + 1, MaxCell.Y - MinCell.Y + 1);
 	const FVector2D GridOrigin(MinCell.X * Cell, MinCell.Y * Cell);
 
-	TBitArray<> Inside(false, GridSize.X * GridSize.Y);
-	for (int32 Y = 0; Y < GridSize.Y; ++Y)
+	// Grown by one cell, so the footprint reaches past the outline's own columns. A cell's place is its centre's column.
+	if (!Keep)
 	{
-		for (int32 X = 0; X < GridSize.X; ++X)
-		{
-			if (VoxelWaterLevelsPrivate::IsInsidePolygon(GridOrigin + FVector2D((X + 0.5) * Cell, (Y + 0.5) * Cell), Outline))
-			{
-				Inside[Y * GridSize.X + X] = true;
-			}
-		}
+		return Make(GridOrigin, Cell, GridSize, VoxelWaterLevelsPrivate::OutlineCells(GridOrigin, Cell, GridSize, Outline));
 	}
-	// Grown by one cell, so the footprint reaches past the outline's own columns.
-	TBitArray<> Grown(false, GridSize.X * GridSize.Y);
-	for (int32 Y = 0; Y < GridSize.Y; ++Y)
+	const auto KeepCentre = [Keep](const FVector2D& Centre) { return (*Keep)(FVector(Centre.X, Centre.Y, 0.0)); };
+	const TFunctionRef<bool(const FVector2D&)> KeepRef(KeepCentre);
+	return Make(GridOrigin, Cell, GridSize, VoxelWaterLevelsPrivate::OutlineCells(GridOrigin, Cell, GridSize, Outline, &KeepRef));
+}
+
+TSharedRef<const FVoxelWaterLake> FVoxelWaterLake::MakeFromOutlineOnSphere(TConstArrayView<FVector> Outline, double InPlanetRadius, double InCellSize)
+{
+	return MakeFromOutlineCellsOnSphere(Outline, InPlanetRadius, InCellSize, nullptr);
+}
+
+TSharedRef<const FVoxelWaterLake> FVoxelWaterLake::MakeFromOutlineOnSphere(TConstArrayView<FVector> Outline, double InPlanetRadius, double InCellSize,
+	TFunctionRef<bool(const FVector&)> Keep)
+{
+	return MakeFromOutlineCellsOnSphere(Outline, InPlanetRadius, InCellSize, &Keep);
+}
+
+TSharedRef<const FVoxelWaterLake> FVoxelWaterLake::MakeFromOutlineCellsOnSphere(TConstArrayView<FVector> Outline, double InPlanetRadius, double InCellSize,
+	const TFunctionRef<bool(const FVector&)>* Keep)
+{
+	const double Cell = FMath::Max(InCellSize, 1.0);
+	const double Radius = FMath::Max(InPlanetRadius, 1.0);
+	FVector Sum = FVector::ZeroVector;
+	for (const FVector& Corner : Outline)
 	{
-		for (int32 X = 0; X < GridSize.X; ++X)
-		{
-			bool bNear = false;
-			for (int32 DY = -1; DY <= 1 && !bNear; ++DY)
-			{
-				for (int32 DX = -1; DX <= 1 && !bNear; ++DX)
-				{
-					const int32 NX = X + DX;
-					const int32 NY = Y + DY;
-					bNear = NX >= 0 && NY >= 0 && NX < GridSize.X && NY < GridSize.Y && Inside[NY * GridSize.X + NX];
-				}
-			}
-			Grown[Y * GridSize.X + X] = bNear;
-		}
+		Sum += Corner.GetSafeNormal();
 	}
-	return Make(GridOrigin, Cell, GridSize, MoveTemp(Grown));
+	if (Outline.Num() < 3 || Sum.IsNearlyZero())
+	{
+		return MakeOnSphere(FVector::UpVector, Radius, Cell, FIntPoint::ZeroValue, TBitArray<>());
+	}
+	// The lake's centre is the middle of the corners' directions; an empty footprint there gives the tangent plane's
+	// axes, the ones every reader of the lake uses.
+	const TSharedRef<const FVoxelWaterLake> Plane = MakeOnSphere(Sum, Radius, Cell, FIntPoint::ZeroValue, TBitArray<>());
+	FVector AxisX, AxisY, Centre;
+	Plane->GetTangentFrame(AxisX, AxisY, Centre);
+
+	// The corners on the tangent plane, as CoversDirection reads a direction: its datum point's offset along the axes.
+	// A corner on the far side of the planet has no place on the plane and is left out.
+	TArray<FVector2D> Flat;
+	Flat.Reserve(Outline.Num());
+	double Farthest = 0.0;
+	for (const FVector& Corner : Outline)
+	{
+		const FVector Direction = Corner.GetSafeNormal();
+		if (FVector::DotProduct(Direction, Centre) <= 0.0)
+		{
+			continue;
+		}
+		const FVector2D P(Radius * FVector::DotProduct(Direction, AxisX), Radius * FVector::DotProduct(Direction, AxisY));
+		Farthest = FMath::Max3(Farthest, FMath::Abs(P.X), FMath::Abs(P.Y));
+		Flat.Add(P);
+	}
+	if (Flat.Num() < 3)
+	{
+		return Plane;
+	}
+	// A grid centred on the centre's datum point (MakeOnSphere's), wide enough for the corners and a cell of growth.
+	const int32 Half = FMath::CeilToInt32(Farthest / Cell) + 2;
+	const FIntPoint GridSize(2 * Half, 2 * Half);
+	const FVector2D GridOrigin(-Half * Cell, -Half * Cell);
+	if (!Keep)
+	{
+		return MakeOnSphere(Centre, Radius, Cell, GridSize, VoxelWaterLevelsPrivate::OutlineCells(GridOrigin, Cell, GridSize, Flat));
+	}
+	// A cell's place is the direction its centre on the plane stands for (GetGridPoint's).
+	const auto KeepCentre = [&](const FVector2D& P)
+	{
+		const double U = FMath::Clamp(P.X / Radius, -1.0, 1.0);
+		const double V = FMath::Clamp(P.Y / Radius, -1.0, 1.0);
+		return (*Keep)(AxisX * U + AxisY * V + Centre * FMath::Sqrt(FMath::Max(0.0, 1.0 - U * U - V * V)));
+	};
+	const TFunctionRef<bool(const FVector2D&)> KeepRef(KeepCentre);
+	return MakeOnSphere(Centre, Radius, Cell, GridSize, VoxelWaterLevelsPrivate::OutlineCells(GridOrigin, Cell, GridSize, Flat, &KeepRef));
 }
 
 void FVoxelWaterLake::Finish()

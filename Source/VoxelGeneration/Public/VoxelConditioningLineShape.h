@@ -179,4 +179,127 @@ struct VOXELGENERATION_API FVoxelConditioningLineShape
 	 * @return Whether both ends were met, and the steepest segment
 	 */
 	static FProfile MakeProfile(TConstArrayView<FVector> Points, TConstArrayView<double> Ground, const FProfileParams& Params, TArray<double>& OutTargets);
+
+	// ---- A river's profile (Documentation/HYDROLOGY_PLAN.md, section 5.3) ----
+
+	/** What a river's profile is made with. Heights are world Z or altitudes, lengths world units. */
+	struct FRiverProfileParams
+	{
+		/** The water over the bed where the river is at its full depth */
+		double Depth = 150.0;
+
+		/** A river that follows the ground: its surface is held this far under the ground along the line */
+		double SurfaceUnderGround = 75.0;
+
+		/** The surface is held this far under the lowest ground of the two banks, out to the footprint's edge (rule 2) */
+		double BankMargin = 37.5;
+
+		/** A river that follows the ground: the ground is averaged this far each way along the line (0: not at all) */
+		double SmoothingDistance = 600.0;
+
+		/** At its head the river's depth and width start from nothing and reach their full values over this length (rule 4) */
+		double HeadLength = 600.0;
+
+		/** A river that ends on land thins to nothing over this length (rule 3) */
+		double EndLength = 600.0;
+
+		/**
+		 * Inside another body (the lake it leaves or runs into, the sea, the river it joins) the river's surface lies
+		 * this far under that body's level, so that body answers there and the river's mesh ends under its surface
+		 * (rules 5 and 7)
+		 */
+		double BodyTuck = 10.0;
+
+		/** How many of the river's vertices are kept inside the body it ends in, and inside the one it starts in */
+		int32 BodyVertices = 3;
+
+		/**
+		 * No surface lies under this height: the sea's level less the tuck, in a world with a sea. Ground under the sea's
+		 * level holds the sea's water whatever a river says there, so a river that comes down a beach need go no lower,
+		 * and its mesh stays a tuck under the sea's surface and not a margin under the beach
+		 */
+		double MinSurface = -TNumericLimits<double>::Max();
+
+		/**
+		 * The bed's half width, its falloff and the world's voxel size: what the bend bound is stated in. The bed's
+		 * grade at a vertex that turns is held to what the bound leaves there, by lowering the bed (rule 8). A voxel
+		 * size of 0 leaves the bed's grades alone
+		 */
+		float HalfWidth = 225.0f;
+		float FalloffWidth = 300.0f;
+		double VoxelSize = 0.0;
+
+		/**
+		 * The most the bend hold deepens a bed, as a share of the river's depth at that vertex (1: to twice the depth).
+		 * A head and an end on land have no depth and are never deepened, so a river still starts from nothing. A bend
+		 * too steep to hold within this keeps part of its step: the line made from the bed says so (its bend warning)
+		 */
+		double MaxBendDeepening = 1.0;
+	};
+
+	/** What MakeRiverProfile made: a value per vertex of the input, and which of them the river keeps. */
+	struct FRiverProfile
+	{
+		/** The water's surface at each vertex: it never rises from one vertex to the next */
+		TArray<double> Surface;
+
+		/** The bed's target at each vertex: the surface less the depth there */
+		TArray<double> Bed;
+
+		/** The share of the full depth and of the full width at each vertex: 0 at a head and at an end on land, 1 between */
+		TArray<double> Taper;
+
+		/** The vertices the river keeps: Num of them from First. The ones dropped lie deep inside the body it starts or ends in */
+		int32 First = 0;
+		int32 Num = 0;
+
+		/** Whether the river's first vertex lies in another body (it leaves a lake: no head) and whether its last does (a mouth) */
+		bool bStartsInBody = false;
+		bool bEndsInBody = false;
+
+		/** A river at given heights: how many vertices stood higher than a vertex upstream of them, and by how much at most (rule 1) */
+		int32 NumRises = 0;
+		double MostRise = 0.0;
+
+		/** How many vertices were lowered for a low bank, and by how much at most (rule 2) */
+		int32 NumLowBanks = 0;
+		double MostLowBank = 0.0;
+
+		/** How many vertices' beds were lowered to hold the grade through a bend, and by how much at most (rule 8) */
+		int32 NumBendHolds = 0;
+		double MostBendHold = 0.0;
+
+		/** The deepest the bed lies under the ground along the line, over the vertices kept outside another body */
+		double DeepestCut = 0.0;
+
+		/** How far the surface falls from the first kept vertex to the last */
+		double Fall = 0.0;
+	};
+
+	/**
+	 * A river's surface and bed along its line, by the rules that keep a river watertight (the hydrology plan's section
+	 * 5.3), the lower-only twin of MakeProfile. The surface is what was asked for (the ground along the line less a
+	 * margin, or the heights given), lowered where it must be and never raised:
+	 *  1. it never rises downstream: a vertex that stands over one upstream of it is lowered to it;
+	 *  2. it stays under the lowest ground of both banks by a margin, and from a low bank on;
+	 *  3. a river whose last vertex is in no other body ends on land: its depth and width thin to nothing over its end;
+	 *  4. at its head the depth and the width start from nothing, unless the head lies in another body;
+	 *  5, 7. inside another body the surface lies a tuck under that body's level, and of the vertices inside the body the
+	 *     river starts or ends in only the few next to the land are kept;
+	 *  8. the bed (the surface less the depth) is lowered where its grade at a vertex that turns is over what the bend
+	 *     bound leaves there, by up to a share of the depth there, so the line made from it keeps the bound's second
+	 *     part through the bends of a river that is not steep and tightly curved at once.
+	 * Rule 6 (a lake's level under its rim) is the lake's own. Pure and thread-safe.
+	 *
+	 * @param Points The line's vertices, upstream to downstream, in the frame distances are measured in (MakeProfile's)
+	 * @param Ground The ground's height at each vertex
+	 * @param BankGround The lowest ground across the river's footprint at each vertex: both banks, out to the footprint's edge
+	 * @param Heights The surface asked for at each vertex (a spline's own heights), or empty for a river that follows the ground
+	 * @param BodyLevels The level of the body a vertex lies in (the sea where the ground is under it, a lake, another
+	 *                   river), or NaN where it lies in none; empty when there is no other body
+	 * @param Params The depth, the margins, the head and the bed's widths
+	 * @return The surface, the bed and the taper per vertex, the vertices kept, and what was lowered
+	 */
+	static FRiverProfile MakeRiverProfile(TConstArrayView<FVector> Points, TConstArrayView<double> Ground, TConstArrayView<double> BankGround,
+		TConstArrayView<double> Heights, TConstArrayView<double> BodyLevels, const FRiverProfileParams& Params);
 };

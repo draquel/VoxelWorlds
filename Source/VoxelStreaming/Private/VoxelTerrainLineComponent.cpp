@@ -115,11 +115,33 @@ int64 UVoxelTerrainLineComponent::GetLineId() const
 	return (static_cast<int64>(Order) << 32) | static_cast<int64>(Hash);
 }
 
+FVoxelTerrainLineSettings UVoxelTerrainLineComponent::GetLineSettings() const
+{
+	FVoxelTerrainLineSettings Settings;
+	Settings.HeightMode = HeightMode;
+	Settings.TerrainOffset = TerrainOffset;
+	Settings.SmoothingDistance = SmoothingDistance;
+	Settings.MaxGrade = MaxGrade;
+	Settings.HalfWidth = HalfWidth;
+	Settings.FalloffWidth = FalloffWidth;
+	Settings.Strength = Strength;
+	Settings.Blend = Blend;
+	Settings.Surface = Surface;
+	Settings.VertexSpacingVoxels = VertexSpacingVoxels;
+	Settings.Id = GetLineId();
+	return Settings;
+}
+
 bool UVoxelTerrainLineComponent::BuildLineParams(const UVoxelChunkManager& Manager, FVoxelConditioningLineParams& OutParams, FVoxelTerrainLineBends* OutBends) const
+{
+	return BuildLineParamsFromSpline(GetSpline(), Manager, GetLineSettings(), OutParams, OutBends);
+}
+
+bool UVoxelTerrainLineComponent::BuildLineParamsFromSpline(const USplineComponent* Spline, const UVoxelChunkManager& Manager, const FVoxelTerrainLineSettings& Settings,
+	FVoxelConditioningLineParams& OutParams, FVoxelTerrainLineBends* OutBends)
 {
 	using namespace VoxelTerrainLinePrivate;
 	using FShape = FVoxelConditioningLineShape;
-	const USplineComponent* Spline = GetSpline();
 	const UVoxelWorldConfiguration* Configuration = Manager.GetConfiguration();
 	const IVoxelWorldMode* WorldMode = Manager.GetWorldMode();
 	if (!Spline || !Configuration || !WorldMode || !Manager.IsInitialized())
@@ -138,7 +160,7 @@ bool UVoxelTerrainLineComponent::BuildLineParams(const UVoxelChunkManager& Manag
 
 	// A vertex every Spacing along the spline, the last one on its end. The spline's length is an approximation (a
 	// straight run of 3,000 uu reads a fraction of a unit long), which must not add a step.
-	const double Spacing = FMath::Max(VertexSpacingVoxels, 0.25f) * Configuration->VoxelSize;
+	const double Spacing = FMath::Max(Settings.VertexSpacingVoxels, 0.25f) * Configuration->VoxelSize;
 	const int32 Steps = FMath::Max(1, FMath::CeilToInt32(Length / Spacing - 0.01));
 	const double Step = Length / Steps;
 
@@ -177,21 +199,21 @@ bool UVoxelTerrainLineComponent::BuildLineParams(const UVoxelChunkManager& Manag
 			SplineHeights.Add(static_cast<float>(World.Z));
 			Natural.Add(static_cast<float>(WorldMode->GetSurfaceOnUpLine(FVector(World.X, World.Y, 0.0), NoiseParams).Position.Z));
 		}
-		HalfWidths.Add(HalfWidth * FMath::Abs(static_cast<float>(Spline->GetScaleAtDistanceAlongSpline(Distance).Y)));
+		HalfWidths.Add(Settings.HalfWidth * FMath::Abs(static_cast<float>(Spline->GetScaleAtDistanceAlongSpline(Distance).Y)));
 	}
 
 	// The targets.
 	TArray<float> Targets;
-	if (HeightMode == EVoxelTerrainLineHeight::SplineHeight)
+	if (Settings.HeightMode == EVoxelTerrainLineHeight::SplineHeight)
 	{
 		Targets = MoveTemp(SplineHeights);
 	}
 	else
 	{
-		// The natural height averaged over SmoothingDistance each way along the line, then held to the grade from both
+		// The natural height averaged over the smoothing distance each way along the line, then held to the grade from both
 		// ends, then the offset. The average reaches as far back as forward, so it narrows toward each end and the line
 		// meets the ground there: an average of what lies ahead alone would start a road on a rise with a mound.
-		const int32 Window = FMath::Max(0, FMath::RoundToInt32(SmoothingDistance / Step));
+		const int32 Window = FMath::Max(0, FMath::RoundToInt32(Settings.SmoothingDistance / Step));
 		Targets.SetNumUninitialized(Natural.Num());
 		for (int32 Index = 0; Index < Natural.Num(); ++Index)
 		{
@@ -203,9 +225,9 @@ bool UVoxelTerrainLineComponent::BuildLineParams(const UVoxelChunkManager& Manag
 			}
 			Targets[Index] = static_cast<float>(Sum / (2 * Reach + 1));
 		}
-		if (MaxGrade > 0.0f)
+		if (Settings.MaxGrade > 0.0f)
 		{
-			const float MaxStep = static_cast<float>(MaxGrade * Step);
+			const float MaxStep = static_cast<float>(Settings.MaxGrade * Step);
 			for (int32 Index = 1; Index < Targets.Num(); ++Index)
 			{
 				Targets[Index] = FMath::Clamp(Targets[Index], Targets[Index - 1] - MaxStep, Targets[Index - 1] + MaxStep);
@@ -217,7 +239,7 @@ bool UVoxelTerrainLineComponent::BuildLineParams(const UVoxelChunkManager& Manag
 		}
 		for (float& Target : Targets)
 		{
-			Target += TerrainOffset;
+			Target += Settings.TerrainOffset;
 		}
 	}
 
@@ -227,12 +249,12 @@ bool UVoxelTerrainLineComponent::BuildLineParams(const UVoxelChunkManager& Manag
 	{
 		OutParams.Vertices.Add(FVoxelConditioningLineVertex(Positions[Index], Targets[Index], HalfWidths[Index]));
 	}
-	OutParams.FalloffWidth = FalloffWidth;
-	OutParams.Strength = Strength;
-	OutParams.Blend = Blend;
-	OutParams.Id = GetLineId();
+	OutParams.FalloffWidth = Settings.FalloffWidth;
+	OutParams.Strength = Settings.Strength;
+	OutParams.Blend = Settings.Blend;
+	OutParams.Id = Settings.Id;
 	OutParams.bRadial = bPlanet;
-	OutParams.Surface = Surface;
+	OutParams.Surface = Settings.Surface;
 
 	// The bends (D134). The line above is the spline's, as sampled: when it keeps the bend bound it is the line, vertex
 	// for vertex. When it does not, the terrain would step on the inside of a bend, and the line is made again below.
@@ -245,7 +267,7 @@ bool UVoxelTerrainLineComponent::BuildLineParams(const UVoxelChunkManager& Manag
 	Bends.bBrokeBound = Bends.DrawnBendRatio > 1.0;
 	if (Bends.bBrokeBound)
 	{
-		const bool bFollow = HeightMode == EVoxelTerrainLineHeight::FollowTerrain;
+		const bool bFollow = Settings.HeightMode == EVoxelTerrainLineHeight::FollowTerrain;
 
 		// The sampled points where distances are measured: world X and Y on a heightmap world, the points on the datum
 		// sphere on a planet (the rounding is done on these, before they become directions again).
@@ -281,7 +303,7 @@ bool UVoxelTerrainLineComponent::BuildLineParams(const UVoxelChunkManager& Manag
 					Target = bPlanet ? static_cast<float>((World - PlanetParams.PlanetCenter).Size() - PlanetParams.PlanetRadius) : static_cast<float>(World.Z);
 				}
 				Try.Vertices.Add(FVoxelConditioningLineVertex(bPlanet ? Points[Index].GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector) : Points[Index], Target,
-					HalfWidth * FMath::Abs(static_cast<float>(Spline->GetScaleAtDistanceAlongSpline(Distance).Y))));
+					Settings.HalfWidth * FMath::Abs(static_cast<float>(Spline->GetScaleAtDistanceAlongSpline(Distance).Y))));
 			}
 			return GetBendRatio(*FVoxelConditioningLine::Make(Try), VoxelSize, PlanetRadius);
 		};
@@ -381,17 +403,17 @@ bool UVoxelTerrainLineComponent::BuildLineParams(const UVoxelChunkManager& Manag
 				MaxHalfWidth = FMath::Max(MaxHalfWidth, Vertex.HalfWidth);
 			}
 			FShape::FProfileParams Profile;
-			Profile.SmoothingDistance = SmoothingDistance;
-			Profile.MaxGrade = MaxGrade;
+			Profile.SmoothingDistance = Settings.SmoothingDistance;
+			Profile.MaxGrade = Settings.MaxGrade;
 			Profile.HalfWidth = MaxHalfWidth;
-			Profile.FalloffWidth = FalloffWidth;
-			Profile.Strength = FMath::Clamp(Strength, 0.0f, 1.0f);
+			Profile.FalloffWidth = Settings.FalloffWidth;
+			Profile.Strength = FMath::Clamp(Settings.Strength, 0.0f, 1.0f);
 			Profile.VoxelSize = VoxelSize;
 			TArray<double> Flattened;
 			FShape::MakeProfile(Points, Ground, Profile, Flattened);
 			for (int32 Index = 0; Index < Try.Vertices.Num(); ++Index)
 			{
-				Try.Vertices[Index].TargetHeight = static_cast<float>(Flattened[Index] + TerrainOffset);
+				Try.Vertices[Index].TargetHeight = static_cast<float>(Flattened[Index] + Settings.TerrainOffset);
 			}
 			Bends.bProfileFlattened = true;
 		}
@@ -403,6 +425,30 @@ bool UVoxelTerrainLineComponent::BuildLineParams(const UVoxelChunkManager& Manag
 		*OutBends = Bends;
 	}
 	return true;
+}
+
+FString UVoxelTerrainLineComponent::DescribeBends(const FVoxelTerrainLineBends& Bends)
+{
+	if (!Bends.WasRounded() && !Bends.bProfileFlattened)
+	{
+		return FString();
+	}
+	FString Done = FString::Printf(TEXT("the spline breaks the bend bound (its sharpest bend turns %.1f times what the bound allows there): "), Bends.DrawnBendRatio);
+	if (Bends.WasRounded())
+	{
+		Done += FString::Printf(TEXT("the line's corners are rounded over %.0f uu each way along it, so the line runs up to %.0f uu from its spline, %s"),
+			Bends.CornerDistance, Bends.FarthestFromSpline,
+			Bends.bProfileFlattened ? TEXT("and its profile is flatter through the bends") : TEXT("at the spline's heights along it"));
+	}
+	else
+	{
+		Done += TEXT("the line runs where the spline does, and its profile is flatter through the bends");
+	}
+	if (Bends.BendRatio > 1.0)
+	{
+		Done += FString::Printf(TEXT("; the line still breaks the bound (its sharpest bend turns %.1f times what the bound allows): corners are spread over no more than twice the line's reach each way"), Bends.BendRatio);
+	}
+	return Done;
 }
 
 void UVoxelTerrainLineComponent::BeginPlay()
@@ -464,23 +510,8 @@ void UVoxelTerrainLineComponent::RegisterLine(UVoxelChunkManager& Manager)
 	// What was done about the spline's bends first, then the limits the line as made breaks (the engine's own check: a
 	// bend the rounding could not bring within the bound is named there).
 	LineWarnings.Reset();
-	if (Bends.WasRounded() || Bends.bProfileFlattened)
+	if (FString Done = DescribeBends(Bends); !Done.IsEmpty())
 	{
-		FString Done = FString::Printf(TEXT("the spline breaks the bend bound (its sharpest bend turns %.1f times what the bound allows there): "), Bends.DrawnBendRatio);
-		if (Bends.WasRounded())
-		{
-			Done += FString::Printf(TEXT("the line's corners are rounded over %.0f uu each way along it, so the line runs up to %.0f uu from its spline, %s"),
-				Bends.CornerDistance, Bends.FarthestFromSpline,
-				Bends.bProfileFlattened ? TEXT("and its profile is flatter through the bends") : TEXT("at the spline's heights along it"));
-		}
-		else
-		{
-			Done += TEXT("the line runs where the spline does, and its profile is flatter through the bends");
-		}
-		if (Bends.BendRatio > 1.0)
-		{
-			Done += FString::Printf(TEXT("; the line still breaks the bound (its sharpest bend turns %.1f times what the bound allows): corners are spread over no more than twice the line's reach each way"), Bends.BendRatio);
-		}
 		LineWarnings.Add(MoveTemp(Done));
 	}
 	LineWarnings.Append(Manager.GetConditioningLineWarnings(*Line));

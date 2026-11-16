@@ -43,7 +43,6 @@
 #include "VoxelMaterialAtlas.h"
 #include "VoxelWaterPropagation.h"
 #include "VoxelChunkWaterColumns.h"
-#include "Diagnostics/VoxelWaterTestBodies.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelWaterMesher.h"
 #include "VoxelCollisionManager.h"
@@ -1396,8 +1395,6 @@ void UVoxelChunkManager::Initialize(
 
 	// The world has started and no generation request is built yet: whatever supplies terrain conditioning registers now
 	// (the game's conditioner, the terrain line components), so the first chunks generate with it (G187).
-	// First the bodies a script laid for a look or a measurement (voxel.Water.TestBodies; development builds).
-	VoxelWaterTestBodies::Apply(*this);
 	OnInitialized.Broadcast(*this);
 }
 

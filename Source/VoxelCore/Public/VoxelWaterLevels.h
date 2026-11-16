@@ -226,6 +226,37 @@ struct VOXELCORE_API FVoxelWaterLake
 	 */
 	static TSharedRef<const FVoxelWaterLake> MakeFromOutline(TConstArrayView<FVector2D> Outline, double InCellSize);
 
+	/**
+	 * The footprint of a drawn outline on a planet (a hand-placed lake's): the lake's centre is the middle of the
+	 * corners' directions, and the footprint the cells of the plane tangent there whose centres lie inside the outline
+	 * as that plane sees it (a corner's datum point, set down on the plane along the centre's direction), grown by one
+	 * cell. An outline is a small part of the sphere: a corner on the far side from the centre is left out.
+	 * @param Outline The polygon's corners as directions from the planet centre, in order (closed from the last to the first)
+	 * @param InPlanetRadius The datum radius
+	 * @param InCellSize A cell's width (world units on the tangent plane)
+	 */
+	static TSharedRef<const FVoxelWaterLake> MakeFromOutlineOnSphere(TConstArrayView<FVector> Outline, double InPlanetRadius, double InCellSize);
+
+	/**
+	 * MakeFromOutline for a lake that holds water over part of its outline only: of the cells inside the outline, the
+	 * ones Keep accepts, grown by one cell. A hand-placed lake keeps the cells whose ground lies under its level, so
+	 * its footprint is the water and a cell of shore around it, not the whole drawing.
+	 * @param Outline The polygon's corners in world XY, in order
+	 * @param InCellSize A cell's width
+	 * @param Keep Asked of each cell inside the outline, with its centre's column (X, Y, 0)
+	 */
+	static TSharedRef<const FVoxelWaterLake> MakeFromOutline(TConstArrayView<FVector2D> Outline, double InCellSize, TFunctionRef<bool(const FVector&)> Keep);
+
+	/**
+	 * MakeFromOutlineOnSphere with the cells Keep accepts, as MakeFromOutline's.
+	 * @param Outline The polygon's corners as directions from the planet centre, in order
+	 * @param InPlanetRadius The datum radius
+	 * @param InCellSize A cell's width
+	 * @param Keep Asked of each cell inside the outline, with the unit direction its centre stands for
+	 */
+	static TSharedRef<const FVoxelWaterLake> MakeFromOutlineOnSphere(TConstArrayView<FVector> Outline, double InPlanetRadius, double InCellSize,
+		TFunctionRef<bool(const FVector&)> Keep);
+
 	/** @return Whether this is a planet lake */
 	bool IsRadial() const { return bRadial; }
 
@@ -292,6 +323,11 @@ struct VOXELCORE_API FVoxelWaterLake
 private:
 	/** Count the cells and build the bounds. */
 	void Finish();
+
+	/** The two MakeFromOutline forms: every cell inside the outline, or the ones Keep accepts (null: every one). */
+	static TSharedRef<const FVoxelWaterLake> MakeFromOutlineCells(TConstArrayView<FVector2D> Outline, double InCellSize, const TFunctionRef<bool(const FVector&)>* Keep);
+	static TSharedRef<const FVoxelWaterLake> MakeFromOutlineCellsOnSphere(TConstArrayView<FVector> Outline, double InPlanetRadius, double InCellSize,
+		const TFunctionRef<bool(const FVector&)>* Keep);
 
 	bool bRadial = false;
 

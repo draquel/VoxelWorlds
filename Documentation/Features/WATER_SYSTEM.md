@@ -1,7 +1,7 @@
 # Water System Architecture
 
-> State as of 2026-11-15 (the hydrology plan's H1 to H3: "Lakes and river reaches", "A chunk's water columns" and
-> "Lakes and river reaches drawn", under "On a Planet"; the water plan's W1, 2026-11-13: the material paragraphs; its
+> State as of 2026-11-15 (the hydrology plan's H1 to H4: "Lakes and river reaches", "A chunk's water columns",
+> "Lakes and river reaches drawn" and "The river and the lake placed by hand", under "On a Planet"; the water plan's W1, 2026-11-13: the material paragraphs; its
 > W2: "The water levels"; the rest as of code review CR5, 2026-11-02).
 > Terms: `Documentation/GLOSSARY.md`.
 
@@ -301,7 +301,10 @@ lies under the level; the footprint does not draw the shore, it keeps the body's
 - **A lake** (`FVoxelWaterLake`, `FVoxelWaterBody::MakeLake`) has one level and a footprint that is a grid of cells:
   in world XY on a heightmap world (`Make`; `MakeFromOutline` takes the cells whose centres lie inside a drawn polygon,
   grown by one cell), in the plane tangent to the datum sphere at the lake's centre on a planet (`MakeOnSphere`: a
-  direction's cell is its datum point's offset from the centre's along the plane's two axes).
+  direction's cell is its datum point's offset from the centre's along the plane's two axes; `MakeFromOutlineOnSphere`
+  takes an outline's corners as directions, puts the centre at their middle and the corners on that plane as a
+  direction's cell is read, and keeps the cells inside, grown by one). Both outline forms take a filter, asked of each
+  cell inside the outline at its centre: a hand-placed lake keeps the cells whose ground lies under its level.
 - **A river reach** (`FVoxelWaterReach`, `FVoxelWaterBody::MakeReach`) is a polyline, upstream to downstream, each
   vertex a position (world XY, or a unit direction on a planet), a bed level, a surface level and the footprint's half
   width (the bed's half width and its falloff). Its level at a place is the surface level interpolated on the nearest
@@ -442,10 +445,6 @@ drawn by one mesh of its own, made from its record, with an underside; the sea's
   reach's speed from the second texture coordinate (the material's `RiverSpeed` while a reach carries none), at full
   strength whatever the wind. The instances and the configurations' `RiverMeshMaterial` are made by the parent
   project's water material script.
-- **Bodies for a look** (`voxel.Water.TestBodies`, development builds): the path of a text file a world reads at its
-  start, a line a lake (flooded from a pit to a level over the cells whose generated ground lies under it) and a
-  block a river reach (its vertices; its bed is added as a lower-only conditioning line through them). The shot
-  script lays the lake and the river reach it photographs this way, until a river and a lake have their actors.
 
 Tests: `Streaming.Water.BodyMesh.Lake`, `.BodyMesh.Reach` (the geometry against the record on a plane and a planet:
 the level at each vertex, the sheet over every footprint cell and no other, the head and the mouth, the planet's
@@ -453,6 +452,81 @@ vertices on the sphere of the level, the winding, the underside); `Streaming.Wat
 streamed world with a lake and a river reach: a mesh a body with its material, the underside by the camera's place,
 the switch, a body kept across a change elsewhere, no tile layer wet in the lake's column while a sea column's is,
 nothing drawn without a material, the dedicated server's rule).
+
+**The river and the lake placed by hand (the hydrology plan's H4, 2026-11-15; D144).** Two components turn a spline
+on their actor into a body, as `UVoxelTerrainLineComponent` turns one into a line (`WORLD_MODES.md`, "The hand-placed
+line"; the how-to is `Guides/TERRAIN_LINES.md`, "A river and a lake"): `UVoxelRiverComponent` on `AVoxelRiverActor`
+("Voxel River" in the Place Actors panel) and `UVoxelLakeComponent` on `AVoxelLakeActor` ("Voxel Lake"), both
+`UVoxelWaterBodyComponent` (VoxelStreaming). The actors are in the level on every machine and are not replicated; a
+body registers at BeginPlay when the voxel world has started, else on `UVoxelChunkManager::OnInitialized`, before the
+first generation request, and from then on it is a body like any other: generation floods it, the readers answer
+it, a mesh draws it.
+
+- **The order.** A river is made against the water it meets, so the first body of a world to register makes the ones
+  that come before it register first (`RegisterBody`): every lake before any river, and of two rivers the one with
+  the higher `Order`, then the one whose actor's name sorts first. The order is the level's alone, the same on every
+  machine and whichever actor began play first. A body's id is a hash of its actor's and its component's names
+  (`GetWaterBodyId`; never the sea's 0).
+- **A river** (`BuildRiver`) samples its spline with the terrain line's own sampler
+  (`UVoxelTerrainLineComponent::BuildLineParamsFromSpline`, with a lower-only line of the river's widths: a vertex
+  every two voxels, the corners rounded where the spline breaks the bend bound), reads at each vertex the natural
+  ground on the line, the lowest natural ground of its two banks (from the floor's edge to the footprint's, a voxel
+  apart; a bank that lies in another body counts as that body's surface) and the level of the body the vertex lies
+  in (every body of the water levels gathered over the river is asked: a river reach wherever its footprint covers
+  the place, a lake or the sea where the ground is under its level; the highest), and gives the vertices a profile
+  with `FVoxelConditioningLineShape::MakeRiverProfile`, the lower-only twin of `MakeProfile` (below). From the
+  vertices the profile keeps it makes the **bed**, a lower-only conditioning line whose targets are the bed's
+  heights and whose half width is the floor's (a unit where the river narrows to nothing), with the component's
+  `Surface` (a band, the caves' depth, a clear width) and an id as a terrain line's (`GetLineId`), and the **river
+  reach**, the same vertices with the bed's and the surface's levels and a footprint of the floor and one bank
+  (`FVoxelWaterReach::Make`, with `FlowSpeed`). The bed is added first (`AddConditioningLine`), then the body.
+- **The profile** (`MakeRiverProfile`: the plan's section 5.3; plain positions and heights, pure). The surface is what
+  was asked for, lowered where it must be and never raised: the ground along the line averaged over
+  `SmoothingDistance` and never over the ground itself, less `SurfaceBelowGround`, or at the spline's height the
+  spline's own heights. Then, from the head down: (1) it never rises, a vertex over one upstream of it is lowered to
+  it; (2) it stays `BankMargin` under the lowest ground of the banks, and from a low bank on; (7) inside another body
+  it lies a tuck (10 uu) under that body's level, so that body answers there; and in a world with a sea no surface
+  lies under the sea's level less the tuck (ground under the sea holds the sea's water whatever a river says, so a
+  river down a beach goes no lower). The bed is the surface less `Depth`
+  times a taper: (4) from nothing at a head to full over `HeadLength`, unless the first vertex lies in a body (a river
+  that leaves a lake starts at the lake's level at full width, and its bed notches the rim: rule 6); (3) to nothing
+  again over the last `HeadLength` of a river whose last vertex lies in no body, which is an end on land and is
+  warned about. (5) Of the vertices inside the body a river ends in, and inside the one it starts in, the three next
+  to the land are kept, so the mesh ends under that body's surface. (8) Where the bed's grade at a vertex that turns
+  is over what the bend bound leaves there, the bed's higher end is lowered (a pass from the end, one from the
+  start), by no more than the river's depth there again: the surface stays and the water is deeper, a head still
+  starts from nothing, and a line made from the bed keeps the bound's second part through the bends of a river that
+  is not steep and tightly curved at once (one that is keeps the line's bend warning). The result counts what was
+  lowered (rises of the given heights, low banks, beds deepened), the deepest cut and the fall.
+- **A lake** (`BuildLake`) reads the natural ground a voxel apart along its closed spline (an open one is closed
+  straight from its last point to its first), takes its level (`LevelMode`: the lowest ground along the outline less
+  `LevelMargin`, so the drawn rim holds; or the actor's own height) and makes the footprint from the outline with the
+  filter above: the cells inside whose ground lies under the level, grown by one cell (`CellSizeVoxels`, 4). So the
+  footprint is the water and a cell of shore, as the plan's section 5.1 asks of a maker of footprints, and the sheet
+  is no wider. The record's depth is the deepest cell read and a chunk; `MinCaveDepth` (8) is the body's. No ground
+  moves. A lake with nothing under its level adds no body.
+- **What they say** (`GetBodyWarnings`, logged as "Water body <actor>: ..."): what was done about the spline's bends
+  (the terrain line's sentence); a spline at its own height that rises downstream or stands over a bank, with how
+  many vertices and by how much; a river that ends on land; the limits the bed's line breaks (the cut and fill cap
+  above all: a river that follows the terrain cuts through a rise), but for the narrow core and band a head and a
+  dry end have on purpose; a lake with no water; an outline whose own ground lies under the level (the water ends in a wall
+  there); ground under the level in the footprint's grown cells outside the outline (a rim narrower than a cell);
+  an outline that is not a closed loop. A body is added whatever they say.
+- **What they read.** The natural ground, as a terrain line does, so the same on every machine and whatever else
+  registers: a road's cut and fill or a pad beside a river is not seen. And the bodies the chunk manager holds when
+  the body is made: the lakes and the rivers before it in the order, and a source's (the generator's, from H7).
+
+Tests: `Generation.RiverProfile.Rules` (made ground: a slope, a low bank, a rise of the ground, given heights that
+rise or stand over the banks, a mouth, a head in a lake, the sea's floor), `.Bends` (the bed's grade through a curve
+on a steep slope, against the engine's own bend check; the limit on how far a bed is deepened); `Core.WaterLevels.Lake` (an outline on a planet, the kept cells);
+`Streaming.HandPlacedWater.Plane`, `.Island`, `.Planet`, `.Cubic` (a river down a course of the natural ground to
+the sea and a lake round a hollow, as actors: the order, the profile's rules read back from the record and the
+ground, then a streamed world whose voxels hold both bodies' water and whose sample is the lake's and the river's
+with its flow), `.Rules` (a spline that climbs, an end on land, a head in a lake, a tributary, a lake over its
+outline and one with no water, a river that begins play before the world, two worlds making the same river);
+`Map.WaterBodies.HandPlaced.Plane`, `.Planet` (the map's pixels over both); and in the game module
+`VoxelEngine.Water.HandPlaced.Plane`, `.Island`, `.Planet`, `.Cubic` (the pawn swims in the lake and is carried
+down the river, following its surface down; an item floats in each).
 
 H1 changed no output: no world has a body, a gather with none is the sea's snapshot, and the gates read as the base
 (the plan's H1 result). The cost of the point gather was measured by `Streaming.Water.Bodies.Plane` and `.Planet` in a

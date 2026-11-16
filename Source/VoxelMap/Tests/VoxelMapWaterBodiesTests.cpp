@@ -5,6 +5,7 @@
 #include "Misc/AutomationTest.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
+#include "Testing/VoxelTestHandPlacedWater.h"
 #include "VoxelMapSubsystem.h"
 #include "VoxelMapTileFrame.h"
 #include "VoxelMapTypes.h"
@@ -24,6 +25,10 @@
 //   of the shore aside), inside the footprint and nowhere outside it. Then a pond a source did not have at hand when
 //   the tiles were drawn is announced (UVoxelChunkManager::NotifyWaterBodiesChanged): the tiles it reaches go stale,
 //   draw again, and show it.
+// - Map.WaterBodies.HandPlaced.Plane, .Planet (the plan's H4): a river actor and a lake actor laid over a course and a
+//   hollow of the ground, in a world with a sea. The tiles round each are drawn: every pixel is water exactly where
+//   the world's sample puts its ground under a level, and pixels of the lake's and of the river reach's own water are
+//   drawn as water.
 // ---------------------------------------------------------------------------
 
 namespace VoxelMapWaterBodiesTest
@@ -249,6 +254,138 @@ namespace VoxelMapWaterBodiesTest
 		Manager->RemoveWaterBodySource(&Source);
 		W.Stop();
 	}
+}
+
+namespace VoxelMapWaterBodiesTest
+{
+	void RunHandPlaced(FAutomationTestBase& Test, bool bPlanet)
+	{
+		using namespace VoxelTesting;
+		const FString Name = bPlanet ? TEXT("Planet") : TEXT("Plane");
+		Test.AddExpectedMessagePlain(TEXT("Water body "), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, -1);
+		FTestChunkWorld W;
+		W.Create(bPlanet ? TEXT("VoxelMapHandPlacedPlanet") : TEXT("VoxelMapHandPlacedPlane"));
+		ConfigureHandPlacedWorld(W, bPlanet ? EHandPlacedWorld::Planet : EHandPlacedWorld::Plane);
+		W.StartManager();
+		UVoxelChunkManager* Manager = W.Manager;
+		UVoxelMapSubsystem* Map = W.World->GetSubsystem<UVoxelMapSubsystem>();
+		const FHandPlacedGround Ground(*Manager);
+		const FVoxelWaterFrame Frame = Ground.Frame;
+		const FVector Site = bPlanet ? Frame.Center + FVector(0.3, 0.5, 0.8).GetSafeNormal() * Frame.DatumRadius : FVector::ZeroVector;
+		TArray<FVector> Course;
+		FHandPlacedHollow Hollow;
+		if (!Test.TestNotNull(TEXT("The game world has a map"), Map)
+			|| !Test.TestTrue(*FString::Printf(TEXT("%s: the ground has a course and a hollow (the fixture)"), *Name),
+				FindRiverCourse(Ground, Site, 6000.0, 1200.0, 5000.0, Course) && FindHollow(Ground, Site, 6000.0, 150.0, Hollow)))
+		{
+			W.Stop();
+			return;
+		}
+		AVoxelRiverActor* RiverActor = SpawnRiverAlong(W.World, Ground, Course);
+		RiverActor->GetRiver()->HalfWidth = 150.0f;
+		RiverActor->GetRiver()->BankWidth = 200.0f;
+		RiverActor->GetRiver()->Depth = 100.0f;
+		RiverActor->GetRiver()->SurfaceBelowGround = 50.0f;
+		RiverActor->GetRiver()->BankMargin = 25.0f;
+		AVoxelLakeActor* LakeActor = SpawnLakeRound(W.World, Ground, Hollow.Pit, Hollow.Radius);
+		LakeActor->GetLake()->LevelMargin = 25.0f;
+		FinishHandPlaced(RiverActor);
+		FinishHandPlaced(LakeActor);
+		if (!Test.TestEqual(*FString::Printf(TEXT("%s: the world holds the river and the lake"), *Name), Manager->GetNumWaterBodies(), 2))
+		{
+			W.Stop();
+			return;
+		}
+		const uint32 LakeId = LakeActor->GetLake()->GetWaterBodyId();
+		const uint32 RiverId = RiverActor->GetRiver()->GetWaterBodyId();
+		const FVector RiverMid = Course[Course.Num() / 2];
+
+		// Round each body in turn: the world streams, its tiles draw, and every pixel is held against the world's sample
+		// at its ground. Counted apart: the pixels whose water is the lake's own, and the river reach's own.
+		int32 Pixels = 0, Mismatches = 0, LakeWater = 0, LakeDrawn = 0, RiverWater = 0, RiverDrawn = 0;
+		for (const FVector& Centre : { Hollow.Pit, RiverMid })
+		{
+			W.SetViewer(Centre + Ground.UpAt(Centre) * 300.0);
+			if (!Test.TestTrue(*FString::Printf(TEXT("%s: streaming settles"), *Name), W.Settle()))
+			{
+				break;
+			}
+			Map->RequestTilesInRadius(Centre, 2500.0f);
+			const FVoxelMapTileFrame TileFrame = Map->GetTileFrame();
+			TArray<FIntPoint> Tiles;
+			TileFrame.TilesWithinRadius(Centre, 2500.0, Tiles);
+			TArray<FVoxelMapTileId> View;
+			for (const FIntPoint& Coord : Tiles)
+			{
+				View.Add(FVoxelMapTileId(Coord, 0));
+			}
+			Map->RequestView(EVoxelMapRequester::WorldMap, View);
+			Test.TestTrue(*FString::Printf(TEXT("%s: the tiles draw"), *Name), DrainMap(Map, W.World));
+			for (const FIntPoint& Coord : Tiles)
+			{
+				const FVoxelMapTile* Tile = Map->GetTile(Coord);
+				if (!Tile || Tile->PixelData.Num() != Tile->Resolution * Tile->Resolution)
+				{
+					continue;
+				}
+				for (int32 PY = 0; PY < Tile->Resolution; ++PY)
+				{
+					for (int32 PX = 0; PX < Tile->Resolution; ++PX)
+					{
+						const FVoxelMapTileSample Sample = TileFrame.SampleAt(FVoxelMapTileId(Coord, 0), PX + 1, PY + 1);
+						const FVector At = bPlanet ? Manager->GetGeneratedSurfacePoint(Frame.Center + Sample.Direction * Frame.DatumRadius)
+							: Manager->GetGeneratedSurfacePoint(FVector(Sample.X, Sample.Y, 0.0));
+						FVoxelWaterSample Water;
+						Manager->SampleWater(At, Water);
+						if (Water.Depth > -5.0 && Water.Depth < 5.0)
+						{
+							continue; // the shore
+						}
+						const bool bDrawn = IsWaterColour(Tile->PixelData[PY * Tile->Resolution + PX]);
+						const bool bUnder = Water.bWater && Water.Depth > 0.0;
+						++Pixels;
+						Mismatches += bDrawn == bUnder ? 0 : 1;
+						if (bUnder && Water.BodyId == LakeId)
+						{
+							++LakeWater;
+							LakeDrawn += bDrawn ? 1 : 0;
+						}
+						else if (bUnder && Water.BodyId == RiverId)
+						{
+							++RiverWater;
+							RiverDrawn += bDrawn ? 1 : 0;
+						}
+					}
+				}
+			}
+		}
+		Test.AddInfo(FString::Printf(TEXT("%s: %d pixels compared; the lake's water %d pixels, %d drawn as water; the river's %d, %d drawn"),
+			*Name, Pixels, LakeWater, LakeDrawn, RiverWater, RiverDrawn));
+		Test.TestEqual(*FString::Printf(TEXT("%s: a pixel is water exactly where its ground lies under the level over it (mismatches)"), *Name), Mismatches, 0);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the map shows the lake (non-vacuous)"), *Name), LakeWater > 20 && LakeDrawn == LakeWater);
+		Test.TestTrue(*FString::Printf(TEXT("%s: the map shows the river (non-vacuous)"), *Name), RiverWater > 10 && RiverDrawn == RiverWater);
+		W.Stop();
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelMapWaterBodiesHandPlacedPlaneTest,
+	"VoxelWorlds.Map.WaterBodies.HandPlaced.Plane",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelMapWaterBodiesHandPlacedPlaneTest::RunTest(const FString& Parameters)
+{
+	VoxelMapWaterBodiesTest::RunHandPlaced(*this, false);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelMapWaterBodiesHandPlacedPlanetTest,
+	"VoxelWorlds.Map.WaterBodies.HandPlaced.Planet",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelMapWaterBodiesHandPlacedPlanetTest::RunTest(const FString& Parameters)
+{
+	VoxelMapWaterBodiesTest::RunHandPlaced(*this, true);
+	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelMapWaterBodiesPlaneTest,
