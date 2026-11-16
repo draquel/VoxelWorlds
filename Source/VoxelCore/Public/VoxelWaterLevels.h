@@ -717,4 +717,15 @@ public:
 	 */
 	virtual void GatherWaterBodiesOnSphere(const FVector& Direction, double AngularRadius, EVoxelConditioningGather Need,
 		TArray<FVoxelWaterBody>& OutBodies) const {}
+
+	/**
+	 * Whether a Complete gather over a region of a heightmap world would be answered from what the source has at
+	 * hand, with nothing worked out. A reader whose work would ask for every body of many places (the game layer's
+	 * placement, behind a gather that takes what is at hand) asks this first and waits for the bodies to be there.
+	 * Defaults to true: a source that works nothing out holds everything.
+	 *
+	 * @param Bounds World XY region
+	 * @return True when nothing would be worked out
+	 */
+	virtual bool HoldsWaterBodies(const FBox2D& Bounds) const { return true; }
 };

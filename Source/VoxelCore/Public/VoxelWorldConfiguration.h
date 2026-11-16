@@ -12,6 +12,7 @@
 class UMaterialInterface;
 class UVoxelBiomeConfiguration;
 class UVoxelCaveConfiguration;
+class UVoxelHydrologyConfiguration;
 class UVoxelScatterConfiguration;
 class URuntimeVirtualTexture;
 class FVoxelMaterialTable;
@@ -274,6 +275,17 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water")
 	TObjectPtr<UMaterialInterface> RiverMeshMaterial;
+
+	/**
+	 * The world's generated hydrology (Documentation/HYDROLOGY_PLAN.md, D145 and D146): with an asset named, ponds and
+	 * brooks are generated from the seed: springs run downhill over the natural ground, a run long and gentle enough is
+	 * kept as a brook with its bed, and a hollow one meets fills to its rim as a pond. Null (the default): the sea, and the
+	 * rivers and lakes a level's actors place by hand. Naming one changes the world's terrain, its POIs and its roads, so
+	 * the saves made without it are refused (the fingerprint's Hydrology term). Read on the plane and the island; a
+	 * planet and a block world do not generate hydrology yet and ignore it, with a warning (the plan's H8).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water")
+	TObjectPtr<UVoxelHydrologyConfiguration> HydrologyConfiguration;
 
 	// ==================== Terrain Generation Settings ====================
 

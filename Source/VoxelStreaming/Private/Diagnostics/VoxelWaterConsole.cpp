@@ -6,6 +6,7 @@
 #include "VoxelStreaming.h"
 #include "Diagnostics/VoxelConsoleHelpers.h"
 #include "VoxelWaterPropagation.h"
+#include "VoxelHydrologyNetwork.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
@@ -96,6 +97,20 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 						: PlayWorld->GetNetMode() == NM_Client ? TEXT("Client") : TEXT("Standalone");
 					UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Stats [%s]: net=%s: %d lake(s) and river reach(es) added to the world, %d drawn (%d quads)"),
 						*PlayWorld->GetName(), Net, It->GetStaticWaterBodies().Num(), It->GetWaterBodyMeshes().Num(), It->GetWaterBodyMeshes().GetNumQuads());
+					// The generated hydrology's network (the hydrology plan's H7): what it keeps and who worked it out. A tile
+					// worked out inside a gather on the game thread is the cost a frame feels: none after the world's start.
+					if (const TSharedPtr<FVoxelHydrologyNetwork, ESPMode::ThreadSafe> Network = It->GetHydrologyNetwork())
+					{
+						const FVoxelHydrologyStats H = Network->GetStats();
+						UE_LOG(LogVoxelStreaming, Warning,
+							TEXT("voxel.Water.Stats [%s]: net=%s: hydrology: %d tile(s) kept (%d with a body, %d queued); %d lattice square(s): %d spring(s), %d river(s); %d system(s) (%d refused) with %d river reach(es); %d lake(s) kept of %d hollow(s); %d cell(s) with two ways on"),
+							*PlayWorld->GetName(), Net, H.Tiles, H.TilesWithBodies, H.Queued, H.Squares, H.Springs, H.Rivers, H.Systems, H.RefusedSystems, H.Reaches,
+							H.KeptLakes, H.Lakes, H.Conflicts);
+						UE_LOG(LogVoxelStreaming, Warning,
+							TEXT("voxel.Water.Stats [%s]: net=%s: hydrology tiles worked out: SyncTiles=%lld inside a gather on the game thread (%.1f ms, the dearest gather %.1f), %lld inside a gather on another thread (%.1f ms), %lld by the worker (%.1f ms), %lld at the start (%.1f ms) and %lld more inside gathers before the first tick (%.1f ms); gathers: %lld complete (%lld too wide), %lld ready (%lld tile(s) missed, %lld too wide to queue); %lld tile(s) announced"),
+							*PlayWorld->GetName(), Net, H.SyncTiles, H.SyncMs, H.WorstSyncMs, H.OffThreadTiles, H.OffThreadMs, H.WorkerTiles, H.WorkerMs, H.WarmTiles, H.WarmMs, H.StartSyncTiles, H.StartSyncMs,
+							H.CompleteGathers, H.CompleteTooWide, H.ReadyGathers, H.ReadyMisses, H.ReadyTooWide, H.Announced);
+					}
 				}
 			}
 			if (bColumn)

@@ -23,7 +23,7 @@ section true on its date); the Features docs are the current truth.
 | Module | What it holds |
 |--------|---------------|
 | `VoxelCore` | Voxel and chunk types, the world configuration and `UVoxelWorldsSettings`, material and biome registries, the edit manager, the sea surface and the water levels, cube-sphere and render-region math; no dependency on another voxel module |
-| `VoxelGeneration` | CPU and GPU generation, the noise (`FVoxelNoise`), world modes behind `IVoxelWorldMode` and `FVoxelWorldModeFactory`, surface queries, conditioning zones and lines, the tree injector |
+| `VoxelGeneration` | CPU and GPU generation, the noise (`FVoxelNoise`), world modes behind `IVoxelWorldMode` and `FVoxelWorldModeFactory`, surface queries, conditioning zones and lines, the tree injector, the hydrology generator (`FVoxelHydrology`) |
 | `VoxelLOD` | `IVoxelLODStrategy` and `FDistanceBandLODStrategy`: the voxel window, bands, horizons, the cut-over |
 | `VoxelMeshing` | `IVoxelMesher`: the CPU cubic, Marching Cubes and Dual Contouring meshers (chunk meshes and seams), the water mesher |
 | `VoxelRendering` | `IVoxelMeshRenderer` and `FVoxelMeshRenderer`: a `UVoxelRegionComponent` per render region, `FVoxelSceneProxy`, the crossfades |
@@ -76,6 +76,15 @@ section true on its date); the Features docs are the current truth.
   placed by hand") and the game's POI conditioner do (`AddTerrainConditioner`: a world may have several;
   `AddWaterBody`, `AddWaterBodySource`); a source registered after a request was built is warned about and counted
   (`GetNumLateConditioningSources`, G187). A test adds its zones, lines and bodies before it sets a viewer.
+- **Generated hydrology is a setting per world.** A configuration that names a `UVoxelHydrologyConfiguration` has
+  ponds and brooks generated from its seed (`FVoxelHydrology`, pure; `FVoxelHydrologyNetwork`, the chunk manager's,
+  registered as a water body source and a conditioner before `OnInitialized` fires; WATER_SYSTEM.md, "Ponds and
+  brooks from the seed"). The generator reads the natural ground alone and must give the same bodies from any region:
+  a descent's way on from a cell is the cell's alone, a lake is its pit's, a river system its mouth's. A change to
+  what the same settings generate raises `FVoxelHydrology::Version` (the fingerprint's term), never the generation
+  version: a world that names none must generate what it did. A reader that asks for every body of many places (the
+  POI layer's placement) asks `HoldsWaterBodies` first when its own caller takes what is at hand, and works the
+  bodies out ahead on the network's worker (`WarmUp`), never inside a far-field or a map gather.
 - **Precision.** Planets are precise to about 1,000 km and heightmaps to the double range of a position: never hold a
   value of size R in float (altitudes in double on the CPU, the chunk's frame on the GPU, `PlanetFrame.ush`); primitives
   sit at their render region's origin (`FVoxelRenderRegions`) and store float offsets from it.

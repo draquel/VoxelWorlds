@@ -4,58 +4,9 @@
 #include "VoxelStreaming.h"
 #include "VoxelChunkManager.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelRiverCourse.h"
 #include "Components/SplineComponent.h"
 #include "Misc/Crc.h"
-#include <limits>
-
-namespace VoxelRiverPrivate
-{
-	/**
-	 * The level of the body a place lies in, in a line's terms (a world Z, an altitude on a planet): the sea or a lake
-	 * where the ground lies under its level, a river reach wherever its footprint covers the place (its bed will be
-	 * there); the highest, where several do. Every body is asked, not the one the world's sample answers with: under a
-	 * river that has come down to the sea's level the sample is the sea's.
-	 * @param Water The water levels gathered over the river
-	 * @param Place World (X, Y), or on a planet the unit direction from the centre
-	 * @param GroundHeight The natural ground's height there
-	 * @return The level, or NaN where the place lies in no body
-	 */
-	double GetBodyLevelAt(const FVoxelWaterLevels& Water, const FVector& Place, double GroundHeight)
-	{
-		const FVoxelWaterFrame& Frame = Water.GetFrame();
-		const double LevelBase = Frame.bRadial ? Frame.DatumRadius : 0.0;
-		double Best = std::numeric_limits<double>::quiet_NaN();
-		const auto Take = [&Best](double Level) { Best = FMath::IsNaN(Best) ? Level : FMath::Max(Best, Level); };
-		if (Water.GetSea().bEnabled)
-		{
-			const FVector GroundPoint = Frame.bRadial ? Frame.Center + Place * (Frame.DatumRadius + GroundHeight) : FVector(Place.X, Place.Y, GroundHeight);
-			const double Depth = Water.GetSea().GetDepth(GroundPoint);
-			if (Depth > 0.0)
-			{
-				Take(GroundHeight + Depth);
-			}
-		}
-		for (const FVoxelWaterBody& Body : Water.GetBodies())
-		{
-			if (Body.Kind == EVoxelWaterBodyKind::Lake && Body.Lake.IsValid())
-			{
-				if ((Frame.bRadial ? Body.Lake->CoversDirection(Place) : Body.Lake->Covers(Place.X, Place.Y)) && GroundHeight + LevelBase < Body.Level)
-				{
-					Take(Body.Level - LevelBase);
-				}
-			}
-			else if (Body.Kind == EVoxelWaterBodyKind::Reach && Body.Reach.IsValid())
-			{
-				FVoxelWaterReachSample Sample;
-				if (Frame.bRadial ? Body.Reach->SampleOnSphere(Place, Frame.DatumRadius, Sample) : Body.Reach->SampleAt(Place.X, Place.Y, Sample))
-				{
-					Take(Sample.SurfaceLevel - LevelBase);
-				}
-			}
-		}
-		return Best;
-	}
-}
 
 UVoxelRiverComponent::UVoxelRiverComponent()
 {
@@ -168,7 +119,7 @@ bool UVoxelRiverComponent::BuildRiver(const UVoxelChunkManager& Manager, FVoxelR
 		{
 			Heights.Add(Vertex.TargetHeight);
 		}
-		const double BodyLevel = VoxelRiverPrivate::GetBodyLevelAt(Water, Vertex.Position, Height);
+		const double BodyLevel = FVoxelRiverCourse::GetBodyLevelAt(Water, Vertex.Position, Height);
 		BodyLevels.Add(BodyLevel);
 		bAnyBody |= !FMath::IsNaN(BodyLevel);
 	}
@@ -201,41 +152,23 @@ bool UVoxelRiverComponent::BuildRiver(const UVoxelChunkManager& Manager, FVoxelR
 	// end on land, so the banks are read where the river will have them: the taper depends on the vertices' places and
 	// bodies alone, and a first profile over level banks gives it.
 	TArray<double> BankGround;
-	BankGround.Reserve(Num);
 	{
 		const TArray<double> Taper = FShape::MakeRiverProfile(Points, Ground, Ground, Heights, BodyLevels, Params).Taper;
-		const int32 Steps = FMath::Max(1, FMath::CeilToInt32(BankWidth / FMath::Max(VoxelSize, 1.0)));
+		TArray<double> Floors;
+		TArray<FVector> Ups;
+		Floors.Reserve(Num);
 		for (int32 Index = 0; Index < Num; ++Index)
 		{
-			const FVoxelConditioningLineVertex& Vertex = Line.Vertices[Index];
-			// The way across the river here, along the surface.
-			const FVector Up = bPlanet ? Vertex.Position : FVector::UpVector;
-			FVector AlongLine = Points[FMath::Min(Index + 1, Num - 1)] - Points[FMath::Max(Index - 1, 0)];
-			AlongLine -= Up * FVector::DotProduct(AlongLine, Up);
-			const FVector Across = FVector::CrossProduct(Up, AlongLine.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::ForwardVector));
-			const double Floor = Vertex.HalfWidth * (Taper.IsValidIndex(Index) ? Taper[Index] : 1.0);
-			double Lowest = TNumericLimits<double>::Max();
-			for (int32 Step = 0; Step <= Steps; ++Step)
+			Floors.Add(Line.Vertices[Index].HalfWidth * (Taper.IsValidIndex(Index) ? Taper[Index] : 1.0));
+			if (bPlanet)
 			{
-				const double Distance = Floor + BankWidth * Step / Steps;
-				for (const double Side : { -1.0, 1.0 })
-				{
-					FVector Place = Points[Index] + Across * (Side * Distance);
-					if (bPlanet)
-					{
-						Place = Place.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, Up);
-					}
-					double Bank = GetNaturalHeight(Manager, Place);
-					const double BodyLevel = VoxelRiverPrivate::GetBodyLevelAt(Water, Place, Bank);
-					if (!FMath::IsNaN(BodyLevel))
-					{
-						Bank = FMath::Max(Bank, BodyLevel + BankMargin);
-					}
-					Lowest = FMath::Min(Lowest, Bank);
-				}
+				Ups.Add(Line.Vertices[Index].Position);
 			}
-			BankGround.Add(Lowest);
 		}
+		FVoxelRiverCourse::ReadBanks(Points, Ups, Floors, BankWidth, VoxelSize, BankMargin,
+			[&Manager](const FVector& Place) { return GetNaturalHeight(Manager, Place); },
+			[&Water](const FVector& Place, double GroundHeight) { return FVoxelRiverCourse::GetBodyLevelAt(Water, Place, GroundHeight); },
+			BankGround);
 	}
 
 	// The profile.
