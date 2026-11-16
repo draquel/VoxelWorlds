@@ -63,6 +63,28 @@ struct FVoxelTerrainLineBends
 };
 
 /**
+ * The values a spline is sampled to a conditioning line with (UVoxelTerrainLineComponent::BuildLineParamsFromSpline):
+ * a terrain line component's own, or the ones another maker of a line from a spline gives (a hand-placed river's bed,
+ * UVoxelRiverComponent). Each is the component's property of the same name.
+ */
+struct FVoxelTerrainLineSettings
+{
+	EVoxelTerrainLineHeight HeightMode = EVoxelTerrainLineHeight::FollowTerrain;
+	float TerrainOffset = 0.0f;
+	float SmoothingDistance = 1200.0f;
+	float MaxGrade = 0.15f;
+	float HalfWidth = 225.0f;
+	float FalloffWidth = 300.0f;
+	float Strength = 1.0f;
+	EVoxelConditioningLineBlend Blend = EVoxelConditioningLineBlend::Level;
+	FVoxelConditioningLineSurface Surface;
+	float VertexSpacingVoxels = 2.0f;
+
+	/** The line's id (UVoxelTerrainLineComponent::GetLineId) */
+	int64 Id = 0;
+};
+
+/**
  * A hand-placed conditioning line: turns a USplineComponent on the same actor into a conditioning line of the level's
  * voxel world (Documentation/TERRAIN_LINES_PLAN.md, section 4.5; the how-to is Documentation/Guides/TERRAIN_LINES.md in
  * the plugin). A road, a cutting, an embankment, a painted trail or a river bed drawn in a level.
@@ -198,6 +220,30 @@ public:
 	 * @return False when there is no spline, the spline has no length or the manager is not initialized
 	 */
 	bool BuildLineParams(const UVoxelChunkManager& Manager, FVoxelConditioningLineParams& OutParams, FVoxelTerrainLineBends* OutBends = nullptr) const;
+
+	/** @return This component's values, as the settings a spline is sampled with */
+	FVoxelTerrainLineSettings GetLineSettings() const;
+
+	/**
+	 * BuildLineParams for any spline and any values: what the component does with its own, for another maker of a line
+	 * from a spline (a hand-placed river samples its bed's vertices with it, so a river's corners are rounded as a
+	 * road's are).
+	 * @param Spline The spline (null: no line)
+	 * @param Manager The world's chunk manager, initialized
+	 * @param Settings The values
+	 * @param OutParams The line's values
+	 * @param OutBends What was done about the line's bends (optional)
+	 * @return False when there is no spline, the spline has no length or the manager is not initialized
+	 */
+	static bool BuildLineParamsFromSpline(const USplineComponent* Spline, const UVoxelChunkManager& Manager, const FVoxelTerrainLineSettings& Settings,
+		FVoxelConditioningLineParams& OutParams, FVoxelTerrainLineBends* OutBends = nullptr);
+
+	/**
+	 * @param Bends What was done about a line's bends
+	 * @return The sentence a line's first warning is when its spline broke the bend bound: what was done about it and how
+	 *         far the line runs from the spline. Empty when the line is the spline's, vertex for vertex
+	 */
+	static FString DescribeBends(const FVoxelTerrainLineBends& Bends);
 
 	/** @return The registered line; null before the world started */
 	TSharedPtr<const FVoxelConditioningLine> GetRegisteredLine() const { return RegisteredLine; }

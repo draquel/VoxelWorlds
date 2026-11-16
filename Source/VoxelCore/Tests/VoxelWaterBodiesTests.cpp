@@ -161,6 +161,58 @@ bool FVoxelWaterLevelsLakeTest::RunTest(const FString& Parameters)
 		TestFalse(TEXT("Outline: a column two cells outside is not"), Drawn->Covers(-150.0, 300.0) || Drawn->Covers(500.0, 750.0));
 		TestTrue(TEXT("Outline: fewer than three corners make no footprint"),
 			FVoxelWaterLake::MakeFromOutline(MakeArrayView(Outline.GetData(), 2), 100.0)->NumCells() == 0);
+
+		// The cells a filter keeps (a hand-placed lake's: the ones under its level): the left half of the outline, grown
+		// by one cell. 5 x 6 cells kept, a ring around them: 7 x 8.
+		int32 Asked = 0;
+		const TSharedRef<const FVoxelWaterLake> Kept = FVoxelWaterLake::MakeFromOutline(Outline, 100.0, [&Asked](const FVector& Place)
+		{
+			++Asked;
+			return Place.X < 500.0;
+		});
+		TestEqual(TEXT("Outline, kept cells: every cell inside the outline is asked about, at its centre's column"), Asked, 60);
+		TestEqual(TEXT("Outline, kept cells: the cells kept and one cell around them"), Kept->NumCells(), 56);
+		TestTrue(TEXT("Outline, kept cells: a kept column and its neighbour are covered"), Kept->Covers(450.0, 300.0) && Kept->Covers(550.0, 300.0) && Kept->Covers(-50.0, -50.0));
+		TestFalse(TEXT("Outline, kept cells: a column inside the outline two cells from a kept one is not"), Kept->Covers(650.0, 300.0));
+	}
+
+	// ---- An outline on a planet: a square of 1,000 uu round a direction, as corners' directions. The footprint lies in
+	// the plane tangent at the corners' middle: the cells inside, grown by one.
+	{
+		const double Radius = 250000.0;
+		const FVector Centre = FVector(0.3, -0.5, 0.8).GetSafeNormal();
+		const FVector East = FVector::CrossProduct(FVector::UpVector, Centre).GetSafeNormal();
+		const FVector North = FVector::CrossProduct(Centre, East);
+		const auto Direction = [&](double AlongEast, double AlongNorth) { return (Centre * Radius + East * AlongEast + North * AlongNorth).GetSafeNormal(); };
+		const TArray<FVector> Corners = { Direction(-500.0, -500.0), Direction(500.0, -500.0), Direction(500.0, 500.0), Direction(-500.0, 500.0) };
+		const TSharedRef<const FVoxelWaterLake> Drawn = FVoxelWaterLake::MakeFromOutlineOnSphere(Corners, Radius, 100.0);
+		TestTrue(TEXT("Planet outline: a planet lake"), Drawn->IsRadial());
+		// 10 x 10 cells inside and a ring of one cell: 144, give or take the cells the outline's edges run along.
+		TestTrue(TEXT("Planet outline: the cells inside and one cell around them"), Drawn->NumCells() >= 121 && Drawn->NumCells() <= 169);
+		TestTrue(TEXT("Planet outline: the middle and a place inside are covered"), Drawn->CoversDirection(Centre) && Drawn->CoversDirection(Direction(400.0, -400.0)));
+		TestTrue(TEXT("Planet outline: a place half a cell outside is covered"), Drawn->CoversDirection(Direction(550.0, 0.0)) && Drawn->CoversDirection(Direction(0.0, -550.0)));
+		TestFalse(TEXT("Planet outline: a place over two cells outside is not"), Drawn->CoversDirection(Direction(750.0, 0.0)) || Drawn->CoversDirection(Direction(0.0, 750.0)));
+		TestFalse(TEXT("Planet outline: the far side of the planet is not"), Drawn->CoversDirection(-Centre));
+		FVector CapDirection;
+		double CapAngle = 0.0;
+		TestTrue(TEXT("Planet outline: its cap is round the corners' middle and holds them"), Drawn->GetCap(CapDirection, CapAngle)
+			&& CapDirection.Equals(Centre, 1.0e-6) && CapAngle > 700.0 / Radius && CapAngle < 1400.0 / Radius);
+		// The corners in the other order give the same footprint.
+		const TArray<FVector> Reversed = { Corners[3], Corners[2], Corners[1], Corners[0] };
+		TestEqual(TEXT("Planet outline: the corners' order does not matter"), FVoxelWaterLake::MakeFromOutlineOnSphere(Reversed, Radius, 100.0)->NumCells(), Drawn->NumCells());
+
+		// The cells a filter keeps: the eastern half.
+		int32 Asked = 0;
+		const TSharedRef<const FVoxelWaterLake> Kept = FVoxelWaterLake::MakeFromOutlineOnSphere(Corners, Radius, 100.0, [&](const FVector& Place)
+		{
+			++Asked;
+			return FVector::DotProduct(Place, East) > 0.0;
+		});
+		TestTrue(TEXT("Planet outline, kept cells: every cell inside is asked about, by its direction"), Asked >= 81 && Asked <= 121);
+		TestTrue(TEXT("Planet outline, kept cells: about half the footprint"), Kept->NumCells() > Drawn->NumCells() / 3 && Kept->NumCells() < (2 * Drawn->NumCells()) / 3 + 12);
+		TestTrue(TEXT("Planet outline, kept cells: the eastern side is covered, the western is not"), Kept->CoversDirection(Direction(300.0, 0.0)) && !Kept->CoversDirection(Direction(-300.0, 0.0)));
+		TestTrue(TEXT("Planet outline: fewer than three corners make no footprint"),
+			FVoxelWaterLake::MakeFromOutlineOnSphere(MakeArrayView(Corners.GetData(), 2), Radius, 100.0)->NumCells() == 0);
 	}
 
 	// ---- A planet: the sea 500 under the datum, a lake 300 over it on a cap of the surface.

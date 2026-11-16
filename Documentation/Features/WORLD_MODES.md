@@ -164,12 +164,19 @@ is immutable and shared from then on.
   A line made from those targets steps by less than a tenth of a voxel across every bisector whatever its turns: a
   tight bend on a slope is levelled, with more cut and fill, which the caller judges against its cap. The roads
   between POIs are made with it (VoxelWorldPOI's `FPOIRoads`), and so is a hand-placed line whose spline breaks the
-  bend bound ("The hand-placed line", below; the plan's L5).
+  bend bound ("The hand-placed line", below; the plan's L5). `MakeRiverProfile` is its lower-only twin for a river
+  (the hydrology plan's H4; `WATER_SYSTEM.md`, "The river and the lake placed by hand"): a surface that is only ever
+  lowered (never rising downstream, a margin under both banks, a tuck under the water it meets), a bed a depth under
+  it that starts from nothing at a head, and the bed deepened, by up to the depth again, where its grade at a vertex
+  that turns is over what the bend bound leaves there.
 - **Roads between POIs** are VoxelWorldPOI's, in every world mode (the plan's R1 and R2; `POI_SYSTEM.md` section
   5.1): heightmap lines on the plane, the island and block worlds, radial lines on a planet, gathered through
   `IVoxelTerrainConditioner::GatherConditioningLines` and `GatherConditioningLinesOnSphere`.
 
-**The hand-placed line** (the plan's section 4.5 and phases L4 and L5; the how-to is `Guides/TERRAIN_LINES.md`).
+**The hand-placed line** (the plan's section 4.5 and phases L4 and L5; the how-to is `Guides/TERRAIN_LINES.md`). A
+hand-placed river's bed is such a line, sampled from its spline by the same function
+(`UVoxelTerrainLineComponent::BuildLineParamsFromSpline`, which takes any spline and a line's values:
+`FVoxelTerrainLineSettings`), with the river's own profile for its targets (`UVoxelRiverComponent`).
 `UVoxelTerrainLineComponent` (`VoxelStreaming/Public/VoxelTerrainLineComponent.h`) turns a `USplineComponent` on its
 actor into a conditioning line of the level's voxel world; `AVoxelTerrainLineActor` ("Voxel Terrain Line" in the Place
 Actors panel) is a spline with the component, to drop into a level. When the world starts the component samples the

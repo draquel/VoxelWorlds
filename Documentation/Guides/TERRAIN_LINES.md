@@ -1,9 +1,13 @@
-# Terrain lines: a road, a cutting or a trail from a spline
+# Terrain lines: a road, a cutting, a trail, a river or a lake from a spline
 
 How to draw a line in a level and have the voxel terrain carry it: a levelled road, a cutting or a river bed, an
 embankment, a painted trail. The line is a **conditioning line** (`Features/WORLD_MODES.md`, "Conditioning lines", "The
 surface under a line" and "The hand-placed line"): it changes what the world generates, on every machine, in every
 world mode (plane, island, planet, a block world). Nothing is drawn in the editor: the terrain shows the line in PIE.
+
+A river and a lake are placed the same way and have a section of their own ("A river and a lake", below): a river is
+a spline whose bed is such a line and whose water is a body of the world's water levels, a lake a closed spline round a
+hollow.
 
 ## Placing one
 
@@ -46,9 +50,10 @@ component rounds it ("Bends", below), and the log says how far the line then run
 
 ## Three lines to start from
 
-The review maps `/Game/PluginTesting/Tests/Review/Review_TerrainLines_Plane` and `Review_TerrainLines_Planet` hold one
-of each (`Scripts/setup_terrain_line_review.py` at the project root builds them; the material ids are the demo
-atlas's):
+The review maps `/Game/PluginTesting/Tests/Review/Review_TerrainLines_Plane` and `Review_TerrainLines_Planet` hold a
+road and a trail where the pawn starts, and near them a river that runs into the sea, a lake and the lake's outlet
+("A river and a lake", below; the lower-only line they had until the hydrology plan's H4 made way for the river)
+(`Scripts/setup_terrain_line_review.py` at the project root builds them; the material ids are the demo atlas's):
 
 | Line | Values |
 |---|---|
@@ -118,6 +123,115 @@ whatever they say; the warnings say where it is not what you drew, and where it 
 how far over the bound the spline was, how far the corners were spread and how far the line runs from the spline.
 `voxel.World.Stats` reports the lines in the world, and whether every conditioning source registered before the first
 chunk was requested.
+
+## A river and a lake
+
+Water placed by hand (`Features/WATER_SYSTEM.md`, "The river and the lake placed by hand"; the hydrology plan's H4).
+Both are water to everything in the world: the voxels hold it, a pawn swims in it and a river carries the swimmer
+downstream, items float on it, the map shows it and a mesh draws it, in every world mode, the same on a dedicated
+server and on each client. Neither moves ground it does not have to: a lake moves none, a river cuts its bed and
+raises nothing.
+
+### A river
+
+1. Drag a **Voxel River** (`AVoxelRiverActor`: a spline with a `UVoxelRiverComponent`) into the level.
+2. Draw the spline **from the river's head to its mouth**: downhill, and on into the water it runs into (a few
+   points past the shore of the sea or of a lake, or onto another river). As with a line, only where the spline runs
+   over the ground is read unless you choose `Spline Height`.
+3. Play. The log has one line a river ("River <actor>: N vertices ...") and a warning for whatever is not as drawn.
+
+The component makes the river's long profile itself, by the rules that keep a river watertight:
+
+- **The surface never rises downstream.** Following the terrain it lies `Surface Below Ground` under the natural
+  ground along the spline and is lowered wherever the ground ahead rises, so the bed cuts through a rise as a gorge.
+  At the spline's height the spline's own heights are the surface, lowered where they climb (the log says by how
+  much): draw them falling.
+- **The surface stays under both banks.** Out to the edge of the bank on each side the natural ground stands `Bank
+  Margin` over the water, or the surface is lowered there and from there on. So a river laid along a hillside sits
+  as low as its lower bank asks, and no water stands over open ground.
+- **A head.** The depth and the width start from nothing and reach their full values over `Head Length`.
+- **A mouth.** Where the spline runs into the sea, a lake or another river, the river comes down to that water's
+  level, a hand under it, and stops three vertices inside it. A river that reaches no water **ends on land**: it
+  thins to nothing over its last `Head Length`, with a warning.
+- **Out of a lake.** A river whose first points lie in a lake starts at the lake's level at full width, and its bed
+  notches the lake's rim.
+- **Bends** are rounded as a line's are ("Bends", above), and where the bed would still be too steep through one it is
+  cut deeper, by up to its depth again, which leaves a pool there. A steep river through tight bends keeps the bend
+  warning: draw its bends wider.
+- **The sea.** In a world with a sea no river lies under the sea's level: down a beach it comes to a hand under the
+  sea and stays there.
+
+| Value | Default | What it does |
+|---|---|---|
+| Height Mode | Follow Terrain | `Follow Terrain`: the surface lies under the natural ground along the spline. `Spline Height`: the spline's own height is the surface (its Z; on a planet its altitude) |
+| Surface Below Ground | 75 | Follow Terrain: how far under the ground along the spline the surface lies (a voxel of 75 uu) |
+| Smoothing Distance | 600 | Follow Terrain: the ground is averaged this far each way along the spline first, so the surface does not step at every bump. More gives an evener fall and a deeper cut |
+| Bank Margin | 37.5 | How far the ground of both banks stands over the surface, at least |
+| Depth | 150 | The water over the bed at full depth (two voxels) |
+| Half Width | 225 | Half the width of the bed's flat floor. Each spline point's **scale Y** multiplies it there |
+| Bank Width | 300 | The width of each bank: the bed eases back up to the natural ground over this far. The water's edge lies on it |
+| Head Length | 600 | How far from the head the river reaches its full depth and width, and how far from an end on land it thins out. 0 starts and ends at full size |
+| Flow Speed | 100 | How fast the river runs, in uu a second: it carries a swimmer and moves the ripples. A swimmer makes about 150, so against a river of 150 he stands still |
+| Surface | cave depth 8 | The bed's ground, as a line's: a band of material (the atlas's stone or gravel reads as a river bed), the caves' depth, a width kept clear of scatter and trees |
+| Vertex Spacing Voxels | 2 | A vertex every this many voxels |
+| Order | 0 | Where rivers meet: the river with the higher order is made first and the other ends in it. Give a river a higher order than its tributaries |
+
+Widths in voxels, as for a line: a floor under two voxels wide does not mesh cleanly, and a river narrower than a
+far-field quad (a few voxels at the edge of the voxel window, more beyond) shows from far as a broken line.
+
+### A lake
+
+1. Drag a **Voxel Lake** (`AVoxelLakeActor`: a closed spline with a `UVoxelLakeComponent`) into the level.
+2. Draw the spline **round a hollow of the terrain, along the ground that is to hold the water**: the rim. The lake
+   fills what lies under its level inside the outline, and nothing outside it.
+3. Play. The log has one line a lake ("Lake <actor>: level ...").
+
+A river drawn from inside a lake (its first points in the water) is the lake's outlet: it starts at the lake's level
+and cuts a notch through the rim. A river drawn into a lake ends in it. Either way the lake is made first, whichever
+actor the level lists first.
+
+| Value | Default | What it does |
+|---|---|---|
+| Level Mode | Below Outline | `Below Outline`: the level is the lowest natural ground along the outline, less the margin: as high as the drawn rim holds. `Actor Height`: the level is the actor's own height (its Z; on a planet its altitude) |
+| Level Margin | 37.5 | Below Outline: how far under the outline's lowest ground the level lies |
+| Min Cave Depth | 8 | No cave opens within this many voxels under the lake's bed |
+| Cell Size Voxels | 4 | The footprint is a grid of cells this wide: the water's own cells and one cell of shore. A rim narrower than a cell wants a smaller cell |
+
+A lake carves nothing: where there is no hollow there is no lake, and the log says so. To find a hollow without a
+preview, play the level and walk it, or read the ground with `Scripts/qa/water_sites.py` at the project root: it
+probes the play world's natural ground round a place, finds the basin that holds the most water with an outline over
+its rim and the longest gentle course down to the sea, and with `--lay` puts both into the open level as actors (the
+review maps' river, lake and outlet were found with it). The demo's terrain gives brooks of two or three hundred
+metres and ponds of a quarter hectare; other terrain gives more (the hydrology plan's section 3.1).
+
+### What the log tells you about water
+
+| Warning | What to change |
+|---|---|
+| "the spline rises downstream at N of its M vertices, by up to X uu: the river's surface is lowered there" | Spline Height: the spline climbs. Nothing, if the lowered river is the one you want; else draw the spline falling from head to mouth, or let the river follow the terrain |
+| "at N of its M vertices the spline is not X uu under the ground of both banks: the surface is lowered there" | Spline Height: the spline runs over, or too near under, a bank's ground. Lower it, or move the river off the low bank |
+| "the river ends on land ...: it thins to nothing over its last X uu" | The spline stops short of the water. Run it on into the sea, the lake or the river it should reach (for a river, give that river the higher Order) |
+| "the spline breaks the bend bound ..." and the line's other warnings | As for a line ("What the log tells you", above). "the cut and fill cap": the bed lies over half a chunk under the ground somewhere, usually where a river that follows the terrain cuts through a high rise: route it round |
+| "nothing inside the outline lies under the lake's level ...: the lake holds no water" | The outline is not round a hollow (a slope or a hill), or the level is under the ground: draw it along a rim, or raise the actor |
+| "the ground along the outline lies under the lake's level at N of M places ...: the water ends in a wall there" | Actor Height: the level is over the outline's ground. Lower the actor, or draw the outline over higher ground |
+| "the ground just outside the outline lies under the lake's level at N cells of the footprint's edge" | The rim is narrower than a footprint cell there: use a smaller cell, or a larger margin |
+| "the spline is not a closed loop" | The outline was closed straight from its last point to its first: close the spline for the outline you see |
+
+`GetBodyWarnings` on either component returns the same sentences to a Blueprint. `voxel.Water.Stats` lists the
+world's bodies with their levels and footprints.
+
+### What a river and a lake do not do
+
+- No editor preview, and no change to chunks that have already generated: one spawned while the world runs is added
+  with a warning.
+- They read the natural ground, not what a road, a pad or an edit made of it: a river beside an embankment does not
+  know it is there.
+- No waterfall, no rapids, no flooding or draining: the water stands where it is made (digging into a body's footprint
+  under its level floods the dig; nothing drains). A river carries swimmers, not items.
+- A lake does not carve a basin, and a river's banks are the terrain's own: where a bank is low the river sinks into
+  a cutting, it does not build a levee.
+- A dry pit dug inside a body's drawn surface, clear of the water, still shows the surface over it: the mesh covers
+  the footprint.
 
 ## What a line does not do
 

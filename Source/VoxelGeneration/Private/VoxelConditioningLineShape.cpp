@@ -247,3 +247,206 @@ FVoxelConditioningLineShape::FProfile FVoxelConditioningLineShape::MakeProfile(T
 	}
 	return Result;
 }
+
+FVoxelConditioningLineShape::FRiverProfile FVoxelConditioningLineShape::MakeRiverProfile(TConstArrayView<FVector> Points, TConstArrayView<double> Ground,
+	TConstArrayView<double> BankGround, TConstArrayView<double> Heights, TConstArrayView<double> BodyLevels, const FRiverProfileParams& Params)
+{
+	FRiverProfile Result;
+	int32 Num = FMath::Min3(Points.Num(), Ground.Num(), BankGround.Num());
+	const bool bFollow = Heights.Num() == 0;
+	if (!bFollow)
+	{
+		Num = FMath::Min(Num, Heights.Num());
+	}
+	if (BodyLevels.Num() > 0)
+	{
+		Num = FMath::Min(Num, BodyLevels.Num());
+	}
+	if (Num < 2)
+	{
+		return Result;
+	}
+	const auto InBody = [&](int32 Index) { return BodyLevels.Num() > 0 && !FMath::IsNaN(BodyLevels[Index]); };
+
+	// How far along the line each vertex is.
+	TArray<double> Along;
+	Along.SetNumUninitialized(Num);
+	Along[0] = 0.0;
+	for (int32 Index = 1; Index < Num; ++Index)
+	{
+		Along[Index] = Along[Index - 1] + FVector::Dist(Points[Index - 1], Points[Index]);
+	}
+	const double Length = Along[Num - 1];
+	const double Step = Length / (Num - 1);
+
+	// The surface asked for: the heights given, or the ground along the line, averaged and never over the ground
+	// itself, less the margin. Inside another body the average takes that body's level for the ground (its floor is
+	// not the river's), so a river comes to a shore at the water's level and not under it.
+	TArray<double> Asked;
+	if (bFollow)
+	{
+		TArray<double> Effective(Ground.Left(Num));
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			if (InBody(Index))
+			{
+				Effective[Index] = BodyLevels[Index] + Params.SurfaceUnderGround;
+			}
+		}
+		VoxelConditioningLineShapePrivate::AverageAlong<double>(Effective, FMath::RoundToInt32(Params.SmoothingDistance / FMath::Max(Step, 1.0)), Asked);
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			Asked[Index] = FMath::Min(Asked[Index], Ground[Index]) - Params.SurfaceUnderGround;
+		}
+	}
+	else
+	{
+		Asked = TArray<double>(Heights.Left(Num));
+	}
+
+	// Rules 1, 2 and 7, upstream to downstream: under the banks, a tuck under the body the vertex lies in, and never
+	// over the vertex before. Only the heights given count as rises (a river that follows the ground cuts through a
+	// rise of the ground: that is its cut, not a fault of the drawing).
+	Result.Surface.SetNumUninitialized(Num);
+	double Lowest = TNumericLimits<double>::Max();
+	double LowestAsked = TNumericLimits<double>::Max();
+	for (int32 Index = 0; Index < Num; ++Index)
+	{
+		double Level = Asked[Index];
+		if (InBody(Index))
+		{
+			Level = BodyLevels[Index] - Params.BodyTuck;
+		}
+		else
+		{
+			if (!bFollow && Level > LowestAsked + UE_DOUBLE_KINDA_SMALL_NUMBER)
+			{
+				++Result.NumRises;
+				Result.MostRise = FMath::Max(Result.MostRise, Level - LowestAsked);
+			}
+			LowestAsked = FMath::Min(LowestAsked, Level);
+			const double Bank = BankGround[Index] - Params.BankMargin;
+			if (FMath::Min(Level, Lowest) > Bank + UE_DOUBLE_KINDA_SMALL_NUMBER)
+			{
+				++Result.NumLowBanks;
+				Result.MostLowBank = FMath::Max(Result.MostLowBank, FMath::Min(Level, Lowest) - Bank);
+			}
+			Level = FMath::Min(Level, Bank);
+		}
+		Lowest = FMath::Max(FMath::Min(Lowest, Level), Params.MinSurface);
+		Result.Surface[Index] = Lowest;
+	}
+
+	// Rules 3 and 4: the depth and the width start from nothing at a head and thin to nothing at an end on land.
+	Result.bStartsInBody = InBody(0);
+	Result.bEndsInBody = InBody(Num - 1);
+	Result.Taper.SetNumUninitialized(Num);
+	Result.Bed.SetNumUninitialized(Num);
+	for (int32 Index = 0; Index < Num; ++Index)
+	{
+		double Taper = 1.0;
+		if (!Result.bStartsInBody && Params.HeadLength > UE_DOUBLE_SMALL_NUMBER)
+		{
+			Taper = FMath::Min(Taper, Along[Index] / Params.HeadLength);
+		}
+		if (!Result.bEndsInBody && Params.EndLength > UE_DOUBLE_SMALL_NUMBER)
+		{
+			Taper = FMath::Min(Taper, (Length - Along[Index]) / Params.EndLength);
+		}
+		Result.Taper[Index] = FMath::Clamp(Taper, 0.0, 1.0);
+		Result.Bed[Index] = Result.Surface[Index] - Params.Depth * Result.Taper[Index];
+	}
+
+	// Rule 8: the bed's grade through a bend. Across a bend's bisector the line's target steps by
+	// 2 x grade x d x tan(turn / 2); held under a tenth of a voxel at the weight's peak, that is a grade per vertex that
+	// turns (MakeProfile's). A segment steeper than its two vertices allow has its higher end lowered: the pass from
+	// the end deepens the bed upstream of a fall, the pass from the start deepens it downstream of a rise (an end on
+	// land, where the bed comes up to the surface). The surface stays: the water there is deeper, by no more than a
+	// share of the depth the river has there, so a head still starts from nothing and no bend digs a pit.
+	if (Params.VoxelSize > 0.0)
+	{
+		TArray<double> VertexGrade;
+		VertexGrade.Init(TNumericLimits<double>::Max(), Num);
+		for (int32 Index = 1; Index + 1 < Num; ++Index)
+		{
+			const double Turn = GetTurnAt(Points.Left(Num), Index);
+			if (Turn > UE_DOUBLE_SMALL_NUMBER)
+			{
+				const double Grade = GetMaxGradeForTurn(Turn, Params.HalfWidth, Params.FalloffWidth, Params.VoxelSize);
+				VertexGrade[Index] = Grade < TNumericLimits<double>::Max() ? BoundMargin * Grade : Grade;
+			}
+		}
+		const auto MaxStep = [&](int32 Segment)
+		{
+			const double Grade = FMath::Min(VertexGrade[Segment], VertexGrade[Segment + 1]);
+			return Grade < TNumericLimits<double>::Max() ? Grade * (Along[Segment + 1] - Along[Segment]) : TNumericLimits<double>::Max();
+		};
+		const TArray<double> Before = Result.Bed;
+		for (int32 Index = Num - 2; Index >= 0; --Index)
+		{
+			const double Most = MaxStep(Index);
+			if (Most < TNumericLimits<double>::Max())
+			{
+				Result.Bed[Index] = FMath::Min(Result.Bed[Index], Result.Bed[Index + 1] + Most);
+			}
+		}
+		for (int32 Index = 1; Index < Num; ++Index)
+		{
+			const double Most = MaxStep(Index - 1);
+			if (Most < TNumericLimits<double>::Max())
+			{
+				Result.Bed[Index] = FMath::Min(Result.Bed[Index], Result.Bed[Index - 1] + Most);
+			}
+		}
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			Result.Bed[Index] = FMath::Max(Result.Bed[Index], Before[Index] - FMath::Max(Params.MaxBendDeepening, 0.0) * Params.Depth * Result.Taper[Index]);
+			if (Before[Index] - Result.Bed[Index] > UE_DOUBLE_KINDA_SMALL_NUMBER)
+			{
+				++Result.NumBendHolds;
+				Result.MostBendHold = FMath::Max(Result.MostBendHold, Before[Index] - Result.Bed[Index]);
+			}
+		}
+	}
+
+	// Rules 5 and 7: of the vertices inside the body the river starts in, and inside the one it ends in, the few next
+	// to the land are kept: the mesh ends under that body's surface, and the bed does not run on across its floor.
+	const int32 Keep = FMath::Max(Params.BodyVertices, 1);
+	int32 First = 0;
+	int32 Last = Num - 1;
+	if (Result.bStartsInBody)
+	{
+		int32 Run = 0;
+		while (Run < Num && InBody(Run))
+		{
+			++Run;
+		}
+		First = FMath::Max(0, FMath::Min(Run, Num - 1) - Keep);
+	}
+	if (Result.bEndsInBody)
+	{
+		int32 Run = Num - 1;
+		while (Run >= 0 && InBody(Run))
+		{
+			--Run;
+		}
+		Last = FMath::Min(Num - 1, FMath::Max(Run, 0) + Keep);
+	}
+	if (Last - First < 1)
+	{
+		// A river wholly inside another body: its two ends.
+		First = 0;
+		Last = Num - 1;
+	}
+	Result.First = First;
+	Result.Num = Last - First + 1;
+	Result.Fall = Result.Surface[First] - Result.Surface[Last];
+	for (int32 Index = First; Index <= Last; ++Index)
+	{
+		if (!InBody(Index))
+		{
+			Result.DeepestCut = FMath::Max(Result.DeepestCut, Ground[Index] - Result.Bed[Index]);
+		}
+	}
+	return Result;
+}
