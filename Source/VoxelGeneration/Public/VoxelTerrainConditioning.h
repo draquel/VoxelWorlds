@@ -462,6 +462,20 @@ public:
 	}
 
 	/**
+	 * GatherConditioning with the need of the gather, for a conditioner whose zones cost something to work out (the
+	 * game's POI placement in a world with generated hydrology asks for the ponds and brooks of every site). Complete:
+	 * every zone, as GatherConditioning. Ready: the zones that can be had without that work; the conditioner announces
+	 * the rest through the conditioning-changed path when they can. Defaults to GatherConditioning.
+	 * @param Region    Chunk (or query) XY bounds
+	 * @param Need      Complete or Ready, as GatherConditioningLines
+	 * @param OutZones  Append overlapping zones here
+	 */
+	virtual void GatherConditioningZones(const FBox2D& Region, EVoxelConditioningGather Need, TArray<FVoxelConditioningZone>& OutZones) const
+	{
+		GatherConditioning(Region, OutZones);
+	}
+
+	/**
 	 * Append the conditioning lines whose reach meets the given world-space XY region. The default supplies none.
 	 * @param Region    Chunk (or query) XY bounds
 	 * @param Need      Complete: every such line, computed here if it is not at hand. Ready: only the lines at hand; the

@@ -38,6 +38,7 @@ class UVoxelCollisionManager;
 class UVoxelScatterManager;
 class UVoxelWaterPropagation;
 class FVoxelChunkWaterReader;
+class FVoxelHydrologyNetwork;
 class FVoxelSeamRegistry;
 class FVoxelStreamingBenchmark;
 struct FVoxelBenchConfig;
@@ -975,6 +976,23 @@ public:
 
 	/** @return Whether the world may hold a lake or a river reach: a static body or a source is registered */
 	bool HasWaterBodies() const { return !WaterBodySources.IsEmpty(); }
+
+	/**
+	 * The world's generated hydrology (the hydrology plan's section 5.8): the network that works ponds and brooks out
+	 * from the seed, in a world whose configuration names a hydrology configuration (FVoxelHydrology::IsEnabled). Made
+	 * in Initialize and registered as a water body source and a conditioner before OnInitialized fires, so what
+	 * registers there (a hand-placed river, the game's POI layer) finds it. Its gathers answer on any thread.
+	 * @return The network, or null in a world without generated hydrology
+	 */
+	TSharedPtr<FVoxelHydrologyNetwork, ESPMode::ThreadSafe> GetHydrologyNetwork() const { return HydrologyNetwork; }
+
+	/**
+	 * The world's sources of water bodies that answer a gather on any thread, for a reader that works on a worker (the
+	 * POI layer's placement and road searches): the hydrology network, when the world has one. The bodies added to the
+	 * manager (GetStaticWaterBodies) are read on the game thread and copied.
+	 * @return The source, or null
+	 */
+	TSharedPtr<const IVoxelWaterBodySource, ESPMode::ThreadSafe> GetThreadSafeWaterBodySource() const;
 
 	/**
 	 * Whether a voxel of a chunk is at or under the water level over its own column, as generation's fill tests it
@@ -2917,6 +2935,17 @@ private:
 	/** The lakes and river reaches added to the world and the sources of more (the hydrology plan's section 5.2) */
 	FVoxelWaterBodySources WaterBodySources;
 
+	/** The generated hydrology's network (null in a world without it): a source of WaterBodySources and a conditioner of ConditioningSources */
+	TSharedPtr<FVoxelHydrologyNetwork, ESPMode::ThreadSafe> HydrologyNetwork;
+
+	/** Where the hydrology's worker was last asked to work ahead around each viewer, and the frame it was */
+	TArray<FVector2D> HydrologyWarmedAt;
+	int64 HydrologyWarmedFrame = 0;
+
+	/** Tiles arrived with bodies since the drawn bodies were last gathered, and the frame they were last gathered for it */
+	bool bHydrologyBodiesArrived = false;
+	int64 HydrologyMeshesFrame = 0;
+
 	/** One place the point gather keeps: a cell a chunk across (its key) and the water levels gathered over it */
 	struct FWaterPointSnapshot
 	{
@@ -2967,6 +2996,21 @@ private:
 
 	/** Drop what was kept from the water levels and fire OnWaterBodiesChanged. */
 	void BroadcastWaterBodiesChanged(const FVoxelConditioningRegion& Region);
+
+	/**
+	 * Make the hydrology network of a world that generates hydrology, register it, and work out the bodies around
+	 * where the world will first stream, waiting for them (the end of Initialize, before OnInitialized fires).
+	 */
+	void StartHydrology();
+
+	/** Take the hydrology network out and stop its worker (Shutdown). */
+	void StopHydrology();
+
+	/**
+	 * Each tick: have the hydrology's worker work ahead around the viewers, and announce the tiles that arrived with a
+	 * body after a reader that takes what is at hand (the far field, the map) had missed them.
+	 */
+	void UpdateHydrology();
 
 	/**
 	 * The water levels the voxel trees over a world XY region are planted with, where a lake or a river reach lies

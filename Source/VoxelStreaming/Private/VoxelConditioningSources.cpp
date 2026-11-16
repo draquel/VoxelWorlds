@@ -59,7 +59,7 @@ void FVoxelConditioningSources::GatherForRegion(const FBox2D& Region, EVoxelCond
 	// The dynamic conditioners' zones and lines for this region, in the order they were registered.
 	for (const IVoxelTerrainConditioner* Conditioner : Conditioners)
 	{
-		Conditioner->GatherConditioning(Region, Out.Zones);
+		Conditioner->GatherConditioningZones(Region, Need, Out.Zones);
 		Conditioner->GatherConditioningLines(Region, Need, Out.Lines);
 	}
 	Out.SortLines();

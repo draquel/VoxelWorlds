@@ -514,7 +514,8 @@ it, a mesh draws it.
   an outline that is not a closed loop. A body is added whatever they say.
 - **What they read.** The natural ground, as a terrain line does, so the same on every machine and whatever else
   registers: a road's cut and fill or a pad beside a river is not seen. And the bodies the chunk manager holds when
-  the body is made: the lakes and the rivers before it in the order, and a source's (the generator's, from H7).
+  the body is made: the lakes and the rivers before it in the order, and a source's (the generated ponds and
+  brooks of a world that has them, below: the network is registered before any actor's component).
 
 Tests: `Generation.RiverProfile.Rules` (made ground: a slope, a low bank, a rise of the ground, given heights that
 rise or stand over the banks, a mouth, a head in a lake, the sea's floor), `.Bends` (the bed's grade through a curve
@@ -527,6 +528,101 @@ outline and one with no water, a river that begins play before the world, two wo
 `Map.WaterBodies.HandPlaced.Plane`, `.Planet` (the map's pixels over both); and in the game module
 `VoxelEngine.Water.HandPlaced.Plane`, `.Island`, `.Planet`, `.Cubic` (the pawn swims in the lake and is carried
 down the river, following its surface down; an item floats in each).
+
+**Ponds and brooks from the seed (the hydrology plan's H7, 2026-11-16; D145, D146).** A world whose configuration
+names a hydrology configuration (`UVoxelWorldConfiguration::HydrologyConfiguration`, a `UVoxelHydrologyConfiguration`
+asset holding `FVoxelHydrologySettings`) has lakes and river reaches generated from its seed and its natural ground,
+with no terrain change but the beds: springs run downhill, a run long and gentle enough is a river with its bed, and a
+hollow one meets fills as a lake. On the plane and the island with a smooth surface (`FVoxelHydrology::IsEnabled`); a
+planet and a block world that name one ignore it with a warning until the plan's H8. A world that names none has no
+generator, no source and no term in its fingerprint: it is what it was.
+
+- **The generator** (`FVoxelHydrology`, VoxelGeneration: pure functions of the seed and a ground function,
+  `FVoxelHydrologyGround`). The natural ground is read on a grid of cells (`CellVoxels`, 8), aligned to the world.
+  - *Springs.* A square of `SpringSpacingCells` cells holds one candidate, placed by a hash; it is a spring when it
+    stands `MinSpringHeight` over the sea (`GetSpring`). The count of brooks goes with the square of the spacing, and
+    the game layer places no POI on a body: 48 cells is the default (a square of 288 m on the demo), since a spring
+    every 24 cells left 4 of 9 cities and 4 of 15 villages around the demo's start without a site.
+  - *Descents.* A spring's water steps to the neighbour with the steepest fall, cell by cell. At a pit it takes the
+    pit's lake and goes on from the lake's way out; it ends in the sea, in a lake with no outlet, or as no river when
+    it is longer than `MaxRiverLength` (`TraceSpring`, a `FVoxelHydrologyTrace`). The way on from a cell is the cell's
+    alone, whichever descent comes to it: inside a hollow it is the hollow's own way to its saddle (a breadth-first
+    walk from the cell before the saddle), and from a saddle it is the steepest fall where that leads out of the
+    hollow, else the cell the flood found beyond it. A descent is a river when it ends in the sea or in a kept lake,
+    is `MinRiverLength` long at least, and falls no more than `MaxMeanGrade` over its length.
+  - *A pit's lake* (`MakeLake`, a `FVoxelHydrologyLake`): one flood from the pit, lowest cell first. While it climbs,
+    the cells it has taken are the hollow under the level it has reached. When it takes a cell under that level it has
+    passed a saddle and goes on over the ground beyond: if that ground runs away (it reaches the sea, falls further
+    than a lake may be deep, or is wider than a lake may be) the saddle is the rim; if the flood climbs out of it
+    again, it was one more hollow of the same lake. So two pits in one hollow give one lake, from either pit, and no
+    lake needs another made first (the spike's rule needed the lakes below, and left rivers without an end). A hollow
+    deeper than `MaxLakeDepth` holds a lake that deep with no outlet; one wider than `MaxLakeCells` or longer than
+    `MaxLakeSpanCells` holds the largest hollow under the caps, with no outlet.
+  - *A lake's water* comes from a second flood on a grid of two voxels a cell, inside the hollow and one cell round
+    it: the generator's cell (6 m on the demo) is coarser than a rim is wide, and water stands in every column of a
+    footprint whose ground lies under the level. The fine flood's rim is the lowest ground every way out of the
+    hollow's surroundings crosses (never over the hollow's own rim); the footprint is the cells it took under the
+    level and one fine cell round them; the level is `LakeLevelMarginVoxels` under the rim and under every ground on
+    the footprint's edge, read a voxel apart. A lake is a body when its water is `MinLakeDepthVoxels` deep and covers
+    `MinLakeArea`. A lake is found by any descent that comes to its pit, a river's or not.
+  - *River systems* (`BuildSystem`, a `FVoxelHydrologySystem`): the rivers that end at one mouth form a tree, and a
+    river reach is a chain of it between a spring, a join, a lake and the mouth. A reach's floor is as wide as the
+    springs that drain through it (`HalfWidthVoxels`, wider by `HalfWidthGrowth` a doubling, to `MaxHalfWidthVoxels`).
+    Each chain is shaped as a line (a vertex every two voxels, its corners spread until no vertex turns more than the
+    bend bound allows, through its two ends, which stay), reads its ground, its banks and the bodies it meets as a
+    hand-placed river does (`FVoxelRiverCourse`, shared with `UVoxelRiverComponent`) and takes the river profile
+    (`MakeRiverProfile`). A chain that other chains end at starts at the lowest surface they arrive with, so the
+    surface never rises from one reach to the next, and a chain that ends at a join lies a tuck under the reach it
+    joins over its last bank's width. A reach comes to the lake it ends in at that lake's level (the profile's
+    `MinSurface`, as for the sea). A system is whole or not at all: when a bed breaks the bend bound it is made again
+    with its corners spread wider and its pools deeper (three tries), and when a bed would lie deeper than
+    `MaxCutVoxels` or still breaks the bound, the system has no reach. The lakes stay.
+  - *Any region finds the same bodies* (`BuildRegion`): a descent depends on the ground within the longest river's
+    length of its spring, a lake on its pit, a system on the springs within that length of its mouth; a region works
+    out the springs within twice that length of itself. Ids come from cells: a reach's from its chain's first cell, a
+    lake's from its lowest cell and its size, a bed's line id from the chain's first cell, over every road's and
+    trail's between POIs and under a hand-placed line's of order 0.
+- **The network** (`FVoxelHydrologyNetwork`, VoxelStreaming) keeps what is worked out: a descent by its spring's
+  square, a lake by its pit, a system by its mouth, and by tile (`TileCells` cells) the bodies and beds that reach it.
+  It is the world's source of generated bodies (`IVoxelWaterBodySource`) and of their beds (`IVoxelTerrainConditioner`,
+  lines only), made by the chunk manager in `Initialize` and registered before `OnInitialized` fires, so a hand-placed
+  river meets a generated lake and the game's POI layer reads the generated bodies. A complete gather works a missing
+  tile out then and there (counted: `SyncTiles` on the game thread once the world streams); a gather for a reader that
+  takes what is at hand queues it for the worker and the tile is announced when it arrives with a body
+  (`UpdateHydrology`: the far field and the map draw again there); a gather over more tiles than a reader of the voxels
+  asks for gets what is kept. The chunk manager warms the tiles within `WarmUpViewDistances` view distances of where
+  the world will first stream before it returns from `Initialize`, in parallel, and has the worker keep that disc and
+  the wider one of `FarViewDistances` worked out around the viewers. `HoldsWaterBodies` says whether a region's tiles
+  are kept: the game layer asks it before it places for a reader that takes what is at hand.
+- **Drawing.** A generated body is drawn as any body is, by a mesh of its own (H3), but only near the viewer: a lake
+  within `LakeDrawDistance` (6 km) and a river reach within `ReachDrawDistance` (2.5 km), and neither further than the
+  far field draws the ground. A world that generates hydrology has thousands of bodies inside the far field's 20 km,
+  most of them brooks under a pixel wide there, and a mesh each for all of them cost the demo 14 to 20 ms every time
+  the meshes were made again; the bodies within the two distances cost 1 to 2.4 ms. The meshes are made again when
+  tiles arrive with bodies, no more often than every 30 frames. Past its distance a lake is the far field's ground
+  with no water on it, and a brook its bed. A river or a lake placed by hand in such a world is drawn as far as in
+  any world.
+- **The fingerprint.** `FVoxelWorldModeFactory::MakeFingerprint` ends with `Hydrology=<version>:<hash of the settings
+  that decide the bodies>` in a world that generates hydrology (`FVoxelHydrology::Version`, 1;
+  `FVoxelHydrologySettings::GetGenerationHash`), so its saves made without it, or with other settings, are refused.
+  The generation version does not move: a world that names no hydrology configuration generates what it did.
+- **What it costs.** On the demo at the default lattice a tile (0.15 km2) takes about 0.3 ms of one core to work
+  out (the descents, the floods, the systems' profiles), four times that at a spring every 24 cells; the bodies of a
+  region depend on the ground 1.6 km round it at the default longest river. A world's start works out the tiles
+  round it and, for the game layer's placement, those within 11 km in parallel: about half a second with the roads'
+  warm-up, which reads the bodies of its searches' boxes. `voxel.Water.Stats` reports the network (tiles, springs, rivers, systems, lakes, who worked the tiles
+  out); `voxel.Water.Hydrology.Survey` works a window out, reads every river reach back against the plan's rules and
+  logs a digest two machines compare; `voxel.Water.Hydrology.TraceSync 1` logs who had a tile worked out on the game
+  thread.
+
+Tests: `Generation.Hydrology.Lakes` (made ground: a hollow on a slope, two pits in one hollow, a hollow that spills
+into a lower one, the depth, width and span caps, a dip too shallow; no column of water against a footprint's edge),
+`.Regions` (rolling ground with a sea: two regions that overlap, a region round both and a run with a cache another
+region filled give each body with the same record; every river reach against the rules; a cap no bed keeps refuses
+every system whole), `.Fingerprint`; `Streaming.Hydrology.Network` (the gathers by need, the worker, the
+announcements, the warm-up, the counters), `.World` (a streamed plane: the network there at the registration, a
+generated lake's and a river reach's voxels flagged and sampled, no tile worked out on the game thread along a walk);
+in the POI layer `POI.WaterBodies.Source`. The gate in a play world is `Scripts/qa/hydrology_gate.py`.
 
 H1 changed no output: no world has a body, a gather with none is the sea's snapshot, and the gates read as the base
 (the plan's H1 result). The cost of the point gather was measured by `Streaming.Water.Bodies.Plane` and `.Planet` in a
