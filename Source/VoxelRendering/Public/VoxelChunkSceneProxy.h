@@ -17,6 +17,10 @@
 
 struct FPrimitiveSceneProxyDesc;
 class UMaterialInterface;
+namespace Nanite
+{
+	struct FResources;
+}
 class FCardRepresentationData;
 class FMeshCardsBuildData;
 
@@ -106,6 +110,28 @@ public:
 
 	/** @return Triangles (on the game thread too: counted at construction) */
 	uint32 GetNumTriangles() const { return NumTriangles; }
+
+	/**
+	 * Game thread, before the mesh's first primitive (runtime Nanite spike, N1): encode the vertices, as the render thread
+	 * will convert them, as a Nanite resource of root pages (EncodeVoxelNaniteMesh), check it against them when
+	 * voxel.Render.Nanite.Validate is on, and hand it to the engine's streaming manager. The vertices stay for the buffers
+	 * the ray tracing geometry is built over (D155).
+	 *
+	 * @param Owner         The UObject the resource is registered under (the region component)
+	 * @param bRadialFaceUp Face types against a planet's radial up (spherical SP-D3)
+	 * @param FaceUpCenter  The planet centre (world space)
+	 * @return Whether the mesh has a Nanite resource (false: no triangles, a failed encode or validation; it then draws
+	 *         through FVoxelChunkSceneProxy)
+	 */
+	bool BuildNanite_GameThread(const UObject* Owner, bool bRadialFaceUp, const FVector& FaceUpCenter);
+
+	/** @return Whether the mesh has a Nanite resource (set before its first primitive, fixed after) */
+	bool HasNanite() const { return NaniteResources.IsValid(); }
+
+	/** The Nanite resource (BuildNanite_GameThread), released by the destructor on the render thread */
+	TUniquePtr<Nanite::FResources> NaniteResources;
+	int32 NanitePages = 0;
+	int64 NaniteGpuBytes = 0;
 
 	/** The LOD it was meshed at, its box relative to Origin, and Origin (fixed at construction, any thread) */
 	const int32 LODLevel;
