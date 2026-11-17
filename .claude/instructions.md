@@ -84,7 +84,13 @@ section true on its date); the Features docs are the current truth.
   what the same settings generate raises `FVoxelHydrology::Version` (the fingerprint's term), never the generation
   version: a world that names none must generate what it did. A reader that asks for every body of many places (the
   POI layer's placement) asks `HoldsWaterBodies` first when its own caller takes what is at hand, and works the
-  bodies out ahead on the network's worker (`WarmUp`), never inside a far-field or a map gather.
+  bodies out ahead on the network's worker (`WarmUp`), never inside a far-field or a map gather. It works in every
+  world mode: a region is a box on a heightmap world and a cap on a planet (`FVoxelConditioningRegion`; the gathers,
+  the warm-up and `HoldsWaterBodiesOnSphere` take caps), a planet's cells are a cube sphere's and their neighbours
+  come from `FVoxelCubeSphereGrid::GetAdjacentCell` (the same from both sides of a face's edge: never `Neighbour`
+  for a walk that must find the same cells from any face), and on a planet nothing that runs per frame may list the
+  bodies of a wide cap (a 50 km planet holds thousands near a viewer): ask the range the tiles keep
+  (`GetLevelRangeAtHandOnSphere`) or a small cap.
 - **Precision.** Planets are precise to about 1,000 km and heightmaps to the double range of a position: never hold a
   value of size R in float (altitudes in double on the CPU, the chunk's frame on the GPU, `PlanetFrame.ush`); primitives
   sit at their render region's origin (`FVoxelRenderRegions`) and store float offsets from it.

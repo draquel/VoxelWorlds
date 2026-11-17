@@ -53,6 +53,13 @@ public:
 	void GatherOnSphere(const FVector& Direction, double AngularRadius, double PlanetRadius, EVoxelConditioningGather Need,
 		TArray<FVoxelWaterBody>& Out) const;
 
+	/**
+	 * The lowest and highest level of the sources' bodies at hand that may reach a cap of a planet, with no body listed
+	 * (IVoxelWaterBodySource::GetLevelRangeAtHandOnSphere). The static bodies are not counted: the caller has them.
+	 * @return False when there is no source or one of them does not answer this way
+	 */
+	bool GetSourcesLevelRangeAtHandOnSphere(const FVector& Direction, double AngularRadius, bool& bOutAny, double& OutMinLevel, double& OutMaxLevel) const;
+
 private:
 	/** Static bodies: lakes and river reaches */
 	TArray<FVoxelWaterBody> Bodies;

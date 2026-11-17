@@ -6,6 +6,9 @@
 #include "VoxelHash.h"
 #include "VoxelRiverCourse.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelWorldModeFactory.h"
+#include "SphericalPlanetWorldMode.h"
+#include "VoxelPolyline.h"
 #include <limits>
 
 namespace VoxelHydrologyPrivate
@@ -31,26 +34,31 @@ namespace VoxelHydrologyPrivate
 		}
 	};
 
-	double StepLength(const FIntPoint& A, const FIntPoint& B, double CellSize)
+	/** The distance from a place to a region of its world's kind (0 inside it): to a box, or along the datum sphere to a cap. */
+	double DistanceToRegion(const FVoxelConditioningRegion& Region, const FVoxelHydrologyGround& Ground, const FVector& Place)
 	{
-		return CellSize * FMath::Sqrt(static_cast<double>(FMath::Square(A.X - B.X) + FMath::Square(A.Y - B.Y)));
-	}
-
-	/** The distance from a place to a box (0 inside it). */
-	double DistanceToBox(const FBox2D& Box, const FVector2D& Place)
-	{
-		return FMath::Sqrt(Box.ComputeSquaredDistanceToPoint(Place));
+		if (Region.bCap)
+		{
+			return Ground.PlanetRadius * FMath::Max(0.0, FVoxelPolylineBounds::AngleBetween(Region.Direction, Place) - Region.AngularRadius);
+		}
+		return FMath::Sqrt(Region.Box.ComputeSquaredDistanceToPoint(FVector2D(Place.X, Place.Y)));
 	}
 
 	/** Whether a cell's ground lies under the water of a kept lake: under its level, inside its footprint. */
 	bool IsUnderLake(const FVoxelHydrologyLake& Lake, FVoxelHydrologyHeights& Heights, const FIntPoint& Cell)
 	{
-		if (!Lake.bKept || !Lake.Body.Lake.IsValid() || Heights.At(Cell) >= Lake.WaterLevel)
+		if (!Lake.bKept || !Lake.Body.Lake.IsValid())
 		{
 			return false;
 		}
-		const FVector2D Place = Heights.PlaceOf(Cell);
-		return Lake.Body.Lake->Covers(Place.X, Place.Y);
+		// A block world's column is dry when its topmost block's top is at the water's.
+		const FVoxelHydrologyGround& Ground = Heights.GetGround();
+		if ((Ground.bBlocks ? Ground.BlockTopFor(Heights.At(Cell)) : Heights.At(Cell)) >= Lake.WaterLevel)
+		{
+			return false;
+		}
+		const FVector Place = Heights.PlaceOf(Cell);
+		return Ground.bRadial ? Lake.Body.Lake->CoversDirection(Place) : Lake.Body.Lake->Covers(Place.X, Place.Y);
 	}
 }
 
@@ -65,17 +73,135 @@ FVoxelHydrologyGround FVoxelHydrologyGround::FromConfig(const UVoxelWorldConfigu
 		return WorldMode->GetSurfaceOnUpLine(FVector(X, Y, 0.0), Noise).Position.Z;
 	};
 	const FVoxelSeaSurface Sea = FVoxelWaterLevels::FromConfig(Config).GetSea();
-	Ground.bSea = Sea.bEnabled && !Sea.bRadial;
-	Ground.SeaLevel = Sea.PlaneZ;
 	Ground.VoxelSize = Config.VoxelSize;
 	Ground.ChunkWorldSize = Config.GetChunkWorldSize();
 	Ground.Seed = Noise.Seed;
+	if (Config.WorldMode == EWorldMode::SphericalPlanet)
+	{
+		// The ground along the radial: the planet's own altitude function over its datum sphere.
+		const FSphericalPlanetParams Planet = FVoxelWorldModeFactory::MakePlanetParams(Config);
+		Ground.bRadial = true;
+		Ground.PlanetCenter = Planet.PlanetCenter;
+		Ground.PlanetRadius = FMath::Max(static_cast<double>(Planet.PlanetRadius), 1.0);
+		Ground.Height = nullptr;
+		Ground.Altitude = [WorldMode, Noise](const FVector& Direction)
+		{
+			return static_cast<double>(static_cast<const FSphericalPlanetWorldMode&>(WorldMode.Get()).GetTerrainAltitude(Direction, Noise));
+		};
+		Ground.bSea = Sea.bEnabled && Sea.bRadial;
+		Ground.SeaLevel = Sea.Radius - Ground.PlanetRadius;
+		return Ground;
+	}
+	Ground.bSea = Sea.bEnabled && !Sea.bRadial;
+	Ground.SeaLevel = Sea.PlaneZ;
+	Ground.bBlocks = FVoxelBlockSurface::UsesBlockSurface(Config);
+	Ground.BlockOrigin = Config.WorldOrigin;
 	return Ground;
+}
+
+double FVoxelHydrologyGround::BlockTopFor(double InHeight) const
+{
+	return bBlocks ? FVoxelBlockSurface::BlockTopForHeight(static_cast<float>(InHeight), BlockOrigin.Z, static_cast<float>(VoxelSize)) : InHeight;
+}
+
+double FVoxelHydrologyGround::StandingHeightAt(const FVector& Place) const
+{
+	if (!bBlocks)
+	{
+		return HeightAt(Place);
+	}
+	// A block column's height is read at its lower corner, as the generators read it.
+	const float Voxel = static_cast<float>(VoxelSize);
+	return BlockTopFor(Height(FVoxelBlockSurface::ColumnCorner(Place.X, BlockOrigin.X, Voxel), FVoxelBlockSurface::ColumnCorner(Place.Y, BlockOrigin.Y, Voxel)));
+}
+
+FVoxelWaterFrame FVoxelHydrologyGround::GetFrame() const
+{
+	FVoxelWaterFrame Frame;
+	Frame.bRadial = bRadial;
+	Frame.Center = PlanetCenter;
+	Frame.DatumRadius = PlanetRadius;
+	return Frame;
+}
+
+FVoxelSeaSurface FVoxelHydrologyGround::GetSea() const
+{
+	if (!bSea)
+	{
+		return FVoxelSeaSurface();
+	}
+	return bRadial ? FVoxelSeaSurface::MakeSphere(PlanetCenter, PlanetRadius + SeaLevel) : FVoxelSeaSurface::MakePlane(SeaLevel);
+}
+
+// ==================== The grid ====================
+
+FVoxelHydrologyGrid::FVoxelHydrologyGrid(const FVoxelHydrologyGround& Ground, const FVoxelHydrologySettings& Settings)
+	: bRadial(Ground.bRadial)
+	, CellSize(FMath::Max(Settings.CellVoxels, 1) * FMath::Max(Ground.VoxelSize, 1.0))
+	, PlanetRadius(Ground.PlanetRadius)
+	, Spacing(FMath::Max(Settings.SpringSpacingCells, 1))
+{
+	if (bRadial)
+	{
+		// As many lattice squares along a face's edge as bring a cell nearest the width asked for, along the face's
+		// middle lines (a quarter of the equator), and at least one. The cells are then whole squares on every face.
+		const double Quarter = UE_DOUBLE_HALF_PI * FMath::Max(PlanetRadius, 1.0);
+		const int32 SquaresPerEdge = FMath::Max(1, FMath::RoundToInt32(Quarter / (CellSize * Spacing)));
+		Squares = FVoxelCubeSphereGrid(SquaresPerEdge);
+		Cells = FVoxelCubeSphereGrid(SquaresPerEdge * Spacing);
+		CellSize = Quarter / (SquaresPerEdge * Spacing);
+	}
+}
+
+FVector FVoxelHydrologyGrid::PlaceOf(const FIntPoint& Cell) const
+{
+	return bRadial ? Cells.CellCentreDirection(Cell) : FVector(Cell.X * CellSize, Cell.Y * CellSize, 0.0);
+}
+
+FIntPoint FVoxelHydrologyGrid::CellAt(const FVector& Place) const
+{
+	return bRadial ? Cells.CellOfDirection(Place) : FIntPoint(FMath::RoundToInt32(Place.X / CellSize), FMath::RoundToInt32(Place.Y / CellSize));
+}
+
+bool FVoxelHydrologyGrid::GetNeighbour(const FIntPoint& Cell, int32 Index, FIntPoint& OutNeighbour) const
+{
+	using namespace VoxelHydrologyPrivate;
+	if (bRadial)
+	{
+		return Cells.GetAdjacentCell(Cell, DX[Index], DY[Index], OutNeighbour);
+	}
+	OutNeighbour = FIntPoint(Cell.X + DX[Index], Cell.Y + DY[Index]);
+	return true;
+}
+
+double FVoxelHydrologyGrid::GetStepLength(const FIntPoint& A, const FIntPoint& B) const
+{
+	if (bRadial)
+	{
+		return PlanetRadius * FVoxelPolylineBounds::AngleBetween(Cells.CellCentreDirection(A), Cells.CellCentreDirection(B));
+	}
+	return CellSize * FMath::Sqrt(static_cast<double>(FMath::Square(A.X - B.X) + FMath::Square(A.Y - B.Y)));
+}
+
+FIntPoint FVoxelHydrologyGrid::GetSquareOrigin(const FIntPoint& Square) const
+{
+	if (bRadial)
+	{
+		int32 Face = 0, IU = 0, IV = 0;
+		Squares.FromAtlas(Square, Face, IU, IV);
+		return Cells.ToAtlas(Face, IU * Spacing, IV * Spacing);
+	}
+	return FIntPoint(Square.X * Spacing, Square.Y * Spacing);
+}
+
+double FVoxelHydrologyGrid::GetDistance(const FVector& A, const FVector& B) const
+{
+	return bRadial ? PlanetRadius * FVoxelPolylineBounds::AngleBetween(A, B) : FVector2D::Distance(FVector2D(A.X, A.Y), FVector2D(B.X, B.Y));
 }
 
 FVoxelHydrologyHeights::FVoxelHydrologyHeights(const FVoxelHydrologyGround& InGround, const FVoxelHydrologySettings& InSettings)
 	: Ground(InGround)
-	, CellSize(FMath::Max(InSettings.CellVoxels, 1) * FMath::Max(InGround.VoxelSize, 1.0))
+	, Grid(InGround, InSettings)
 {
 }
 
@@ -86,21 +212,29 @@ double FVoxelHydrologyHeights::At(const FIntPoint& Cell)
 		return *Found;
 	}
 	++NumSamples;
-	const double Height = Ground.Height(Cell.X * CellSize, Cell.Y * CellSize);
+	const double CellSize = Grid.GetCellSize();
+	const double Height = Ground.bRadial ? Ground.Altitude(Grid.PlaceOf(Cell)) : Ground.Height(Cell.X * CellSize, Cell.Y * CellSize);
 	Kept.Add(Cell, Height);
 	return Height;
 }
 
 bool FVoxelHydrologyHeights::GetDownhill(const FIntPoint& Cell, FIntPoint& OutNext)
 {
-	using namespace VoxelHydrologyPrivate;
 	const double Here = At(Cell);
 	double BestFall = 0.0;
 	bool bFound = false;
 	for (int32 D = 0; D < 8; ++D)
 	{
-		const FIntPoint Neighbour(Cell.X + DX[D], Cell.Y + DY[D]);
-		const double Fall = (Here - At(Neighbour)) / (D < 4 ? 1.0 : UE_DOUBLE_SQRT_2);
+		FIntPoint Neighbour;
+		if (!Grid.GetNeighbour(Cell, D, Neighbour))
+		{
+			continue;
+		}
+		// The fall a unit of length: a cell's width on a heightmap world (a corner step root two of them), the arc
+		// between the two cells on a planet, whose cells are not all one size.
+		const double Fall = Ground.bRadial
+			? (Here - At(Neighbour)) / FMath::Max(Grid.GetStepLength(Cell, Neighbour), 1.0)
+			: (Here - At(Neighbour)) / (D < 4 ? 1.0 : UE_DOUBLE_SQRT_2);
 		if (Fall > BestFall)
 		{
 			BestFall = Fall;
@@ -115,9 +249,7 @@ bool FVoxelHydrologyHeights::GetDownhill(const FIntPoint& Cell, FIntPoint& OutNe
 
 bool FVoxelHydrology::IsEnabled(const UVoxelWorldConfiguration& Config)
 {
-	return Config.HydrologyConfiguration != nullptr
-		&& (Config.WorldMode == EWorldMode::InfinitePlane || Config.WorldMode == EWorldMode::IslandBowl)
-		&& !FVoxelBlockSurface::UsesBlockSurface(Config);
+	return Config.HydrologyConfiguration != nullptr;
 }
 
 FString FVoxelHydrology::GetFingerprintTerm(const UVoxelWorldConfiguration& Config)
@@ -154,15 +286,60 @@ double FVoxelHydrology::GetDependencyDistance(const FVoxelHydrologySettings& Set
 	return 2.0 * Settings.MaxRiverLength + 2.0 * CellSize;
 }
 
-FIntRect FVoxelHydrology::GetSquaresFor(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground, const FBox2D& Region)
+void FVoxelHydrology::GetSquaresFor(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground, const FVoxelConditioningRegion& Region,
+	TArray<FIntPoint>& OutSquares)
 {
+	OutSquares.Reset();
+	const double Distance = GetDependencyDistance(Settings, Ground);
+	if (Ground.bRadial)
+	{
+		if (!Region.bCap)
+		{
+			return;
+		}
+		// A square's spring lies anywhere in it: every square whose centre is within the distance and the square's own
+		// half width, corner to corner (a cube sphere's cell is no wider than its width at a face's middle).
+		const FVoxelHydrologyGrid Grid(Ground, Settings);
+		const double Radius = FMath::Max(Ground.PlanetRadius, 1.0);
+		const double HalfSquare = UE_DOUBLE_INV_SQRT_2 * Settings.SpringSpacingCells * Grid.GetCellSize();
+		Grid.GetSquares().GatherCentresWithinAngle(Region.Direction, Region.AngularRadius + (Distance + 1.1 * HalfSquare) / Radius, OutSquares);
+		return;
+	}
+	if (Region.bCap || Region.bEverywhere || !Region.Box.bIsValid)
+	{
+		return;
+	}
 	const double CellSize = Settings.CellVoxels * FMath::Max(Ground.VoxelSize, 1.0);
 	const double Square = Settings.SpringSpacingCells * CellSize;
-	const double Distance = GetDependencyDistance(Settings, Ground);
 	// A square's spring lies anywhere in it: every square that comes within the distance.
-	return FIntRect(
-		FMath::FloorToInt32((Region.Min.X - Distance) / Square), FMath::FloorToInt32((Region.Min.Y - Distance) / Square),
-		FMath::FloorToInt32((Region.Max.X + Distance) / Square) + 1, FMath::FloorToInt32((Region.Max.Y + Distance) / Square) + 1);
+	const FIntRect Rect(
+		FMath::FloorToInt32((Region.Box.Min.X - Distance) / Square), FMath::FloorToInt32((Region.Box.Min.Y - Distance) / Square),
+		FMath::FloorToInt32((Region.Box.Max.X + Distance) / Square) + 1, FMath::FloorToInt32((Region.Box.Max.Y + Distance) / Square) + 1);
+	OutSquares.Reserve(Rect.Width() * Rect.Height());
+	for (int32 Y = Rect.Min.Y; Y < Rect.Max.Y; ++Y)
+	{
+		for (int32 X = Rect.Min.X; X < Rect.Max.X; ++X)
+		{
+			OutSquares.Add(FIntPoint(X, Y));
+		}
+	}
+}
+
+bool FVoxelHydrology::MeetsRegion(const FVoxelWaterBody& Body, const FVoxelConditioningRegion& Region, const FVoxelHydrologyGround& Ground)
+{
+	return Region.bCap ? Body.MeetsCap(Region.Direction, Region.AngularRadius, Ground.PlanetRadius) : Body.MeetsRegion(Region.Box);
+}
+
+bool FVoxelHydrology::MeetsRegion(const FVoxelConditioningLine& Bed, const FVoxelConditioningRegion& Region, const FVoxelHydrologyGround& Ground)
+{
+	return Region.bCap ? Bed.MeetsCap(Region.Direction, Region.AngularRadius, Ground.PlanetRadius) : Bed.MeetsRegion(Region.Box);
+}
+
+double FVoxelHydrology::GetBlockBedGrade()
+{
+	// Adjacent columns, diagonals included, are up to a voxel times root two apart along a line: a grade under one over
+	// root two keeps the block tops to a block a column (the engine's limit, FVoxelConditioningLine::GetWarnings).
+	return FVoxelConditioningLineShape::BoundMargin * UE_DOUBLE_INV_SQRT_2;
 }
 
 uint32 FVoxelHydrology::MakeReachId(int32 Seed, const FIntPoint& StartCell)
@@ -177,11 +354,13 @@ uint32 FVoxelHydrology::MakeLakeId(int32 Seed, const FIntPoint& LowestCell, int3
 	return Id != FVoxelWaterBody::SeaId ? Id : 1u;
 }
 
-int64 FVoxelHydrology::MakeBedLineId(const FIntPoint& StartCell)
+int64 FVoxelHydrology::MakeBedLineId(const FIntPoint& StartCell, bool bAtlas)
 {
-	// 21 bits a coordinate (cells to a million either way of the origin), counted up from -2^60: over every road's and
-	// trail's (under -2^61) and under every hand-placed line's of order -2^27 or more.
-	const auto Bits = [](int32 Coordinate) { return static_cast<int64>((Coordinate + (1 << 20)) & 0x1FFFFF); };
+	// 21 bits a coordinate (cells to a million either way of the origin; a planet's atlas coordinate counts up from 0,
+	// to two million: six faces of a 1,000 km planet's cells), counted up from -2^60: over every road's and trail's
+	// (under -2^61) and under every hand-placed line's of order -2^27 or more.
+	const int32 Offset = bAtlas ? 0 : (1 << 20);
+	const auto Bits = [Offset](int32 Coordinate) { return static_cast<int64>((Coordinate + Offset) & 0x1FFFFF); };
 	return -(static_cast<int64>(1) << 60) + ((Bits(StartCell.X) << 21) | Bits(StartCell.Y));
 }
 
@@ -195,7 +374,9 @@ bool FVoxelHydrology::GetSpring(const FVoxelHydrologySettings& Settings, FVoxelH
 	const uint32 Y = static_cast<uint32>(Square.Y);
 	const int32 OffsetX = FMath::Min(Spacing - 1, FMath::FloorToInt32(VoxelHash::Unit(VoxelHash::Lattice(X, Y, 0x53505258u, Ground.Seed)) * Spacing));
 	const int32 OffsetY = FMath::Min(Spacing - 1, FMath::FloorToInt32(VoxelHash::Unit(VoxelHash::Lattice(X, Y, 0x53505259u, Ground.Seed)) * Spacing));
-	OutCell = FIntPoint(Square.X * Spacing + OffsetX, Square.Y * Spacing + OffsetY);
+	// A square's cells lie on one face of a planet, so the offset stays on it.
+	const FIntPoint Origin = Heights.GetGrid().GetSquareOrigin(Square);
+	OutCell = FIntPoint(Origin.X + OffsetX, Origin.Y + OffsetY);
 	if (!Ground.bSea)
 	{
 		return true;
@@ -205,6 +386,46 @@ bool FVoxelHydrology::GetSpring(const FVoxelHydrologySettings& Settings, FVoxelH
 
 namespace VoxelHydrologyPrivate
 {
+	/**
+	 * The grid a lake's water is worked out on: finer than the generator's, in world XY on a heightmap world (a block
+	 * world: its block columns) and on a planet in the plane tangent to the datum sphere at the lake's lowest cell,
+	 * the plane a planet lake's footprint lies in (FVoxelWaterLake::MakeOnSphere).
+	 */
+	struct FLakeFineGrid
+	{
+		bool bRadial = false;
+
+		/** A fine cell's width */
+		double Fine = 200.0;
+
+		/** A heightmap world: where the fine cell (0, 0) is (a block world's columns are counted from the world's origin) */
+		FVector2D Offset = FVector2D::ZeroVector;
+
+		/** A planet: the lake's centre, the tangent plane's two axes and the datum radius */
+		FVector Centre = FVector::UpVector;
+		FVector AxisX = FVector::ForwardVector;
+		FVector AxisY = FVector::RightVector;
+		double Radius = 1.0;
+
+		/** @return A fine cell's point on the grid's plane (world units): its middle, or on a block world its column's lower corner */
+		FVector2D PointOf(const FIntPoint& FineCell) const
+		{
+			return FVector2D(Offset.X + FineCell.X * Fine, Offset.Y + FineCell.Y * Fine);
+		}
+
+		/** @return The place a point of the grid's plane stands for: the column, or the direction whose datum point lies over it */
+		FVector PlaceOf(const FVector2D& Point) const
+		{
+			if (!bRadial)
+			{
+				return FVector(Point.X, Point.Y, 0.0);
+			}
+			const double U = FMath::Clamp(Point.X / Radius, -1.0, 1.0);
+			const double V = FMath::Clamp(Point.Y / Radius, -1.0, 1.0);
+			return AxisX * U + AxisY * V + Centre * FMath::Sqrt(FMath::Max(0.0, 1.0 - U * U - V * V));
+		}
+	};
+
 	/**
 	 * The water of a lake whose hollow the flood on the generator's grid found: its level, its footprint and its
 	 * record, from a second flood on a finer grid (two voxels a cell) inside the hollow and one cell around it.
@@ -216,14 +437,28 @@ namespace VoxelHydrologyPrivate
 	 * crosses, the rim, and the cells it took under that level are the water. The footprint is those cells and one
 	 * fine cell around them; the level is a margin under the rim, and under every ground on the footprint's edge, read
 	 * a voxel apart.
+	 *
+	 * On a planet the fine grid lies in the plane tangent at the hollow's lowest cell, and a fine cell belongs to the
+	 * generator's cell its place lies in. On a block world a fine cell is a block column and its ground the top of the
+	 * column's topmost block: the rim holds at its own height, the water's top is a block layer's (the lowest block top
+	 * on the way out, and no higher than the lowest column beside the footprint), and the body's level lies a tenth of
+	 * a voxel under it, inside the layer whose blocks are the water's top ones.
 	 */
 	void MakeLakeBody(const FVoxelHydrologySettings& Settings, FVoxelHydrologyHeights& Heights, FVoxelHydrologyLake& Lake)
 	{
 		const FVoxelHydrologyGround& Ground = Heights.GetGround();
+		const FVoxelHydrologyGrid& Grid = Heights.GetGrid();
 		const double CellSize = Heights.GetCellSize();
 		const double Voxel = FMath::Max(Ground.VoxelSize, 1.0);
+		const bool bBlocks = Ground.bBlocks;
+		const bool bRadial = Ground.bRadial;
 		const double Margin = Settings.LakeLevelMarginVoxels * Voxel;
 		const double MinDepth = Settings.MinLakeDepthVoxels * Voxel;
+		// The top of the block layer a height lies in or on, from below: a block world's levels are layer tops.
+		const auto LayerTopUnder = [&Ground, Voxel](double Height)
+		{
+			return Ground.BlockOrigin.Z + FMath::FloorToDouble((Height - Ground.BlockOrigin.Z) / Voxel) * Voxel;
+		};
 
 		// What the hollow could hold at most, on the generator's grid: too little, and the fine flood is not run.
 		Lake.WaterLevel = Lake.Closed == 1 ? Lake.RimLevel : Lake.RimLevel - Margin;
@@ -234,10 +469,25 @@ namespace VoxelHydrologyPrivate
 			return;
 		}
 
-		// The fine grid: two voxels a cell where the generator's cell is a whole number of them.
-		const int32 FineVoxels = (Settings.CellVoxels >= 4 && Settings.CellVoxels % 2 == 0) ? 2 : 1;
+		// The fine grid: two voxels a cell where the generator's cell is a whole number of them; a block world's columns.
+		const int32 FineVoxels = (!bBlocks && Settings.CellVoxels >= 4 && Settings.CellVoxels % 2 == 0) ? 2 : 1;
 		const int32 PerCell = Settings.CellVoxels / FineVoxels;
-		const double Fine = FineVoxels * Voxel;
+		FLakeFineGrid FineGrid;
+		FineGrid.bRadial = bRadial;
+		FineGrid.Fine = FineVoxels * Voxel;
+		const double Fine = FineGrid.Fine;
+		if (bRadial)
+		{
+			// The plane and the axes a planet lake's footprint is read in: an empty footprint at the centre gives them.
+			FineGrid.Radius = FMath::Max(Ground.PlanetRadius, 1.0);
+			FVoxelWaterLake::MakeOnSphere(Heights.PlaceOf(Lake.LowestCell), FineGrid.Radius, Fine, FIntPoint::ZeroValue, TBitArray<>())
+				->GetTangentFrame(FineGrid.AxisX, FineGrid.AxisY, FineGrid.Centre);
+		}
+		else if (bBlocks)
+		{
+			// The columns are counted from the world's origin: the fine cell (0, 0) is the column at or after world 0.
+			FineGrid.Offset = FVector2D(FMath::Fmod(Ground.BlockOrigin.X, Voxel), FMath::Fmod(Ground.BlockOrigin.Y, Voxel));
+		}
 		TSet<FIntPoint> Domain;
 		Domain.Reserve(Lake.Cells.Num() * 2);
 		for (const FIntPoint& Cell : Lake.Cells)
@@ -245,27 +495,35 @@ namespace VoxelHydrologyPrivate
 			Domain.Add(Cell);
 			for (int32 D = 0; D < 8; ++D)
 			{
-				Domain.Add(FIntPoint(Cell.X + DX[D], Cell.Y + DY[D]));
+				FIntPoint Neighbour;
+				if (Grid.GetNeighbour(Cell, D, Neighbour))
+				{
+					Domain.Add(Neighbour);
+				}
 			}
 		}
-		const auto InDomain = [&Domain, PerCell](const FIntPoint& FineCell)
+		const auto InDomain = [&Domain, &Grid, &FineGrid, PerCell, bRadial](const FIntPoint& FineCell)
 		{
+			if (bRadial)
+			{
+				return Domain.Contains(Grid.CellAt(FineGrid.PlaceOf(FineGrid.PointOf(FineCell))));
+			}
 			return Domain.Contains(FIntPoint(FMath::RoundToInt32(static_cast<double>(FineCell.X) / PerCell), FMath::RoundToInt32(static_cast<double>(FineCell.Y) / PerCell)));
 		};
 		TMap<FIntPoint, double> FineHeights;
-		const auto HeightAt = [&FineHeights, &Ground, Fine](const FIntPoint& FineCell)
+		const auto HeightAt = [&FineHeights, &Ground, &FineGrid](const FIntPoint& FineCell)
 		{
 			if (const double* Found = FineHeights.Find(FineCell))
 			{
 				return *Found;
 			}
-			const double Height = Ground.Height(FineCell.X * Fine, FineCell.Y * Fine);
+			const double Height = Ground.StandingHeightAt(FineGrid.PlaceOf(FineGrid.PointOf(FineCell)));
 			FineHeights.Add(FineCell, Height);
 			return Height;
 		};
 
-		// Down from the hollow's lowest cell to the pit under it.
-		FIntPoint Start(Lake.LowestCell.X * PerCell, Lake.LowestCell.Y * PerCell);
+		// Down from the hollow's lowest cell to the pit under it. A planet's fine grid is centred on that cell.
+		FIntPoint Start = bRadial ? FIntPoint::ZeroValue : FIntPoint(Lake.LowestCell.X * PerCell, Lake.LowestCell.Y * PerCell);
 		for (int32 Guard = 4 * PerCell * (Lake.Cells.Num() + 8); Guard > 0; --Guard)
 		{
 			const double Here = HeightAt(Start);
@@ -356,11 +614,13 @@ namespace VoxelHydrologyPrivate
 		{
 			return;
 		}
-		if (Rim > Lake.RimLevel)
+		// Never over the rim the hollow was found with (on a block world, the top of the layer that rim lies in): the
+		// cells the river's ways are laid over lie under that one. The water is then what the flood had taken when it
+		// first climbed past it.
+		const double RimCap = bBlocks ? LayerTopUnder(Lake.RimLevel) + Voxel : Lake.RimLevel;
+		if (Rim > RimCap)
 		{
-			// Never over the rim the hollow was found with: the cells the river's ways are laid over lie under that one.
-			// The water is then what the flood had taken when it first climbed past it.
-			Rim = Lake.RimLevel;
+			Rim = RimCap;
 			bDepthCapped = Lake.Closed == 1;
 			for (int32 Index = 0; Index < NumHollow; ++Index)
 			{
@@ -374,7 +634,7 @@ namespace VoxelHydrologyPrivate
 
 		// The water: the cells taken under the level. A cell beyond a saddle the flood did not climb back over is not
 		// the lake's.
-		const double FirstLevel = bDepthCapped ? Rim : Rim - Margin;
+		const double FirstLevel = bBlocks ? LayerTopUnder(Rim) : (bDepthCapped ? Rim : Rim - Margin);
 		TSet<FIntPoint> Footprint;
 		FIntPoint FootMin(TNumericLimits<int32>::Max(), TNumericLimits<int32>::Max());
 		FIntPoint FootMax(TNumericLimits<int32>::Lowest(), TNumericLimits<int32>::Lowest());
@@ -406,28 +666,35 @@ namespace VoxelHydrologyPrivate
 			return;
 		}
 		// The edge: each side of a footprint cell's square that no other footprint cell shares, read a voxel apart. A
-		// cell's square is centred on its place.
+		// cell's square is centred on its place. On a block world a cell is a column, and the edge the columns beside
+		// the footprint: their block tops.
 		double LowestEdge = TNumericLimits<double>::Max();
 		for (const FIntPoint& Cell : Footprint)
 		{
 			for (int32 D = 0; D < 4; ++D)
 			{
-				if (Footprint.Contains(FIntPoint(Cell.X + DX[D], Cell.Y + DY[D])))
+				const FIntPoint Beside(Cell.X + DX[D], Cell.Y + DY[D]);
+				if (Footprint.Contains(Beside))
 				{
 					continue;
 				}
-				const FVector2D Centre(Cell.X * Fine, Cell.Y * Fine);
+				if (bBlocks)
+				{
+					LowestEdge = FMath::Min(LowestEdge, HeightAt(Beside));
+					continue;
+				}
+				const FVector2D Centre = FineGrid.PointOf(Cell);
 				const FVector2D Out(DX[D], DY[D]);
 				const FVector2D Along(-Out.Y, Out.X);
 				const FVector2D From = Centre + Out * (0.5 * Fine) - Along * (0.5 * Fine);
 				for (int32 Step = 0; Step <= FineVoxels; ++Step)
 				{
-					const FVector2D Place = From + Along * (Fine * Step / FineVoxels);
-					LowestEdge = FMath::Min(LowestEdge, Ground.Height(Place.X, Place.Y));
+					const FVector2D Point = From + Along * (Fine * Step / FineVoxels);
+					LowestEdge = FMath::Min(LowestEdge, Ground.HeightAt(FineGrid.PlaceOf(Point)));
 				}
 			}
 		}
-		Lake.WaterLevel = FMath::Min(FirstLevel, LowestEdge - Margin);
+		Lake.WaterLevel = FMath::Min(FirstLevel, bBlocks ? LowestEdge : LowestEdge - Margin);
 		Lake.LoweredForEdge = FirstLevel - Lake.WaterLevel;
 		Lake.NumWetCells = 0;
 		for (int32 Index = 0; Index < NumHollow; ++Index)
@@ -441,16 +708,36 @@ namespace VoxelHydrologyPrivate
 			return;
 		}
 
-		const FIntPoint Size(FootMax.X - FootMin.X + 1, FootMax.Y - FootMin.Y + 1);
-		TBitArray<> Bits(false, Size.X * Size.Y);
-		for (const FIntPoint& Cell : Footprint)
+		// The body's level: the water's height as a water level. A block world's lies inside the water's top layer.
+		const double BodyLevel = (bBlocks ? Lake.WaterLevel - 0.1 * Voxel : Lake.WaterLevel) + Ground.GetLevelBase();
+		const uint32 BodyId = FVoxelHydrology::MakeLakeId(Ground.Seed, Lake.LowestCell, Lake.Cells.Num());
+		TSharedPtr<const FVoxelWaterLake> Shape;
+		if (bRadial)
 		{
-			Bits[(Cell.Y - FootMin.Y) * Size.X + (Cell.X - FootMin.X)] = true;
+			// A planet lake's grid is centred on its centre: as many cells each way as the footprint reaches furthest.
+			const int32 Half = FMath::Max(FMath::Max(FMath::Abs(FootMin.X), FMath::Abs(FootMax.X)), FMath::Max(FMath::Abs(FootMin.Y), FMath::Abs(FootMax.Y)));
+			const FIntPoint Size(2 * Half + 1, 2 * Half + 1);
+			TBitArray<> Bits(false, Size.X * Size.Y);
+			for (const FIntPoint& Cell : Footprint)
+			{
+				Bits[(Cell.Y + Half) * Size.X + (Cell.X + Half)] = true;
+			}
+			Shape = FVoxelWaterLake::MakeOnSphere(FineGrid.Centre, FineGrid.Radius, Fine, Size, MoveTemp(Bits));
 		}
-		const FVector2D Origin((FootMin.X - 0.5) * Fine, (FootMin.Y - 0.5) * Fine);
-		const TSharedRef<const FVoxelWaterLake> Shape = FVoxelWaterLake::Make(Origin, Fine, Size, MoveTemp(Bits));
-		Lake.Body = FVoxelWaterBody::MakeLake(FVoxelHydrology::MakeLakeId(Ground.Seed, Lake.LowestCell, Lake.Cells.Num()), Lake.WaterLevel, Shape, FVoxelWaterFrame(),
-			Lake.Depth + Ground.ChunkWorldSize, Settings.LakeMinCaveDepth);
+		else
+		{
+			const FIntPoint Size(FootMax.X - FootMin.X + 1, FootMax.Y - FootMin.Y + 1);
+			TBitArray<> Bits(false, Size.X * Size.Y);
+			for (const FIntPoint& Cell : Footprint)
+			{
+				Bits[(Cell.Y - FootMin.Y) * Size.X + (Cell.X - FootMin.X)] = true;
+			}
+			// A cell's square is centred on its place; a block world's cell is the column from its place on.
+			const double Lead = bBlocks ? 0.0 : 0.5;
+			const FVector2D Origin(FineGrid.Offset.X + (FootMin.X - Lead) * Fine, FineGrid.Offset.Y + (FootMin.Y - Lead) * Fine);
+			Shape = FVoxelWaterLake::Make(Origin, Fine, Size, MoveTemp(Bits));
+		}
+		Lake.Body = FVoxelWaterBody::MakeLake(BodyId, BodyLevel, Shape.ToSharedRef(), Ground.GetFrame(), Lake.Depth + Ground.ChunkWorldSize, Settings.LakeMinCaveDepth);
 		Lake.bKept = true;
 	}
 }
@@ -460,6 +747,7 @@ namespace VoxelHydrologyPrivate
 TSharedRef<const FVoxelHydrologyLake> FVoxelHydrology::MakeLake(const FVoxelHydrologySettings& Settings, FVoxelHydrologyHeights& Heights, const FIntPoint& Pit)
 {
 	using namespace VoxelHydrologyPrivate;
+	const FVoxelHydrologyGrid& Grid = Heights.GetGrid();
 	const double DepthCap = Settings.MaxLakeDepth;
 	const int32 MaxCells = Settings.MaxLakeCells;
 	const int32 MaxSpan = Settings.MaxLakeSpanCells;
@@ -479,7 +767,36 @@ TSharedRef<const FVoxelHydrologyLake> FVoxelHydrology::MakeLake(const FVoxelHydr
 	double LowestOfLake = Level;        // the lowest ground of the hollow so far (the cells that are surely in it)
 	int32 BeyondStart = INDEX_NONE;     // the first cell taken beyond a saddle the flood has not climbed back over yet
 	double LowestBeyond = 0.0;
+	// How wide the flood has grown, in cells along the grid's two axes. A planet's cells have no common axes across its
+	// faces: there the width is measured east and north of the pit on the plane tangent at it, in cells' widths.
 	FIntPoint MinCell = Pit, MaxCell = Pit;
+	FVector PitUp = FVector::UpVector, PitEast = FVector::ForwardVector, PitNorth = FVector::RightVector;
+	FVector2D MinPlace = FVector2D::ZeroVector, MaxPlace = FVector2D::ZeroVector;
+	if (Grid.IsRadial())
+	{
+		PitUp = Heights.PlaceOf(Pit);
+		FVoxelCubeSphere::GetTangentFrame(PitUp, PitEast, PitNorth);
+	}
+	const double CellsAcross = Heights.GetGround().PlanetRadius / FMath::Max(Grid.GetCellSize(), 1.0);
+	const auto Grow = [&](const FIntPoint& Cell)
+	{
+		if (Grid.IsRadial())
+		{
+			const FVector Place = Heights.PlaceOf(Cell);
+			const FVector2D At(CellsAcross * FVector::DotProduct(Place, PitEast), CellsAcross * FVector::DotProduct(Place, PitNorth));
+			MinPlace = FVector2D(FMath::Min(MinPlace.X, At.X), FMath::Min(MinPlace.Y, At.Y));
+			MaxPlace = FVector2D(FMath::Max(MaxPlace.X, At.X), FMath::Max(MaxPlace.Y, At.Y));
+			return;
+		}
+		MinCell = FIntPoint(FMath::Min(MinCell.X, Cell.X), FMath::Min(MinCell.Y, Cell.Y));
+		MaxCell = FIntPoint(FMath::Max(MaxCell.X, Cell.X), FMath::Max(MaxCell.Y, Cell.Y));
+	};
+	const auto IsTooWide = [&]()
+	{
+		return Grid.IsRadial()
+			? (MaxPlace.X - MinPlace.X >= MaxSpan || MaxPlace.Y - MinPlace.Y >= MaxSpan)
+			: (MaxCell.X - MinCell.X >= MaxSpan || MaxCell.Y - MinCell.Y >= MaxSpan);
+	};
 	// The end: how many of Taken are the hollow, its rim, and why it is closed if it is.
 	int32 NumHollow = 0;
 	bool bDone = false;
@@ -498,7 +815,7 @@ TSharedRef<const FVoxelHydrologyLake> FVoxelHydrology::MakeLake(const FVoxelHydr
 				LowestOfLake = FMath::Min(LowestOfLake, LowestBeyond);
 				BeyondStart = INDEX_NONE;
 			}
-			if (Taken.Num() > MaxCells || MaxCell.X - MinCell.X >= MaxSpan || MaxCell.Y - MinCell.Y >= MaxSpan)
+			if (Taken.Num() > MaxCells || IsTooWide())
 			{
 				// Wider than a lake may be: the lake is the hollow as it stood under the rim before, with no outlet.
 				Lake->Closed = 2;
@@ -540,15 +857,18 @@ TSharedRef<const FVoxelHydrologyLake> FVoxelHydrology::MakeLake(const FVoxelHydr
 			}
 		}
 		Taken.Add(Entry);
-		MinCell = FIntPoint(FMath::Min(MinCell.X, Entry.Cell.X), FMath::Min(MinCell.Y, Entry.Cell.Y));
-		MaxCell = FIntPoint(FMath::Max(MaxCell.X, Entry.Cell.X), FMath::Max(MaxCell.Y, Entry.Cell.Y));
+		Grow(Entry.Cell);
 		if (Taken.Num() > Budget)
 		{
 			break;
 		}
 		for (int32 D = 0; D < 8; ++D)
 		{
-			const FIntPoint Neighbour(Entry.Cell.X + DX[D], Entry.Cell.Y + DY[D]);
+			FIntPoint Neighbour;
+			if (!Grid.GetNeighbour(Entry.Cell, D, Neighbour))
+			{
+				continue;
+			}
 			bool bAlready = false;
 			Seen.Add(Neighbour, &bAlready);
 			if (!bAlready)
@@ -597,7 +917,11 @@ TSharedRef<const FVoxelHydrologyLake> FVoxelHydrology::MakeLake(const FVoxelHydr
 		double Lowest = 0.0;
 		for (int32 D = 0; D < 8; ++D)
 		{
-			const FIntPoint Neighbour(Lake->Saddle.X + DX[D], Lake->Saddle.Y + DY[D]);
+			FIntPoint Neighbour;
+			if (!Grid.GetNeighbour(Lake->Saddle, D, Neighbour))
+			{
+				continue;
+			}
 			if (Lake->Cells.Contains(Neighbour) && (!bFound || Heights.At(Neighbour) < Lowest))
 			{
 				bFound = true;
@@ -632,7 +956,11 @@ TSharedRef<const FVoxelHydrologyLake> FVoxelHydrology::MakeLake(const FVoxelHydr
 			const FIntPoint Cell = Queue[Head];
 			for (int32 D = 0; D < 8; ++D)
 			{
-				const FIntPoint Neighbour(Cell.X + DX[D], Cell.Y + DY[D]);
+				FIntPoint Neighbour;
+				if (!Grid.GetNeighbour(Cell, D, Neighbour))
+				{
+					continue;
+				}
 				if (Lake->Cells.Contains(Neighbour) && !Lake->ToSaddle.Contains(Neighbour))
 				{
 					Lake->ToSaddle.Add(Neighbour, Cell);
@@ -652,7 +980,7 @@ TSharedRef<const FVoxelHydrologyTrace> FVoxelHydrology::TraceSpring(const FVoxel
 	IVoxelHydrologyCache* Cache)
 {
 	using namespace VoxelHydrologyPrivate;
-	const double CellSize = Heights.GetCellSize();
+	const FVoxelHydrologyGrid& Grid = Heights.GetGrid();
 	TSharedRef<FVoxelHydrologyTrace> Trace = MakeShared<FVoxelHydrologyTrace>();
 	Trace->Square = Square;
 	if (!GetSpring(Settings, Heights, Square, Trace->Spring))
@@ -691,7 +1019,7 @@ TSharedRef<const FVoxelHydrologyTrace> FVoxelHydrology::TraceSpring(const FVoxel
 		if (Heights.GetDownhill(Cell, Next))
 		{
 			Push(Cell, INDEX_NONE);
-			Length += StepLength(Cell, Next, CellSize);
+			Length += Grid.GetStepLength(Cell, Next);
 			Cell = Next;
 			continue;
 		}
@@ -717,7 +1045,7 @@ TSharedRef<const FVoxelHydrologyTrace> FVoxelHydrology::TraceSpring(const FVoxel
 			// own water does, so the way on from the saddle is the same whichever descent comes to it.
 			for (int32 Index = Entry - 1; Index + 1 < Cells.Num(); ++Index)
 			{
-				Length -= StepLength(Cells[Index], Cells[Index + 1], CellSize);
+				Length -= Grid.GetStepLength(Cells[Index], Cells[Index + 1]);
 			}
 			Cells.SetNum(Entry, EAllowShrinking::No);
 			LakeOf.SetNum(Entry, EAllowShrinking::No);
@@ -726,7 +1054,7 @@ TSharedRef<const FVoxelHydrologyTrace> FVoxelHydrology::TraceSpring(const FVoxel
 				Trace->End = EVoxelHydrologyEnd::TooManyLakes;
 				break;
 			}
-			Length += StepLength(Lake->Saddle, Lake->Outlet, CellSize);
+			Length += Grid.GetStepLength(Lake->Saddle, Lake->Outlet);
 			Cell = Lake->Outlet;
 			DescentStart = Cells.Num();
 			continue;
@@ -748,7 +1076,7 @@ TSharedRef<const FVoxelHydrologyTrace> FVoxelHydrology::TraceSpring(const FVoxel
 			}
 			for (int32 Index = Entry; Index + 1 < Cells.Num(); ++Index)
 			{
-				Length -= StepLength(Cells[Index], Cells[Index + 1], CellSize);
+				Length -= Grid.GetStepLength(Cells[Index], Cells[Index + 1]);
 			}
 			Cells.SetNum(LastKept + 1, EAllowShrinking::No);
 			LakeOf.SetNum(LastKept + 1, EAllowShrinking::No);
@@ -769,7 +1097,7 @@ TSharedRef<const FVoxelHydrologyTrace> FVoxelHydrology::TraceSpring(const FVoxel
 		// cell's way on is then the cell's alone, whichever descent comes to it.
 		for (int32 Index = Entry; Index + 1 < Cells.Num(); ++Index)
 		{
-			Length -= StepLength(Cells[Index], Cells[Index + 1], CellSize);
+			Length -= Grid.GetStepLength(Cells[Index], Cells[Index + 1]);
 		}
 		Cells.SetNum(Entry + 1, EAllowShrinking::No);
 		LakeOf.SetNum(Entry + 1, EAllowShrinking::No);
@@ -782,13 +1110,13 @@ TSharedRef<const FVoxelHydrologyTrace> FVoxelHydrology::TraceSpring(const FVoxel
 			{
 				break;
 			}
-			Length += StepLength(At, *Way, CellSize);
+			Length += Grid.GetStepLength(At, *Way);
 			At = *Way;
 			Push(At, LakeIndex);
 		}
-		Length += StepLength(At, Lake->Saddle, CellSize);
+		Length += Grid.GetStepLength(At, Lake->Saddle);
 		Push(Lake->Saddle, INDEX_NONE);
-		Length += StepLength(Lake->Saddle, Lake->Outlet, CellSize);
+		Length += Grid.GetStepLength(Lake->Saddle, Lake->Outlet);
 		Cell = Lake->Outlet;
 		DescentStart = Cells.Num();
 	}
@@ -820,6 +1148,8 @@ namespace VoxelHydrologyPrivate
 		TArray<FVector> Points;
 		TArray<double> Ground;
 		TArray<double> BodyLevels;
+		/** A planet: the unit direction at each point (empty on a heightmap world) */
+		TArray<FVector> Ups;
 		bool bRounded = true;
 		double HalfWidth = 0.0;
 
@@ -840,18 +1170,31 @@ namespace VoxelHydrologyPrivate
 	 * ends, so a corner a cell from an end (a chain of a few cells, the cell before a join) stays sharp; here the line
 	 * is carried on past each end by its own mirror image through the end, so a corner near an end is spread across it
 	 * and the end stays in place.
-	 * @param Raw The cells' places
+	 * @param Raw The cells' places, where distances are measured (a planet: their points on the datum sphere)
 	 * @param Spacing The vertices' spacing
 	 * @param MaxTurn The bound on a vertex's turn
 	 * @param Distance The distance the first try spreads over
+	 * @param SphereRadius A planet: the datum radius, to whose sphere every sampled and spread point is brought back (a
+	 *                     mean of points on a sphere lies under it); 0 on a heightmap world
 	 * @param Out Receives the vertices
 	 * @return Whether the line is within the bound (with the shape's margin)
 	 */
-	bool RoundChain(TConstArrayView<FVector> Raw, double Spacing, double MaxTurn, double Distance, TArray<FVector>& Out)
+	bool RoundChain(TConstArrayView<FVector> Raw, double Spacing, double MaxTurn, double Distance, double SphereRadius, TArray<FVector>& Out)
 	{
 		using FShape = FVoxelConditioningLineShape;
+		const auto OntoSphere = [SphereRadius](TArray<FVector>& Points)
+		{
+			if (SphereRadius > 0.0)
+			{
+				for (FVector& Point : Points)
+				{
+					Point = Point.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector) * SphereRadius;
+				}
+			}
+		};
 		TArray<FVector> Dense;
 		FShape::ResampleEvenly(Raw, Spacing, Dense);
+		OntoSphere(Dense);
 		Out = Dense;
 		const int32 Num = Dense.Num();
 		if (Num < 3 || FShape::GetWorstTurn(Out) <= FShape::BoundMargin * MaxTurn)
@@ -883,7 +1226,9 @@ namespace VoxelHydrologyPrivate
 			}
 			Cut[0] = Dense[0];
 			Cut[Num - 1] = Dense[Num - 1];
+			OntoSphere(Cut);
 			FShape::ResampleEvenly(Cut, Spacing, Out);
+			OntoSphere(Out);
 			if (FShape::GetWorstTurn(Out) <= FShape::BoundMargin * MaxTurn)
 			{
 				return true;
@@ -899,11 +1244,17 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildSystem(const FVoxe
 	using namespace VoxelHydrologyPrivate;
 	using FShape = FVoxelConditioningLineShape;
 	const FVoxelHydrologyGround& Ground = Heights.GetGround();
+	const FVoxelHydrologyGrid& Grid = Heights.GetGrid();
+	const bool bRadial = Ground.bRadial;
 	const double CellSize = Heights.GetCellSize();
 	const double Voxel = FMath::Max(Ground.VoxelSize, 1.0);
 	const double Spacing = 2.0 * Voxel;
 	const double BankWidth = Settings.BankWidthVoxels * Voxel;
 	const double BankMargin = Settings.BankMarginVoxels * Voxel;
+	// A water level from a line's height, and a place from a point where distances are measured.
+	const double LevelBase = Ground.GetLevelBase();
+	const FVoxelWaterFrame Frame = Ground.GetFrame();
+	const auto PlaceOfPoint = [bRadial](const FVector& Point) { return bRadial ? Point.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector) : Point; };
 
 	TSharedRef<FVoxelHydrologySystem> System = MakeShared<FVoxelHydrologySystem>();
 	System->Mouth = Mouth;
@@ -1127,9 +1478,8 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildSystem(const FVoxe
 	// The water the reaches meet: the sea and the kept lakes on the rivers' ways.
 	TArray<FVoxelWaterBody> Bodies;
 	LakeBodies.GenerateValueArray(Bodies);
-	const FVoxelSeaSurface Sea = Ground.bSea ? FVoxelSeaSurface::MakePlane(Ground.SeaLevel) : FVoxelSeaSurface();
-	const FVoxelWaterLevels Water = FVoxelWaterLevels::Make(Sea, FVoxelWaterFrame(), FVoxelWaterLevels::WholeWorld(), MoveTemp(Bodies));
-	const auto GroundAt = [&Ground](const FVector& Place) { return Ground.Height(Place.X, Place.Y); };
+	const FVoxelWaterLevels Water = FVoxelWaterLevels::Make(Ground.GetSea(), Frame, FVoxelWaterLevels::WholeWorld(), MoveTemp(Bodies));
+	const auto GroundAt = [&Ground](const FVector& Place) { return Ground.HeightAt(Place); };
 	const auto BodyLevelAt = [&Water](const FVector& Place, double GroundHeight) { return FVoxelRiverCourse::GetBodyLevelAt(Water, Place, GroundHeight); };
 
 	FShape::FRiverProfileParams Params;
@@ -1145,10 +1495,18 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildSystem(const FVoxe
 	{
 		Params.MinSurface = Ground.SeaLevel - Params.BodyTuck;
 	}
+	if (Ground.bBlocks)
+	{
+		// A block world's bed steps a block a column at most, as a road's line does (D151).
+		Params.MaxBedGrade = GetBlockBedGrade();
+	}
 
-	// The engine's own check of a bed's line: the bend bound above all. The cut's cap is the profile's (MaxCutVoxels).
+	// The engine's own check of a bed's line: the bend bound above all (on a planet a segment's sag too, on a block
+	// world a step of more than a block a column). The cut's cap is the profile's (MaxCutVoxels).
 	FVoxelConditioningLineLimits Limits;
 	Limits.VoxelSize = static_cast<float>(Voxel);
+	Limits.bBlockWorld = Ground.bBlocks;
+	Limits.PlanetRadius = bRadial ? Ground.PlanetRadius : 0.0;
 	const double NoLevel = std::numeric_limits<double>::quiet_NaN();
 	const double MaxCut = Settings.MaxCutVoxels * Voxel;
 
@@ -1179,18 +1537,23 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildSystem(const FVoxe
 		Raw.Reserve(Chain.Cells.Num());
 		for (const FIntPoint& Cell : Chain.Cells)
 		{
-			const FVector2D Place = Heights.PlaceOf(Cell);
-			Raw.Add(FVector(Place.X, Place.Y, 0.0));
+			Raw.Add(Grid.PointOf(Heights.PlaceOf(Cell)));
 		}
 		const double MaxTurn = FShape::GetMaxTurnForReach(Spacing, Chain.HalfWidth + BankWidth);
-		Chain.bRounded = RoundChain(Raw, Spacing, MaxTurn, CellSize * CornerCells[Attempt], Chain.Points);
+		Chain.bRounded = RoundChain(Raw, Spacing, MaxTurn, CellSize * CornerCells[Attempt], bRadial ? Ground.PlanetRadius : 0.0, Chain.Points);
 		Chain.Ground.Reserve(Chain.Points.Num());
 		Chain.BodyLevels.Reserve(Chain.Points.Num());
+		Chain.Ups.Reset();
 		for (const FVector& Point : Chain.Points)
 		{
-			const double Height = GroundAt(Point);
+			const FVector Place = PlaceOfPoint(Point);
+			const double Height = GroundAt(Place);
 			Chain.Ground.Add(Height);
-			Chain.BodyLevels.Add(BodyLevelAt(Point, Height));
+			Chain.BodyLevels.Add(BodyLevelAt(Place, Height));
+			if (bRadial)
+			{
+				Chain.Ups.Add(Place);
+			}
 		}
 	}
 
@@ -1239,7 +1602,7 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildSystem(const FVoxe
 			Floors.Add(Chain.HalfWidth * (Taper.IsValidIndex(Index) ? Taper[Index] : 1.0));
 		}
 		TArray<double> BankGround;
-		FVoxelRiverCourse::ReadBanks(Chain.Points, TConstArrayView<FVector>(), Floors, BankWidth, Voxel, BankMargin, GroundAt, BodyLevelAt, BankGround);
+		FVoxelRiverCourse::ReadBanks(Chain.Points, Chain.Ups, Floors, BankWidth, Voxel, BankMargin, GroundAt, BodyLevelAt, BankGround);
 		return FShape::MakeRiverProfile(Chain.Points, Chain.Ground, BankGround, TConstArrayView<double>(), BodyLevels, ChainParams);
 	};
 
@@ -1346,8 +1709,8 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildSystem(const FVoxe
 		Bed.FalloffWidth = static_cast<float>(BankWidth);
 		Bed.Strength = 1.0f;
 		Bed.Blend = EVoxelConditioningLineBlend::LowerOnly;
-		Bed.Id = MakeBedLineId(Reach.StartCell);
-		Bed.bRadial = false;
+		Bed.Id = MakeBedLineId(Reach.StartCell, bRadial);
+		Bed.bRadial = bRadial;
 		Bed.Surface.BandMaterialID = Settings.BedMaterialID;
 		Bed.Surface.MinCaveDepth = Settings.BedMinCaveDepth;
 		Bed.Surface.ClearHalfWidth = static_cast<float>(Chain.HalfWidth + 0.5 * BankWidth);
@@ -1357,14 +1720,17 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildSystem(const FVoxe
 		for (int32 Vertex = Profile.First; Vertex < Profile.First + Profile.Num; ++Vertex)
 		{
 			const double Half = Chain.HalfWidth * Profile.Taper[Vertex];
-			Bed.Vertices.Add(FVoxelConditioningLineVertex(Chain.Points[Vertex], static_cast<float>(Profile.Bed[Vertex]), static_cast<float>(FMath::Max(Half, 1.0))));
-			Vertices.Add(FVoxelWaterReachVertex(Chain.Points[Vertex], Profile.Bed[Vertex], Profile.Surface[Vertex], Half + BankWidth));
+			// A vertex's position is its place: the column, or on a planet the direction. A bed's target is a line's
+			// height, a river reach's levels are water levels.
+			const FVector Place = PlaceOfPoint(Chain.Points[Vertex]);
+			Bed.Vertices.Add(FVoxelConditioningLineVertex(Place, static_cast<float>(Profile.Bed[Vertex]), static_cast<float>(FMath::Max(Half, 1.0))));
+			Vertices.Add(FVoxelWaterReachVertex(Place, Profile.Bed[Vertex] + LevelBase, Profile.Surface[Vertex] + LevelBase, Half + BankWidth));
 			if (Vertex > Profile.First)
 			{
 				Reach.Length += FVector::Dist(Chain.Points[Vertex], Chain.Points[Vertex - 1]);
 			}
 		}
-		const TSharedRef<const FVoxelWaterReach> Shape = FVoxelWaterReach::Make(MoveTemp(Vertices), false, Settings.FlowSpeed);
+		const TSharedRef<const FVoxelWaterReach> Shape = FVoxelWaterReach::Make(MoveTemp(Vertices), bRadial, Settings.FlowSpeed);
 		if (Shape->NumSegments() < 1)
 		{
 			System->Refused = TEXT("a river reach of one place");
@@ -1385,7 +1751,7 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildSystem(const FVoxe
 		{
 			break;
 		}
-		Reach.Body = FVoxelWaterBody::MakeReach(MakeReachId(Ground.Seed, Reach.StartCell), Shape, FVoxelWaterFrame());
+		Reach.Body = FVoxelWaterBody::MakeReach(MakeReachId(Ground.Seed, Reach.StartCell), Shape, Frame);
 		System->Reaches.Add(MoveTemp(Reach));
 	}
 	System->NumAttempts = Attempt + 1;
@@ -1413,12 +1779,13 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildSystem(const FVoxe
 
 // ==================== A region ====================
 
-void FVoxelHydrology::BuildRegion(const FVoxelHydrologySettings& InSettings, const FVoxelHydrologyGround& Ground, const FBox2D& Region, IVoxelHydrologyCache* Cache,
-	FVoxelHydrologyRegion& Out)
+void FVoxelHydrology::BuildRegion(const FVoxelHydrologySettings& InSettings, const FVoxelHydrologyGround& Ground, const FVoxelConditioningRegion& Region,
+	IVoxelHydrologyCache* Cache, FVoxelHydrologyRegion& Out)
 {
 	using namespace VoxelHydrologyPrivate;
 	Out = FVoxelHydrologyRegion();
-	if (!Ground.Height || !Region.bIsValid)
+	// A region of the world's own kind: a cap on a planet, a box on a heightmap world.
+	if (!Ground.IsValid() || Region.bEverywhere || Region.bCap != Ground.bRadial || (!Region.bCap && !Region.Box.bIsValid))
 	{
 		return;
 	}
@@ -1429,15 +1796,14 @@ void FVoxelHydrology::BuildRegion(const FVoxelHydrologySettings& InSettings, con
 
 	// Every spring a body of the region may depend on: its descent, the kept lakes on its way, and, when it is a river
 	// whose mouth is near enough for one of its reaches to come here, its system.
-	const FIntRect Squares = GetSquaresFor(Settings, Ground, Region);
+	TArray<FIntPoint> Squares;
+	GetSquaresFor(Settings, Ground, Region, Squares);
 	TMap<FIntPoint, TArray<TSharedRef<const FVoxelHydrologyTrace>>> ByMouth;
 	TMap<uint32, TSharedRef<const FVoxelHydrologyLake>> Lakes;
-	for (int32 Y = Squares.Min.Y; Y < Squares.Max.Y; ++Y)
 	{
-		for (int32 X = Squares.Min.X; X < Squares.Max.X; ++X)
+		for (const FIntPoint& Square : Squares)
 		{
 			++Out.NumSquares;
-			const FIntPoint Square(X, Y);
 			TSharedPtr<const FVoxelHydrologyTrace> Trace = Cache ? Cache->FindTrace(Square) : nullptr;
 			if (!Trace.IsValid())
 			{
@@ -1452,7 +1818,7 @@ void FVoxelHydrology::BuildRegion(const FVoxelHydrologySettings& InSettings, con
 			++Out.NumSprings;
 			for (const TSharedPtr<const FVoxelHydrologyLake>& Lake : Trace->Lakes)
 			{
-				if (Lake->bKept && !Lakes.Contains(Lake->Body.Id) && Lake->Body.MeetsRegion(Region))
+				if (Lake->bKept && !Lakes.Contains(Lake->Body.Id) && MeetsRegion(Lake->Body, Region, Ground))
 				{
 					Lakes.Add(Lake->Body.Id, Lake.ToSharedRef());
 				}
@@ -1460,7 +1826,7 @@ void FVoxelHydrology::BuildRegion(const FVoxelHydrologySettings& InSettings, con
 			if (Trace->bKept)
 			{
 				++Out.NumRivers;
-				if (DistanceToBox(Region, Heights.PlaceOf(Trace->Mouth)) <= MouthReach)
+				if (DistanceToRegion(Region, Ground, Heights.PlaceOf(Trace->Mouth)) <= MouthReach)
 				{
 					ByMouth.FindOrAdd(Trace->Mouth).Add(Trace.ToSharedRef());
 				}
@@ -1492,7 +1858,7 @@ void FVoxelHydrology::BuildRegion(const FVoxelHydrologySettings& InSettings, con
 		}
 		for (const FVoxelHydrologyReach& Reach : System->Reaches)
 		{
-			if (Reach.Body.MeetsRegion(Region) || (Reach.Bed.IsValid() && Reach.Bed->MeetsRegion(Region)))
+			if (MeetsRegion(Reach.Body, Region, Ground) || (Reach.Bed.IsValid() && MeetsRegion(*Reach.Bed, Region, Ground)))
 			{
 				Out.Systems.Add(System.ToSharedRef());
 				break;

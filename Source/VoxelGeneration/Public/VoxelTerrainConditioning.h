@@ -487,6 +487,20 @@ public:
 	}
 
 	/**
+	 * GatherConditioningOnSphere with the need of the gather, the planet twin of GatherConditioningZones. Defaults to
+	 * GatherConditioningOnSphere.
+	 * @param Direction     Unit direction from the planet centre to the cap's centre
+	 * @param AngularRadius The cap's half-angle in radians
+	 * @param Need          Complete or Ready, as GatherConditioningLines
+	 * @param OutZones      Append overlapping zones here
+	 */
+	virtual void GatherConditioningZonesOnSphere(const FVector& Direction, double AngularRadius, EVoxelConditioningGather Need,
+		TArray<FVoxelConditioningZone>& OutZones) const
+	{
+		GatherConditioningOnSphere(Direction, AngularRadius, OutZones);
+	}
+
+	/**
 	 * Planets: append the conditioning lines whose reach meets a cap on the sphere. The default supplies none.
 	 * @param Direction     Unit direction from the planet centre to the cap's centre
 	 * @param AngularRadius The cap's half-angle in radians (a chunk's, or a query's; pi or more is the whole sphere)

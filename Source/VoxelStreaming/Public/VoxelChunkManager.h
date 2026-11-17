@@ -2939,7 +2939,7 @@ private:
 	TSharedPtr<FVoxelHydrologyNetwork, ESPMode::ThreadSafe> HydrologyNetwork;
 
 	/** Where the hydrology's worker was last asked to work ahead around each viewer, and the frame it was */
-	TArray<FVector2D> HydrologyWarmedAt;
+	TArray<FVector> HydrologyWarmedAt;
 	int64 HydrologyWarmedFrame = 0;
 
 	/** Tiles arrived with bodies since the drawn bodies were last gathered, and the frame they were last gathered for it */

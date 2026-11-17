@@ -25,7 +25,7 @@ void FVoxelConditioningSources::GatherOnSphere(const FVector& Direction, double 
 	}
 	for (const IVoxelTerrainConditioner* Conditioner : Conditioners)
 	{
-		Conditioner->GatherConditioningOnSphere(Direction, AngularRadius, Out.Zones);
+		Conditioner->GatherConditioningZonesOnSphere(Direction, AngularRadius, Need, Out.Zones);
 		Conditioner->GatherConditioningLinesOnSphere(Direction, AngularRadius, Need, Out.Lines);
 	}
 	Out.SortLines();

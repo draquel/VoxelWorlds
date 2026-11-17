@@ -235,6 +235,14 @@ struct VOXELGENERATION_API FVoxelConditioningLineShape
 		 * too steep to hold within this keeps part of its step: the line made from the bed says so (its bend warning)
 		 */
 		double MaxBendDeepening = 1.0;
+
+		/**
+		 * The steepest a segment of the bed may be (rise over run; 0 or less: no bound). A block world's bed steps a
+		 * block a column at most (FVoxelHydrology::GetBlockBedGrade): where the bed falls or rises faster, its higher
+		 * end is lowered, by as much as it takes. The surface stays, so the water there is deeper; how deep the bed
+		 * then lies is in DeepestCut, for the caller to judge against its cap
+		 */
+		double MaxBedGrade = 0.0;
 	};
 
 	/** What MakeRiverProfile made: a value per vertex of the input, and which of them the river keeps. */
@@ -268,6 +276,10 @@ struct VOXELGENERATION_API FVoxelConditioningLineShape
 		/** How many vertices' beds were lowered to hold the grade through a bend, and by how much at most (rule 8) */
 		int32 NumBendHolds = 0;
 		double MostBendHold = 0.0;
+
+		/** How many vertices' beds were lowered to hold the bed's grade (MaxBedGrade), and by how much at most */
+		int32 NumGradeHolds = 0;
+		double MostGradeHold = 0.0;
 
 		/** The deepest the bed lies under the ground along the line, over the vertices kept outside another body */
 		double DeepestCut = 0.0;

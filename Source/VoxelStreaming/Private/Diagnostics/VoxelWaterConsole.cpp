@@ -107,9 +107,9 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelWaterStatsCmd(
 							*PlayWorld->GetName(), Net, H.Tiles, H.TilesWithBodies, H.Queued, H.Squares, H.Springs, H.Rivers, H.Systems, H.RefusedSystems, H.Reaches,
 							H.KeptLakes, H.Lakes, H.Conflicts);
 						UE_LOG(LogVoxelStreaming, Warning,
-							TEXT("voxel.Water.Stats [%s]: net=%s: hydrology tiles worked out: SyncTiles=%lld inside a gather on the game thread (%.1f ms, the dearest gather %.1f), %lld inside a gather on another thread (%.1f ms), %lld by the worker (%.1f ms), %lld at the start (%.1f ms) and %lld more inside gathers before the first tick (%.1f ms); gathers: %lld complete (%lld too wide), %lld ready (%lld tile(s) missed, %lld too wide to queue); %lld tile(s) announced"),
+							TEXT("voxel.Water.Stats [%s]: net=%s: hydrology tiles worked out: SyncTiles=%lld inside a gather on the game thread (%.1f ms, the dearest gather %.1f), %lld inside a gather on another thread (%.1f ms), %lld by the worker (%.1f ms), %lld at the start (%.1f ms) and %lld more inside gathers before the first tick (%.1f ms); gathers: %lld complete (%lld too wide), %lld ready (%lld tile(s) missed, %lld too wide to queue); %lld tile(s) announced; %lld warm-up(s) round a viewer that had moved (%.1f ms, the dearest %.2f)"),
 							*PlayWorld->GetName(), Net, H.SyncTiles, H.SyncMs, H.WorstSyncMs, H.OffThreadTiles, H.OffThreadMs, H.WorkerTiles, H.WorkerMs, H.WarmTiles, H.WarmMs, H.StartSyncTiles, H.StartSyncMs,
-							H.CompleteGathers, H.CompleteTooWide, H.ReadyGathers, H.ReadyMisses, H.ReadyTooWide, H.Announced);
+							H.CompleteGathers, H.CompleteTooWide, H.ReadyGathers, H.ReadyMisses, H.ReadyTooWide, H.Announced, H.WarmUpAsks, H.WarmUpMs, H.WorstWarmUpMs);
 					}
 				}
 			}

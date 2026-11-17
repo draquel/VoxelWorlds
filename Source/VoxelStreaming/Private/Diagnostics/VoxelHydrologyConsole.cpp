@@ -37,19 +37,85 @@ namespace VoxelHydrologyConsole
 		}
 	}
 
-	void Survey(UVoxelChunkManager& Manager, FVoxelHydrologyNetwork& Network, const FVector2D& Centre, double Half, const FString& Tag)
+	/**
+	 * The survey's window: a square of the world round a place. On a heightmap world its coordinates are world X and Y;
+	 * on a planet the square lies on the plane tangent at the place and its coordinates run east and north of it, a
+	 * point of it standing for the direction whose datum point lies over it.
+	 */
+	struct FWindow
+	{
+		bool bRadial = false;
+		FVector Up = FVector::UpVector;
+		FVector East = FVector::ForwardVector;
+		FVector North = FVector::RightVector;
+		double Radius = 1.0;
+		FBox2D Box = FBox2D(ForceInit);
+
+		FVector2D ToWindow(const FVector& Place) const
+		{
+			return bRadial ? FVector2D(Radius * FVector::DotProduct(Place, East), Radius * FVector::DotProduct(Place, North)) : FVector2D(Place.X, Place.Y);
+		}
+
+		FVector FromWindow(const FVector2D& Point) const
+		{
+			if (!bRadial)
+			{
+				return FVector(Point.X, Point.Y, 0.0);
+			}
+			const double U = FMath::Clamp(Point.X / Radius, -1.0, 1.0);
+			const double V = FMath::Clamp(Point.Y / Radius, -1.0, 1.0);
+			return East * U + North * V + Up * FMath::Sqrt(FMath::Max(0.0, 1.0 - U * U - V * V));
+		}
+
+		bool IsInside(const FVector& Place) const
+		{
+			return (!bRadial || FVector::DotProduct(Place, Up) > 0.0) && Box.IsInside(ToWindow(Place));
+		}
+	};
+
+	void Survey(UVoxelChunkManager& Manager, FVoxelHydrologyNetwork& Network, const FVector& CentrePlace, double InHalf, const FString& Tag)
 	{
 		const UWorld* World = Manager.GetWorld();
 		const UVoxelWorldConfiguration* Config = Manager.GetConfiguration();
 		const FVoxelHydrologyGround& Ground = Network.GetGround();
 		const FVoxelHydrologySettings& Settings = Network.GetSettings();
+		const FVoxelHydrologyGrid Grid(Ground, Settings);
 		const double Voxel = FMath::Max(Ground.VoxelSize, 1.0);
 		const double BankWidth = Settings.BankWidthVoxels * Voxel;
-		const FBox2D Box(Centre - FVector2D(Half, Half), Centre + FVector2D(Half, Half));
+		const double LevelBase = Ground.GetLevelBase();
+		const FVoxelWaterFrame Frame = Ground.GetFrame();
+
+		// The window, and the region that holds it: the box itself, or on a planet the cap round the square.
+		FWindow Window;
+		Window.bRadial = Ground.bRadial;
+		double Half = InHalf;
+		FVector2D Centre(CentrePlace.X, CentrePlace.Y);
+		FVoxelConditioningRegion SurveyRegion;
+		if (Ground.bRadial)
+		{
+			Window.Radius = FMath::Max(Ground.PlanetRadius, 1.0);
+			Window.Up = CentrePlace.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector);
+			FVoxelCubeSphere::GetTangentFrame(Window.Up, Window.East, Window.North);
+			// A square on the tangent plane stands for less than half the planet.
+			Half = FMath::Min(Half, 0.6 * Window.Radius);
+			Centre = FVector2D::ZeroVector;
+			SurveyRegion = FVoxelConditioningRegion::OfCap(Window.Up, FMath::Asin(FMath::Min(UE_DOUBLE_SQRT_2 * Half / Window.Radius, 1.0)));
+		}
+		Window.Box = FBox2D(Centre - FVector2D(Half, Half), Centre + FVector2D(Half, Half));
+		const FBox2D Box = Window.Box;
+		if (!Ground.bRadial)
+		{
+			SurveyRegion = FVoxelConditioningRegion::OfBox(Box);
+		}
+		// A place at a water level, as a world position.
+		const auto WorldAt = [&Ground](const FVector& Place, double Level)
+		{
+			return Ground.bRadial ? Ground.PlanetCenter + Place * Level : FVector(Place.X, Place.Y, Level);
+		};
 
 		const double Start = FPlatformTime::Seconds();
 		FVoxelHydrologyRegion Region;
-		Network.Survey(Box, Region);
+		Network.Survey(SurveyRegion, Region);
 		const double SurveyMs = (FPlatformTime::Seconds() - Start) * 1000.0;
 
 		// Every body of the window, as one snapshot of the water: what a reach's end is tested against.
@@ -67,7 +133,7 @@ namespace VoxelHydrologyConsole
 				++NumReaches;
 			}
 		}
-		const FVoxelSeaSurface Sea = Ground.bSea ? FVoxelSeaSurface::MakePlane(Ground.SeaLevel) : FVoxelSeaSurface();
+		const FVoxelSeaSurface Sea = Ground.GetSea();
 
 		// The rules (the plan's section 5.3), read back from the records.
 		int32 Rises = 0, EndsOnLand = 0, EndsOverBody = 0, BadHeads = 0, LineWarnings = 0, Conflicts = 0;
@@ -112,10 +178,13 @@ namespace VoxelHydrologyConsole
 						Others.Add(Body);
 					}
 				}
-				const FVoxelWaterLevels Water = FVoxelWaterLevels::Make(Sea, FVoxelWaterFrame(), FVoxelWaterLevels::WholeWorld(), MoveTemp(Others));
+				const FVoxelWaterLevels Water = FVoxelWaterLevels::Make(Sea, Frame, FVoxelWaterLevels::WholeWorld(), MoveTemp(Others));
 				const FVoxelWaterReachVertex& Last = Vertices.Last();
-				const double Level = FVoxelRiverCourse::GetBodyLevelAt(Water, Last.Position, Ground.Height(Last.Position.X, Last.Position.Y));
-				if (!Box.IsInside(FVector2D(Last.Position)))
+				// The body's level comes back as a line's height (an altitude on a planet); the reach's are water levels.
+				const double LastGround = Ground.HeightAt(Last.Position);
+				const double LastSurface = Last.SurfaceLevel - LevelBase;
+				const double Level = FVoxelRiverCourse::GetBodyLevelAt(Water, Last.Position, LastGround);
+				if (!Window.IsInside(Last.Position))
 				{
 					// Its end lies outside the window, and so may the body it ends in.
 				}
@@ -124,14 +193,43 @@ namespace VoxelHydrologyConsole
 					++EndsOnLand;
 					if (FirstWarning.IsEmpty())
 					{
+						const FVector2D At = Window.ToWindow(Last.Position);
 						FirstWarning = FString::Printf(TEXT("reach %u from cell (%d, %d) ends on land at (%.0f, %.0f): surface %.1f over ground %.1f, %s, %d vertices, flow %d"),
-							Reach.Body.Id, Reach.StartCell.X, Reach.StartCell.Y, Last.Position.X, Last.Position.Y, Last.SurfaceLevel,
-							Ground.Height(Last.Position.X, Last.Position.Y), Reach.bEndsAtJoin ? TEXT("at a join") : TEXT("not at a join"), Vertices.Num(), Reach.Flow);
+							Reach.Body.Id, Reach.StartCell.X, Reach.StartCell.Y, At.X, At.Y, LastSurface,
+							LastGround, Reach.bEndsAtJoin ? TEXT("at a join") : TEXT("not at a join"), Vertices.Num(), Reach.Flow);
 					}
 				}
-				else if (!Reach.bEndsAtJoin && (Level < Last.SurfaceLevel - 1.0e-3 || Level > Last.SurfaceLevel + Tuck + 1.0e-3))
+				else if (!Reach.bEndsAtJoin && (Level < LastSurface - 1.0e-3 || Level > LastSurface + Tuck + 1.0e-3))
 				{
 					++EndsOverBody;
+					if (FirstWarning.IsEmpty())
+					{
+						const FVector2D At = Window.ToWindow(Last.Position);
+						FVoxelWaterSample Sample;
+						Water.Sample(WorldAt(Last.Position, LastGround + LevelBase), Sample);
+						// The lake it lies in, when it is one: whether the system's own mouth is a cell of its hollow (else the
+						// river came to it by a way its descents did not know: beside the hollow, over its footprint).
+						FString LakeNote;
+						FString Covering;
+						for (const TSharedRef<const FVoxelHydrologyLake>& Lake : Region.Lakes)
+						{
+							// Every kept lake whose footprint covers the end: two there are two lakes of one hollow.
+							if (Ground.bRadial ? Lake->Body.Lake->CoversDirection(Last.Position) : Lake->Body.Lake->Covers(Last.Position.X, Last.Position.Y))
+							{
+								Covering += FString::Printf(TEXT(" %u at %.1f (pit (%d, %d), closed %d)"), Lake->Body.Id, Lake->WaterLevel, Lake->Pit.X, Lake->Pit.Y, Lake->Closed);
+							}
+							if (Lake->Body.Id == Sample.BodyId)
+							{
+								LakeNote = FString::Printf(TEXT("; that lake: closed %d, %d cells, pit (%d, %d), the mouth %s a cell of its hollow, the reach %s as ending in a body"),
+									Lake->Closed, Lake->Cells.Num(), Lake->Pit.X, Lake->Pit.Y, Lake->Cells.Contains(System->Mouth) ? TEXT("is") : TEXT("is not"),
+									Reach.Profile.bEndsInBody ? TEXT("was made") : TEXT("was not made"));
+							}
+						}
+						FirstWarning = FString::Printf(TEXT("reach %u from cell (%d, %d) ends at (%.0f, %.0f) with its surface at %.1f where the water it lies in stands at %.1f (body %u, kind %d; ground %.1f, sea %.1f), %d vertices, flow %d, mouth (%d, %d)%s"),
+							Reach.Body.Id, Reach.StartCell.X, Reach.StartCell.Y, At.X, At.Y, LastSurface, Level, Sample.BodyId, static_cast<int32>(Sample.Kind), LastGround,
+							Ground.SeaLevel, Vertices.Num(), Reach.Flow, System->Mouth.X, System->Mouth.Y, *LakeNote);
+						FirstWarning += FString::Printf(TEXT("; the lakes whose footprints cover the end:%s"), Covering.IsEmpty() ? TEXT(" none") : *Covering);
+					}
 				}
 				// Rule 8: the bed is a line and keeps a line's limits (the narrow core and band of a head are meant).
 				for (const FString& Warning : Manager.GetConditioningLineWarnings(*Reach.Bed))
@@ -172,7 +270,7 @@ namespace VoxelHydrologyConsole
 		{
 			for (int32 X = 0; X < N; ++X)
 			{
-				Heights[Y * N + X] = static_cast<float>(Ground.Height(Box.Min.X + (X + 0.5) * Pixel, Box.Min.Y + (Y + 0.5) * Pixel));
+				Heights[Y * N + X] = static_cast<float>(Ground.HeightAt(Window.FromWindow(FVector2D(Box.Min.X + (X + 0.5) * Pixel, Box.Min.Y + (Y + 0.5) * Pixel))));
 			}
 		});
 		int64 Land = 0;
@@ -207,6 +305,28 @@ namespace VoxelHydrologyConsole
 		}
 		for (const TSharedRef<const FVoxelHydrologyLake>& Lake : Region.Lakes)
 		{
+			if (Ground.bRadial)
+			{
+				// A planet lake's footprint lies in its own tangent plane: each of its cells at the pixel its middle falls on.
+				const FVoxelWaterLake& Shape = *Lake->Body.Lake;
+				for (int32 CellY = 0; CellY < Shape.GetSize().Y; ++CellY)
+				{
+					for (int32 CellX = 0; CellX < Shape.GetSize().X; ++CellX)
+					{
+						if (!Shape.HasCell(CellX, CellY))
+						{
+							continue;
+						}
+						const FVector2D P = Window.ToWindow((Shape.GetCellCentre(CellX, CellY, Lake->Body.Level, Ground.PlanetCenter) - Ground.PlanetCenter).GetSafeNormal());
+						const int32 X = FMath::FloorToInt32((P.X - Box.Min.X) / Pixel), Y = FMath::FloorToInt32((P.Y - Box.Min.Y) / Pixel);
+						if (X >= 0 && Y >= 0 && X < N && Y < N && Heights[Y * N + X] < Lake->WaterLevel)
+						{
+							PixelAt(X, Y) = FColor(40, 200, 235);
+						}
+					}
+				}
+				continue;
+			}
 			const FBox2D Bounds = Lake->Body.Lake->GetBounds2D();
 			const int32 X0 = FMath::Clamp(FMath::FloorToInt32((Bounds.Min.X - Box.Min.X) / Pixel), 0, N - 1), X1 = FMath::Clamp(FMath::FloorToInt32((Bounds.Max.X - Box.Min.X) / Pixel), 0, N - 1);
 			const int32 Y0 = FMath::Clamp(FMath::FloorToInt32((Bounds.Min.Y - Box.Min.Y) / Pixel), 0, N - 1), Y1 = FMath::Clamp(FMath::FloorToInt32((Bounds.Max.Y - Box.Min.Y) / Pixel), 0, N - 1);
@@ -230,7 +350,7 @@ namespace VoxelHydrologyConsole
 				const TArray<FVoxelWaterReachVertex>& Vertices = Reach.Body.Reach->GetVertices();
 				for (int32 Index = 0; Index + 1 < Vertices.Num(); ++Index)
 				{
-					const FVector2D A(Vertices[Index].Position), B(Vertices[Index + 1].Position);
+					const FVector2D A = Window.ToWindow(Vertices[Index].Position), B = Window.ToWindow(Vertices[Index + 1].Position);
 					const int32 Steps = FMath::Max(1, FMath::CeilToInt32(FVector2D::Distance(A, B) / (0.5 * Pixel)));
 					for (int32 Step = 0; Step <= Steps; ++Step)
 					{
@@ -251,6 +371,15 @@ namespace VoxelHydrologyConsole
 			Config ? *Config->GetName() : TEXT(""), NetName(World), *Tag, Ground.Seed, Voxel, Ground.bSea ? TEXT("true") : TEXT("false"), Ground.SeaLevel);
 		Json += FString::Printf(TEXT(" \"centre\": [%.0f, %.0f], \"half\": %.0f, \"land_km2\": %.3f, \"land_pct\": %.1f, \"survey_ms\": %.1f,\n"),
 			Centre.X, Centre.Y, Half, LandKm2, 100.0 * Land / (static_cast<double>(N) * N), SurveyMs);
+		// The frame a script stands a camera in: the up at the window's middle, and east and north there. A planet's
+		// places in the lists below are east and north of the middle; every "_world" is a world position at the water.
+		Json += FString::Printf(TEXT(" \"radial\": %s, \"blocks\": %s, \"planet_radius\": %.1f, \"planet_centre\": [%.1f, %.1f, %.1f], \"up\": [%.6f, %.6f, %.6f], \"east\": [%.6f, %.6f, %.6f], \"north\": [%.6f, %.6f, %.6f], \"cell\": %.1f, \"cells_per_edge\": %d,\n"),
+			Ground.bRadial ? TEXT("true") : TEXT("false"), Ground.bBlocks ? TEXT("true") : TEXT("false"), Ground.PlanetRadius,
+			Ground.PlanetCenter.X, Ground.PlanetCenter.Y, Ground.PlanetCenter.Z,
+			Ground.bRadial ? Window.Up.X : 0.0, Ground.bRadial ? Window.Up.Y : 0.0, Ground.bRadial ? Window.Up.Z : 1.0,
+			Ground.bRadial ? Window.East.X : 1.0, Ground.bRadial ? Window.East.Y : 0.0, Ground.bRadial ? Window.East.Z : 0.0,
+			Ground.bRadial ? Window.North.X : 0.0, Ground.bRadial ? Window.North.Y : 1.0, Ground.bRadial ? Window.North.Z : 0.0,
+			Grid.GetCellSize(), Grid.GetCellsPerEdge());
 		Json += FString::Printf(TEXT(" \"squares\": %d, \"springs\": %d, \"rivers\": %d, \"systems\": %d, \"refused\": %d, \"reaches\": %d, \"reach_km\": %.3f, \"longest_river_m\": %.1f, \"longest_reach_m\": %.1f, \"most_flow\": %d, \"deepest_cut_voxels\": %.2f,\n"),
 			Region.NumSquares, Region.NumSprings, Region.NumRivers, Region.Systems.Num(), Region.NumRefused, NumReaches, ReachLength / 1.0e5, LongestRiver / 100.0,
 			LongestReach / 100.0, MostFlow, DeepestCut / Voxel);
@@ -261,11 +390,23 @@ namespace VoxelHydrologyConsole
 		for (int32 Index = 0; Index < Region.Lakes.Num(); ++Index)
 		{
 			const FVoxelHydrologyLake& Lake = Region.Lakes[Index].Get();
-			const FVector2D Middle = Lake.Body.Lake->GetBounds2D().GetCenter();
-			const FVector2D Pit(Lake.LowestCell.X * Settings.CellVoxels * Voxel, Lake.LowestCell.Y * Settings.CellVoxels * Voxel);
-			Json += FString::Printf(TEXT("%s\n  {\"id\": %u, \"level\": %.1f, \"area_m2\": %.0f, \"depth\": %.1f, \"closed\": %d, \"lowered\": %.1f, \"middle\": [%.0f, %.0f], \"pit\": [%.0f, %.0f], \"size\": [%.0f, %.0f]}"),
+			// The lake's middle and its lowest cell as places, and how wide it is.
+			FVector MiddlePlace = FVector(Lake.Body.Lake->GetBounds2D().GetCenter(), 0.0);
+			FVector2D Size = Lake.Body.Lake->GetBounds2D().GetSize();
+			if (Ground.bRadial)
+			{
+				double CapAngle = 0.0;
+				Lake.Body.Lake->GetCap(MiddlePlace, CapAngle);
+				Size = FVector2D(2.0 * CapAngle * Ground.PlanetRadius);
+			}
+			const FVector PitPlace = Grid.PlaceOf(Lake.LowestCell);
+			const FVector2D Middle = Window.ToWindow(MiddlePlace);
+			const FVector2D Pit = Ground.bRadial ? Window.ToWindow(PitPlace) : FVector2D(Lake.LowestCell.X * Settings.CellVoxels * Voxel, Lake.LowestCell.Y * Settings.CellVoxels * Voxel);
+			const FVector MiddleWorld = WorldAt(MiddlePlace, Lake.Body.Level);
+			const FVector PitWorld = WorldAt(PitPlace, Lake.Body.Level);
+			Json += FString::Printf(TEXT("%s\n  {\"id\": %u, \"level\": %.1f, \"area_m2\": %.0f, \"depth\": %.1f, \"closed\": %d, \"lowered\": %.1f, \"middle\": [%.0f, %.0f], \"pit\": [%.0f, %.0f], \"size\": [%.0f, %.0f], \"middle_world\": [%.1f, %.1f, %.1f], \"pit_world\": [%.1f, %.1f, %.1f]}"),
 				Index ? TEXT(",") : TEXT(""), Lake.Body.Id, Lake.WaterLevel, Lake.Area / 1.0e4, Lake.Depth, Lake.Closed, Lake.LoweredForEdge, Middle.X, Middle.Y, Pit.X, Pit.Y,
-				Lake.Body.Lake->GetBounds2D().GetSize().X, Lake.Body.Lake->GetBounds2D().GetSize().Y);
+				Size.X, Size.Y, MiddleWorld.X, MiddleWorld.Y, MiddleWorld.Z, PitWorld.X, PitWorld.Y, PitWorld.Z);
 		}
 		Json += TEXT("\n ],\n \"reach_list\": [");
 		bool bFirst = true;
@@ -277,10 +418,13 @@ namespace VoxelHydrologyConsole
 				const FVoxelWaterReachVertex& First = Vertices[0];
 				const FVoxelWaterReachVertex& Middle = Vertices[Vertices.Num() / 2];
 				const FVoxelWaterReachVertex& Last = Vertices.Last();
-				Json += FString::Printf(TEXT("%s\n  {\"id\": %u, \"mouth\": [%d, %d], \"flow\": %d, \"length\": %.0f, \"fall\": %.1f, \"cut\": %.1f, \"join\": %s, \"head\": %s, \"first\": [%.0f, %.0f, %.1f], \"middle\": [%.0f, %.0f, %.1f], \"last\": [%.0f, %.0f, %.1f]}"),
+				const FVector2D FirstAt = Window.ToWindow(First.Position), MiddleAt = Window.ToWindow(Middle.Position), LastAt = Window.ToWindow(Last.Position);
+				const FVector FirstWorld = WorldAt(First.Position, First.SurfaceLevel), MiddleWorld = WorldAt(Middle.Position, Middle.SurfaceLevel), LastWorld = WorldAt(Last.Position, Last.SurfaceLevel);
+				Json += FString::Printf(TEXT("%s\n  {\"id\": %u, \"mouth\": [%d, %d], \"flow\": %d, \"length\": %.0f, \"fall\": %.1f, \"cut\": %.1f, \"grade_holds\": %d, \"join\": %s, \"head\": %s, \"first\": [%.0f, %.0f, %.1f], \"middle\": [%.0f, %.0f, %.1f], \"last\": [%.0f, %.0f, %.1f], \"first_world\": [%.1f, %.1f, %.1f], \"middle_world\": [%.1f, %.1f, %.1f], \"last_world\": [%.1f, %.1f, %.1f]}"),
 					bFirst ? TEXT("") : TEXT(","), Reach.Body.Id, System->Mouth.X, System->Mouth.Y, Reach.Flow, Reach.Length, Reach.Profile.Fall, Reach.Profile.DeepestCut,
-					Reach.bEndsAtJoin ? TEXT("true") : TEXT("false"), Reach.Profile.bStartsInBody ? TEXT("false") : TEXT("true"),
-					First.Position.X, First.Position.Y, First.SurfaceLevel, Middle.Position.X, Middle.Position.Y, Middle.SurfaceLevel, Last.Position.X, Last.Position.Y, Last.SurfaceLevel);
+					Reach.Profile.NumGradeHolds, Reach.bEndsAtJoin ? TEXT("true") : TEXT("false"), Reach.Profile.bStartsInBody ? TEXT("false") : TEXT("true"),
+					FirstAt.X, FirstAt.Y, First.SurfaceLevel - LevelBase, MiddleAt.X, MiddleAt.Y, Middle.SurfaceLevel - LevelBase, LastAt.X, LastAt.Y, Last.SurfaceLevel - LevelBase,
+					FirstWorld.X, FirstWorld.Y, FirstWorld.Z, MiddleWorld.X, MiddleWorld.Y, MiddleWorld.Z, LastWorld.X, LastWorld.Y, LastWorld.Z);
 				bFirst = false;
 			}
 		}
@@ -314,7 +458,8 @@ namespace VoxelHydrologyConsole
 // Console: voxel.Water.Hydrology.Survey [x y | pawn] [half] [tag]
 static FAutoConsoleCommandWithWorldAndArgs GVoxelHydrologySurveyCmd(
 	TEXT("voxel.Water.Hydrology.Survey"),
-	TEXT("The generated hydrology over a window of every play world that has it (the hydrology plan's H7): voxel.Water.Hydrology.Survey [x y | pawn] [half=300000] [tag]. ")
+	TEXT("The generated hydrology over a window of every play world that has it (the hydrology plan's H7 and H8): voxel.Water.Hydrology.Survey [x y | pawn] [half=300000] [tag]. ")
+	TEXT("On a planet x and y are a latitude and a longitude in degrees and the window is a square on the plane tangent there. ")
 	TEXT("Works the window's ponds and brooks out (whatever is streamed), checks each river reach against the rules that keep a river watertight, and logs the counts, ")
 	TEXT("the violations and a digest of the bodies (the same on a server and its clients); a picture and the numbers go to Saved/Hydro/<configuration>_<tag>_<net>.png and .json."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
@@ -325,14 +470,18 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelHydrologySurveyCmd(
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Hydrology.Survey: no PIE/Game world found (start PIE first)"));
 			return;
 		}
+		// Where the window is: a world position (the pawn's), or two numbers: world X and Y, a planet's latitude and longitude.
 		FVector2D Centre = FVector2D::ZeroVector;
+		FVector PawnAt = FVector::ZeroVector;
+		bool bPawn = false;
 		int32 Next = 0;
 		if (Args.Num() >= 1 && Args[0].Equals(TEXT("pawn"), ESearchCase::IgnoreCase))
 		{
 			const APlayerController* PC = TargetWorld->GetFirstPlayerController();
 			if (PC && PC->GetPawn())
 			{
-				Centre = FVector2D(PC->GetPawn()->GetActorLocation());
+				PawnAt = PC->GetPawn()->GetActorLocation();
+				bPawn = true;
 			}
 			Next = 1;
 		}
@@ -353,7 +502,9 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelHydrologySurveyCmd(
 			}
 			if (const TSharedPtr<FVoxelHydrologyNetwork, ESPMode::ThreadSafe> Network = It->GetHydrologyNetwork())
 			{
-				VoxelHydrologyConsole::Survey(**It, *Network, Centre, Half, Tag);
+				const FVector Place = bPawn ? Network->GetPlaceOf(PawnAt)
+					: (Network->GetGround().bRadial ? FVoxelCubeSphere::LatLonToDirection(Centre.X, Centre.Y) : FVector(Centre.X, Centre.Y, 0.0));
+				VoxelHydrologyConsole::Survey(**It, *Network, Place, Half, Tag);
 				++Surveyed;
 			}
 		}

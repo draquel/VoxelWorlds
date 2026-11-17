@@ -246,8 +246,13 @@ public:
 	{
 		WaterRangeGather = MoveTemp(InGather);
 		ColumnSurfaceCache.Reset();
+		NearWaterMemo = FNearWaterMemo();
 	}
-	virtual void NotifyWaterChanged() override { ColumnSurfaceCache.Reset(); }
+	virtual void NotifyWaterChanged() override
+	{
+		ColumnSurfaceCache.Reset();
+		NearWaterMemo = FNearWaterMemo();
+	}
 
 	/** The viewer's layer ± this many layers is streamed in columns near the viewer (heightmap worlds, D8). */
 	static constexpr int32 NearLayers = 2;
@@ -853,6 +858,20 @@ protected:
 	/** GetPlanetSurfaceEnvelope's memos: the load disk's (ForEachPlanetCandidate) and the near disk's (GetPlanetNearLayersCeiling). */
 	mutable FSurfaceEnvelopeMemo LoadEnvelopeMemo;
 	mutable FSurfaceEnvelopeMemo NearEnvelopeMemo;
+
+	/**
+	 * The water's range over a planet's near disk, kept for the viewer's cell of the slab grid (GetPlanetNearLayersCeiling
+	 * asks several times an update, and in a world with generated ponds and brooks the gather is over thousands of
+	 * tiles). Gathered over the disk round the cell's middle, a cell wider each way, so it holds for any viewer in the
+	 * cell; dropped when the water changes (NotifyWaterChanged).
+	 */
+	struct FNearWaterMemo
+	{
+		FIntPoint Cell = FIntPoint(MIN_int32, MIN_int32);
+		double Angle = -1.0;
+		FVoxelWaterLevelRange Range;
+	};
+	mutable FNearWaterMemo NearWaterMemo;
 
 	/** GetWindowChunksAround's memo of the envelope over a further viewer's reach (apart from the streaming viewer's, G217). */
 	mutable FSurfaceEnvelopeMemo AroundEnvelopeMemo;

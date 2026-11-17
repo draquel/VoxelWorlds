@@ -281,8 +281,9 @@ public:
 	 * brooks are generated from the seed: springs run downhill over the natural ground, a run long and gentle enough is
 	 * kept as a brook with its bed, and a hollow one meets fills to its rim as a pond. Null (the default): the sea, and the
 	 * rivers and lakes a level's actors place by hand. Naming one changes the world's terrain, its POIs and its roads, so
-	 * the saves made without it are refused (the fingerprint's Hydrology term). Read on the plane and the island; a
-	 * planet and a block world do not generate hydrology yet and ignore it, with a warning (the plan's H8).
+	 * the saves made without it are refused (the fingerprint's Hydrology term). Read in every world mode: on a planet
+	 * the generator walks the cube sphere's cells, on a block world a pond stands at a block layer's top and a bed steps
+	 * a block a column at most (the plan's H8).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water")
 	TObjectPtr<UVoxelHydrologyConfiguration> HydrologyConfiguration;

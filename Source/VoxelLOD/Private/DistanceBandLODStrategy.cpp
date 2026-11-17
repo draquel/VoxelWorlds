@@ -160,6 +160,7 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	PlanetChunkSlabCache.Reset();
 	LoadEnvelopeMemo = FSurfaceEnvelopeMemo();
 	NearEnvelopeMemo = FSurfaceEnvelopeMemo();
+	NearWaterMemo = FNearWaterMemo();
 	PlanetNearBandAngle = 0.0;
 	GroundRadiusViewer = FVector(TNumericLimits<double>::Max());
 	CutoverConfigured = 0.0;
@@ -1447,8 +1448,19 @@ double FDistanceBandLODStrategy::GetPlanetNearLayersCeiling(const FVector& Viewe
 	double Top = GetPlanetSurfaceEnvelope(Up, PlanetNearBandAngle, NearEnvelopeMemo).Max;
 	// The water's surface over the near disk, where it is higher: the levels' range over the disk's box, with the
 	// bodies at hand (the disk is wide and asked every update; a body worked out later drops the caches).
-	const FVoxelWaterLevelRange NearWater = GetWaterRange(FBox::BuildAABB(ViewerPosition, FVector(PlanetNearBandAngle * ShellWindowOuterRadius)),
-		EVoxelConditioningGather::Ready);
+	// Kept for the viewer's cell of the slab grid: the disk round the cell's middle at the viewer's distance from the
+	// centre, two cells wider, holds the disk round any viewer in the cell.
+	const FIntPoint WaterCell = PlanetSlabGrid.CellOfDirection(Up);
+	if (WaterCell != NearWaterMemo.Cell || PlanetNearBandAngle != NearWaterMemo.Angle)
+	{
+		const double CellAngle = UE_DOUBLE_PI / FMath::Max(1, PlanetSlabGrid.GetCellsPerEdge());
+		const FVector Middle = PlanetCenter + PlanetSlabGrid.CellCentreDirection(WaterCell) * FMath::Max(Relative.Size(), 1.0);
+		NearWaterMemo.Cell = WaterCell;
+		NearWaterMemo.Angle = PlanetNearBandAngle;
+		NearWaterMemo.Range = GetWaterRange(FBox::BuildAABB(Middle, FVector((PlanetNearBandAngle + 2.0 * CellAngle) * ShellWindowOuterRadius)),
+			EVoxelConditioningGather::Ready);
+	}
+	const FVoxelWaterLevelRange& NearWater = NearWaterMemo.Range;
 	if (NearWater.bAny && NearWater.MaxLevel > 0.0)
 	{
 		Top = FMath::Max(Top, NearWater.MaxLevel - PlanetRadius);
