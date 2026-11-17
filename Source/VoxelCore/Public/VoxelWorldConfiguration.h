@@ -695,13 +695,23 @@ public:
 	 * Settings that load and run but produce wrong results, one readable line each: a tree template using a
 	 * material id the material registry does not define (KC10); on a planet, a terrain shell that does not cover
 	 * the terrain's real amplitude, and water enabled while consumers still read the Z-plane WaterLevel
-	 * (SPHERICAL_PLANET_REQUIREMENTS.md SP-A5). Logged as warnings when the asset loads (PostLoad), when a voxel
-	 * world initializes with it, and from ValidateConfiguration.
+	 * (SPHERICAL_PLANET_REQUIREMENTS.md SP-A5). The tree templates are checked against the built-in material IDs; a
+	 * world starting with the asset checks them against its own atlas (GetSettingsWarningsAgainst), and the asset's load
+	 * logs only what needs no material table (GetLoadWarnings, G223).
 	 *
 	 * @return The warnings; empty when nothing is wrong.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Configuration")
 	TArray<FString> GetSettingsWarnings() const;
+
+	/**
+	 * GetSettingsWarnings without the tree templates' materials, which only a world's material table can judge: what the
+	 * asset logs when it loads (PostLoad) and when it is edited (ValidateConfiguration). A world whose atlas defines more
+	 * materials than the built-in ones (the Megascans block world's trees on ids past 21) logged false warnings at every
+	 * load before (G223).
+	 * @return The warnings; empty when nothing is wrong.
+	 */
+	TArray<FString> GetLoadWarnings() const;
 
 	/**
 	 * GetSettingsWarnings with the tree templates' materials checked against a world's material table (its atlas's)
@@ -711,6 +721,16 @@ public:
 	 * @return The warnings; empty when nothing is wrong.
 	 */
 	TArray<FString> GetSettingsWarningsAgainst(const FVoxelMaterialTable& Materials) const;
+
+private:
+	/**
+	 * The warnings of GetSettingsWarnings, the trees' materials checked against Materials when there is one.
+	 * @param Materials The material table to check the tree templates against; null skips them
+	 * @return The warnings; empty when nothing is wrong.
+	 */
+	TArray<FString> CollectSettingsWarnings(const FVoxelMaterialTable* Materials) const;
+
+public:
 
 	/**
 	 * Get the spawn position for spherical planet mode over the datum (no terrain: the configuration has no world mode).
@@ -740,7 +760,7 @@ public:
 	 */
 	static FString GetOverridePath();
 
-	/** Logs GetSettingsWarnings, so a bad asset is reported when it loads. */
+	/** Logs GetLoadWarnings, so a bad asset is reported when it loads. */
 	virtual void PostLoad() override;
 
 #if WITH_EDITOR

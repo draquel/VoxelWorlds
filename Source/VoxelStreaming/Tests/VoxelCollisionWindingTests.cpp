@@ -88,6 +88,39 @@ bool FVoxelCollisionWindingSwapTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// G230: the cook's triangles leave out those of no area, whose hit reports a normal of no length.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCollisionDropsDegenerateTest,
+	"VoxelWorlds.Streaming.Collision.Winding.DropsDegenerateTriangles",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelCollisionDropsDegenerateTest::RunTest(const FString& Parameters)
+{
+	const TArray<FVector3f> Positions = {
+		FVector3f(0, 0, 0), FVector3f(100, 0, 0), FVector3f(0, 100, 0),   // a triangle with area
+		FVector3f(200, 0, 0), FVector3f(300, 0, 0), FVector3f(400, 0, 0), // three on one line
+	};
+	const TArray<uint32> RenderIndices = {
+		0, 1, 2,  // kept
+		3, 4, 5,  // collinear: no area
+		1, 1, 2,  // two of its vertices the same
+		0, 2, 9,  // names a vertex past the positions
+		2, 1, 0,  // kept (the other winding)
+	};
+	TArray<Chaos::TVector<int32, 3>> Triangles;
+	const int32 Dropped = UVoxelCollisionManager::BuildPhysicsTriangles(RenderIndices, Positions, Triangles);
+	TestEqual(TEXT("Three of the five triangles are dropped"), Dropped, 3);
+	TestEqual(TEXT("Two physics triangles are left"), Triangles.Num(), 2);
+	for (const Chaos::TVector<int32, 3>& T : Triangles)
+	{
+		const FVector3f N = FVector3f::CrossProduct(Positions[T[1]] - Positions[T[0]], Positions[T[2]] - Positions[T[0]]);
+		TestTrue(TEXT("Each triangle left has a normal"), N.SizeSquared() > 1.0f);
+	}
+	TestTrue(TEXT("The kept triangles keep the physics winding: (1, 0, 2) and (1, 2, 0)"), Triangles.Num() == 2
+		&& ((Triangles[0] == Chaos::TVector<int32, 3>(1, 0, 2) && Triangles[1] == Chaos::TVector<int32, 3>(1, 2, 0))
+			|| (Triangles[1] == Chaos::TVector<int32, 3>(1, 0, 2) && Triangles[0] == Chaos::TVector<int32, 3>(1, 2, 0))));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCollisionWindingFacesUpTest,
 	"VoxelWorlds.Streaming.Collision.Winding.FlatGroundFacesUp",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

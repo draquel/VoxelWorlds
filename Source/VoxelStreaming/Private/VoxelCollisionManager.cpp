@@ -1245,8 +1245,8 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 				ChaosVertices.Add(Chaos::TVec3<Chaos::FRealSingle>(V.X, V.Y, V.Z));
 			}
 
-			// Render winding -> physics winding (see BuildPhysicsTriangles).
-			BuildPhysicsTriangles(Indices, ChaosTriangles);
+			// Render winding -> physics winding, without the triangles of no area (see BuildPhysicsTriangles).
+			BuildPhysicsTriangles(Indices, Vertices, ChaosTriangles);
 
 			// Create the Chaos trimesh implicit object (thread-safe — pure data construction)
 			TRefCountPtr<Chaos::FTriangleMeshImplicitObject> TriMesh = new Chaos::FTriangleMeshImplicitObject(
@@ -1330,6 +1330,27 @@ void UVoxelCollisionManager::BuildPhysicsTriangles(const TArray<uint32>& RenderI
 			static_cast<int32>(RenderIndices[i * 3 + 0]),
 			static_cast<int32>(RenderIndices[i * 3 + 2])));
 	}
+}
+
+int32 UVoxelCollisionManager::BuildPhysicsTriangles(const TArray<uint32>& RenderIndices, const TArray<FVector3f>& Positions,
+	TArray<Chaos::TVector<int32, 3>>& OutTriangles)
+{
+	BuildPhysicsTriangles(RenderIndices, OutTriangles);
+
+	// A triangle with no area has no normal: the engine's cooker cleans such triangles out (the voxel trimesh skips the
+	// cooker), and a query that hits one reports a normal of no length, which the engine's hit check ensures on (G230).
+	// The meshers can emit one where two of a quad's vertices meet. Dropping it leaves no hole: it covers no ground.
+	const int32 Before = OutTriangles.Num();
+	OutTriangles.RemoveAllSwap([&Positions](const Chaos::TVector<int32, 3>& Tri)
+	{
+		if (!Positions.IsValidIndex(Tri[0]) || !Positions.IsValidIndex(Tri[1]) || !Positions.IsValidIndex(Tri[2]))
+		{
+			return true;
+		}
+		const FVector3f& A = Positions[Tri[0]];
+		return FVector3f::CrossProduct(Positions[Tri[1]] - A, Positions[Tri[2]] - A).SizeSquared() <= UE_SMALL_NUMBER;
+	}, EAllowShrinking::No);
+	return Before - OutTriangles.Num();
 }
 
 void UVoxelCollisionManager::ApplyEmptyCollisionResult(const FIntVector& ChunkCoord)
@@ -1643,22 +1664,9 @@ UPrimitiveComponent* UVoxelCollisionManager::CreateCollisionComponent(const FInt
 		CollisionComp->BodyInstance.IsValidBodyInstance() ? TEXT("Yes") : TEXT("NO"),
 		BodySetup->TriMeshGeometries.Num());
 
-	// Verification trace: confirm the collision component responds to line traces.
-	// Traces downward through the center of the chunk — should hit terrain if any surface exists.
-	if (CachedWorld)
-	{
-		const FVector TraceStart = ChunkWorldPos + FVector(ChunkWorldSize * 0.5f, ChunkWorldSize * 0.5f, ChunkWorldSize + 100.f);
-		const FVector TraceEnd = ChunkWorldPos + FVector(ChunkWorldSize * 0.5f, ChunkWorldSize * 0.5f, -100.f);
-		FHitResult VerifyHit;
-		const bool bVerifyHit = CachedWorld->LineTraceSingleByChannel(VerifyHit, TraceStart, TraceEnd, ECC_WorldStatic);
-		UE_LOG(LogVoxelCollision, Log,
-			TEXT("  Verification trace for chunk (%d,%d,%d): %s%s"),
-			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z,
-			bVerifyHit ? TEXT("HIT") : TEXT("MISS"),
-			bVerifyHit ? *FString::Printf(TEXT(" at Z=%.0f comp=%s"), VerifyHit.ImpactPoint.Z,
-				VerifyHit.GetComponent() ? *VerifyHit.GetComponent()->GetName() : TEXT("null")) : TEXT(""));
-	}
-
+	// No trace through the new body here: the check from the collision's first days traced down the chunk's middle for
+	// every component it made, and a hit with a normal of no length fired an engine ensure (G230). The collision tests
+	// trace the bodies they need.
 	return CollisionComp;
 }
 

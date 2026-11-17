@@ -320,7 +320,11 @@ moves and teleports its pawn, the client follows).
 ## Further viewers and their ground windows
 
 The streaming has one **streaming viewer**: the camera of the world's first player controller
-(`BuildQueryContext`), with the collision shell centred on that controller's pawn. A client and a standalone game have
+(`BuildQueryContext`), with the collision shell centred on that controller's pawn. A game world with no player yet (a
+dedicated server before its first player joins, a test world) streams around where its players will spawn: on a planet
+the configuration's spawn point over the datum, in the heightmap modes the origin; only the editor's own world (the
+preview) follows the level viewport's camera (G224: before, a server in Play In Editor streamed around wherever the
+editor's camera was left until a player joined). A client and a standalone game have
 no other player. A server has: every other player's pawn is a **further viewer** (`GatherFurtherViewers`: every player
 controller of the world but the first; a player with no pawn is none), and each gets a **ground window**, so the server
 has ground under each of its players (G217: before, a second player beyond the first's collision radius stood on
