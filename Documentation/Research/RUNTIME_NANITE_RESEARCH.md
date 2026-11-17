@@ -2,7 +2,7 @@
 
 > Research note, 2026-11-16. Nothing is built. The question: can VoxelWorlds draw its runtime-generated chunk meshes
 > through Nanite, as the commercial Voxel Plugin 2 does, and what would that buy (frame cost, shadows, tessellation and
-> displacement)? Sources: the UE 5.8.3 source under `D:\Program Files\Epic Games\UE_5.8\Engine`, Voxel Plugin's
+> displacement)? Sources: the UE 5.8.4 source under `D:\Program Files\Epic Games\UE_5.8\Engine`, Voxel Plugin's
 > open-source core (github.com/VoxelPlugin/VoxelCore, MIT, last pushed 2026-08-23), the plugin's documentation, and
 > this repository's rendering docs and bench records. No measurement was taken for this note; the numbers quoted are
 > the existing records.
@@ -27,7 +27,7 @@
 - **Fit: viable, medium-high cost, worth a time-boxed spike** that measures the frame and the shadows before any
   decision. Section 8 proposes it.
 
-## 2. What the engine allows (UE 5.8.3)
+## 2. What the engine allows (UE 5.8.4)
 
 ### The builder is editor-only
 
@@ -211,7 +211,7 @@ until then they stand, with this note as the correction of their premise.
 
 ## Sources
 
-- UE 5.8.3 source, paths as cited.
+- UE 5.8.4 source, paths as cited.
 - VoxelCore: github.com/VoxelPlugin/VoxelCore, Source/VoxelCore/Private/VoxelNaniteBuilder.cpp and VoxelNanite.cpp.
 - Voxel Plugin docs: docs.voxelplugin.com (Feature Overview; Authoring Materials).
 - Realtime Mesh Component Pro listing on Fab (vendor claims).
