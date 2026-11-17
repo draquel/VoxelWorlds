@@ -1208,7 +1208,11 @@ bool UVoxelRegionComponent::GetChunkDrawInfo(const FIntVector& ChunkCoord, FVoxe
 		// The chunk's primitive (G116), and the totals over this component's primitives
 		const FChunkPrimitive* Primitive = ChunkPrimitives.Find(FVoxelFadeScheduler::ChunkKey(ChunkCoord));
 		const FVoxelChunkSceneProxy* ChunkProxy = Primitive ? Primitive->GetChunkProxy() : nullptr;
+		// A Nanite primitive (runtime Nanite spike) answers for its mesh the same way
+		const FVoxelChunkNaniteSceneProxy* NaniteProxy = Primitive && Primitive->bNanite && Primitive->Proxy
+			? static_cast<const FVoxelChunkNaniteSceneProxy*>(Primitive->Proxy) : nullptr;
 		TArray<const FVoxelChunkSceneProxy*> AllProxies;
+		TArray<const FVoxelChunkNaniteSceneProxy*> AllNaniteProxies;
 		AllProxies.Reserve(ChunkPrimitives.Num());
 		for (const TPair<FIntVector4, FChunkPrimitive>& Pair : ChunkPrimitives)
 		{
@@ -1216,14 +1220,32 @@ bool UVoxelRegionComponent::GetChunkDrawInfo(const FIntVector& ChunkCoord, FVoxe
 			{
 				AllProxies.Add(Each);
 			}
+			else if (Pair.Value.bNanite && Pair.Value.Proxy)
+			{
+				AllNaniteProxies.Add(static_cast<const FVoxelChunkNaniteSceneProxy*>(Pair.Value.Proxy));
+			}
 		}
 		FVoxelChunkDrawInfo Info;
 		ENQUEUE_RENDER_COMMAND(VoxelChunkPrimitiveDrawInfo)(
-			[ChunkProxy, AllProxies = MoveTemp(AllProxies), &Info](FRHICommandListImmediate& RHICmdList)
+			[ChunkProxy, NaniteProxy, AllProxies = MoveTemp(AllProxies), AllNaniteProxies = MoveTemp(AllNaniteProxies), &Info](FRHICommandListImmediate& RHICmdList)
 			{
 				if (ChunkProxy)
 				{
 					ChunkProxy->GetDrawInfo_RenderThread(Info);
+				}
+				else if (NaniteProxy)
+				{
+					NaniteProxy->GetDrawInfo_RenderThread(Info);
+				}
+				for (const FVoxelChunkNaniteSceneProxy* Each : AllNaniteProxies)
+				{
+					Info.ProxyMeshBufferBytes += Each->GetMeshBufferBytes_RenderThread();
+					const uint64 Bytes = Each->GetRayTracingBytes_RenderThread();
+					if (Bytes > 0)
+					{
+						(Each->IsSeam() ? Info.ProxyRayTracingSeams : Info.ProxyRayTracingChunks) += 1;
+						Info.ProxyRayTracingBytes += Bytes;
+					}
 				}
 				for (const FVoxelChunkSceneProxy* Each : AllProxies)
 				{

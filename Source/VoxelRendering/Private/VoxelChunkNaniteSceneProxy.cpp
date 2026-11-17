@@ -392,6 +392,40 @@ const FCardRepresentationData* FVoxelChunkNaniteSceneProxy::GetMeshCardRepresent
 	return bLumenCards ? Mesh->CardRepresentation.Get() : nullptr;
 }
 
+void FVoxelChunkNaniteSceneProxy::GetDrawInfo_RenderThread(FVoxelChunkDrawInfo& OutInfo) const
+{
+	check(IsInRenderingThread());
+	OutInfo.CurrentTriangles = Mesh->GetNumTriangles();
+	OutInfo.LODLevel = Mesh->LODLevel;
+	OutInfo.bVisible = OutInfo.CurrentTriangles > 0;
+	OutInfo.VertexFactory = Mesh->VertexFactory.Get();
+	OutInfo.VertexStride = Mesh->RenderData.VertexStride;
+	OutInfo.bRayTracing = bRayTracing;
+	const FCardRepresentationData* Cards = GetMeshCardRepresentation();
+	OutInfo.LumenCards = Cards ? Cards->MeshCardsBuildData.CardBuildData.Num() : 0;
+	OutInfo.bVisibleInLumenScene = IsVisibleInLumenScene();
+#if RHI_RAYTRACING
+	if (Mesh->RayTracingGeometry.IsValid())
+	{
+		OutInfo.RayTracingTriangles = Mesh->RayTracingGeometry->GetInitializer().TotalPrimitiveCount;
+	}
+#endif
+}
+
+int64 FVoxelChunkNaniteSceneProxy::GetMeshBufferBytes_RenderThread() const
+{
+	return Mesh->RenderData.HasValidBuffers() ? static_cast<int64>(Mesh->RenderData.GetGPUMemoryUsage()) : 0;
+}
+
+uint64 FVoxelChunkNaniteSceneProxy::GetRayTracingBytes_RenderThread() const
+{
+#if RHI_RAYTRACING
+	return Mesh->RayTracingGeometry.IsValid() ? Mesh->RayTracingBytes : 0;
+#else
+	return 0;
+#endif
+}
+
 Nanite::FResourceMeshInfo FVoxelChunkNaniteSceneProxy::GetResourceMeshInfo() const
 {
 	Nanite::FResourceMeshInfo Info;

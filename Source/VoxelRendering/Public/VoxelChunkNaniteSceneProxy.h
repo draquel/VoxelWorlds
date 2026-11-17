@@ -149,6 +149,18 @@ public:
 	/** @return Whether it is a seam bucket */
 	bool IsSeam() const { return bSeam; }
 
+	/**
+	 * How this primitive draws its chunk (as FVoxelChunkSceneProxy::GetDrawInfo_RenderThread): its mesh alone, never a fade.
+	 * Render thread.
+	 *
+	 * @param OutInfo Receives the primitive's part
+	 */
+	void GetDrawInfo_RenderThread(FVoxelChunkDrawInfo& OutInfo) const;
+
+	/** @return The bytes of its mesh's buffers (kept for ray tracing, D155) and of its ray tracing geometry (render thread) */
+	int64 GetMeshBufferBytes_RenderThread() const;
+	uint64 GetRayTracingBytes_RenderThread() const;
+
 private:
 	FVoxelChunkMeshRef Mesh;
 	UMaterialInterface* Material = nullptr;
