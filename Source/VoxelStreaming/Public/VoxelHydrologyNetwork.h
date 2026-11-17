@@ -52,6 +52,9 @@ struct FVoxelHydrologyStats
 	double WarmUpMs = 0.0;
 	double WorstWarmUpMs = 0.0;
 
+	/** Tiles the worker queued for regions RequestRegion asked for (G232) */
+	int64 RequestedTiles = 0;
+
 	/** Descents and lakes worked out, and ground samples the lattice squares' descents read */
 	int64 TracesMade = 0;
 	int64 LakesMade = 0;
@@ -89,8 +92,9 @@ struct FVoxelHydrologyStats
  *  - by a Complete gather that finds it missing, then and there on the caller's thread: a chunk's voxels are
  *    generated once, so correctness never depends on the warm-up. Counted (FVoxelHydrologyStats::SyncTiles on the game
  *    thread, OffThreadTiles elsewhere).
- *  - by the worker, one tile at a time off the game thread: the tiles around each viewer (WarmUp), and those a Ready
- *    gather did not get. A Ready gather never works anything out: it takes what is kept and queues the rest, and a
+ *  - by the worker, one tile at a time off the game thread: the tiles around each viewer (WarmUp), those a Ready
+ *    gather did not get, and the regions a reader asked for (RequestRegion: the POI layer's roads and pads far from
+ *    the viewers, G232). A Ready gather never works anything out: it takes what is kept and queues the rest, and a
  *    tile that arrives with a body after a Ready gather missed it is announced (TakeAnnouncements).
  *  - by a warm-up that waits (the world's start): in parallel on the task threads, before the first chunk asks.
  *
@@ -160,6 +164,26 @@ public:
 
 	/** WarmUpAround on a heightmap world, by the viewers' world X and Y. */
 	int32 WarmUp(TConstArrayView<FVector2D> Centres, double Radius, bool bWait);
+
+	/**
+	 * Queue for the worker the tiles of a region the network does not hold, the nearest to a place first, after what is
+	 * queued: what a reader that took what was at hand is waiting for (the POI layer's roads and pads far from the
+	 * viewers, G232). Nothing is worked out or walked here: the worker goes through the region's tiles (a few
+	 * thousand: a millisecond or more on the caller's thread) before the tiles it has queued.
+	 * @param Region A box on a heightmap world, a cap on a planet
+	 * @param Place Where the nearest tiles are counted from (GetPlaceOf)
+	 * @param MaxTiles Queue no more than this many
+	 * @return Whether the region was taken (one of this world's kind, and the network not shut down)
+	 */
+	bool RequestRegion(const FVoxelConditioningRegion& Region, const FVector& Place, int32 MaxTiles);
+
+	/**
+	 * The cache's load, without walking it (GetStats walks every kept tile).
+	 * @param OutKept The tiles kept
+	 * @param OutQueued The tiles, the planet discs and the requested regions waiting for the worker
+	 * @param OutLimit The tiles kept past which the ones used longest ago are dropped
+	 */
+	void GetLoad(int32& OutKept, int32& OutQueued, int32& OutLimit) const;
 
 	/** @return The place of a world position: its column (X, Y, 0), or on a planet the unit direction from the centre */
 	FVector GetPlaceOf(const FVector& WorldPosition) const;
@@ -321,6 +345,15 @@ private:
 
 	/** A planet: the discs a warm-up that does not wait asked for, which the worker has yet to go through */
 	TArray<FWarmedDisc> PendingDiscs;
+
+	/** A region RequestRegion asked for: the worker walks it (its tiles, the nearest to Place first) before the tiles queued */
+	struct FRequestedRegion
+	{
+		FVoxelConditioningRegion Region;
+		FVector Place = FVector::ZeroVector;
+		int32 MaxTiles = 0;
+	};
+	TArray<FRequestedRegion> PendingRegions;
 
 	/** Counts the times tiles were dropped from the cache: a disc gone through before then is gone through again */
 	uint64 TrimEpoch = 0;
