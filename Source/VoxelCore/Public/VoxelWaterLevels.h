@@ -728,4 +728,31 @@ public:
 	 * @return True when nothing would be worked out
 	 */
 	virtual bool HoldsWaterBodies(const FBox2D& Bounds) const { return true; }
+
+	/**
+	 * HoldsWaterBodies over a cap of a planet's surface. Defaults to true.
+	 *
+	 * @param Direction Unit direction from the planet centre to the cap's centre
+	 * @param AngularRadius The cap's half angle (radians)
+	 * @return True when a Complete gather over the cap would work nothing out
+	 */
+	virtual bool HoldsWaterBodiesOnSphere(const FVector& Direction, double AngularRadius) const { return true; }
+
+	/**
+	 * The lowest and the highest level of the bodies at hand that may reach a cap of a planet, with no body listed: for
+	 * a reader that wants the levels' range over a region too wide to list bodies for, at every update (the LOD
+	 * window's near disk; a source of generated bodies holds thousands). Defaults to false: the caller gathers the
+	 * bodies (Ready) and reads their range.
+	 *
+	 * @param Direction Unit direction from the planet centre to the cap's centre
+	 * @param AngularRadius The cap's half angle (radians)
+	 * @param bOutAny Whether a body at hand may reach the cap
+	 * @param OutMinLevel The lowest level among them
+	 * @param OutMaxLevel The highest
+	 * @return Whether the source answered
+	 */
+	virtual bool GetLevelRangeAtHandOnSphere(const FVector& Direction, double AngularRadius, bool& bOutAny, double& OutMinLevel, double& OutMaxLevel) const
+	{
+		return false;
+	}
 };

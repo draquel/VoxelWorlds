@@ -185,6 +185,34 @@ struct VOXELCORE_API FVoxelCubeSphereGrid
 	FIntPoint Neighbour(const FIntPoint& Cell, int32 DX, int32 DY) const;
 
 	/**
+	 * The cell one step of cells away by index: on the face its neighbour there, across a face's edge the cell of the
+	 * next face that shares that stretch of the edge (two faces' cells meet edge to edge along the edge they share: the
+	 * warp is the same along it from both sides). The relation is the same from both sides: when B is the cell (DX, DY)
+	 * from A, A is a cell one step from B. Neighbour finds a cell by a direction, a step past the edge along the face's
+	 * own plane, and near a cube corner that direction lands half a cell along the edge, on the border between two cells
+	 * to within the cube of a cell's width: which of the two it gives there hangs on rounding. A descent, a flood or any
+	 * walk that must find the same cells whichever face it started on steps with this (the hydrology plan's H8).
+	 *
+	 * @param Cell Atlas coordinate
+	 * @param DX Cells along U: -1, 0 or 1
+	 * @param DY Cells along V: -1, 0 or 1
+	 * @param OutCell The neighbour
+	 * @return False where there is none: a diagonal step off a cube corner, where three faces meet and the corner's cell
+	 *         has seven neighbours; or a cell outside the atlas
+	 */
+	bool GetAdjacentCell(const FIntPoint& Cell, int32 DX, int32 DY, FIntPoint& OutCell) const;
+
+	/**
+	 * The cells whose centre lies within an angle of a direction, and the direction's own cell: a flood through the four
+	 * side neighbours (GetAdjacentCell), with no limit on their number.
+	 *
+	 * @param Direction Unit direction
+	 * @param MaxAngle Angle (radians; pi or more: every cell)
+	 * @param OutCells The cells, in flood order (emptied first)
+	 */
+	void GatherCentresWithinAngle(const FVector& Direction, double MaxAngle, TArray<FIntPoint>& OutCells) const;
+
+	/**
 	 * The cells whose centre lies within an angle of a direction: a flood fill through the four neighbours from the
 	 * direction's cell (always included).
 	 *

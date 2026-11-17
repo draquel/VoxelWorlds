@@ -409,6 +409,30 @@ FVoxelConditioningLineShape::FRiverProfile FVoxelConditioningLineShape::MakeRive
 		}
 	}
 
+	// The bed's grade, where it is bounded (a block world: a block a column). A segment steeper than the bound has its
+	// higher end lowered, from the end up and from the start down, with no limit of its own: the surface stays, the
+	// water there is deeper, and the cut is the caller's to judge.
+	if (Params.MaxBedGrade > 0.0)
+	{
+		const TArray<double> Before = Result.Bed;
+		for (int32 Index = Num - 2; Index >= 0; --Index)
+		{
+			Result.Bed[Index] = FMath::Min(Result.Bed[Index], Result.Bed[Index + 1] + Params.MaxBedGrade * (Along[Index + 1] - Along[Index]));
+		}
+		for (int32 Index = 1; Index < Num; ++Index)
+		{
+			Result.Bed[Index] = FMath::Min(Result.Bed[Index], Result.Bed[Index - 1] + Params.MaxBedGrade * (Along[Index] - Along[Index - 1]));
+		}
+		for (int32 Index = 0; Index < Num; ++Index)
+		{
+			if (Before[Index] - Result.Bed[Index] > UE_DOUBLE_KINDA_SMALL_NUMBER)
+			{
+				++Result.NumGradeHolds;
+				Result.MostGradeHold = FMath::Max(Result.MostGradeHold, Before[Index] - Result.Bed[Index]);
+			}
+		}
+	}
+
 	// Rules 5 and 7: of the vertices inside the body the river starts in, and inside the one it ends in, the few next
 	// to the land are kept: the mesh ends under that body's surface, and the bed does not run on across its floor.
 	const int32 Keep = FMath::Max(Params.BodyVertices, 1);

@@ -47,6 +47,11 @@ struct FVoxelHydrologyStats
 	/** Complete gathers too wide to work out (answered with what was at hand, and warned about) */
 	int64 CompleteTooWide = 0;
 
+	/** Warm-ups that did not wait and went through a disc's tiles (a viewer had moved), their cost on the caller's thread and the dearest */
+	int64 WarmUpAsks = 0;
+	double WarmUpMs = 0.0;
+	double WorstWarmUpMs = 0.0;
+
 	/** Descents and lakes worked out, and ground samples the lattice squares' descents read */
 	int64 TracesMade = 0;
 	int64 LakesMade = 0;
@@ -75,6 +80,10 @@ struct FVoxelHydrologyStats
  *
  * What is kept: a descent by its spring's lattice square, a lake by its pit, a river system by its mouth, and by
  * tile (a square of the generator's cells) the bodies and beds that reach it, so a chunk's gather is a lookup.
+ *
+ * A region is a world XY box on a heightmap world and a cap on a planet (FVoxelConditioningRegion), and the gathers,
+ * the warm-up and the announcements come in both forms. A planet's tiles are the cells of a cube sphere
+ * (FVoxelCubeSphereGrid), about as wide as a heightmap world's; a tile's region there is the cap around it.
  *
  * Three ways a tile is worked out:
  *  - by a Complete gather that finds it missing, then and there on the caller's thread: a chunk's voxels are
@@ -109,14 +118,22 @@ public:
 	// ---- IVoxelWaterBodySource ----
 
 	virtual void GatherWaterBodies(const FBox2D& Bounds, EVoxelConditioningGather Need, TArray<FVoxelWaterBody>& OutBodies) const override;
+	virtual void GatherWaterBodiesOnSphere(const FVector& Direction, double AngularRadius, EVoxelConditioningGather Need,
+		TArray<FVoxelWaterBody>& OutBodies) const override;
 
 	/** Whether every tile of a region is kept: a Complete gather over it then works nothing out. */
 	virtual bool HoldsWaterBodies(const FBox2D& Bounds) const override;
+	virtual bool HoldsWaterBodiesOnSphere(const FVector& Direction, double AngularRadius) const override;
+
+	/** The levels of the kept tiles' bodies round a cap, from each tile's own range: no body is listed or copied. */
+	virtual bool GetLevelRangeAtHandOnSphere(const FVector& Direction, double AngularRadius, bool& bOutAny, double& OutMinLevel, double& OutMaxLevel) const override;
 
 	// ---- IVoxelTerrainConditioner: the beds ----
 
 	virtual void GatherConditioning(const FBox2D& Region, TArray<FVoxelConditioningZone>& OutZones) const override {}
 	virtual void GatherConditioningLines(const FBox2D& Region, EVoxelConditioningGather Need, TArray<FVoxelConditioningLineRef>& OutLines) const override;
+	virtual void GatherConditioningLinesOnSphere(const FVector& Direction, double AngularRadius, EVoxelConditioningGather Need,
+		TArray<FVoxelConditioningLineRef>& OutLines) const override;
 
 	// ---- IVoxelHydrologyCache ----
 
@@ -132,13 +149,23 @@ public:
 	/**
 	 * Work out the tiles around viewers before a chunk asks: every tile within a distance of a centre that the network
 	 * does not hold.
-	 * @param Centres The viewers' world X and Y
-	 * @param Radius The distance (GetWarmUpRadius, GetFarRadius)
+	 * @param Places The viewers' places: world (X, Y, 0) on a heightmap world, the unit direction from the planet's
+	 *               centre on a planet (GetPlaceOf)
+	 * @param Radius The distance, along the surface on a planet (GetWarmUpRadius, GetFarRadius)
 	 * @param bWait True: in parallel on the task threads, returning when all are kept (the world's start). False: queued
 	 *              for the worker, the nearest first
 	 * @return How many tiles were worked out or queued
 	 */
+	int32 WarmUpAround(TConstArrayView<FVector> Places, double Radius, bool bWait);
+
+	/** WarmUpAround on a heightmap world, by the viewers' world X and Y. */
 	int32 WarmUp(TConstArrayView<FVector2D> Centres, double Radius, bool bWait);
+
+	/** @return The place of a world position: its column (X, Y, 0), or on a planet the unit direction from the centre */
+	FVector GetPlaceOf(const FVector& WorldPosition) const;
+
+	/** @return The region within a distance of a place: a box on a heightmap world, a cap on a planet */
+	FVoxelConditioningRegion GetRegionAround(const FVector& Place, double Radius) const;
 
 	/** @return The radius the world's start waits for, and the chunks' gathers stay inside: the settings' view distances and a tile */
 	double GetWarmUpRadius() const;
@@ -147,11 +174,11 @@ public:
 	double GetFarRadius() const;
 
 	/**
-	 * The tiles that arrived with a body after a Ready gather had missed them: their boxes. The owner hands each to the
-	 * chunk manager's water and conditioning announcements.
-	 * @param OutRegions Appended with the boxes; the list is emptied
+	 * The tiles that arrived with a body after a Ready gather had missed them: their regions (a box, or on a planet the
+	 * cap around the tile). The owner hands each to the chunk manager's water and conditioning announcements.
+	 * @param OutRegions Appended with the regions; the list is emptied
 	 */
-	void TakeAnnouncements(TArray<FBox2D>& OutRegions);
+	void TakeAnnouncements(TArray<FVoxelConditioningRegion>& OutRegions);
 
 	/** @return Whether a tile with a body was stored since the last call: what draws the bodies gathers them again */
 	bool TakeBodiesArrived();
@@ -161,10 +188,11 @@ public:
 
 	/**
 	 * The lakes and the river systems that reach a region, worked out here when they are missing (a survey, a test).
-	 * @param Region World XY
+	 * @param Region A box on a heightmap world, a cap on a planet
 	 * @param Out The generator's own answer for the region
 	 */
-	void Survey(const FBox2D& Region, FVoxelHydrologyRegion& Out);
+	void Survey(const FVoxelConditioningRegion& Region, FVoxelHydrologyRegion& Out);
+	void Survey(const FBox2D& Region, FVoxelHydrologyRegion& Out) { Survey(FVoxelConditioningRegion::OfBox(Region), Out); }
 
 	/** @return The counters and the cache's sizes now */
 	FVoxelHydrologyStats GetStats() const;
@@ -184,6 +212,11 @@ private:
 	{
 		TArray<FVoxelWaterBody> Bodies;
 		TArray<FVoxelConditioningLineRef> Beds;
+
+		/** The lowest and highest level of the bodies (unset with none), and on a planet the tile's middle */
+		double MinLevel = 0.0;
+		double MaxLevel = 0.0;
+		FVector Centre = FVector::ZeroVector;
 	};
 
 	struct FTileEntry
@@ -195,13 +228,36 @@ private:
 	/** Who works a tile out, for the counters */
 	enum class EBuild : uint8 { Gather, Worker, Warm };
 
-	FBox2D BoxOfTile(const FIntPoint& Tile) const;
+	/** A tile's region: its box, or on a planet the cap around it */
+	FVoxelConditioningRegion RegionOfTile(const FIntPoint& Tile) const;
 
-	/** The tiles a region meets: [Min, Max) */
-	FIntRect TilesOf(const FBox2D& Region) const;
+	/** Whether a region is one of this world's kind (a box on a heightmap world, a cap on a planet) with something in it */
+	bool IsRegionOfWorld(const FVoxelConditioningRegion& Region) const;
+
+	/**
+	 * The tiles a region meets.
+	 * @param Limit Stop past this many
+	 * @param OutTiles The tiles (emptied first): row by row on a heightmap world
+	 * @return False when there are more than the limit (OutTiles is then not the whole list)
+	 */
+	bool TilesOf(const FVoxelConditioningRegion& Region, int64 Limit, TArray<FIntPoint>& OutTiles) const;
+
+	/**
+	 * The tiles a region meets, one at a time: row by row on a heightmap world, in a flood's order on a planet.
+	 * @param Limit Give up past this many (a planet's cap wider than that many tiles is given up before any is visited)
+	 * @param Visit Called with each tile; false stops the walk
+	 * @return False when Visit stopped the walk or the region meets more tiles than the limit
+	 */
+	bool VisitTiles(const FVoxelConditioningRegion& Region, int64 Limit, TFunctionRef<bool(const FIntPoint&)> Visit) const;
+
+	/** @return How far a tile lies from a place (0 when the place is in the tile's region) */
+	double DistanceToTile(const FIntPoint& Tile, const FVector& Place) const;
 
 	/** The gather both interfaces share: the tiles of a region, worked out or queued by the need. */
-	void Gather(const FBox2D& Region, EVoxelConditioningGather Need, TArray<FVoxelWaterBody>* OutBodies, TArray<FVoxelConditioningLineRef>* OutLines);
+	void Gather(const FVoxelConditioningRegion& Region, EVoxelConditioningGather Need, TArray<FVoxelWaterBody>* OutBodies, TArray<FVoxelConditioningLineRef>* OutLines);
+
+	/** Whether every tile of a region is kept. */
+	bool Holds(const FVoxelConditioningRegion& Region) const;
 
 	/** Work tiles out here and keep them: the springs' descents first, in parallel, then each tile's region. Lock not held. @return The wall time, in milliseconds */
 	double BuildNow(const TArray<FIntPoint>& Tiles, EBuild Who, bool bParallel);
@@ -221,6 +277,13 @@ private:
 	double CellSize = 800.0;
 	double TileSize = 51200.0;
 
+	/** The generator's grid of the world, and a planet's tiles: the cells of a cube sphere, a tile's width about TileSize */
+	FVoxelHydrologyGrid Grid;
+	FVoxelCubeSphereGrid TileGrid;
+
+	/** A planet: a tile's width at a face's middle as an angle, which bounds how far any tile's corner lies from its middle */
+	double TileCapAngle = 0.0;
+
 	mutable FCriticalSection Lock;
 	uint64 UseCounter = 0;
 	TMap<FIntPoint, FTileEntry> Tiles;
@@ -236,7 +299,7 @@ private:
 
 	/** Tiles a Ready gather did not get: announced when they arrive with a body */
 	TSet<FIntPoint> ReadyMissed;
-	TArray<FBox2D> Announcements;
+	TArray<FVoxelConditioningRegion> Announcements;
 	bool bBodiesArrived = false;
 	bool bWarnedTooWide = false;
 	bool bStarted = false;
@@ -244,11 +307,20 @@ private:
 	/** A disc a warm-up that does not wait has gone through: asked again for a viewer that has barely moved, it is not walked again */
 	struct FWarmedDisc
 	{
-		FVector2D Centre = FVector2D::ZeroVector;
+		FVector Centre = FVector::ZeroVector;
 		double Radius = 0.0;
 		uint64 Epoch = 0;
+
+		/** Every tile of the disc is kept (until tiles are dropped: Epoch): a region inside it is held */
+		bool bComplete = false;
 	};
 	TArray<FWarmedDisc, TInlineAllocator<8>> WarmedDiscs;
+
+	/** The discs a warm-up that waited worked out whole (the world's start, the game layer's): what Holds answers from first */
+	TArray<FWarmedDisc, TInlineAllocator<8>> HeldDiscs;
+
+	/** A planet: the discs a warm-up that does not wait asked for, which the worker has yet to go through */
+	TArray<FWarmedDisc> PendingDiscs;
 
 	/** Counts the times tiles were dropped from the cache: a disc gone through before then is gone through again */
 	uint64 TrimEpoch = 0;

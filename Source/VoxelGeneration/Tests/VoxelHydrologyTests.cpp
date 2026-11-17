@@ -24,7 +24,7 @@
 //   system one of whose reaches cannot be made has no reach.
 // - Generation.Hydrology.Fingerprint: a world that names a hydrology configuration has the save fingerprint's term,
 //   with the generator's version and its settings; one that names none has the fingerprint it had; a planet and a
-//   block world have no term (they generate none yet).
+//   block world that name one have the term too (the plan's H8; their own tests are in VoxelHydrologyPlanetTests.cpp).
 // ---------------------------------------------------------------------------
 
 namespace VoxelHydrologyTest
@@ -530,11 +530,17 @@ bool FVoxelHydrologyFingerprintTest::RunTest(const FString& Parameters)
 
 	Config->WorldMode = EWorldMode::IslandBowl;
 	TestTrue(TEXT("an island that names one generates hydrology"), FVoxelHydrology::IsEnabled(*Config) && FVoxelWorldModeFactory::MakeFingerprint(*Config).Shape.Contains(TEXT("Hydrology=")));
+	// Every world mode generates hydrology since the plan's H8: a planet and a block world carry the term too.
 	Config->WorldMode = EWorldMode::SphericalPlanet;
-	TestTrue(TEXT("a planet does not, yet: no term"), !FVoxelHydrology::IsEnabled(*Config) && !FVoxelWorldModeFactory::MakeFingerprint(*Config).Shape.Contains(TEXT("Hydrology")));
+	TestTrue(TEXT("a planet that names one generates hydrology"), FVoxelHydrology::IsEnabled(*Config) && FVoxelWorldModeFactory::MakeFingerprint(*Config).Shape.Contains(TEXT("Hydrology=")));
+	Config->HydrologyConfiguration = nullptr;
+	TestTrue(TEXT("... and one that names none has no term"), !FVoxelHydrology::IsEnabled(*Config) && !FVoxelWorldModeFactory::MakeFingerprint(*Config).Shape.Contains(TEXT("Hydrology")));
+	Config->HydrologyConfiguration = Hydrology;
 	Config->WorldMode = EWorldMode::InfinitePlane;
 	Config->MeshingMode = EMeshingMode::Cubic;
-	TestTrue(TEXT("a block world does not, yet: no term"), !FVoxelHydrology::IsEnabled(*Config) && !FVoxelWorldModeFactory::MakeFingerprint(*Config).Shape.Contains(TEXT("Hydrology")));
+	TestTrue(TEXT("a block world that names one generates hydrology"), FVoxelHydrology::IsEnabled(*Config) && FVoxelWorldModeFactory::MakeFingerprint(*Config).Shape.Contains(TEXT("Hydrology=")));
+	Config->HydrologyConfiguration = nullptr;
+	TestTrue(TEXT("... and one that names none has no term"), !FVoxelHydrology::IsEnabled(*Config) && !FVoxelWorldModeFactory::MakeFingerprint(*Config).Shape.Contains(TEXT("Hydrology")));
 	return true;
 }
 

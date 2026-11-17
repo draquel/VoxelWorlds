@@ -3545,12 +3545,6 @@ void UVoxelChunkManager::StartHydrology()
 	}
 	if (!FVoxelHydrology::IsEnabled(*Configuration))
 	{
-		if (Configuration->HydrologyConfiguration)
-		{
-			UE_LOG(LogVoxelStreaming, Warning,
-				TEXT("Hydrology: the world configuration %s names a hydrology configuration, but a planet and a block world do not generate hydrology yet: no pond and no brook is generated, and the world's saves are not refused for it."),
-				*Configuration->GetName());
-		}
 		return;
 	}
 	const FVoxelHydrologyGround Ground = FVoxelHydrologyGround::FromConfig(*Configuration, WorldMode.ToSharedRef());
@@ -3560,13 +3554,22 @@ void UVoxelChunkManager::StartHydrology()
 
 	// Where the world will first stream: the level's player starts; with none, the world's origin (where a game mode
 	// puts a player that finds no start); and a pawn that stands already. The bodies within the warm-up's radius of
-	// each are worked out now, in parallel, so no chunk's request and no spawn search waits for one.
-	TArray<FVector2D> Centres;
+	// each are worked out now, in parallel, so no chunk's request and no spawn search waits for one. A place is a
+	// column: world X and Y, or on a planet the direction from its centre.
+	TArray<FVector> Centres;
+	// A position deep inside a planet names no direction on it (a level's player start at the planet's centre): no start.
+	const auto AddCentre = [this, &Ground, &Centres](const FVector& Location)
+	{
+		if (!Ground.bRadial || FVector::Dist(Location, Ground.PlanetCenter) > 0.5 * Ground.PlanetRadius)
+		{
+			Centres.AddUnique(HydrologyNetwork->GetPlaceOf(Location));
+		}
+	};
 	if (const UWorld* World = GetWorld())
 	{
 		for (TActorIterator<APlayerStart> It(World); It; ++It)
 		{
-			Centres.AddUnique(FVector2D(It->GetActorLocation()));
+			AddCentre(It->GetActorLocation());
 		}
 		for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
 		{
@@ -3574,18 +3577,24 @@ void UVoxelChunkManager::StartHydrology()
 			{
 				if (const APawn* Pawn = Controller->GetPawn())
 				{
-					Centres.AddUnique(FVector2D(Pawn->GetActorLocation()));
+					AddCentre(Pawn->GetActorLocation());
 				}
 			}
 		}
 	}
+	if (Ground.bRadial)
+	{
+		// A planet streams first around its spawn position (the configuration's: the point over the datum, which asks
+		// no generated ground and so no body before the warm-up).
+		AddCentre(Configuration->GetPlanetSpawnPosition());
+	}
 	if (Centres.Num() == 0)
 	{
-		Centres.Add(FVector2D::ZeroVector);
+		Centres.Add(HydrologyNetwork->GetPlaceOf(FVector::ZeroVector));
 	}
 	const double Start = FPlatformTime::Seconds();
 	const double Radius = HydrologyNetwork->GetWarmUpRadius();
-	const int32 Worked = HydrologyNetwork->WarmUp(Centres, Radius, /*bWait=*/true);
+	const int32 Worked = HydrologyNetwork->WarmUpAround(Centres, Radius, /*bWait=*/true);
 	const double Ms = (FPlatformTime::Seconds() - Start) * 1000.0;
 	const FVoxelHydrologyStats Stats = HydrologyNetwork->GetStats();
 	const FVoxelHydrologySettings& Settings = HydrologyNetwork->GetSettings();
@@ -3618,44 +3627,47 @@ void UVoxelChunkManager::UpdateHydrology()
 		return;
 	}
 	HydrologyNetwork->MarkStarted();
-	// The viewers: the streaming viewer and a server's further ones.
-	TArray<FVector2D, TInlineAllocator<4>> Centres;
-	Centres.Add(FVector2D(CurrentViewerPosition));
+	// The viewers: the streaming viewer and a server's further ones, each by its place (its column; a planet: its direction).
+	TArray<FVector, TInlineAllocator<4>> Centres;
+	Centres.Add(HydrologyNetwork->GetPlaceOf(CurrentViewerPosition));
 	for (const FVoxelFurtherViewer& Viewer : FurtherViewers)
 	{
-		Centres.Add(FVector2D(Viewer.Position));
+		Centres.Add(HydrologyNetwork->GetPlaceOf(Viewer.Position));
 	}
+	const double PlaceScale = HydrologyNetwork->GetGround().bRadial ? HydrologyNetwork->GetGround().PlanetRadius : 1.0;
 	// Asked again when a viewer has moved a quarter of a tile, when the viewers changed, and every few seconds (the
 	// queue is not kept across a tile that was dropped from the cache).
 	const double Step = 0.25 * HydrologyNetwork->GetSettings().TileCells * HydrologyNetwork->GetSettings().CellVoxels * FMath::Max(static_cast<double>(Configuration->VoxelSize), 1.0);
 	bool bAsk = HydrologyWarmedAt.Num() != Centres.Num() || CurrentFrame - HydrologyWarmedFrame >= 300;
 	for (int32 Index = 0; Index < Centres.Num() && !bAsk; ++Index)
 	{
-		bAsk = FVector2D::Distance(Centres[Index], HydrologyWarmedAt[Index]) > Step;
+		bAsk = PlaceScale * FVector::Distance(Centres[Index], HydrologyWarmedAt[Index]) > Step;
 	}
 	if (bAsk)
 	{
-		HydrologyWarmedAt = TArray<FVector2D>(Centres);
+		HydrologyWarmedAt = TArray<FVector>(Centres);
 		HydrologyWarmedFrame = CurrentFrame;
 		// The near disc first: what the chunks' requests ask for. Then the far one, for what draws far away.
-		HydrologyNetwork->WarmUp(Centres, HydrologyNetwork->GetWarmUpRadius(), /*bWait=*/false);
-		HydrologyNetwork->WarmUp(Centres, HydrologyNetwork->GetFarRadius(), /*bWait=*/false);
+		HydrologyNetwork->WarmUpAround(Centres, HydrologyNetwork->GetWarmUpRadius(), /*bWait=*/false);
+		HydrologyNetwork->WarmUpAround(Centres, HydrologyNetwork->GetFarRadius(), /*bWait=*/false);
 	}
 
 	// A tile that arrived with a body after a reader had taken what was at hand there: the far field's patches and the
 	// map's tiles draw again. What asks for every body (a chunk's request, a point, scatter) was answered whole when
 	// it asked, so nothing it kept is dropped.
-	TArray<FBox2D> Arrived;
+	TArray<FVoxelConditioningRegion> Arrived;
 	HydrologyNetwork->TakeAnnouncements(Arrived);
-	for (const FBox2D& Box : Arrived)
+	for (const FVoxelConditioningRegion& Region : Arrived)
 	{
 		if (FarField)
 		{
 			FVoxelFarFieldRegion FarRegion;
-			FarRegion.Box = Box;
+			FarRegion.bCap = Region.bCap;
+			FarRegion.Direction = Region.Direction;
+			FarRegion.AngularRadius = Region.AngularRadius;
+			FarRegion.Box = Region.Box;
 			FarField->InvalidateRegion(FarRegion);
 		}
-		const FVoxelConditioningRegion Region = FVoxelConditioningRegion::OfBox(Box);
 		OnWaterBodiesChanged.Broadcast(Region);
 		BroadcastTerrainConditioningChanged(Region);
 	}
@@ -3762,6 +3774,37 @@ FVoxelWaterLevelRange UVoxelChunkManager::GetWaterRange(const FBox& Box, EVoxelC
 	if (WaterBodySources.IsEmpty())
 	{
 		return GetWaterLevels().GetRange(Box);
+	}
+	// A planet's reader that takes what is at hand over a wide box (the LOD window's near disk, at every update): where
+	// every source gives its levels' range without listing its bodies (a world with generated ponds and brooks holds
+	// thousands), the range is the sea's and the hand-placed bodies' with the sources' levels over it.
+	FVector CapDirection;
+	double CapAngle = 0.0;
+	if (Need == EVoxelConditioningGather::Ready && WaterBodySources.NumSources() > 0 && GetPlanetCapOfBox(Box, CapDirection, CapAngle))
+	{
+		bool bAny = false;
+		double MinLevel = 0.0, MaxLevel = 0.0;
+		if (WaterBodySources.GetSourcesLevelRangeAtHandOnSphere(CapDirection, CapAngle, bAny, MinLevel, MaxLevel))
+		{
+			const FVoxelWaterLevels Sea = GetWaterLevels();
+			TArray<FVoxelWaterBody> Placed;
+			for (const FVoxelWaterBody& Body : WaterBodySources.GetBodies())
+			{
+				if (Body.MeetsCap(CapDirection, CapAngle, Sea.GetFrame().DatumRadius))
+				{
+					Placed.Add(Body);
+				}
+			}
+			FVoxelWaterLevelRange Range = FVoxelWaterLevels::Make(Sea.GetSea(), Sea.GetFrame(), Box, MoveTemp(Placed)).GetRange(Box);
+			if (bAny)
+			{
+				Range.MinLevel = Range.bAny ? FMath::Min(Range.MinLevel, MinLevel) : MinLevel;
+				Range.MaxLevel = Range.bAny ? FMath::Max(Range.MaxLevel, MaxLevel) : MaxLevel;
+				Range.bAny = true;
+				Range.bUniform = false;
+			}
+			return Range;
+		}
 	}
 	return GatherWaterLevels(Box, Need).GetRange(Box);
 }
@@ -4216,7 +4259,7 @@ void UVoxelChunkManager::UpdateWaterBodyMeshes()
 			const FVector2D Viewer(CurrentViewerPosition.X, CurrentViewerPosition.Y);
 			WaterBodySources.GatherForRegion(FBox2D(Viewer - FVector2D(Reach), Viewer + FVector2D(Reach)), EVoxelConditioningGather::Ready, Bodies);
 		}
-		if (HydrologyNetwork.IsValid() && !Frame.bRadial)
+		if (HydrologyNetwork.IsValid())
 		{
 			// Each generated kind out to its own distance, by the body's bounds; the bodies placed by hand (the world's
 			// own list: a river's and a lake's actors) out to the far field's, the nearer ones gathered above already.
@@ -4232,14 +4275,21 @@ void UVoxelChunkManager::UpdateWaterBodyMeshes()
 				{
 					return false;
 				}
-				const FBox2D Bounds(FVector2D(Body.Bounds.Min.X, Body.Bounds.Min.Y), FVector2D(Body.Bounds.Max.X, Body.Bounds.Max.Y));
 				const double Limit = Body.Kind == EVoxelWaterBodyKind::Reach ? RiverReach : LakeReach;
+				if (Frame.bRadial)
+				{
+					// A planet body's bounds are a box round its water in the world: the straight distance to it.
+					return Body.Bounds.ComputeSquaredDistanceToPoint(CurrentViewerPosition) > FMath::Square(Limit);
+				}
+				const FBox2D Bounds(FVector2D(Body.Bounds.Min.X, Body.Bounds.Min.Y), FVector2D(Body.Bounds.Max.X, Body.Bounds.Max.Y));
 				return Bounds.ComputeSquaredDistanceToPoint(Viewer) > FMath::Square(Limit);
 			});
 			const FBox2D PlacedRegion(Viewer - FVector2D(PlacedReach), Viewer + FVector2D(PlacedReach));
+			const FVector PlacedDirection = Frame.UpAt(CurrentViewerPosition);
+			const double PlacedAngle = FMath::Min(PlacedReach / FMath::Max(Frame.DatumRadius, 1.0), UE_DOUBLE_PI);
 			for (const FVoxelWaterBody& Body : WaterBodySources.GetBodies())
 			{
-				if (Body.MeetsRegion(PlacedRegion))
+				if (Frame.bRadial ? Body.MeetsCap(PlacedDirection, PlacedAngle, Frame.DatumRadius) : Body.MeetsRegion(PlacedRegion))
 				{
 					Bodies.Add(Body); // a second copy of a near one goes with the ids below
 				}

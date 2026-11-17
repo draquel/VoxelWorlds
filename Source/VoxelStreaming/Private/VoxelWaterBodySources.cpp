@@ -48,3 +48,30 @@ void FVoxelWaterBodySources::GatherOnSphere(const FVector& Direction, double Ang
 		Source->GatherWaterBodiesOnSphere(Direction, AngularRadius, Need, Out);
 	}
 }
+
+bool FVoxelWaterBodySources::GetSourcesLevelRangeAtHandOnSphere(const FVector& Direction, double AngularRadius, bool& bOutAny, double& OutMinLevel, double& OutMaxLevel) const
+{
+	bOutAny = false;
+	OutMinLevel = 0.0;
+	OutMaxLevel = 0.0;
+	if (Sources.Num() == 0)
+	{
+		return false;
+	}
+	for (const IVoxelWaterBodySource* Source : Sources)
+	{
+		bool bAny = false;
+		double MinLevel = 0.0, MaxLevel = 0.0;
+		if (!Source->GetLevelRangeAtHandOnSphere(Direction, AngularRadius, bAny, MinLevel, MaxLevel))
+		{
+			return false;
+		}
+		if (bAny)
+		{
+			OutMinLevel = bOutAny ? FMath::Min(OutMinLevel, MinLevel) : MinLevel;
+			OutMaxLevel = bOutAny ? FMath::Max(OutMaxLevel, MaxLevel) : MaxLevel;
+			bOutAny = true;
+		}
+	}
+	return true;
+}

@@ -170,6 +170,114 @@ FIntPoint FVoxelCubeSphereGrid::Neighbour(const FIntPoint& Cell, int32 DX, int32
 	return CellOfDirection(DirectionAt(Cell, 0.5 + DX, 0.5 + DY));
 }
 
+bool FVoxelCubeSphereGrid::GetAdjacentCell(const FIntPoint& Cell, int32 DX, int32 DY, FIntPoint& OutCell) const
+{
+	int32 Face = 0, IU = 0, IV = 0;
+	if (!FromAtlas(Cell, Face, IU, IV))
+	{
+		return false;
+	}
+	const int32 NU = IU + FMath::Clamp(DX, -1, 1);
+	const int32 NV = IV + FMath::Clamp(DY, -1, 1);
+	const bool bOutU = NU < 0 || NU >= N;
+	const bool bOutV = NV < 0 || NV >= N;
+	if (!bOutU && !bOutV)
+	{
+		OutCell = ToAtlas(Face, NU, NV);
+		return true;
+	}
+	if (bOutU && bOutV)
+	{
+		// Off a cube corner: the two faces across the two edges meet each other there, and no cell lies diagonally.
+		return false;
+	}
+
+	// Across one edge. The step leaves the face along Out (one of its two axes, with a sign); Along is the face's other
+	// axis, the edge's own direction, and Index the cell's place along it.
+	FVector Normal, AxisU, AxisV;
+	FVoxelCubeSphere::GetFaceAxes(Face, Normal, AxisU, AxisV);
+	const FVector Out = bOutU ? AxisU * (NU < 0 ? -1.0 : 1.0) : AxisV * (NV < 0 ? -1.0 : 1.0);
+	const FVector Along = bOutU ? AxisV : AxisU;
+	const int32 Index = bOutU ? NV : NU;
+
+	// The next face is the one whose normal is Out. Seen from it the shared edge lies on the side this face's normal
+	// points to, and runs along Along or against it: its cells along the edge are this face's, in order or reversed.
+	for (int32 Other = 0; Other < 6; ++Other)
+	{
+		FVector OtherNormal, OtherU, OtherV;
+		FVoxelCubeSphere::GetFaceAxes(Other, OtherNormal, OtherU, OtherV);
+		if (FVector::DotProduct(OtherNormal, Out) < 0.5)
+		{
+			continue;
+		}
+		const double EdgeOnU = FVector::DotProduct(Normal, OtherU);
+		const double EdgeOnV = FVector::DotProduct(Normal, OtherV);
+		int32 OU = 0, OV = 0;
+		if (FMath::Abs(EdgeOnU) > 0.5)
+		{
+			OU = EdgeOnU > 0.0 ? N - 1 : 0;
+			OV = FVector::DotProduct(Along, OtherV) > 0.0 ? Index : N - 1 - Index;
+		}
+		else
+		{
+			OV = EdgeOnV > 0.0 ? N - 1 : 0;
+			OU = FVector::DotProduct(Along, OtherU) > 0.0 ? Index : N - 1 - Index;
+		}
+		OutCell = ToAtlas(Other, OU, OV);
+		return true;
+	}
+	return false;
+}
+
+void FVoxelCubeSphereGrid::GatherCentresWithinAngle(const FVector& Direction, double MaxAngle, TArray<FIntPoint>& OutCells) const
+{
+	OutCells.Reset();
+	if (!IsValid())
+	{
+		return;
+	}
+	if (MaxAngle >= UE_DOUBLE_PI)
+	{
+		OutCells.Reserve(static_cast<int32>(GetNumCells()));
+		for (int32 Face = 0; Face < 6; ++Face)
+		{
+			for (int32 IV = 0; IV < N; ++IV)
+			{
+				for (int32 IU = 0; IU < N; ++IU)
+				{
+					OutCells.Add(ToAtlas(Face, IU, IV));
+				}
+			}
+		}
+		return;
+	}
+	const double MinDot = FMath::Cos(FMath::Max(MaxAngle, 0.0));
+	TSet<FIntPoint> Visited;
+	const FIntPoint Start = CellOfDirection(Direction);
+	Visited.Add(Start);
+	OutCells.Add(Start);
+	static const int32 StepX[4] = { 1, -1, 0, 0 };
+	static const int32 StepY[4] = { 0, 0, 1, -1 };
+	for (int32 Head = 0; Head < OutCells.Num(); ++Head)
+	{
+		const FIntPoint Cell = OutCells[Head];
+		for (int32 Step = 0; Step < 4; ++Step)
+		{
+			FIntPoint Next;
+			if (!GetAdjacentCell(Cell, StepX[Step], StepY[Step], Next))
+			{
+				continue;
+			}
+			bool bAlready = false;
+			Visited.Add(Next, &bAlready);
+			if (!bAlready && FVector::DotProduct(CellCentreDirection(Next), Direction) >= MinDot)
+			{
+				OutCells.Add(Next);
+			}
+		}
+	}
+}
+
 bool FVoxelCubeSphereGrid::GatherWithinAngle(const FVector& Direction, double MaxAngle, int32 MaxCells, TArray<FIntPoint>& OutCells) const
 {
 	OutCells.Reset();

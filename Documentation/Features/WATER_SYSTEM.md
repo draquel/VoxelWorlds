@@ -1,8 +1,9 @@
 # Water System Architecture
 
-> State as of 2026-11-15 (the hydrology plan's H1 to H4: "Lakes and river reaches", "A chunk's water columns",
-> "Lakes and river reaches drawn" and "The river and the lake placed by hand", under "On a Planet"; the water plan's W1, 2026-11-13: the material paragraphs; its
-> W2: "The water levels"; the rest as of code review CR5, 2026-11-02).
+> State as of 2026-11-16 (the hydrology plan's H1 to H8: "Lakes and river reaches", "A chunk's water columns",
+> "Lakes and river reaches drawn", "The river and the lake placed by hand" and "Ponds and brooks from the seed", under
+> "On a Planet"; the water plan's W1, 2026-11-13: the material paragraphs; its W2: "The water levels"; the rest as of
+> code review CR5, 2026-11-02).
 > Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelCore (flags, the sea, the water levels), VoxelGeneration (fill pass), VoxelMeshing (water mesher), VoxelStreaming (propagation, tiles, the far ocean, the meshes of lakes and river reaches), VoxelRendering (rendering)
@@ -529,16 +530,17 @@ outline and one with no water, a river that begins play before the world, two wo
 `VoxelEngine.Water.HandPlaced.Plane`, `.Island`, `.Planet`, `.Cubic` (the pawn swims in the lake and is carried
 down the river, following its surface down; an item floats in each).
 
-**Ponds and brooks from the seed (the hydrology plan's H7, 2026-11-16; D145, D146).** A world whose configuration
-names a hydrology configuration (`UVoxelWorldConfiguration::HydrologyConfiguration`, a `UVoxelHydrologyConfiguration`
-asset holding `FVoxelHydrologySettings`) has lakes and river reaches generated from its seed and its natural ground,
-with no terrain change but the beds: springs run downhill, a run long and gentle enough is a river with its bed, and a
-hollow one meets fills as a lake. On the plane and the island with a smooth surface (`FVoxelHydrology::IsEnabled`); a
-planet and a block world that name one ignore it with a warning until the plan's H8. A world that names none has no
-generator, no source and no term in its fingerprint: it is what it was.
+**Ponds and brooks from the seed (the hydrology plan's H7 and H8, 2026-11-16; D145, D146, D151).** A world whose
+configuration names a hydrology configuration (`UVoxelWorldConfiguration::HydrologyConfiguration`, a
+`UVoxelHydrologyConfiguration` asset holding `FVoxelHydrologySettings`) has lakes and river reaches generated from its
+seed and its natural ground, with no terrain change but the beds: springs run downhill, a run long and gentle enough
+is a river with its bed, and a hollow one meets fills as a lake. In every world mode (`FVoxelHydrology::IsEnabled`):
+the plane and the island since H7, a planet and a block world since H8 ("On a planet", "On a block world", below). A
+world that names none has no generator, no source and no term in its fingerprint: it is what it was.
 
 - **The generator** (`FVoxelHydrology`, VoxelGeneration: pure functions of the seed and a ground function,
-  `FVoxelHydrologyGround`). The natural ground is read on a grid of cells (`CellVoxels`, 8), aligned to the world.
+  `FVoxelHydrologyGround`). The natural ground is read on a grid of cells (`CellVoxels`, 8), aligned to the world
+  (`FVoxelHydrologyGrid`: a cell's place, its neighbours, a step's length, the lattice's squares).
   - *Springs.* A square of `SpringSpacingCells` cells holds one candidate, placed by a hash; it is a spring when it
     stands `MinSpringHeight` over the sea (`GetSpring`). The count of brooks goes with the square of the spacing, and
     the game layer places no POI on a body: 48 cells is the default (a square of 288 m on the demo), since a spring
@@ -582,6 +584,40 @@ generator, no source and no term in its fingerprint: it is what it was.
     out the springs within twice that length of itself. Ids come from cells: a reach's from its chain's first cell, a
     lake's from its lowest cell and its size, a bed's line id from the chain's first cell, over every road's and
     trail's between POIs and under a hand-placed line's of order 0.
+- **On a planet** (H8). A region is a cap (`FVoxelConditioningRegion::OfCap`), a place a unit direction, a height an
+  altitude over the datum (the ground is the planet's own altitude function, read along the radial), and a body's
+  level the datum radius more.
+  - *The grid* is a cube sphere's (`FVoxelCubeSphereGrid`): as many cells along a face's edge as bring a cell nearest
+    to `CellVoxels` voxels at a face's middle, in whole lattice squares, so a square's cells lie on one face. A cell is
+    an atlas coordinate and its place its middle's direction. Its neighbours are the cells it shares a side or a
+    corner with on the sphere, found by index across a face's edge (`FVoxelCubeSphereGrid::GetAdjacentCell`: two
+    faces' cells meet edge to edge along the edge they share): eight of them, seven for the three cells round each of
+    the cube's corners, and the same relation from both sides. A step is as long as the arc between the two cells'
+    middles, and the steepest fall is by that length (a cube sphere's cells are not all one size). So a descent, a
+    flood and a river are the same cells whichever face's region asks, which is what the plan asked of H8 first.
+    `Neighbour`, the step along a face's own plane, lands within rounding of a cell's border near a cube's corner
+    and is not used.
+  - *A lake's width* is measured east and north of its pit on the plane tangent there, in cells' widths. *A lake's
+    water* is worked out on the plane tangent at the hollow's lowest cell, the plane its footprint lies in
+    (`FVoxelWaterLake::MakeOnSphere`): a fine cell belongs to the generator's cell its direction lies in.
+  - *A river system's chains* are shaped on the datum sphere (each sampled and spread point brought back to it), the
+    banks are read across the line on the tangent plane (`FVoxelRiverCourse::ReadBanks` with the vertices' ups), and
+    a reach and its bed are a planet's: directions, the bed's targets altitudes, the reach's levels distances from
+    the centre. A bed's line id counts an atlas coordinate from 0.
+- **On a block world** (H8; `FVoxelHydrologyGround::bBlocks`: cubic meshing on a heightmap). The descents and the
+  hollows read the natural height, as on a smooth world: block tops are the same height over whole terraces, and a
+  descent over them would find a pit at every step.
+  - *A lake's water is whole blocks.* The fine flood runs on the block columns (a fine cell is a column, read at
+    its lower corner as the generators read it) and on their block tops (`FVoxelBlockSurface::BlockTopForHeight`), so
+    the rim holds at its own block's height with no margin: the water's top is the lowest block top on the way out,
+    and no higher than the lowest column beside the footprint. The body's level lies a tenth of a voxel under that
+    top, inside the layer whose blocks are the water's top ones (a level on a layer's boundary would flag the layer
+    over it: the fill takes the layer a level lies in), and the sheet is drawn there.
+  - *A bed steps a block a column at most* (D151), as a road's line does: the river profile holds the bed's grade to
+    `FVoxelHydrology::GetBlockBedGrade` (`FRiverProfileParams::MaxBedGrade`: a segment steeper than that has its
+    higher end lowered, with no limit of its own; the surface stays, the water there is deeper, and the cut's cap
+    judges the result), and the engine's own check of a line on a block world (`FVoxelConditioningLineLimits::bBlockWorld`)
+    refuses a system whose bed still breaks it.
 - **The network** (`FVoxelHydrologyNetwork`, VoxelStreaming) keeps what is worked out: a descent by its spring's
   square, a lake by its pit, a system by its mouth, and by tile (`TileCells` cells) the bodies and beds that reach it.
   It is the world's source of generated bodies (`IVoxelWaterBodySource`) and of their beds (`IVoxelTerrainConditioner`,
@@ -594,6 +630,17 @@ generator, no source and no term in its fingerprint: it is what it was.
   the world will first stream before it returns from `Initialize`, in parallel, and has the worker keep that disc and
   the wider one of `FarViewDistances` worked out around the viewers. `HoldsWaterBodies` says whether a region's tiles
   are kept: the game layer asks it before it places for a reader that takes what is at hand.
+  On a planet (H8) a tile is a cell of a cube sphere grid of its own, about `TileCells` cells wide, and its region
+  the cap round it; the gathers, the warm-up, the announcements and `HoldsWaterBodiesOnSphere` take caps. What costs
+  nothing on a plane (the tiles of a box are a rectangle) is a flood through the tiles' neighbours there, so three
+  things keep a planet of any size cheap: a cap wider than a gather's limit is given up by its area, before any tile
+  is looked at; a warm-up that does not wait hands its disc to the worker, which goes through its tiles; and a cap
+  inside a disc a warm-up has gone through whole is held without a look at its tiles (else tile by tile, as far as
+  the first that is not kept). A reader of the levels' range over a wide cap at every update (the LOD window's near
+  disk: `GetPlanetNearLayersCeiling`) gets it from each kept tile's own range, with no body listed
+  (`IVoxelWaterBodySource::GetLevelRangeAtHandOnSphere`, through `UVoxelChunkManager::GetWaterRange`), and keeps it
+  for the viewer's cell of the slab grid: listing and sorting the thousands of bodies of a 50 km planet's near disk
+  several times a frame held a frame for seconds.
 - **Drawing.** A generated body is drawn as any body is, by a mesh of its own (H3), but only near the viewer: a lake
   within `LakeDrawDistance` (6 km) and a river reach within `ReachDrawDistance` (2.5 km), and neither further than the
   far field draws the ground. A world that generates hydrology has thousands of bodies inside the far field's 20 km,
@@ -622,7 +669,15 @@ region filled give each body with the same record; every river reach against the
 every system whole), `.Fingerprint`; `Streaming.Hydrology.Network` (the gathers by need, the worker, the
 announcements, the warm-up, the counters), `.World` (a streamed plane: the network there at the registration, a
 generated lake's and a river reach's voxels flagged and sampled, no tile worked out on the game thread along a walk);
-in the POI layer `POI.WaterBodies.Source`. The gate in a play world is `Scripts/qa/hydrology_gate.py`.
+in the POI layer `POI.WaterBodies.Source`. For H8: `Core.CubeSphere.AdjacentCells` (every cell's neighbour has the cell
+among its own, eight of them but seven round a cube's corner; the cap gather against a count of all cells);
+`Generation.Hydrology.Planet` (a made planet: a hollow on a face's edge and one at a cube's corner each one lake with
+no column of water against its footprint's edge; two caps that overlap across the edge, a cap round both and a run
+with a cache give each body with the same record; the rules, with river reaches that run across the edge),
+`.Blocks` (a block lake's water whole blocks and watertight in blocks; over ground with a cliff no bed steeper than
+a block a column, beds lowered for it); `Streaming.Hydrology.Planet`, `.Cubic` (a streamed planet and a streamed
+block world: a generated lake's and a river reach's voxels flagged and sampled, a gather over a cap, no tile worked
+out on the game thread along a walk). The gate in a play world is `Scripts/qa/hydrology_gate.py`.
 
 H1 changed no output: no world has a body, a gather with none is the sea's snapshot, and the gates read as the base
 (the plan's H1 result). The cost of the point gather was measured by `Streaming.Water.Bodies.Plane` and `.Planet` in a

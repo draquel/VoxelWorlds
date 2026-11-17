@@ -167,11 +167,11 @@ bool FVoxelHydrologyNetworkTest::RunTest(const FString& Parameters)
 		Network->WaitForWorker();
 		const FVoxelHydrologyStats Done = Network->GetStats();
 		TestTrue(TEXT("the worker works the tiles out"), Done.WorkerTiles == Done.ReadyMisses && Done.Queued == 0 && Network->HoldsWaterBodies(Small));
-		TArray<FBox2D> Announced;
+		TArray<FVoxelConditioningRegion> Announced;
 		Network->TakeAnnouncements(Announced);
 		TestTrue(TEXT("the tiles that hold a body are announced, once"), Announced.Num() > 0 && Announced.Num() == Done.Announced && Announced.Num() <= Done.TilesWithBodies);
 		TestTrue(TEXT("... and what draws the bodies is told they arrived, once"), Network->TakeBodiesArrived() && !Network->TakeBodiesArrived());
-		TArray<FBox2D> None;
+		TArray<FVoxelConditioningRegion> None;
 		Network->TakeAnnouncements(None);
 		TestEqual(TEXT("... the list is emptied"), None.Num(), 0);
 		Network->GatherWaterBodies(Small, EVoxelConditioningGather::Ready, Bodies);
