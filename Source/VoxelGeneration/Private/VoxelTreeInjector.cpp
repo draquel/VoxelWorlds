@@ -210,10 +210,10 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 		// The conditioning: no tree inside a line's clear width, and where a line or a zone moves the ground (a road, a
 		// POI's pad and its ring) the tree stands on the ground generation makes there, the lines' blend and then the
 		// zones' (G206: with the natural height a tree on a pad cut into a slope began in the air over it, and one on a
-		// raised pad under its ground).
+		// raised pad under its ground). Nor inside a zone's clear radius: a POI that keeps its pad bare (G222).
 		if (bConditioned)
 		{
-			if (bLines && Conditioning->IsClearedAt(WorldX, WorldY))
+			if ((bLines && Conditioning->IsClearedAt(WorldX, WorldY)) || Conditioning->IsZoneClearedAt(WorldX, WorldY))
 			{
 				continue;
 			}

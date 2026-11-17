@@ -59,6 +59,15 @@ struct VOXELGENERATION_API FVoxelConditioningZone
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Conditioning")
 	FVector Direction = FVector::ZeroVector;
 
+	/**
+	 * Radius around the centre (world units; a planet zone's along the surface) in which no voxel tree is planted, as a
+	 * conditioning line's ClearHalfWidth keeps its width clear (G222: trees came up through a POI's houses on a block
+	 * world). 0, the default, clears nothing. Read by FVoxelConditioning::IsZoneClearedAt; the scatter and PCG keep off a
+	 * POI's pad through its claim instead.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Conditioning", meta = (ClampMin = "0.0"))
+	float ClearRadius = 0.0f;
+
 	FVoxelConditioningZone() = default;
 
 	FVoxelConditioningZone(const FVector2D& InCenter, float InInnerRadius, float InFalloffWidth, float InTargetHeight, float InStrength = 1.0f)
@@ -383,6 +392,44 @@ struct VOXELGENERATION_API FVoxelConditioning
 
 	/** IsClearedAt along a planet direction. */
 	bool IsClearedOnSphere(const FVector& Direction, double PlanetRadius) const;
+
+	/**
+	 * Whether a heightmap (X, Y) lies inside some heightmap zone's ClearRadius: no voxel tree is planted there (G222).
+	 * @param X World X
+	 * @param Y World Y
+	 * @return False when no zone clears
+	 */
+	bool IsZoneClearedAt(double X, double Y) const
+	{
+		for (const FVoxelConditioningZone& Zone : Zones)
+		{
+			if (Zone.ClearRadius > 0.0f && !Zone.IsRadial()
+				&& FVector2D::DistSquared(FVector2D(X, Y), Zone.Center) <= FMath::Square(static_cast<double>(Zone.ClearRadius)))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * IsZoneClearedAt along a planet direction: inside some planet zone's ClearRadius, measured along the datum sphere.
+	 * @param Direction Unit direction from the planet centre
+	 * @param PlanetRadius The datum radius
+	 * @return False when no zone clears
+	 */
+	bool IsZoneClearedOnSphere(const FVector& Direction, double PlanetRadius) const
+	{
+		for (const FVoxelConditioningZone& Zone : Zones)
+		{
+			if (Zone.ClearRadius > 0.0f && Zone.IsRadial()
+				&& FVoxelConditioningZone::GreatCircleDistance(Direction, Zone.Direction, PlanetRadius) <= Zone.ClearRadius)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
 
 	/**
 	 * The zones' part of ApplyToHeight: the height blended toward each heightmap zone's target, in order.
