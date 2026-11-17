@@ -210,6 +210,34 @@ bool FVoxelHydrologyNetworkTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("a warm-up that does not wait queues the rest for the worker"), Queued > 0 && Network->GetStats().WorkerTiles == Queued && Network->GetStats().SyncTiles == 0);
 		Network->Shutdown();
 	}
+
+	// ---- A region asked for (G232): the worker walks it and works out its tiles, the nearest to the place first, up to a
+	// limit per ask; nothing is worked out on the asking thread.
+	{
+		const TSharedRef<FVoxelHydrologyNetwork, ESPMode::ThreadSafe> Network = MakeShared<FVoxelHydrologyNetwork, ESPMode::ThreadSafe>(Ground, Settings, 10000.0);
+		Network->MarkStarted();
+		const FBox2D Region(FVector2D(40000.0, -60000.0), FVector2D(160000.0, 60000.0));
+		// The place off any tile's edge, so the tile it lies in is the nearest; the far corner's tile is not among two.
+		const FVector Place(41234.5, 1234.5, 0.0);
+		const FBox2D Near(FVector2D(Place.X - 10.0, Place.Y - 10.0), FVector2D(Place.X + 10.0, Place.Y + 10.0));
+		const FBox2D Far(FVector2D(159980.0, 59980.0), FVector2D(160000.0, 60000.0));
+		int32 Kept = 0, Waiting = 0, Limit = 0;
+		TestTrue(TEXT("a region of this world is taken"), Network->RequestRegion(FVoxelConditioningRegion::OfBox(Region), Place, 2));
+		TestFalse(TEXT("... a cap on a heightmap world is not"), Network->RequestRegion(FVoxelConditioningRegion::OfCap(FVector::UpVector, 0.1), Place, 2));
+		Network->WaitForWorker();
+		Network->GetLoad(Kept, Waiting, Limit);
+		const FVoxelHydrologyStats Limited = Network->GetStats();
+		TestTrue(TEXT("an ask queues no more tiles than its limit, worked out by the worker"), Limited.RequestedTiles == 2 && Limited.WorkerTiles == 2 && Kept == 2 && Waiting == 0
+			&& Limit > Kept && Limited.SyncTiles == 0);
+		TestTrue(TEXT("... the tiles nearest the place first"), Network->HoldsWaterBodies(Near) && !Network->HoldsWaterBodies(Far));
+		Network->RequestRegion(FVoxelConditioningRegion::OfBox(Region), Place, TNumericLimits<int32>::Max());
+		Network->WaitForWorker();
+		const FVoxelHydrologyStats Whole = Network->GetStats();
+		TestTrue(TEXT("asked for whole, the region is held, each tile worked out once"), Network->HoldsWaterBodies(Region) && Whole.WorkerTiles == Whole.RequestedTiles
+			&& Whole.RequestedTiles > 2 && Whole.SyncTiles == 0);
+		Network->Shutdown();
+		TestFalse(TEXT("a network shut down takes no ask"), Network->RequestRegion(FVoxelConditioningRegion::OfBox(Region), Place, 2));
+	}
 	return true;
 }
 

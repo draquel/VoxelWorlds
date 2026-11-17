@@ -482,11 +482,49 @@ void FVoxelHydrologyNetwork::RunWorker()
 			}
 			continue;
 		}
+		FRequestedRegion Requested;
+		bool bRequested = false;
 		{
 			FScopeLock Scope(&Lock);
-			if (PendingDiscs.Num() > 0 && !bShutdown)
+			if (!bShutdown && PendingRegions.Num() > 0)
 			{
-				continue; // a disc was asked for meanwhile
+				Requested = PendingRegions[0];
+				PendingRegions.RemoveAt(0, EAllowShrinking::No);
+				bRequested = true;
+			}
+		}
+		if (bRequested)
+		{
+			// A region RequestRegion asked for (G232): its tiles that are neither kept nor queued, the nearest to its place
+			// first, after what is queued already.
+			TArray<TPair<double, FIntPoint>> Near;
+			VisitTiles(Requested.Region, TNumericLimits<int32>::Max(), [&](const FIntPoint& Key)
+			{
+				Near.Emplace(DistanceToTile(Key, Requested.Place), Key);
+				return true;
+			});
+			Near.Sort([](const TPair<double, FIntPoint>& A, const TPair<double, FIntPoint>& B)
+			{
+				return A.Key != B.Key ? A.Key < B.Key : (A.Value.X != B.Value.X ? A.Value.X < B.Value.X : A.Value.Y < B.Value.Y);
+			});
+			FScopeLock Scope(&Lock);
+			int32 Count = 0;
+			for (const TPair<double, FIntPoint>& Entry : Near)
+			{
+				if (Count >= Requested.MaxTiles)
+				{
+					break;
+				}
+				Count += Enqueue(Entry.Value) ? 1 : 0;
+			}
+			Stats.RequestedTiles += Count;
+			continue;
+		}
+		{
+			FScopeLock Scope(&Lock);
+			if ((PendingDiscs.Num() > 0 || PendingRegions.Num() > 0) && !bShutdown)
+			{
+				continue; // a disc or a region was asked for meanwhile
 			}
 			if (bShutdown || Queue.Num() == 0)
 			{
@@ -923,6 +961,34 @@ int32 FVoxelHydrologyNetwork::WarmUpAround(TConstArrayView<FVector> Centres, dou
 	return Missing.Num();
 }
 
+bool FVoxelHydrologyNetwork::RequestRegion(const FVoxelConditioningRegion& Region, const FVector& Place, int32 MaxTiles)
+{
+	if (MaxTiles <= 0 || !IsRegionOfWorld(Region))
+	{
+		return false;
+	}
+	FScopeLock Scope(&Lock);
+	if (bShutdown)
+	{
+		return false;
+	}
+	PendingRegions.Add(FRequestedRegion{ Region, Place, MaxTiles });
+	if (!bWorkerRunning)
+	{
+		bWorkerRunning = true;
+		WorkerTask = UE::Tasks::Launch(UE_SOURCE_LOCATION, [Self = AsShared()]() { Self->RunWorker(); }, UE::Tasks::ETaskPriority::BackgroundNormal);
+	}
+	return true;
+}
+
+void FVoxelHydrologyNetwork::GetLoad(int32& OutKept, int32& OutQueued, int32& OutLimit) const
+{
+	FScopeLock Scope(&Lock);
+	OutKept = Tiles.Num();
+	OutQueued = Queue.Num() + PendingDiscs.Num() + PendingRegions.Num();
+	OutLimit = VoxelHydrologyNetworkPrivate::MaxTiles;
+}
+
 void FVoxelHydrologyNetwork::TakeAnnouncements(TArray<FVoxelConditioningRegion>& OutRegions)
 {
 	FScopeLock Scope(&Lock);
@@ -954,7 +1020,7 @@ FVoxelHydrologyStats FVoxelHydrologyNetwork::GetStats() const
 	FScopeLock Scope(&Lock);
 	FVoxelHydrologyStats Out = Stats;
 	Out.Tiles = Tiles.Num();
-	Out.Queued = Queue.Num() + PendingDiscs.Num();
+	Out.Queued = Queue.Num() + PendingDiscs.Num() + PendingRegions.Num();
 	for (const TPair<FIntPoint, FTileEntry>& Entry : Tiles)
 	{
 		Out.TilesWithBodies += (Entry.Value.Tile->Bodies.Num() > 0 || Entry.Value.Tile->Beds.Num() > 0) ? 1 : 0;
@@ -1010,4 +1076,5 @@ void FVoxelHydrologyNetwork::Shutdown()
 	Queue.Reset();
 	QueuedTiles.Reset();
 	PendingDiscs.Reset();
+	PendingRegions.Reset();
 }

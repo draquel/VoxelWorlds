@@ -629,7 +629,11 @@ world that names none has no generator, no source and no term in its fingerprint
   asks for gets what is kept. The chunk manager warms the tiles within `WarmUpViewDistances` view distances of where
   the world will first stream before it returns from `Initialize`, in parallel, and has the worker keep that disc and
   the wider one of `FarViewDistances` worked out around the viewers. `HoldsWaterBodies` says whether a region's tiles
-  are kept: the game layer asks it before it places for a reader that takes what is at hand.
+  are kept: the game layer asks it before it places for a reader that takes what is at hand. What such a reader is
+  still waiting for past that disc the game layer asks for by region (`RequestRegion`, G232: its roads and pads far
+  from the viewers): the worker walks the region's tiles itself, so the asking thread does nothing more, and queues
+  those that are not kept, the nearest to a place first, up to a limit per ask. `GetLoad` gives the cache's size and
+  what is queued without walking the cache (`GetStats` walks every tile), so the asker can wait for an idle worker.
   On a planet (H8) a tile is a cell of a cube sphere grid of its own, about `TileCells` cells wide, and its region
   the cap round it; the gathers, the warm-up, the announcements and `HoldsWaterBodiesOnSphere` take caps. What costs
   nothing on a plane (the tiles of a box are a rectangle) is a flood through the tiles' neighbours there, so three
