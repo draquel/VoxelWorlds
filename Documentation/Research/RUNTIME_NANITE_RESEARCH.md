@@ -2,7 +2,7 @@
 
 > Research note, 2026-11-16. Nothing is built. The question: can VoxelWorlds draw its runtime-generated chunk meshes
 > through Nanite, as the commercial Voxel Plugin 2 does, and what would that buy (frame cost, shadows, tessellation and
-> displacement)? Sources: the UE 5.8.3 source under `D:\Program Files\Epic Games\UE_5.8\Engine`, Voxel Plugin's
+> displacement)? Sources: the UE 5.8.4 source under `D:\Program Files\Epic Games\UE_5.8\Engine`, Voxel Plugin's
 > open-source core (github.com/VoxelPlugin/VoxelCore, MIT, last pushed 2026-08-23), the plugin's documentation, and
 > this repository's rendering docs and bench records. No measurement was taken for this note; the numbers quoted are
 > the existing records.
@@ -27,7 +27,7 @@
 - **Fit: viable, medium-high cost, worth a time-boxed spike** that measures the frame and the shadows before any
   decision. Section 8 proposes it.
 
-## 2. What the engine allows (UE 5.8.3)
+## 2. What the engine allows (UE 5.8.4)
 
 ### The builder is editor-only
 
@@ -74,8 +74,10 @@ vertex colour ([RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md)), both of 
 `FResources::Serialize` says the data is derived and unversioned (bump `NANITE_DERIVEDDATA_VER` instead). The fixup
 chunk layout is in `Engine/Source/Runtime/Engine/Internal/Nanite/NaniteFixupChunk.h`, an Internal header a project plugin
 cannot include, so an encoder mirrors it. Voxel Plugin's encoder carries separate branches for 5.5, 5.6 and 5.7 (the
-hierarchy node layout, the fixup chunk and the page header all changed between them). Every engine upgrade is an
-encoder port, checked against the engine's NaniteEncode*.cpp and the transcode shaders.
+hierarchy node layout, the fixup chunk and the page header all changed between them). An engine upgrade that changes
+the format is an encoder port, checked against the engine's NaniteEncode*.cpp and the transcode shaders. The spike's N0
+(the parent's Documentation/RUNTIME_NANITE_SPIKE_PLAN.md, section 6) found that 5.6 and 5.7 changed it and that 5.8 and
+the 5.9 preview did not, as far as can be seen.
 
 ## 3. How Voxel Plugin 2 does it
 
@@ -209,7 +211,7 @@ until then they stand, with this note as the correction of their premise.
 
 ## Sources
 
-- UE 5.8.3 source, paths as cited.
+- UE 5.8.4 source, paths as cited.
 - VoxelCore: github.com/VoxelPlugin/VoxelCore, Source/VoxelCore/Private/VoxelNaniteBuilder.cpp and VoxelNanite.cpp.
 - Voxel Plugin docs: docs.voxelplugin.com (Feature Overview; Authoring Materials).
 - Realtime Mesh Component Pro listing on Fab (vendor claims).
