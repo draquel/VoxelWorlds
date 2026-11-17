@@ -6,6 +6,8 @@
 #include "NaniteSceneProxy.h"
 #include "PrimitiveSceneInfoData.h"
 #include "VoxelChunkSceneProxy.h"
+#include "VoxelNaniteEncoder.h"
+#include <atomic>
 
 /**
  * What the chunk meshes drawn through Nanite hold and cost now (runtime Nanite spike; voxel.Render.NaniteStats): any
@@ -40,6 +42,34 @@ struct VOXELRENDERING_API FVoxelNaniteCounters
 	static void AddPrimitive();
 	static void AddFadeSwap();
 };
+
+/**
+ * One chunk mesh's Nanite encode on a task (runtime Nanite spike, N1): copies of the mesher's vertices and indices, the
+ * conversion the render thread would do, the encode and (with voxel.Render.Nanite.Validate) the CPU decode check. The
+ * mesh holds it until the game thread takes the result; it owns nothing the render thread uses.
+ */
+struct VOXELRENDERING_API FVoxelNaniteEncodeJob
+{
+	TArray<FVoxelVertex> Vertices;
+	TArray<uint32> Indices;
+	bool bRadialFaceUp = false;
+	/** The planet centre relative to the mesh's origin */
+	FVector3f LocalFaceUpCenter = FVector3f::ZeroVector;
+	FVoxelNaniteEncodeSettings Settings;
+	bool bValidate = false;
+
+	/** The result (null: no triangles, a failed encode or validation), its stats, the validation's error */
+	TUniquePtr<Nanite::FResources> Result;
+	FVoxelNaniteEncodeStats Stats;
+	FString Error;
+	std::atomic<bool> bDone{ false };
+
+	/** Convert, encode and check (any thread); sets bDone last */
+	void Run();
+};
+
+/** @return Whether new chunk meshes are encoded on tasks (voxel.Render.Nanite.Async, default 1) rather than at submit */
+VOXELRENDERING_API bool IsVoxelNaniteAsyncWanted();
 
 /**
  * Whether chunk primitives draw through Nanite (runtime Nanite spike, voxel.Render.Nanite): the cvar, on a platform that

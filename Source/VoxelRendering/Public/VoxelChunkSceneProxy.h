@@ -125,10 +125,38 @@ public:
 	 */
 	bool BuildNanite_GameThread(const UObject* Owner, bool bRadialFaceUp, const FVector& FaceUpCenter);
 
-	/** @return Whether the mesh has a Nanite resource (set before its first primitive, fixed after) */
+	/**
+	 * Game thread, at submit (runtime Nanite spike, N1): start encoding a copy of the vertices on a task (converted there as
+	 * BuildNanite_GameThread converts them); the mesh draws without Nanite meanwhile. FinishNaniteEncode_GameThread takes
+	 * the result once IsNaniteEncodeDone.
+	 *
+	 * @param bRadialFaceUp Face types against a planet's radial up
+	 * @param FaceUpCenter  The planet centre (world space)
+	 * @return Whether a task started (false: no triangles, or a resource or a task already)
+	 */
+	bool StartNaniteEncode_GameThread(bool bRadialFaceUp, const FVector& FaceUpCenter);
+
+	/** @return Whether an encode task was started and has not been taken yet */
+	bool IsNaniteEncodePending() const { return NaniteJob.IsValid(); }
+
+	/** @return Whether the started encode task finished (any thread) */
+	bool IsNaniteEncodeDone() const;
+
+	/**
+	 * Game thread: take a finished task's resource and hand it to the engine's streaming manager (as BuildNanite_GameThread).
+	 *
+	 * @param Owner The UObject the resource is registered under (the region component)
+	 * @return Whether the mesh now has a Nanite resource
+	 */
+	bool FinishNaniteEncode_GameThread(const UObject* Owner);
+
+	/** @return Whether the mesh has a Nanite resource (fixed once set) */
 	bool HasNanite() const { return NaniteResources.IsValid(); }
 
-	/** The Nanite resource (BuildNanite_GameThread), released by the destructor on the render thread */
+	/** The encode task's state (copies of the vertices, the result) while it runs and until it is taken */
+	TSharedPtr<struct FVoxelNaniteEncodeJob, ESPMode::ThreadSafe> NaniteJob;
+
+	/** The Nanite resource (BuildNanite_GameThread, FinishNaniteEncode_GameThread), released by the destructor on the render thread */
 	TUniquePtr<Nanite::FResources> NaniteResources;
 	int32 NanitePages = 0;
 	int64 NaniteGpuBytes = 0;

@@ -907,6 +907,15 @@ private:
 	/** Copy every parameter of the terrain material, as it resolves them, onto NaniteMaterialInstance (when there is one) */
 	void SyncNaniteMaterialParameters();
 
+	/** Meshes whose Nanite encode runs on a task (runtime Nanite spike, voxel.Render.Nanite.Async), with their slot */
+	TArray<TPair<FIntVector4, TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>>> PendingNaniteEncodes;
+
+	/**
+	 * Game thread, each tick while encodes run: take the finished ones and swap each slot still drawing that mesh, with no
+	 * fade running, to its Nanite primitive (a fade that ends later swaps then, D154)
+	 */
+	void ProcessNaniteEncodes();
+
 	/** Critical section for chunk info access */
 	mutable FCriticalSection ChunkInfoLock;
 

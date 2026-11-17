@@ -308,6 +308,16 @@ void UVoxelRegionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 	AdvanceFades();
 
+	// Encodes finished on their tasks swap their slots to Nanite (runtime Nanite spike); the tick stays on while any run
+	if (PendingNaniteEncodes.Num() > 0)
+	{
+		ProcessNaniteEncodes();
+		if (PendingNaniteEncodes.Num() > 0)
+		{
+			SetComponentTickEnabled(true);
+		}
+	}
+
 	// Chunks stream in and out every frame: refresh the bounds and hand them to the render scene at most once per
 	// tick, and only when they actually moved (UpdateBounds alone does not reach the scene).
 	if (bTotalBoundsDirty || bRenderBoundsStale)
@@ -2595,6 +2605,35 @@ UMaterialInterface* UVoxelRegionComponent::GetNaniteMaterial()
 	return NaniteMaterialInstance;
 }
 
+void UVoxelRegionComponent::ProcessNaniteEncodes()
+{
+	check(IsInGameThread());
+	const bool bWanted = IsVoxelNaniteWanted();
+	for (int32 i = PendingNaniteEncodes.Num() - 1; i >= 0; --i)
+	{
+		TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe> Mesh = PendingNaniteEncodes[i].Value;
+		if (!Mesh->IsNaniteEncodeDone())
+		{
+			continue;
+		}
+		const FIntVector4 Key = PendingNaniteEncodes[i].Key;
+		PendingNaniteEncodes.RemoveAtSwap(i);
+		const FChunkPrimitive* Primitive = ChunkPrimitives.Find(Key);
+		// A mesh replaced or removed meanwhile is not handed to the engine at all
+		const bool bCurrent = Primitive && Primitive->Mesh == Mesh;
+		if (bCurrent && Mesh->FinishNaniteEncode_GameThread(this) && bWanted && !Primitive->bNanite && !ActiveFades.Contains(Key))
+		{
+			SubmitChunkPrimitiveMesh(Key, Mesh, /*bFade*/ false);
+		}
+		else if (!bCurrent)
+		{
+			Mesh->NaniteJob.Reset();
+		}
+		// The game thread's reference goes on the render thread, as every chunk mesh's does
+		ReleaseChunkMeshOnRenderThread(MoveTemp(Mesh));
+	}
+}
+
 void UVoxelRegionComponent::SyncNaniteMaterialParameters()
 {
 	if (!NaniteMaterialInstance || !VoxelMaterial)
@@ -2724,7 +2763,16 @@ void UVoxelRegionComponent::SubmitChunkPrimitive(const FIntVector4& Key, TArray<
 		LocalBounds, Origin, ChunkMeshBytes.ToSharedRef(), ChunkPrimitiveCards, PrebuiltCards);
 	if (IsVoxelNaniteWanted())
 	{
-		Mesh->BuildNanite_GameThread(this, bRadialFaceUp, FaceUpCenter);
+		if (!IsVoxelNaniteAsyncWanted())
+		{
+			Mesh->BuildNanite_GameThread(this, bRadialFaceUp, FaceUpCenter);
+		}
+		else if (Mesh->StartNaniteEncode_GameThread(bRadialFaceUp, FaceUpCenter))
+		{
+			// It draws without Nanite until the task is done (ProcessNaniteEncodes)
+			PendingNaniteEncodes.Emplace(Key, Mesh);
+			SetComponentTickEnabled(true);
+		}
 	}
 	SubmitChunkPrimitiveMesh(Key, Mesh, bFade);
 }

@@ -14,6 +14,7 @@
 #include "SceneManagement.h"
 #include "SceneView.h"
 #include "HAL/IConsoleManager.h"
+#include "Tasks/Task.h"
 #include <atomic>
 #if RHI_RAYTRACING
 #include "RayTracingInstance.h"
@@ -42,6 +43,13 @@ namespace
 		1,
 		TEXT("Runtime Nanite spike (tuning): 1 = a triangle's corner refers back to a vertex its cluster holds (5-bit references);\n")
 		TEXT("0 = every triangle stores its three vertices. Read at each encode."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarVoxelNaniteAsync(
+		TEXT("voxel.Render.Nanite.Async"),
+		1,
+		TEXT("Runtime Nanite spike (A/B): 1 = a chunk mesh is encoded on a task while it draws without Nanite, and swaps to its\n")
+		TEXT("Nanite primitive when the encode is done; 0 = encoded on the game thread at submit. Read at each submit."),
 		ECVF_Default);
 
 	TAutoConsoleVariable<FString> CVarVoxelNaniteMaterial(
@@ -158,57 +166,112 @@ bool IsVoxelNaniteValidationWanted()
 	return CVarVoxelNaniteValidate.GetValueOnAnyThread() != 0;
 }
 
-// ==================== FVoxelChunkMesh: the Nanite resource ====================
-
-bool FVoxelChunkMesh::BuildNanite_GameThread(const UObject* Owner, bool bRadialFaceUp, const FVector& FaceUpCenter)
+bool IsVoxelNaniteAsyncWanted()
 {
-	check(IsInGameThread());
-	if (NaniteResources.IsValid() || PendingVertices.Num() == 0 || PendingIndices.Num() < 3 || !Owner)
-	{
-		return NaniteResources.IsValid();
-	}
+	return CVarVoxelNaniteAsync.GetValueOnAnyThread() != 0;
+}
 
+void FVoxelNaniteEncodeJob::Run()
+{
 	// The vertices as InitResources_RenderThread converts them (the same face types, tangents, UVs and colours)
-	const FVector3f LocalFaceUpCenter(FaceUpCenter - Origin);
 	TArray<FVoxelLocalVertex> Converted;
-	Converted.SetNumUninitialized(PendingVertices.Num());
-	for (int32 i = 0; i < PendingVertices.Num(); ++i)
+	Converted.SetNumUninitialized(Vertices.Num());
+	for (int32 i = 0; i < Vertices.Num(); ++i)
 	{
-		const FVoxelVertex& Vertex = PendingVertices[i];
+		const FVoxelVertex& Vertex = Vertices[i];
 		Converted[i] = bRadialFaceUp
 			? FVoxelLocalVertex::FromVoxelVertex(Vertex, (Vertex.Position - LocalFaceUpCenter).GetSafeNormal())
 			: FVoxelLocalVertex::FromVoxelVertex(Vertex);
 	}
-
-	FVoxelNaniteEncodeSettings Settings;
-	Settings.bVertexReuse = CVarVoxelNaniteReuse.GetValueOnGameThread() != 0;
-	FVoxelNaniteEncodeStats Stats;
-	TUniquePtr<Nanite::FResources> Resources = EncodeVoxelNaniteMesh(Converted, PendingIndices, Settings, &Stats);
-	bool bFailed = !Resources.IsValid();
-	if (Resources.IsValid() && IsVoxelNaniteValidationWanted())
+	Result = EncodeVoxelNaniteMesh(Converted, Indices, Settings, &Stats);
+	if (Result.IsValid() && bValidate)
 	{
-		const FVoxelNaniteValidation Validation = ValidateVoxelNaniteMesh(*Resources, Converted, PendingIndices, Settings);
+		const FVoxelNaniteValidation Validation = ValidateVoxelNaniteMesh(*Result, Converted, Indices, Settings);
 		if (!Validation.bValid)
 		{
-			UE_LOG(LogVoxelRendering, Error, TEXT("Nanite encode of a chunk mesh (LOD %d, %d triangles) does not decode to its input: %s"),
-				LODLevel, Stats.NumTriangles, *Validation.Error);
-			Resources.Reset();
-			bFailed = true;
+			Error = Validation.Error;
+			Result.Reset();
 		}
 	}
-	FVoxelNaniteCounters::AddEncode(Stats.EncodeSeconds, Stats.NumTriangles, bFailed);
-	if (!Resources.IsValid())
+	Vertices.Empty();
+	Indices.Empty();
+	bDone.store(true, std::memory_order_release);
+}
+
+// ==================== FVoxelChunkMesh: the Nanite resource ====================
+
+namespace
+{
+	TSharedPtr<FVoxelNaniteEncodeJob, ESPMode::ThreadSafe> MakeNaniteJob(const TArray<FVoxelVertex>& Vertices, const TArray<uint32>& Indices,
+		const FVector& Origin, bool bRadialFaceUp, const FVector& FaceUpCenter)
+	{
+		TSharedPtr<FVoxelNaniteEncodeJob, ESPMode::ThreadSafe> Job = MakeShared<FVoxelNaniteEncodeJob, ESPMode::ThreadSafe>();
+		Job->Vertices = Vertices;
+		Job->Indices = Indices;
+		Job->bRadialFaceUp = bRadialFaceUp;
+		Job->LocalFaceUpCenter = FVector3f(FaceUpCenter - Origin);
+		Job->Settings.bVertexReuse = CVarVoxelNaniteReuse.GetValueOnGameThread() != 0;
+		Job->bValidate = IsVoxelNaniteValidationWanted();
+		return Job;
+	}
+}
+
+bool FVoxelChunkMesh::StartNaniteEncode_GameThread(bool bRadialFaceUp, const FVector& FaceUpCenter)
+{
+	check(IsInGameThread());
+	if (NaniteResources.IsValid() || NaniteJob.IsValid() || PendingVertices.Num() == 0 || PendingIndices.Num() < 3)
 	{
 		return false;
 	}
+	// Copies: the render thread consumes the mesh's own arrays when its first primitive is added
+	NaniteJob = MakeNaniteJob(PendingVertices, PendingIndices, Origin, bRadialFaceUp, FaceUpCenter);
+	UE::Tasks::Launch(UE_SOURCE_LOCATION, [Job = NaniteJob]() { Job->Run(); });
+	return true;
+}
 
-	NaniteResources = MoveTemp(Resources);
-	NanitePages = Stats.NumPages;
-	NaniteGpuBytes = Stats.GpuBytes;
+bool FVoxelChunkMesh::IsNaniteEncodeDone() const
+{
+	return NaniteJob.IsValid() && NaniteJob->bDone.load(std::memory_order_acquire);
+}
+
+bool FVoxelChunkMesh::FinishNaniteEncode_GameThread(const UObject* Owner)
+{
+	check(IsInGameThread());
+	if (!IsNaniteEncodeDone())
+	{
+		return NaniteResources.IsValid();
+	}
+	const TSharedPtr<FVoxelNaniteEncodeJob, ESPMode::ThreadSafe> Job = MoveTemp(NaniteJob);
+	const bool bFailed = !Job->Result.IsValid();
+	if (!Job->Error.IsEmpty())
+	{
+		UE_LOG(LogVoxelRendering, Error, TEXT("Nanite encode of a chunk mesh (LOD %d, %d triangles) does not decode to its input: %s"),
+			LODLevel, Job->Stats.NumTriangles, *Job->Error);
+	}
+	FVoxelNaniteCounters::AddEncode(Job->Stats.EncodeSeconds, Job->Stats.NumTriangles, bFailed);
+	if (bFailed || !Owner)
+	{
+		return false;
+	}
+	NaniteResources = MoveTemp(Job->Result);
+	NanitePages = Job->Stats.NumPages;
+	NaniteGpuBytes = Job->Stats.GpuBytes;
 	// The streaming manager takes it on the render thread (before any primitive over it is added: the add is enqueued later)
 	NaniteResources->InitResources(Owner);
 	FVoxelNaniteCounters::AddLive(1, NanitePages, NaniteGpuBytes);
 	return true;
+}
+
+bool FVoxelChunkMesh::BuildNanite_GameThread(const UObject* Owner, bool bRadialFaceUp, const FVector& FaceUpCenter)
+{
+	check(IsInGameThread());
+	if (NaniteResources.IsValid() || NaniteJob.IsValid() || PendingVertices.Num() == 0 || PendingIndices.Num() < 3 || !Owner)
+	{
+		return NaniteResources.IsValid();
+	}
+	NaniteJob = MakeNaniteJob(PendingVertices, PendingIndices, Origin, bRadialFaceUp, FaceUpCenter);
+	NaniteJob->Run();
+	return FinishNaniteEncode_GameThread(Owner);
 }
 
 // ==================== FVoxelChunkNaniteSceneProxy ====================
