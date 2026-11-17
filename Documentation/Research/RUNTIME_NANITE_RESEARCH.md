@@ -74,8 +74,10 @@ vertex colour ([RENDERING_SYSTEM.md](../Features/RENDERING_SYSTEM.md)), both of 
 `FResources::Serialize` says the data is derived and unversioned (bump `NANITE_DERIVEDDATA_VER` instead). The fixup
 chunk layout is in `Engine/Source/Runtime/Engine/Internal/Nanite/NaniteFixupChunk.h`, an Internal header a project plugin
 cannot include, so an encoder mirrors it. Voxel Plugin's encoder carries separate branches for 5.5, 5.6 and 5.7 (the
-hierarchy node layout, the fixup chunk and the page header all changed between them). Every engine upgrade is an
-encoder port, checked against the engine's NaniteEncode*.cpp and the transcode shaders.
+hierarchy node layout, the fixup chunk and the page header all changed between them). An engine upgrade that changes
+the format is an encoder port, checked against the engine's NaniteEncode*.cpp and the transcode shaders. The spike's N0
+(the parent's Documentation/RUNTIME_NANITE_SPIKE_PLAN.md, section 6) found that 5.6 and 5.7 changed it and that 5.8 and
+the 5.9 preview did not, as far as can be seen.
 
 ## 3. How Voxel Plugin 2 does it
 
