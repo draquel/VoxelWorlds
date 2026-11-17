@@ -167,8 +167,8 @@ bool UVoxelWorldConfiguration::ValidateConfiguration() const
 		bValid = false;
 	}
 
-	// Settings that run but give wrong results: warnings, not failures.
-	for (const FString& Warning : GetSettingsWarnings())
+	// Settings that run but give wrong results: warnings, not failures. The trees' materials are the world's to check (G223).
+	for (const FString& Warning : GetLoadWarnings())
 	{
 		UE_LOG(LogVoxelCore, Warning, TEXT("VoxelWorldConfiguration %s: %s"), *GetName(), *Warning);
 	}
@@ -192,29 +192,43 @@ TArray<FString> UVoxelWorldConfiguration::GetSettingsWarnings() const
 
 TArray<FString> UVoxelWorldConfiguration::GetSettingsWarningsAgainst(const FVoxelMaterialTable& Materials) const
 {
+	return CollectSettingsWarnings(&Materials);
+}
+
+TArray<FString> UVoxelWorldConfiguration::GetLoadWarnings() const
+{
+	return CollectSettingsWarnings(nullptr);
+}
+
+TArray<FString> UVoxelWorldConfiguration::CollectSettingsWarnings(const FVoxelMaterialTable* Materials) const
+{
 	TArray<FString> Warnings;
 
 	// Tree templates: an id the registry does not define renders with whatever material slot it lands on
 	// and is not treated as leaves (not masked, not non-occluding). DemoSmoothWorldConfig shipped leaves
 	// 22 and 23 and a trunk of 21 (Leaves), which showed as clay and brick canopies when meshed cubic (KC10).
-	const int32 MaterialCount = Materials.Num();
-	auto CheckTreeMaterial = [&Warnings, &Materials, MaterialCount](const FVoxelTreeTemplate& Template, const TCHAR* Field, uint8 MaterialID)
+	// Checked only against a table: the asset names no atlas, so on its own it cannot tell (G223).
+	if (Materials)
 	{
-		if (!Materials.GetMaterial(MaterialID))
+		const int32 MaterialCount = Materials->Num();
+		auto CheckTreeMaterial = [&Warnings, Materials, MaterialCount](const FVoxelTreeTemplate& Template, const TCHAR* Field, uint8 MaterialID)
 		{
-			Warnings.Add(FString::Printf(
-				TEXT("tree template %d (%s): %s %d is not a registered voxel material (ids 0-%d; Wood is %d, Leaves %d)"),
-				Template.TemplateID, *Template.Name, Field, MaterialID, MaterialCount - 1,
-				EVoxelMaterial::Wood, EVoxelMaterial::Leaves));
-		}
-	};
-	for (const FVoxelTreeTemplate& Template : TreeTemplates)
-	{
-		CheckTreeMaterial(Template, TEXT("TrunkMaterialID"), Template.TrunkMaterialID);
-		CheckTreeMaterial(Template, TEXT("LeafMaterialID"), Template.LeafMaterialID);
-		for (const uint8 Allowed : Template.AllowedMaterials)
+			if (!Materials->GetMaterial(MaterialID))
+			{
+				Warnings.Add(FString::Printf(
+					TEXT("tree template %d (%s): %s %d is not a registered voxel material (ids 0-%d; Wood is %d, Leaves %d)"),
+					Template.TemplateID, *Template.Name, Field, MaterialID, MaterialCount - 1,
+					EVoxelMaterial::Wood, EVoxelMaterial::Leaves));
+			}
+		};
+		for (const FVoxelTreeTemplate& Template : TreeTemplates)
 		{
-			CheckTreeMaterial(Template, TEXT("AllowedMaterials entry"), Allowed);
+			CheckTreeMaterial(Template, TEXT("TrunkMaterialID"), Template.TrunkMaterialID);
+			CheckTreeMaterial(Template, TEXT("LeafMaterialID"), Template.LeafMaterialID);
+			for (const uint8 Allowed : Template.AllowedMaterials)
+			{
+				CheckTreeMaterial(Template, TEXT("AllowedMaterials entry"), Allowed);
+			}
 		}
 	}
 
@@ -261,7 +275,8 @@ void UVoxelWorldConfiguration::PostLoad()
 
 	if (!HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject))
 	{
-		for (const FString& Warning : GetSettingsWarnings())
+		// Only what needs no material table: the world that plays the asset checks its trees against its own (G223).
+		for (const FString& Warning : GetLoadWarnings())
 		{
 			UE_LOG(LogVoxelCore, Warning, TEXT("VoxelWorldConfiguration %s: %s"), *GetPathName(), *Warning);
 		}

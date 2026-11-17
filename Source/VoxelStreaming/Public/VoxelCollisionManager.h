@@ -506,6 +506,19 @@ public:
 	static void BuildPhysicsTriangles(const TArray<uint32>& RenderIndices, TArray<Chaos::TVector<int32, 3>>& OutTriangles);
 
 	/**
+	 * BuildPhysicsTriangles without the triangles of no area (and any naming a vertex past Positions): what the cook
+	 * builds the chunk's trimesh from. Such a triangle has no normal, so a query that hit it reported a normal of no
+	 * length (G230); the engine's cooker cleans them out of the meshes it cooks.
+	 *
+	 * @param RenderIndices Triangle list in render order (3 indices per triangle; a trailing partial triangle is ignored)
+	 * @param Positions     The mesh's vertex positions the indices name
+	 * @param OutTriangles  Receives the physics triangles of the render triangles that have an area (replaced, not appended)
+	 * @return How many triangles were dropped
+	 */
+	static int32 BuildPhysicsTriangles(const TArray<uint32>& RenderIndices, const TArray<FVector3f>& Positions,
+		TArray<Chaos::TVector<int32, 3>>& OutTriangles);
+
+	/**
 	 * Where the collision lead (ForcePathCoverage) looks, in the focus's local frame (spherical SP-C4): the focus itself,
 	 * half a chunk along -Up under it (standing on a seam between chunk layers), then LookAhead chunks along the
 	 * velocity's part across Up and, when the velocity along Up is below -1 (descending), the chunk one below each of

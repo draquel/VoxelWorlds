@@ -2544,8 +2544,21 @@ FLODQueryContext UVoxelChunkManager::BuildQueryContext() const
 			}
 		}
 
+		// A game world with no player yet (a dedicated server before its first player joins, a test world) streams around
+		// where its players will spawn: on a planet the configuration's spawn point over the datum (the generated ground
+		// there would be a surface query each tick), in the heightmap modes the origin, as GetSpawnPosition. Not the
+		// editor's camera, which stood wherever it was left: a quarter of the planet away on PlanetTest (G224).
+		if (!bFoundViewer && World->IsGameWorld() && Configuration)
+		{
+			const bool bPlanet = Configuration->WorldMode == EWorldMode::SphericalPlanet;
+			Context.ViewerPosition = bPlanet ? Configuration->GetPlanetSpawnPosition() : Configuration->WorldOrigin;
+			Context.ViewerForward = FVector::ForwardVector;
+			bFoundViewer = true;
+			ViewerSource = TEXT("SpawnPosition");
+		}
+
 #if WITH_EDITOR
-		// In editor, try to get the editor viewport camera if no player found
+		// The editor's own world (the preview) streams around the level viewport's camera.
 		if (!bFoundViewer)
 		{
 			if (GEditor)
