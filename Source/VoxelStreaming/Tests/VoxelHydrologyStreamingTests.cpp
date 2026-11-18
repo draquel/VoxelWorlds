@@ -24,8 +24,8 @@
 //   fingerprint has the term, no source registers late; the voxels of a generated lake hold flagged water under its
 //   level and the world's sample there is the lake's; a river reach's voxels hold water over its bed, with the
 //   reach's flow; and no tile is worked out inside a gather on the game thread while the viewer walks on, the worker
-//   having been there first. (The plane's relief is as fine as the generator's cells; the cells with two ways on it
-//   leaves are reported: G231.) A world that names no hydrology configuration has no network and no source.
+//   having been there first; no cell of the network has two ways on, though the plane's relief is as fine as the
+//   generator's cells (G231). A world that names no hydrology configuration has no network and no source.
 // ---------------------------------------------------------------------------
 
 namespace VoxelHydrologyStreamingTest
@@ -414,9 +414,11 @@ bool FVoxelHydrologyWorldTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("the chunks along the walk asked for their bodies (non-vacuous)"), Stats.CompleteGathers > 100);
 	TestEqual(TEXT("no tile is worked out inside a gather on the game thread along the walk"), Stats.SyncTiles, static_cast<int64>(0));
 	// The test plane's relief is as fine as the generator's cells (hollows a cell or two across, some under the sea's
-	// level), far finer than a world's: a few cells there have two ways on, and the first river in the lattice's
-	// order decides (the findings register's G231). Reported, not held to none.
+	// level), far finer than a world's: two hollows there meet in one saddle at one level, the first's outlet the
+	// second's cell, and a descent from the first goes on from the saddle by the second's outlet (G231).
 	AddInfo(FString::Printf(TEXT("cells with two ways on in the network: %d of %d systems' cells"), Stats.Conflicts, Stats.Systems));
+	TestTrue(TEXT("the network's systems along the walk (non-vacuous)"), Stats.Systems > 1000);
+	TestEqual(TEXT("no cell of the network has two ways on"), Stats.Conflicts, 0);
 
 	W.Stop();
 	Hydrology->RemoveFromRoot();
