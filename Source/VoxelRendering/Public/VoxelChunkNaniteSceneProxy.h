@@ -166,6 +166,9 @@ private:
 	UMaterialInterface* Material = nullptr;
 	ERHIFeatureLevel::Type FeatureLevel;
 	bool bRayTracing = false;
+	/** Ray traced through Nanite's own geometry (r.RayTracing.Nanite.Mode other than 0, read when the proxy is made):
+	 *  the engine streams the clusters out and builds the BLAS, and the mesh builds none of its own */
+	bool bNaniteRayTracing = false;
 	bool bPositionOnly = false;
 	bool bRadialFaceUp = false;
 	FVector FaceUpCenter = FVector::ZeroVector;

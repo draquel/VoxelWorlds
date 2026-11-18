@@ -5,6 +5,7 @@
 #include "VoxelRendering.h"
 #include "VoxelRayTracingCounters.h"
 #include "Rendering/NaniteResources.h"
+#include "Rendering/NaniteInterface.h"
 #include "PrimitiveSceneProxyDesc.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInterface.h"
@@ -326,6 +327,7 @@ FVoxelChunkNaniteSceneProxy::FVoxelChunkNaniteSceneProxy(const FPrimitiveScenePr
 
 	FVoxelNaniteCounters::AddPrimitive();
 #if RHI_RAYTRACING
+	bNaniteRayTracing = bRayTracing && Nanite::GetRayTracingMode() != Nanite::ERayTracingMode::Fallback;
 	if (bRayTracing)
 	{
 		FVoxelRayTracingCounters::AddProxy(1);
@@ -369,8 +371,9 @@ uint32 FVoxelChunkNaniteSceneProxy::GetMemoryFootprint() const
 void FVoxelChunkNaniteSceneProxy::CreateRenderThreadResources(FRHICommandListBase& RHICmdList)
 {
 	check(Mesh->NaniteResources->RuntimeResourceID != INDEX_NONE && Mesh->NaniteResources->HierarchyOffset != INDEX_NONE);
-	// The vertex and index buffers for the ray tracing geometry (D155) and its hit shading
-	Mesh->InitResources_RenderThread(RHICmdList, bPositionOnly, bRadialFaceUp, FaceUpCenter, bRayTracing, FeatureLevel);
+	// The vertex and index buffers for the ray tracing geometry (D155) and its hit shading; with Nanite's ray tracing
+	// the engine builds the geometry from the clusters, and the mesh builds none (a fade that drew it first may have)
+	Mesh->InitResources_RenderThread(RHICmdList, bPositionOnly, bRadialFaceUp, FaceUpCenter, bRayTracing && !bNaniteRayTracing, FeatureLevel);
 }
 
 FPrimitiveViewRelevance FVoxelChunkNaniteSceneProxy::GetViewRelevance(const FSceneView* View) const
@@ -436,6 +439,9 @@ Nanite::FResourceMeshInfo FVoxelChunkNaniteSceneProxy::GetResourceMeshInfo() con
 	Info.NumTriangles = Resources.NumInputTriangles;
 	Info.NumMaterials = 1;
 	Info.NumResidentClusters = Resources.NumResidentClusters;
+	// One section, material 0 (Nanite's ray tracing maps each material index to its geometry segment)
+	Info.NumSegments = 1;
+	Info.SegmentMapping.Init(0, 1);
 	Info.DebugName = bSeam ? FName(TEXT("VoxelSeamBucket")) : FName(TEXT("VoxelChunk"));
 	return Info;
 }
@@ -460,6 +466,16 @@ ERayTracingPrimitiveFlags FVoxelChunkNaniteSceneProxy::GetRayTracingPrimitiveFla
 void FVoxelChunkNaniteSceneProxy::GetStaticRayTracingInstances(FStaticRayTracingInstances& OutRayTracingInstances)
 {
 	FStaticRayTracingInstancesLOD& LOD = OutRayTracingInstances.LODs.AddDefaulted_GetRef();
+	if (bNaniteRayTracing)
+	{
+		// As Nanite::FSceneProxy: no geometry here, the scene takes Nanite's ray tracing manager's for the primitive,
+		// and the hit shading goes through Nanite's vertex factory
+		FRayTracingInstance& Instance = LOD.Instances.AddDefaulted_GetRef();
+		Instance.Geometry = nullptr;
+		SetupRayTracingMaterials(Instance.Materials);
+		Instance.NumTransforms = 1;
+		return;
+	}
 	const FRayTracingGeometry* Geometry = Mesh->RayTracingGeometry.Get();
 	const FMaterialRenderProxy* MaterialProxy = Material ? Material->GetRenderProxy() : nullptr;
 	if (!Geometry || !Geometry->IsValid() || Geometry->IsEvicted() || !MaterialProxy || !Mesh->IsDrawable())
