@@ -6,6 +6,13 @@
 > open-source core (github.com/VoxelPlugin/VoxelCore, MIT, last pushed 2026-08-23), the plugin's documentation, and
 > this repository's rendering docs and bench records. No measurement was taken for this note; the numbers quoted are
 > the existing records.
+>
+> **Outcome (2026-11-18):** the spike this note proposes ran (the parent's
+> `Documentation/RUNTIME_NANITE_SPIKE_PLAN.md`, frozen, its results in section 6; the prototype on the branch
+> spike/runtime-nanite, never merged) and was dropped under D156: the terrain on Nanite costs about 1 ms of GPU and
+> 1.5 ms of render thread on a world with no other Nanite content, Nanite's fixed cost, and neither the render
+> thread, VSM, Nanite's own ray tracing nor tessellation shows a win. The note stands as the reasoning; sections 5
+> and 8 are what the spike measured against.
 
 ## 1. The answer in short
 

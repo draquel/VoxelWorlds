@@ -150,8 +150,14 @@ and stores float offsets from it, in every world mode; generation keeps size-R v
 and the noise is split-origin. Heightmap worlds are exact to the range of a double position and planets to about
 1,000 km, with no world-origin shift ([TRAVERSAL_LIMITS.md](Research/TRAVERSAL_LIMITS.md)).
 
-**No Nanite.** Nanite geometry is built at cook time; terrain generated at runtime from a seed cannot be Nanite. The
-hand-built renderer and LOD are the engine's best option for runtime geometry, not a stand-in for Nanite.
+**No Nanite.** The engine builds Nanite resources in the editor only, but its renderer takes a resource encoded at
+runtime, as Voxel Plugin 2 does ([RUNTIME_NANITE_RESEARCH.md](Research/RUNTIME_NANITE_RESEARCH.md)). A spike encoded
+the chunk meshes on a task and drew them through a Nanite proxy of their own (2026-11-16 to 11-18; the parent's
+`Documentation/RUNTIME_NANITE_SPIKE_PLAN.md`, the branch spike/runtime-nanite): it works, and it was dropped. On a
+world with no other Nanite content it costs about 1 ms of GPU and 1.5 ms of render thread, Nanite's fixed per-frame
+cost; on one that already draws Nanite content it costs nothing measurable and buys nothing measurable; VSM, Nanite's
+own ray tracing and tessellation (about 5 ms of GPU, cracks at material borders) bring no win. The hand-built renderer
+and LOD stay; the plan's N4 lists what would reopen it.
 
 **Runtime Virtual Textures.** The scene proxy emits RVT mesh batches when the configuration lists
 `RuntimeVirtualTextures` (copied onto each region component before it registers), and `M_VoxelMaster` has a Runtime
