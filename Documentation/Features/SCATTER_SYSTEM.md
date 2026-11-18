@@ -1055,9 +1055,12 @@ Stateless, thread-safe static class that stamps tree blocks into VoxelData durin
      the surface material are judged at that height. The chunk manager gathers the lines and the zones over the
      chunk and the chunks its trees may be planted in (`GatherTreeConditioning`, `GetSourceChunkRadius`) for the
      injection and for the tree queries (`FindVoxelTreeAt`, `FindVoxelTreesNear`), so both compute the same trees. A
-     world with no conditioning there plants the trees of the natural ground. A pad is not cleared of trees: nothing
-     tells the injector to keep a place clear but a line's clear width (G222). Test
-     `VoxelWorlds.Cubic.VoxelTrees.OnAPad`
+     world with no conditioning there plants the trees of the natural ground. Nor is a tree planted inside a zone's
+     `ClearRadius` (`FVoxelConditioning::IsZoneClearedAt`): VoxelWorldPOI's conditioner gives a pad its inner radius
+     when the POI's claim keeps the pad bare of decoration (`Claim.Decoration.Suppress`, the type's
+     `bSuppressDecoration`), so the voxel trees keep off a village as the scatter and PCG do (G222: trees came up
+     through its houses on a block world). A tree is skipped after its draws, so the others are the ones planted
+     before. Test `VoxelWorlds.Cubic.VoxelTrees.OnAPad`
    - Filter by placement rules: material, biome, slope, elevation, water level
 3. For each tree position, if bounding box overlaps current chunk: call `StampTree()`
 

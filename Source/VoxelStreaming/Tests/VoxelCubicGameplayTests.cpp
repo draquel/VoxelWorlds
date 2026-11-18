@@ -833,6 +833,75 @@ bool FVoxelCubicVoxelTreesOnAPadTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("A tree clear of the pad is the natural ground's"), OutsideMissing, 0);
 	TestEqual(TEXT("With no conditioning the trees are the ones planted without it, for a null set and for an empty one"), EmptyDifferent, 0);
 
+	// G222: the same pad with a clear radius (what a POI whose claim keeps its pad bare asks for) plants no tree inside
+	// it, and every other tree is the one the pad without it planted, template and seed alike.
+	{
+		FVoxelConditioningZone ClearPad = Pad;
+		ClearPad.ClearRadius = Pad.InnerRadius;
+		FVoxelConditioning Clearing;
+		Clearing.Zones.Add(ClearPad);
+		int32 InClearBefore = 0, InClearAfter = 0, Removed = 0, Changed = 0;
+		for (int32 CX = -3; CX <= 2; ++CX)
+		{
+			for (int32 CY = -3; CY <= 2; ++CY)
+			{
+				TArray<FIntVector> With, Cleared;
+				TArray<int32> WithTemplates, ClearedTemplates;
+				TArray<uint32> WithSeeds, ClearedSeeds;
+				auto Compute = [&](const FVoxelConditioning& Set, TArray<FIntVector>& Positions, TArray<int32>& Templates, TArray<uint32>& Seeds)
+				{
+					FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), N, VoxelSize, Config->WorldOrigin, Config->WorldSeed,
+						Config->NoiseParams, *Manager->GetWorldMode(), Config->TreeDensity, Config->TreeTemplates, nullptr, false, 0.0f,
+						Positions, Templates, Seeds, &Set);
+				};
+				Compute(Conditioning, With, WithTemplates, WithSeeds);
+				Compute(Clearing, Cleared, ClearedTemplates, ClearedSeeds);
+				auto InClear = [&](const FIntVector& Base)
+				{
+					const FVector Centre = Manager->GlobalVoxelToWorldCentre(Base);
+					return Clearing.IsZoneClearedAt(Centre.X - 0.5 * VoxelSize, Centre.Y - 0.5 * VoxelSize);
+				};
+				int32 Next = 0;
+				for (int32 Index = 0; Index < With.Num(); ++Index)
+				{
+					if (InClear(With[Index]))
+					{
+						++InClearBefore;
+						++Removed;
+						continue;
+					}
+					// The trees left keep their order: the clearing skips a tree after its draws, as a line's does.
+					const bool bSame = Cleared.IsValidIndex(Next) && Cleared[Next] == With[Index]
+						&& ClearedTemplates[Next] == WithTemplates[Index] && ClearedSeeds[Next] == WithSeeds[Index];
+					Changed += bSame ? 0 : 1;
+					++Next;
+				}
+				Changed += Cleared.Num() - Next;
+				for (const FIntVector& Base : Cleared)
+				{
+					InClearAfter += InClear(Base) ? 1 : 0;
+				}
+			}
+		}
+		AddInfo(FString::Printf(TEXT("A clear radius of %.0f uu: %d tree(s) inside it without it, %d with it; %d other tree(s) changed"),
+			ClearPad.ClearRadius, InClearBefore, InClearAfter, Changed));
+		TestTrue(TEXT("Without the clear radius trees are planted inside it (non-vacuous)"), InClearBefore >= 3);
+		TestEqual(TEXT("No tree is planted inside the clear radius"), InClearAfter, 0);
+		TestEqual(TEXT("Every tree outside it is the one planted without it"), Changed, 0);
+
+		// A planet zone clears along the datum sphere; a zone of the other kind clears nothing.
+		const double Radius = 100000.0;
+		FVoxelConditioning Planet;
+		FVoxelConditioningZone& Cap = Planet.Zones.Add_GetRef(FVoxelConditioningZone::MakeRadial(FVector::UpVector, 1000.0f, 500.0f, 0.0f));
+		Cap.ClearRadius = 1000.0f;
+		const FVector Inside = FQuat(FVector::ForwardVector, 900.0 / Radius).RotateVector(FVector::UpVector);
+		const FVector Beyond = FQuat(FVector::ForwardVector, 1100.0 / Radius).RotateVector(FVector::UpVector);
+		TestTrue(TEXT("A planet zone clears 900 uu along the surface from its centre"), Planet.IsZoneClearedOnSphere(Inside, Radius));
+		TestFalse(TEXT("... and not 1,100 uu"), Planet.IsZoneClearedOnSphere(Beyond, Radius));
+		TestFalse(TEXT("A planet zone clears nothing on a heightmap"), Planet.IsZoneClearedAt(0.0, 0.0));
+		TestFalse(TEXT("A heightmap zone clears nothing on a sphere"), Clearing.IsZoneClearedOnSphere(FVector::UpVector, Radius));
+	}
+
 	// In the streamed voxels: each tree the manager finds on the pad has the pad's top block under it and its trunk on it.
 	TArray<FVoxelTreeInstance> Standing;
 	Manager->FindVoxelTreesNear(FVector(Site.X, Site.Y, Pad.TargetHeight), 1900.0f, Standing);
