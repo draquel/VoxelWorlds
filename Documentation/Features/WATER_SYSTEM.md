@@ -550,7 +550,11 @@ world that names none has no generator, no source and no term in its fingerprint
     it is longer than `MaxRiverLength` (`TraceSpring`, a `FVoxelHydrologyTrace`). The way on from a cell is the cell's
     alone, whichever descent comes to it: inside a hollow it is the hollow's own way to its saddle (a breadth-first
     walk from the cell before the saddle), and from a saddle it is the steepest fall where that leads out of the
-    hollow, else the cell the flood found beyond it. A descent is a river when it ends in the sea or in a kept lake,
+    hollow, else the cell the flood found beyond it. A descent that comes into a hollow over the hollow's own saddle
+    is cut back to the saddle and goes on by the outlet, and so is one whose step from another lake's saddle lands in
+    the hollow: two hollows that meet in one saddle cell at one level, the first's water spilling into the second
+    (G231, fixed 2026-11-17: 65 cells with two ways on in the streamed world test's network before it, none after).
+    A descent is a river when it ends in the sea or in a kept lake,
     is `MinRiverLength` long at least, and falls no more than `MaxMeanGrade` over its length.
   - *A pit's lake* (`MakeLake`, a `FVoxelHydrologyLake`): one flood from the pit, lowest cell first. While it climbs,
     the cells it has taken are the hollow under the level it has reached. When it takes a cell under that level it has
@@ -559,7 +563,11 @@ world that names none has no generator, no source and no term in its fingerprint
     again, it was one more hollow of the same lake. So two pits in one hollow give one lake, from either pit, and no
     lake needs another made first (the spike's rule needed the lakes below, and left rivers without an end). A hollow
     deeper than `MaxLakeDepth` holds a lake that deep with no outlet; one wider than `MaxLakeCells` or longer than
-    `MaxLakeSpanCells` holds the largest hollow under the caps, with no outlet.
+    `MaxLakeSpanCells` holds the largest hollow under the caps, with no outlet. Where a flood closes a lake depends
+    on the pit it started from, so a closed lake is the one the flood from its own lowest cell finds (the flood goes
+    again from there, up to four times while it finds a lower one): every pit of a capped hollow whose flood comes to
+    that cell has the same lake, and two pits of one hollow give one lake or two that share no cell (G233, fixed
+    2026-11-17; before it two pits of one wide hollow gave two lakes with their own levels, which overlapped).
   - *A lake's water* comes from a second flood on a grid of two voxels a cell, inside the hollow and one cell round
     it: the generator's cell (6 m on the demo) is coarser than a rim is wide, and water stands in every column of a
     footprint whose ground lies under the level. The fine flood's rim is the lowest ground every way out of the
@@ -654,7 +662,7 @@ world that names none has no generator, no source and no term in its fingerprint
   with no water on it, and a brook its bed. A river or a lake placed by hand in such a world is drawn as far as in
   any world.
 - **The fingerprint.** `FVoxelWorldModeFactory::MakeFingerprint` ends with `Hydrology=<version>:<hash of the settings
-  that decide the bodies>` in a world that generates hydrology (`FVoxelHydrology::Version`, 1;
+  that decide the bodies>` in a world that generates hydrology (`FVoxelHydrology::Version`, 2 since G231 and G233;
   `FVoxelHydrologySettings::GetGenerationHash`), so its saves made without it, or with other settings, are refused.
   The generation version does not move: a world that names no hydrology configuration generates what it did.
 - **What it costs.** On the demo at the default lattice a tile (0.15 km2) takes about 0.3 ms of one core to work

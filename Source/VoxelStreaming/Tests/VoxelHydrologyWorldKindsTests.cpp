@@ -243,6 +243,7 @@ namespace VoxelHydrologyWorldKindsTest
 		Test.TestTrue(TEXT("the world settles at each step of a walk of twelve chunks"), bSettled);
 		Test.TestTrue(TEXT("the chunks along the walk asked for their bodies (non-vacuous)"), Stats.CompleteGathers > 100);
 		Test.TestEqual(TEXT("no tile is worked out inside a gather on the game thread along the walk"), Stats.SyncTiles, static_cast<int64>(0));
+		Test.TestEqual(TEXT("no cell of the network has two ways on (G231)"), Stats.Conflicts, 0);
 		Finish();
 	}
 }

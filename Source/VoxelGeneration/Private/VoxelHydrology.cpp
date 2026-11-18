@@ -744,7 +744,8 @@ namespace VoxelHydrologyPrivate
 
 // ==================== A pit's lake ====================
 
-TSharedRef<const FVoxelHydrologyLake> FVoxelHydrology::MakeLake(const FVoxelHydrologySettings& Settings, FVoxelHydrologyHeights& Heights, const FIntPoint& Pit)
+/** One flood from a cell, as MakeLake describes; the lake's body is not made here. */
+static TSharedRef<FVoxelHydrologyLake> FloodFromPit(const FVoxelHydrologySettings& Settings, FVoxelHydrologyHeights& Heights, const FIntPoint& Pit)
 {
 	using namespace VoxelHydrologyPrivate;
 	const FVoxelHydrologyGrid& Grid = Heights.GetGrid();
@@ -970,6 +971,25 @@ TSharedRef<const FVoxelHydrologyLake> FVoxelHydrology::MakeLake(const FVoxelHydr
 		}
 	}
 
+	return Lake;
+}
+
+TSharedRef<const FVoxelHydrologyLake> FVoxelHydrology::MakeLake(const FVoxelHydrologySettings& Settings, FVoxelHydrologyHeights& Heights, const FIntPoint& Pit)
+{
+	// A closed lake is the one the flood from its own lowest cell finds (G233). A hollow wider than a lake may be is
+	// closed where the flood found it too wide, and that depends on the pit it started from: two pits of one wide hollow
+	// gave two lakes with their own levels, which overlapped. The flood from the lowest cell of what the first flood found
+	// finds a lake whose lowest cell is that cell (or a lower one, and the flood goes again from there), so every pit whose
+	// flood comes to the same lowest cell gets the same lake. An open lake is one from any of its pits already: it is
+	// left as its flood found it.
+	constexpr int32 MaxFloods = 4;
+	TSharedRef<FVoxelHydrologyLake> Lake = FloodFromPit(Settings, Heights, Pit);
+	for (int32 Flood = 1; Flood < MaxFloods && !Lake->IsOpen() && Lake->LowestCell != Lake->Pit; ++Flood)
+	{
+		Lake = FloodFromPit(Settings, Heights, Lake->LowestCell);
+	}
+	// Kept by the pit asked for: the cache finds it from there.
+	Lake->Pit = Pit;
 	VoxelHydrologyPrivate::MakeLakeBody(Settings, Heights, Lake.Get());
 	return Lake;
 }
@@ -1038,11 +1058,15 @@ TSharedRef<const FVoxelHydrologyTrace> FVoxelHydrology::TraceSpring(const FVoxel
 		{
 			--Entry;
 		}
-		if (Lake->IsOpen() && Entry > DescentStart && Cells[Entry - 1] == Lake->Saddle)
+		// The cell before the descent in hand is the saddle of the lake it left: Entry may be the descent's first cell
+		// (the last lake's outlet) and still come over this hollow's saddle (G231).
+		if (Lake->IsOpen() && Entry > 0 && Entry >= DescentStart && Cells[Entry - 1] == Lake->Saddle)
 		{
 			// The descent came to the hollow over its own saddle (the steepest way down from a saddle may lead in, while
 			// the lowest ground beside it lies out): water that stands on the saddle leaves by the outlet, as the lake's
-			// own water does, so the way on from the saddle is the same whichever descent comes to it.
+			// own water does, so the way on from the saddle is the same whichever descent comes to it. So does a descent
+			// that left another lake over the same saddle cell, two hollows meeting in one saddle at one level, the
+			// first's outlet the second's cell: from the saddle it goes on by the second's outlet, not through it (G231).
 			for (int32 Index = Entry - 1; Index + 1 < Cells.Num(); ++Index)
 			{
 				Length -= Grid.GetStepLength(Cells[Index], Cells[Index + 1]);

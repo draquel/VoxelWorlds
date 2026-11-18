@@ -21,6 +21,8 @@
 //   edge, a cap round both and a run with a cache another cap filled give each body with the same record; every river
 //   reach keeps the rules of the plan's section 5.3 with its levels as distances from the centre and its bed a line on
 //   the sphere; river reaches run across the edge and beside the corner (non-vacuous).
+//   A basin longer than a lake may be, its floor bumpy, has many pits whose floods close it for its span: two of them
+//   give one lake, or two that share no cell (G233).
 // - Generation.Hydrology.Blocks: a block world. A hollow's lake stands at a block layer's top with its body's level
 //   inside that layer, its footprint is whole block columns, and no column of water blocks stands beside a lower
 //   column outside the footprint; over rolling ground with a cliff no bed's segment is steeper than a block a column
@@ -438,6 +440,81 @@ bool FVoxelHydrologyPlanetTest::RunTest(const FString& Parameters)
 		AddInfo(FString::Printf(TEXT("descents round the edge: %d of %d squares traced, %d of them cross it"), Traced, Squares.Num(), Crossing));
 		TestTrue(TEXT("descents cross the edge (non-vacuous)"), Crossing >= 2);
 		TestEqual(TEXT("every step of a descent is to one of the cell's neighbours"), Broken, 0);
+	}
+
+	// ---- A basin longer than a lake may be, its floor bumpy: many pits, and one lake from all whose floods meet
+	// (G233). A planet measures a flood's span on the plane tangent at the pit it started from, so two pits of one
+	// wide hollow found it too wide at different levels and gave two lakes that overlapped, with their own levels.
+	{
+		const FVector Basin = FVector(-0.3, 0.2, 1.0).GetSafeNormal();
+		FVoxelHydrologyGround Wide = Ground;
+		Wide.Altitude = [Basin](const FVector& Direction)
+		{
+			// A floor at 500 inside a wall that rises to 2,000 past 9,000 uu of arc, with bumps of 60 uu every 2,500 uu or so.
+			const FVector P = Direction * PlanetRadius;
+			const double R = PlanetRadius * FVoxelPolylineBounds::AngleBetween(Direction, Basin) / 9000.0;
+			return 2000.0 - 1500.0 * FMath::Exp(-FMath::Square(FMath::Square(R))) + 60.0 * FMath::Sin(P.X / 400.0) * FMath::Sin(P.Y / 470.0 + 0.4);
+		};
+		FVoxelHydrologySettings Capped = Settings;
+		Capped.MaxLakeSpanCells = 8;
+		const FVoxelHydrologySettings WideSettings = FVoxelHydrology::Sanitize(Capped, Wide);
+		FVoxelHydrologyHeights WideHeights(Wide, WideSettings);
+		FVector East, North;
+		FVoxelCubeSphere::GetTangentFrame(Basin, East, North);
+		TSet<FIntPoint> Pits;
+		for (double V = -6000.0; V <= 6000.0; V += 200.0)
+		{
+			for (double U = -6000.0; U <= 6000.0; U += 200.0)
+			{
+				const FIntPoint Cell = WideHeights.GetGrid().CellAt((Basin + (U * East + V * North) / PlanetRadius).GetSafeNormal());
+				FIntPoint Down;
+				if (!WideHeights.GetDownhill(Cell, Down))
+				{
+					Pits.Add(Cell);
+				}
+			}
+		}
+		TArray<TSharedRef<const FVoxelHydrologyLake>> Lakes;
+		for (const FIntPoint& Pit : Pits)
+		{
+			Lakes.Add(FVoxelHydrology::MakeLake(WideSettings, WideHeights, Pit));
+		}
+		int32 Closed = 0, Shared = 0, Overlaps = 0;
+		bool bSameBody = true;
+		FString FirstOverlap;
+		for (int32 I = 0; I < Lakes.Num(); ++I)
+		{
+			Closed += Lakes[I]->Closed == 2 ? 1 : 0;
+			for (int32 J = I + 1; J < Lakes.Num(); ++J)
+			{
+				const FVoxelHydrologyLake& First = Lakes[I].Get();
+				const FVoxelHydrologyLake& Second = Lakes[J].Get();
+				if (First.LowestCell == Second.LowestCell && First.RimLevel == Second.RimLevel && First.Cells.Num() == Second.Cells.Num())
+				{
+					Shared += First.Closed == 2 ? 1 : 0;
+					bSameBody &= !First.bKept || !Second.bKept || SameLake(First, Second);
+					continue;
+				}
+				for (const FIntPoint& Cell : First.Cells)
+				{
+					if (Second.Cells.Contains(Cell))
+					{
+						++Overlaps;
+						if (FirstOverlap.IsEmpty())
+						{
+							FirstOverlap = FString::Printf(TEXT(": pits (%d, %d) and (%d, %d), rims %.1f and %.1f, %d and %d cells, closed %d and %d"),
+								First.Pit.X, First.Pit.Y, Second.Pit.X, Second.Pit.Y, First.RimLevel, Second.RimLevel, First.Cells.Num(), Second.Cells.Num(), First.Closed, Second.Closed);
+						}
+						break;
+					}
+				}
+			}
+		}
+		AddInfo(FString::Printf(TEXT("a wide bumpy basin: %d pits, %d lakes closed for their width, %d pairs of pits with one such lake, %d pairs that overlap%s"),
+			Lakes.Num(), Closed, Shared, Overlaps, *FirstOverlap));
+		TestTrue(TEXT("a wide bumpy basin: many pits, lakes closed for their width, pits that share one (non-vacuous)"), Lakes.Num() >= 8 && Closed >= 2 && Shared >= 1);
+		TestEqual(TEXT("... two pits give one lake or two that share no cell"), Overlaps, 0);
+		TestTrue(TEXT("... and the pits of one lake give one body"), bSameBody);
 	}
 	return true;
 }

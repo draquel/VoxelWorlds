@@ -206,11 +206,13 @@ private:
  * whichever pit the flood starts, and no lake needs another's to be made first.
  *
  * A lake that would be deeper or wider than the settings allow is closed: it stands at the cap, with no outlet.
+ * A closed lake is the one the flood from its own lowest cell finds, so every pit of a capped hollow whose flood comes
+ * to that cell has the same lake (G233).
  * Shared and immutable.
  */
 struct VOXELGENERATION_API FVoxelHydrologyLake
 {
-	/** The pit the flood started from, and the lake's lowest cell (the same lake from another of its pits has the same) */
+	/** The pit the lake was asked for, and the lake's lowest cell (the same lake from another of its pits has the same) */
 	FIntPoint Pit = FIntPoint::ZeroValue;
 	FIntPoint LowestCell = FIntPoint::ZeroValue;
 
@@ -441,7 +443,7 @@ struct VOXELGENERATION_API FVoxelHydrologyRegion
 struct VOXELGENERATION_API FVoxelHydrology
 {
 	/** The generator's version: part of the save fingerprint's term. Raise it when the same settings would make other bodies */
-	static constexpr int32 Version = 1;
+	static constexpr int32 Version = 2;
 
 	/** @return Whether a world generates hydrology: its configuration names a hydrology configuration */
 	static bool IsEnabled(const UVoxelWorldConfiguration& Config);
