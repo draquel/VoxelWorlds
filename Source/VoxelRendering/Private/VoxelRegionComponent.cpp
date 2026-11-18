@@ -381,7 +381,11 @@ FBoxSphereBounds UVoxelRegionComponent::CalcBounds(const FTransform& LocalToWorl
 
 void UVoxelRegionComponent::GetUsedMaterials(TArray<UMaterialInterface*>& OutMaterials, bool bGetDebugMaterials) const
 {
-	for (UMaterialInterface* Used : { VoxelMaterial.Get(), WaterMaterial.Get(), FadeMaterial.Get() })
+	// The Nanite primitives' material too (runtime Nanite spike): the shader compiler recreates the primitives of a
+	// material that gets new shaders through this list, and a Nanite primitive left out keeps shading commands built
+	// for the old shaders (G235)
+	for (UMaterialInterface* Used : { VoxelMaterial.Get(), WaterMaterial.Get(), FadeMaterial.Get(),
+		static_cast<UMaterialInterface*>(NaniteMaterialInstance.Get()) })
 	{
 		if (Used)
 		{
