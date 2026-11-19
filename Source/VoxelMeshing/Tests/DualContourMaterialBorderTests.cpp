@@ -31,6 +31,8 @@
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 namespace DualContourMaterialBorderTestHelpers
 {
 	using namespace VoxelMeshingTestFixtures;
@@ -393,3 +395,5 @@ bool FDCMaterialBorderMB9ThreeLOD1Test::RunTest(const FString& Parameters)
 	RunSoftBorderInvariants(*this, 1, true);
 	return true;
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS

@@ -10,7 +10,9 @@ met. Which gate a change needs is decided in `Scripts/qa/README.md`; this guide 
 
 Every test is an Unreal automation test (`IMPLEMENT_SIMPLE_AUTOMATION_TEST` and friends), compiled only in
 development builds (`WITH_DEV_AUTOMATION_TESTS`; ItemInventoryPlugin, EquipmentPlugin and some of VoxelCharacterPlugin's
-use `WITH_AUTOMATION_TESTS`). The project's test roots:
+use `WITH_AUTOMATION_TESTS`). A test file carries the guard itself, after its includes, even when the fixture header it
+includes is guarded: a file that uses a guarded fixture without it fails to compile in Shipping, where the fixture is gone
+(G234; the check is the parent's `Scripts/qa/build.ps1 -Shipping`). The project's test roots:
 
 | Root | Plugin |
 |---|---|
