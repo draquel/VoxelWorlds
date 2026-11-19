@@ -123,6 +123,60 @@ struct VOXELGENERATION_API FVoxelConditioningLineShape
 	 */
 	static FRounding RoundCorners(TConstArrayView<FVector> Points, double Spacing, double MaxTurn, double CornerDistance, TArray<FVector>& Out, int32 MaxTries = 3);
 
+	/**
+	 * The radius a corner is rounded to for a vertex sampled a spacing apart along it to turn by BoundMargin times a
+	 * bound (an arc turns by its length over its radius), what FitCornerArcs is given.
+	 * @param Spacing The vertices' spacing
+	 * @param MaxTurn The bound (GetMaxTurnForReach: the radius is then about the reach over BoundMargin)
+	 * @return The radius (world units; a very large number for a bound of no turn)
+	 */
+	static double GetCornerRadius(double Spacing, double MaxTurn);
+
+	/** The turn of a corner FitCornerArcs leaves as it is: over this, a corner comes back on itself (a hairpin) */
+	static constexpr double MaxArcTurnDegrees = 160.0;
+
+	/** What FitCornerArcs made of a polyline. */
+	struct FCornerArcs
+	{
+		/** How many corners were rounded, an arc each (a run of vertices that turn the same way is one corner) */
+		int32 NumArcs = 0;
+
+		/**
+		 * How many corners were left as they were: a turn of over MaxArcTurnDegrees, two corners that turn opposite ways
+		 * (an S) or the same way (a U) too close for an arc each, a short line whose ends are over two radii apart
+		 */
+		int32 NumLeft = 0;
+
+		/**
+		 * The farthest the polyline as made runs from the one given, or the one given from it (a corner's move: the
+		 * arc's middle from the corner)
+		 */
+		double FarthestMove = 0.0;
+
+		/** The largest turn left at any vertex (radians) */
+		double WorstTurn = 0.0;
+	};
+
+	/**
+	 * Round a polyline's corners to a radius with an arc each, which turns evenly (G225; SpreadCorners averages, and an
+	 * average turns most at a corner's middle). A corner is a run of vertices that turn the same way by more than an arc
+	 * of the radius does; it is widened a vertex at a time until the arc tangent to the line before it and to the line
+	 * after it fits between them, the arc's tangent points at the radius times tan(turn / 2) from where those two lines
+	 * meet. A corner too near an end for that keeps the end where it is and lets the end's direction go: an arc of the
+	 * radius through the end, tangent to the line on the corner's other side (or, near both ends, an arc of the radius
+	 * through both). The polyline is then sampled evenly; a polyline with no corner comes back as it was, point for
+	 * point. Where SpreadCorners averages the whole line, only the corners move here. The two ends never move.
+	 * @param Points The polyline, sampled about a spacing apart (ResampleEvenly, a spline's samples)
+	 * @param Spacing The spacing the polyline as made is sampled at
+	 * @param Radius The radius (GetCornerRadius)
+	 * @param Out Receives the vertices (emptied first)
+	 * @param OutPlaces Optional: receives, for each vertex made, its place along the polyline given, in points (2.5: half
+	 *                  way from the third point to the fourth; an arc's vertices are spread evenly between the places of
+	 *                  its two tangent points), for what the caller reads along it (a spline's distance, widths, heights)
+	 * @return The corners rounded and left, how far the line moved, and the worst turn left
+	 */
+	static FCornerArcs FitCornerArcs(TConstArrayView<FVector> Points, double Spacing, double Radius, TArray<FVector>& Out, TArray<double>* OutPlaces = nullptr);
+
 	/** What a levelled line's profile is made with. */
 	struct FProfileParams
 	{

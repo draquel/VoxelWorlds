@@ -47,19 +47,22 @@ struct FVoxelTerrainLineBends
 	double BendRatio = 0.0;
 
 	/**
-	 * How far each way along the line its corners were spread to round them (world units). 0: every vertex is where the
-	 * spline has it
+	 * The radius of the arcs the line's corners were rounded to (world units; FVoxelConditioningLineShape::FitCornerArcs).
+	 * 0: every vertex is where the spline has it
 	 */
-	double CornerDistance = 0.0;
+	double CornerRadius = 0.0;
 
-	/** The farthest the line as made runs from the spline (world units, over the ground): 0 when no corner was rounded */
+	/**
+	 * The farthest the line as made runs from the spline, or the spline from it (world units, over the ground: a rounded
+	 * corner's move, the arc's middle from the spline's corner); 0 when no corner was rounded
+	 */
 	double FarthestFromSpline = 0.0;
 
 	/** Whether the profile was made again, flatter through the bends (a line that follows the terrain) */
 	bool bProfileFlattened = false;
 
 	/** @return Whether the line's corners were rounded, so that it leaves its spline */
-	bool WasRounded() const { return CornerDistance > 0.0; }
+	bool WasRounded() const { return CornerRadius > 0.0; }
 };
 
 /**
@@ -102,19 +105,20 @@ struct FVoxelTerrainLineSettings
  * warning: the chunks generated before it keep their terrain.
  *
  * A spline that turns more sharply than the bend bound allows (a corner, a tight curve on a slope) does not make the
- * line it draws: the terrain would step on the inside of the bend. The component rounds such a line's corners until
- * every vertex keeps the bound, spreading them over up to twice the line's reach each way (the half width plus the
- * falloff: the radius the bound asks a corner for), so the line leaves the spline by less than the reach; a line that
- * follows the terrain then has its profile made again, flatter through what is left of each bend, and a line at the
- * spline's height keeps the spline's heights along it. A spline that keeps the bound makes the line it draws, vertex
- * for vertex. GetLineBends and the first sentence of GetLineWarnings say what was done and how far the line runs from
- * its spline (D134).
+ * line it draws: the terrain would step on the inside of the bend. The component rounds each such corner with an arc
+ * of the radius the bound asks for (about the line's reach, the half width plus the falloff: G225,
+ * FVoxelConditioningLineShape::FitCornerArcs), so a corner moves by the radius times (1 / cos(turn / 2) - 1): a fifth
+ * of the reach at 60 degrees, a reach at 120; a corner near an end keeps the end and lets its direction go. A line
+ * that follows the terrain then has its profile made again, flatter through what is left of each bend, and a line at
+ * the spline's height keeps the spline's heights along it, with a wider radius where the turn must also fit its grade.
+ * A spline that keeps the bound makes the line it draws, vertex for vertex. GetLineBends and the first sentence of
+ * GetLineWarnings say what was done and how far the line runs from its spline (D134).
  *
  * The limits a line must respect (the bend bound, the cut and fill cap, the widths, a line that comes back on itself)
  * are checked on the line as made when it is registered and logged as warnings (GetLineWarnings); the line is added
- * whatever they say. A bend the rounding could not bring within the bound (a corner of much over 100 degrees, a corner
- * at the spline's height on a steep grade, a hairpin) is rounded as far as helps and keeps its warning. There is no
- * editor preview: the terrain shows the line in PIE.
+ * whatever they say. A bend the rounding could not bring within the bound (a corner at the spline's height on a steep
+ * grade, a hairpin of over 160 degrees, an S too tight for two arcs) is rounded as far as helps and keeps its warning.
+ * There is no editor preview: the terrain shows the line in PIE.
  */
 UCLASS(ClassGroup = (Voxel), meta = (BlueprintSpawnableComponent), HideCategories = (Activation, Cooking, AssetUserData, Collision, Navigation))
 class VOXELSTREAMING_API UVoxelTerrainLineComponent : public UActorComponent
