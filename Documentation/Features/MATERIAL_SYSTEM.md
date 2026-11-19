@@ -794,7 +794,8 @@ Materials can be flagged as **masked** (alpha cutout) and/or **non-occluding** (
 
 ### LUT A-Channel Encoding
 
-The Material LUT texture (256 x 4: three face rows and the slice row, see "The Slice Row") uses the **A channel** of its
+The Material LUT texture (256 x 5: three face rows, the slice row, see "The Slice Row", and the height row, "The Terrain on
+Nanite") uses the **A channel** of its
 face rows to encode per-material flags:
 - **Bit 0**: `bIsMasked` (1 = masked blend, 0 = opaque)
 - **Bits 1-7**: Reserved for future flags
@@ -894,6 +895,20 @@ shader: FarFieldMaterialPick picks only under `PIXELSHADER || IS_NANITE_SHADING_
 borders drew hard on Nanite), and the triplanar functions take their texture derivatives analytically there (a Custom
 node's `ddx` does not compile in it). Before D161 the opaque section was drawn with a copy of the master, M_VoxelMaster_Nanite, removed since.
 
+**Tessellation (D163).** A world can have its terrain displaced: its `NaniteMaterial` names `MI_VoxelMaster_Tessellated`,
+the Opaque instance of `M_VoxelMaster_Tessellated`, a copy of the master with Nanite tessellation that
+`Scripts/setup_nanite_tessellation.py` (parent) makes again from the master each time it runs. A copy, not an instance:
+an instance cannot turn tessellation on, and the master with it on would put every Nanite terrain through Nanite's
+programmable raster, whatever the displacement. The displacement (its node, TerrainDisplacement) reads each material's
+height from the atlas's height array: `FVoxelMaterialTextureConfig::HeightTexture` and `HeightChannel` (a Megascans
+surface's ORDp texture, B; `Scripts/setup_terrain_heights.py`), built into `<Atlas>_HeightArray`, with the material LUT's
+height row (row 4: R the slice, G the channel, B whether the material has a height). It samples with the albedo's per-tile
+variation (so the relief follows the texture) and blends the materials by the soft-border weights, the data both copies
+of a duplicated border vertex share, so the borders do not crack (the border test, the parent's
+`Documentation/RUNTIME_NANITE_OPTIN_PLAN.md` section 2). A material without a height stays at the centre. 10 uu about a
+centre of 0.5 by default (an instance overrides it), fading out with the displacement's screen size. The cost and the
+look are in the plan's O4 results.
+
 See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed setup instructions.
 
 ---
@@ -916,6 +931,7 @@ See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed 
 - `M_VoxelMaster` - Unified master material
 - `M_VoxelMaster_Fade` - The crossfade twin (Masked)
 - `MI_VoxelMaster_Nanite` - The terrain on Nanite's opaque section (D161, "The Terrain on Nanite")
+- `M_VoxelMaster_Tessellated`, `MI_VoxelMaster_Tessellated` - The tessellated variant a world can choose (D163)
 - `MI_VoxelDefault` - Default material instance
 - `MPC_VoxelMaterial` - `MacroVariation`, set by `voxel.Material.MacroVariation`
 - `Functions/MF_GetMaterialID` - MaterialID extraction

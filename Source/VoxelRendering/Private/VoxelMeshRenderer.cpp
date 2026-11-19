@@ -137,6 +137,7 @@ UVoxelRegionComponent* FVoxelMeshRenderer::CreateRegionComponent(const FIntVecto
 	Component->SetRadialFaceUp(WorldConfig->WorldMode == EWorldMode::SphericalPlanet, WorldConfig->WorldOrigin);
 	// The terrain on Nanite or not (D158): the world's choice, under voxel.Render.Nanite
 	Component->SetNaniteTerrain(WorldConfig->NaniteTerrain);
+	Component->SetNaniteMaterial(WorldConfig->NaniteMaterial.ToSoftObjectPath());
 
 	// Sync material mode with configuration's meshing mode
 	// Both MarchingCubes and DualContouring use triplanar texturing instead of atlas faces

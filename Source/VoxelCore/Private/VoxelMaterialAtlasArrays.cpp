@@ -344,6 +344,12 @@ UVoxelMaterialAtlas::FTextureArrayInputs UVoxelMaterialAtlas::ComputeTextureArra
 			*TexturePart(Config.AlbedoTexture, Inputs.bAlbedo),
 			*TexturePart(Config.NormalTexture, Inputs.bNormal),
 			*TexturePart(Config.RoughnessTexture, Inputs.bRoughness));
+		// The height map (D163) joins the key only when set, so an atlas without heights keeps the key it was built with
+		if (!Config.HeightTexture.IsNull())
+		{
+			Description += FString::Printf(TEXT("%d:H=%s,c=%d;"), Config.MaterialID,
+				*TexturePart(Config.HeightTexture, Inputs.bHeight), static_cast<int32>(Config.HeightChannel));
+		}
 	}
 
 	const FTCHARToUTF8 Utf8(*Description);
@@ -354,7 +360,8 @@ UVoxelMaterialAtlas::FTextureArrayInputs UVoxelMaterialAtlas::ComputeTextureArra
 bool UVoxelMaterialAtlas::NeedsTextureArrayRebuild(FString* OutReason, bool* bOutMissing, bool bAllowLoad) const
 {
 	const FTextureArrayInputs Inputs = ComputeTextureArrayInputs(bAllowLoad);
-	const bool bMissing = (Inputs.bAlbedo && !AlbedoArray) || (Inputs.bNormal && !NormalArray) || (Inputs.bRoughness && !RoughnessArray);
+	const bool bMissing = (Inputs.bAlbedo && !AlbedoArray) || (Inputs.bNormal && !NormalArray) || (Inputs.bRoughness && !RoughnessArray)
+		|| (Inputs.bHeight && !HeightArray);
 	if (bOutMissing)
 	{
 		*bOutMissing = bMissing;
@@ -372,9 +379,13 @@ bool UVoxelMaterialAtlas::NeedsTextureArrayRebuild(FString* OutReason, bool* bOu
 	{
 		Reason = TEXT("incomplete (no roughness array)");
 	}
+	else if (Inputs.bHeight && !HeightArray)
+	{
+		Reason = TEXT("incomplete (no height array)");
+	}
 	else if (Inputs.Key != TextureArrayBuildKey
 		// No source texture and no array (a packed-atlas-only atlas): nothing to build
-		&& (Inputs.bAlbedo || Inputs.bNormal || Inputs.bRoughness || AlbedoArray || NormalArray || RoughnessArray))
+		&& (Inputs.bAlbedo || Inputs.bNormal || Inputs.bRoughness || Inputs.bHeight || AlbedoArray || NormalArray || RoughnessArray || HeightArray))
 	{
 		Reason = TextureArrayBuildKey.IsEmpty() ? TEXT("never built into this atlas")
 			: TEXT("built from other configs or source textures");

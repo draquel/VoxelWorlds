@@ -246,7 +246,7 @@ bool FMaterialAtlasTextureArraySliceTablesTest::RunTest(const FString& Parameter
 	AddExpectedMessagePlain(TEXT("has no readable source data"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
 	AddExpectedMessagePlain(TEXT("has no readable source texture"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
 	AddExpectedMessagePlain(TEXT("no texture had readable source data"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
-	AddExpectedMessagePlain(TEXT("No textures loaded"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
+	AddExpectedMessagePlain(TEXT("No textures loaded"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 3);
 
 	// MakeAtlas's four materials, then gaps at 4 and 5; 6 with an albedo that has no source data, its own normal map and a
 	// roughness texture; 7 (the highest) grey again. Roughness: 3 grey (the first in MaterialID order), 6 sand.
@@ -263,6 +263,9 @@ bool FMaterialAtlasTextureArraySliceTablesTest::RunTest(const FString& Parameter
 	Atlas->MaterialConfigs[4].AlbedoTexture = NoSource;
 	Atlas->MaterialConfigs[4].NormalTexture = Grey;
 	Atlas->MaterialConfigs[4].RoughnessTexture = Sand;
+	// Material 6 has a height map, its height in G (D163): the height array and the LUT's height row
+	Atlas->MaterialConfigs[4].HeightTexture = Sand;
+	Atlas->MaterialConfigs[4].HeightChannel = EVoxelTextureChannel::G;
 	Atlas->MaterialConfigs[5].AlbedoTexture = Grey;
 	Atlas->MaterialConfigs[3].RoughnessTexture = Grey;
 	// Material 0 has face variants, a UV scale and is masked: the LUT's face rows keep them
@@ -283,7 +286,7 @@ bool FMaterialAtlasTextureArraySliceTablesTest::RunTest(const FString& Parameter
 		return false;
 	}
 	TestEqual(TEXT("LUT width"), LUT->GetSizeX(), 256);
-	TestEqual(TEXT("LUT height: three face rows and the slice row"), LUT->GetSizeY(), 4);
+	TestEqual(TEXT("LUT height: three face rows, the slice row and the height row"), LUT->GetSizeY(), 5);
 	TestEqual(TEXT("No tables: MaterialID 5 reads slice 5 in every array"), LUTTexel(Atlas, 5, 3), FColor(5, 5, 5, 0));
 	TestEqual(TEXT("No tables: MaterialID 255 reads slice 255"), LUTTexel(Atlas, 255, 3), FColor(255, 255, 255, 0));
 
@@ -322,6 +325,13 @@ bool FMaterialAtlasTextureArraySliceTablesTest::RunTest(const FString& Parameter
 	const bool bRowMatches = SliceRowMatches(Atlas, Mismatch);
 	TestTrue(FString::Printf(TEXT("LUT row 3 = the slice tables %s"), *Mismatch), bRowMatches);
 	TestEqual(TEXT("Material 6: albedo 0, normal 1, roughness 1"), LUTTexel(Atlas, 6, 3), FColor(0, 1, 1, 0));
+	// The height row (D163): R the height slice, G the channel, B 255 for a material with a height map
+	if (TestNotNull(TEXT("Height array"), Atlas->HeightArray.Get()))
+	{
+		TestEqual(TEXT("Height: one texture, one slice"), Atlas->HeightArray->Source.GetNumSlices(), 1);
+	}
+	TestEqual(TEXT("Material 6's height row: slice 0, channel G, has a height"), LUTTexel(Atlas, 6, 4), FColor(0, 1, 255, 0));
+	TestEqual(TEXT("Material 5's height row: no height"), LUTTexel(Atlas, 5, 4), FColor(0, 0, 0, 0));
 	// Face rows: R column, G row, B UV scale x 25.5, A flags (bit 0 masked)
 	TestEqual(TEXT("Top row"), LUTTexel(Atlas, 0, 0), FColor(1, 2, 51, 1));
 	TestEqual(TEXT("Side row"), LUTTexel(Atlas, 0, 1), FColor(3, 4, 51, 1));
