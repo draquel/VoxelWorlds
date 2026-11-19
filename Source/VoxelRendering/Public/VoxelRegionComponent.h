@@ -428,6 +428,14 @@ public:
 	 */
 	bool IsNaniteTerrain() const;
 
+	/**
+	 * The material this world's Nanite meshes draw their opaque section with (UVoxelWorldConfiguration::NaniteMaterial;
+	 * the renderer sets it). Null: voxel.Render.Nanite.Material's. Read when a Nanite primitive is created.
+	 *
+	 * @param Material The world's material, or a null path
+	 */
+	void SetNaniteMaterial(const FSoftObjectPath& Material) { NaniteMaterialPath = Material; }
+
 	// ==================== Material Atlas ====================
 
 	/**
@@ -591,6 +599,9 @@ private:
 
 	/** The planet centre for the radial face up */
 	FVector FaceUpCenter = FVector::ZeroVector;
+
+	/** The world's Nanite material (SetNaniteMaterial); null for voxel.Render.Nanite.Material's */
+	FSoftObjectPath NaniteMaterialPath;
 
 	/** The world's Nanite setting (SetNaniteTerrain); Off until the renderer sets it */
 	EVoxelNaniteTerrain NaniteTerrain = EVoxelNaniteTerrain::Off;

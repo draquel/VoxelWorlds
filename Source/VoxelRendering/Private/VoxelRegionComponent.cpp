@@ -2640,7 +2640,9 @@ UMaterialInterface* UVoxelRegionComponent::GetNaniteMaterial()
 	UMaterialInterface* Terrain = VoxelMaterial ? VoxelMaterial.Get() : UMaterial::GetDefaultMaterial(MD_Surface);
 	static const TConsoleVariableData<FString>* MaterialPath =
 		IConsoleManager::Get().FindTConsoleVariableDataString(TEXT("voxel.Render.Nanite.Material"));
-	const FString Path = MaterialPath ? MaterialPath->GetValueOnGameThread() : FString();
+	// The world's own Nanite material first (a tessellated one, D163), then the cvar's
+	const FString Path = !NaniteMaterialPath.IsNull() ? NaniteMaterialPath.ToString()
+		: (MaterialPath ? MaterialPath->GetValueOnGameThread() : FString());
 	if (Path.IsEmpty())
 	{
 		return Terrain;
@@ -2727,6 +2729,12 @@ void UVoxelRegionComponent::SyncNaniteMaterialParameters()
 		{
 			NaniteMaterialInstance->SetTextureParameterValueByInfo(Info, Value);
 		}
+	}
+	// The atlas's height array, which only a tessellated Nanite material reads (D163; the terrain material has no
+	// such parameter, so the copy above does not carry it)
+	if (MaterialAtlas && MaterialAtlas->HeightArray)
+	{
+		NaniteMaterialInstance->SetTextureParameterValue(FName("HeightArray"), MaterialAtlas->HeightArray);
 	}
 }
 

@@ -534,6 +534,16 @@ public:
 	EVoxelShadowMethod ShadowMethod = EVoxelShadowMethod::Project;
 
 	/**
+	 * The material the terrain's Nanite meshes draw their opaque section with, when the terrain is on Nanite
+	 * (NaniteTerrain). None: voxel.Render.Nanite.Material's (MI_VoxelMaster_Nanite, an Opaque instance of the master).
+	 * MI_VoxelMaster_Tessellated displaces the terrain by each material's height map (D163: a tessellated variant of the
+	 * master, a few milliseconds of GPU, so a world's choice and never a default). It is given the terrain material's
+	 * parameters and the atlas's height array at runtime.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering")
+	TSoftObjectPtr<UMaterialInterface> NaniteMaterial;
+
+	/**
 	 * Runtime Virtual Textures the terrain writes into.
 	 *
 	 * The UVoxelRegionComponent is created at runtime by the custom-VF renderer; this list is
