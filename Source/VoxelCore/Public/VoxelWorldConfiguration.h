@@ -517,6 +517,14 @@ public:
 	int32 ScatterRegionChunks = -1;
 
 	/**
+	 * Whether the terrain is drawn through Nanite (D158): Auto when the project uses virtual shadow maps, On for a world
+	 * built around Nanite content, Off never. Needs a platform with Nanite; never on a dedicated server.
+	 * voxel.Render.Nanite overrides it for every world (-1 = this setting).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering")
+	EVoxelNaniteTerrain NaniteTerrain = EVoxelNaniteTerrain::Auto;
+
+	/**
 	 * Runtime Virtual Textures the terrain writes into.
 	 *
 	 * The UVoxelRegionComponent is created at runtime by the custom-VF renderer; this list is

@@ -17,6 +17,10 @@
 
 struct FPrimitiveSceneProxyDesc;
 class UMaterialInterface;
+namespace Nanite
+{
+	struct FResources;
+}
 class FCardRepresentationData;
 class FMeshCardsBuildData;
 
@@ -106,6 +110,56 @@ public:
 
 	/** @return Triangles (on the game thread too: counted at construction) */
 	uint32 GetNumTriangles() const { return NumTriangles; }
+
+	/**
+	 * Game thread, before the mesh's first primitive (runtime Nanite): encode the vertices, as the render thread
+	 * will convert them, as a Nanite resource of root pages (EncodeVoxelNaniteMesh), check it against them when
+	 * voxel.Render.Nanite.Validate is on, and hand it to the engine's streaming manager. The vertices stay for the buffers
+	 * the ray tracing geometry is built over (D155).
+	 *
+	 * @param Owner         The UObject the resource is registered under (the region component)
+	 * @param bRadialFaceUp Face types against a planet's radial up (spherical SP-D3)
+	 * @param FaceUpCenter  The planet centre (world space)
+	 * @return Whether the mesh has a Nanite resource (false: no triangles, a failed encode or validation; it then draws
+	 *         through FVoxelChunkSceneProxy)
+	 */
+	bool BuildNanite_GameThread(const UObject* Owner, bool bRadialFaceUp, const FVector& FaceUpCenter);
+
+	/**
+	 * Game thread, at submit (runtime Nanite): start encoding a copy of the vertices on a task (converted there as
+	 * BuildNanite_GameThread converts them); the mesh draws without Nanite meanwhile. FinishNaniteEncode_GameThread takes
+	 * the result once IsNaniteEncodeDone.
+	 *
+	 * @param bRadialFaceUp Face types against a planet's radial up
+	 * @param FaceUpCenter  The planet centre (world space)
+	 * @return Whether a task started (false: no triangles, or a resource or a task already)
+	 */
+	bool StartNaniteEncode_GameThread(bool bRadialFaceUp, const FVector& FaceUpCenter);
+
+	/** @return Whether an encode task was started and has not been taken yet */
+	bool IsNaniteEncodePending() const { return NaniteJob.IsValid(); }
+
+	/** @return Whether the started encode task finished (any thread) */
+	bool IsNaniteEncodeDone() const;
+
+	/**
+	 * Game thread: take a finished task's resource and hand it to the engine's streaming manager (as BuildNanite_GameThread).
+	 *
+	 * @param Owner The UObject the resource is registered under (the region component)
+	 * @return Whether the mesh now has a Nanite resource
+	 */
+	bool FinishNaniteEncode_GameThread(const UObject* Owner);
+
+	/** @return Whether the mesh has a Nanite resource (fixed once set) */
+	bool HasNanite() const { return NaniteResources.IsValid(); }
+
+	/** The encode task's state (copies of the vertices, the result) while it runs and until it is taken */
+	TSharedPtr<struct FVoxelNaniteEncodeJob, ESPMode::ThreadSafe> NaniteJob;
+
+	/** The Nanite resource (BuildNanite_GameThread, FinishNaniteEncode_GameThread), released by the destructor on the render thread */
+	TUniquePtr<Nanite::FResources> NaniteResources;
+	int32 NanitePages = 0;
+	int64 NaniteGpuBytes = 0;
 
 	/** The LOD it was meshed at, its box relative to Origin, and Origin (fixed at construction, any thread) */
 	const int32 LODLevel;

@@ -16,6 +16,8 @@
 #include "MeshCardBuild.h"
 #include "MeshCardRepresentation.h"
 #include "VoxelChunkMeshCardsPrivate.h"
+#include "VoxelChunkNaniteSceneProxy.h"
+#include "Rendering/NaniteResources.h"
 #if RHI_RAYTRACING
 #include "RayTracingInstance.h"
 #include "RayTracingGeometryManagerInterface.h"
@@ -182,6 +184,15 @@ FVoxelChunkMesh::~FVoxelChunkMesh()
 	}
 	// Takes the buffers' bytes off the region component's count
 	RenderData.ReleaseResources();
+
+	// The Nanite resource leaves the streaming manager (ReleaseResources enqueues its removal, which runs at once on the
+	// render thread) before the resource is deleted
+	if (NaniteResources.IsValid())
+	{
+		NaniteResources->ReleaseResources();
+		FVoxelNaniteCounters::AddLive(-1, -NanitePages, -NaniteGpuBytes);
+		NaniteResources.Reset();
+	}
 }
 
 void FVoxelChunkMesh::InitResources_RenderThread(FRHICommandListBase& RHICmdList, bool bPositionOnly, bool bRadialFaceUp, const FVector& FaceUpCenter,
