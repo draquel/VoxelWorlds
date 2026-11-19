@@ -10,6 +10,8 @@
 #include "RenderingThread.h"
 #include "RHI.h"             // GUsingNullRHI: GPU tests skip under -nullrhi
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 // ==================== Basic Tests ====================
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FInfinitePlaneWorldModeBasicTest, "VoxelWorlds.WorldModes.InfinitePlane.Basic",
@@ -403,3 +405,5 @@ bool FInfinitePlaneWorldModeMaterialTest::RunTest(const FString& Parameters)
 
 	return true;
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS

@@ -7,6 +7,8 @@
 #include "VoxelData.h"
 #include "ChunkRenderData.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 // ==================== Helper Functions ====================
 
 namespace MarchingCubesMeshingTestHelpers
@@ -525,3 +527,5 @@ bool FMarchingCubesMeshingLODNormalsTest::RunTest(const FString& Parameters)
 	CPUMesher.Shutdown();
 	return true;
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS

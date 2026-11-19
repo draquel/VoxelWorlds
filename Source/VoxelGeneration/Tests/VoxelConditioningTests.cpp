@@ -7,6 +7,8 @@
 #include "VoxelNoiseTypes.h"
 #include "VoxelData.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 // ---------------------------------------------------------------------------
 // Pure blend math
 // ---------------------------------------------------------------------------
@@ -189,3 +191,5 @@ bool FVoxelConditioningIslandBowlTest::RunTest(const FString& Parameters)
 
 	return true;
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS
