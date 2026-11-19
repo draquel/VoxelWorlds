@@ -85,6 +85,7 @@ without running them:
 | `VoxelWorlds.Rendering.ChunkPrimitives.Lifecycle` | a render scene (the chunk primitives, G116) | yes |
 | `VoxelWorlds.Rendering.ChunkPrimitives.Crossfade` | a render scene | yes |
 | `VoxelWorlds.Rendering.ChunkPrimitives.RayTracing` | a render scene and ray tracing | yes |
+| `VoxelWorlds.Rendering.MaterialAtlas.TwoAtlasesInTurn` | a GPU texture to read back (its CPU half, two atlases' LUTs as separate textures, runs headless too; G211) | yes |
 | `VoxelWorlds.Streaming.EditReachesProxy.Smooth` | a scene proxy | yes |
 | `VoxelWorlds.Streaming.EditReachesProxy.Cubic` | a scene proxy | yes |
 | `VoxelWorlds.WorldModes.InfinitePlane.GPUConsistency` | GPU generation | no |
@@ -92,7 +93,7 @@ without running them:
 
 The skip sites are in `Source/VoxelGeneration/Tests/VoxelNoiseGeneratorTests.cpp`,
 `Source/VoxelGeneration/Tests/InfinitePlaneWorldModeTests.cpp`, `Source/VoxelRendering/Tests/VoxelCrossfadeProxyTests.cpp`,
-`Source/VoxelRendering/Tests/VoxelRayTracingProxyTests.cpp`, `Source/VoxelRendering/Tests/VoxelChunkPrimitiveTests.cpp`, `Source/VoxelStreaming/Tests/VoxelFarFieldRayTracingProxyTests.cpp` and `Source/VoxelStreaming/Tests/VoxelEditReachesProxyTests.cpp`. A new test that needs either belongs in the same
+`Source/VoxelRendering/Tests/VoxelRayTracingProxyTests.cpp`, `Source/VoxelRendering/Tests/VoxelChunkPrimitiveTests.cpp`, `Source/VoxelRendering/Tests/VoxelMaterialAtlasTwoAtlasesTests.cpp`, `Source/VoxelStreaming/Tests/VoxelFarFieldRayTracingProxyTests.cpp` and `Source/VoxelStreaming/Tests/VoxelEditReachesProxyTests.cpp`. A new test that needs either belongs in the same
 pattern and in the editor gate's filter. **A green headless suite says nothing about GPU generation or the renderer.**
 The chunk-manager tests stream on the CPU into a recording renderer (below), so they run headless.
 
