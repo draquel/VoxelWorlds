@@ -54,8 +54,8 @@ public:
 
 	/**
 	 * The table of an atlas: the defaults, grown to the atlas's highest MaterialID with placeholders, with each
-	 * configured material's atlas position, scales, name and flags from its config (hardness and colour stay the
-	 * defaults'). Built on the caller's thread; nothing global changes.
+	 * configured material's atlas position, scales, name and flags from its config, and its surface class where the
+	 * config names one (hardness and colour stay the defaults'). Built on the caller's thread; nothing global changes.
 	 * @param Configs The atlas's material texture configurations
 	 * @param AtlasColumns Number of columns in the atlas (placeholders' positions)
 	 * @param AtlasRows Number of rows in the atlas

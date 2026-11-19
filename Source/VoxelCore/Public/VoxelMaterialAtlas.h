@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "VoxelMaterialDefinition.h"
 #include "VoxelMaterialAtlas.generated.h"
 
 class FVoxelMaterialTable;
@@ -157,6 +158,15 @@ struct VOXELCORE_API FVoxelMaterialTextureConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Properties", meta = (ClampMin = "-1", ClampMax = "254"))
 	int32 SlopeMaterialID = -1;
+
+	/**
+	 * What kind of ground the material is underfoot (G247): the class a game maps to its surfaces (friction, footsteps).
+	 * Unset keeps the class of the registry's default for the ID (FVoxelMaterialDefinition::SurfaceClass), none for an ID
+	 * past the defaults or a reserved one: set it for every material the atlas adds (the demo's road Stone, its trail Dirt).
+	 * Gameplay data, read on a dedicated server too (FVoxelMaterialTable::FromAtlas).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Properties")
+	EVoxelSurfaceClass SurfaceClass = EVoxelSurfaceClass::Unset;
 
 	// ===== 2D Map Representation =====
 

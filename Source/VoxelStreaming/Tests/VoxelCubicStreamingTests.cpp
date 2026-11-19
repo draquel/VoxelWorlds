@@ -445,6 +445,7 @@ bool FVoxelCubicStreamingTwoWorldsOwnAtlasesTest::RunTest(const FString& Paramet
 			Glass.MaterialID = EVoxelMaterial::Count;
 			Glass.MaterialName = TEXT("Glass");
 			Glass.bNonOccluding = true;
+			Glass.SurfaceClass = EVoxelSurfaceClass::Stone;
 		}
 		return Atlas;
 	};
@@ -471,6 +472,10 @@ bool FVoxelCubicStreamingTwoWorldsOwnAtlasesTest::RunTest(const FString& Paramet
 		TestTrue(TEXT("World A's Leaves are non-occluding"), TableA.IsNonOccluding(EVoxelMaterial::Leaves));
 		TestEqual(TEXT("World B's table has the defaults' 22"), TableB.Num(), static_cast<int32>(EVoxelMaterial::Count));
 		TestFalse(TEXT("World B's Leaves are occluding"), TableB.IsNonOccluding(EVoxelMaterial::Leaves));
+		// The table a game reads a material's gameplay data from (G247) is the one the world meshes with
+		TestTrue(TEXT("World A's manager answers its mesher's table"), &WorldA.Manager->GetMaterialTable() == &TableA);
+		TestTrue(TEXT("World B's manager answers its mesher's table"), &WorldB.Manager->GetMaterialTable() == &TableB);
+		TestEqual(TEXT("World A's glass is stone underfoot"), int32(WorldA.Manager->GetMaterialTable().GetMaterial(EVoxelMaterial::Count)->SurfaceClass), int32(EVoxelSurfaceClass::Stone));
 
 		// The same chunk, a 2x2x2 leaf block in air, meshed by each world's mesher.
 		const int32 N = WorldA.Config->ChunkSize;

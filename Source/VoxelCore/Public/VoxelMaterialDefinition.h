@@ -6,6 +6,27 @@
 #include "VoxelMaterialDefinition.generated.h"
 
 /**
+ * What kind of ground a voxel material is underfoot (G247; code review CR2, VCP-14): the class a game maps to its own
+ * surfaces for friction, footsteps and the like. The voxel engine names the class and reads nothing from it; a game layer
+ * (VoxelCharacterPlugin's EVCSurfaceType) gives each class its meaning. Unset: the material has no class (a game's
+ * default surface), and an atlas config left Unset keeps the table's class.
+ */
+UENUM(BlueprintType)
+enum class EVoxelSurfaceClass : uint8
+{
+	Unset,
+	Stone,
+	Dirt,
+	Grass,
+	Sand,
+	Snow,
+	Ice,
+	Mud,
+	Wood,
+	Metal,
+};
+
+/**
  * Definition of a voxel material with visual properties.
  * Used by the material registry to map MaterialIDs to colors and atlas positions.
  */
@@ -69,6 +90,15 @@ struct VOXELCORE_API FVoxelMaterialDefinition
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Material", meta = (ClampMin = "0.0", Units = "s"))
 	float Hardness = 1.0f;
+
+	/**
+	 * What kind of ground the material is underfoot (G247): the registry's defaults give each of theirs one (Sandstone
+	 * Sand, Frozen Dirt Ice, the ores Stone or Metal, Leaves Grass), an atlas's config sets or keeps it
+	 * (FVoxelMaterialTextureConfig::SurfaceClass), and a material with none is Unset. Gameplay data, not rendering: the
+	 * world's table carries it on a dedicated server too, so the server and the client read one surface.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxel Material")
+	EVoxelSurfaceClass SurfaceClass = EVoxelSurfaceClass::Unset;
 
 	/**
 	 * The material the smooth terrain's shader draws on this one's steep ground (visual polish VP2-O3: its atlas config's

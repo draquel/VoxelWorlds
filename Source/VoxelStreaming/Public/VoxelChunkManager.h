@@ -2026,6 +2026,15 @@ public:
 	 */
 	UVoxelMaterialAtlas* GetMaterialAtlas() const;
 
+	/**
+	 * The world's material definitions: its atlas's table (built at Initialize), or the registry's defaults without an atlas
+	 * or before Initialize. A game reads a material's gameplay data here, such as the surface class under a pawn's feet
+	 * (G247), the same on a dedicated server and a client. Game thread; the reference is valid until the world's next
+	 * Initialize or Deinitialize.
+	 * @return The table
+	 */
+	const FVoxelMaterialTable& GetMaterialTable() const;
+
 	// ==================== Test access ====================
 	// Public for the automation tests alone (code review CR4, CM-17): nothing in the plugins or the game calls these.
 
