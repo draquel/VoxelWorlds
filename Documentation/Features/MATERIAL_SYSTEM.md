@@ -457,7 +457,11 @@ reads) and `Load` that texel. The face rows are read by texel too (`MF_CubicAtla
 move them. An atlas whose arrays were built with a slice per MaterialID has empty slice tables, and its LUT gives every
 MaterialID the slice of its own index. `BuildTextureArrays()` rewrites an existing LUT in place, so materials already
 bound to it read the new slices with the new arrays (the editor rebuilds stale arrays when a world binds the atlas, after
-the LUT was built). The far field's `FarFieldMaterialPick` produces a MaterialID like every voxel vertex and needs
+the LUT was built). Each atlas's LUT is a transient texture under a name of its own (`<Atlas>_MaterialLUT`, made
+unique in the transient package): with one name for every atlas, a second atlas's build replaced the first atlas's LUT
+in place, and after a PIE on `VoxelWorldsTest` the demo atlas drew its materials 4 and 5 from the test atlas's slices
+until the editor restarted (G211; test `VoxelWorlds.Rendering.MaterialAtlas.TwoAtlasesInTurn`, which reads the slice
+row back from the GPU texture in the editor). The far field's `FarFieldMaterialPick` produces a MaterialID like every voxel vertex and needs
 nothing of its own. `Scripts/setup_texture_array_slices.py` (parent repository) made the material edits, headless.
 
 ### Footprint Sampling (visual polish VP2-O1)
