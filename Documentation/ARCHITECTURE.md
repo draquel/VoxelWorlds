@@ -163,7 +163,11 @@ can also ask for virtual shadow maps while it runs (`ShadowMethod`, D164: a plan
 project otherwise leaves off; Auto then puts its terrain on Nanite. Chunk LOD,
 seams and crossfades stay ours: Nanite rasterizes each mesh (clusters in index order, every page a root page, no
 simplification), `FVoxelChunkNaniteSceneProxy` draws it, and a fading mesh draws through `FVoxelChunkSceneProxy` until
-its fade ends. The far field and the water stay on the hand-built renderer.
+its fade ends. The far field and the water stay on the hand-built renderer. A world on Nanite can also have its terrain
+tessellated (`NaniteMaterial`, D163): the displacement blends the materials' heights by the soft-border weights, so
+material borders do not crack. How it draws, what it costs and what is not known:
+[RENDERING_SYSTEM.md](Features/RENDERING_SYSTEM.md), "The Terrain on Nanite"; the material,
+[MATERIAL_SYSTEM.md](Features/MATERIAL_SYSTEM.md), "The Terrain on Nanite". The plan is frozen history.
 
 **Runtime Virtual Textures.** The scene proxy emits RVT mesh batches when the configuration lists
 `RuntimeVirtualTextures` (copied onto each region component before it registers), and `M_VoxelMaster` has a Runtime

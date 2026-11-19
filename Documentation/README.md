@@ -35,7 +35,7 @@ system you work on. The project root holds the vocabulary (`Documentation/GLOSSA
 | [WATER_SYSTEM.md](Features/WATER_SYSTEM.md) | Water flags, the fill pass, the cross-chunk pull, edit-driven floods, water tiles and their mesher, the seas |
 | [DUAL_CONTOURING.md](Features/DUAL_CONTOURING.md) | The Dual Contouring mesher: QEF, fitted normals, LOD crossings, seams |
 | [MARCHING_CUBES_MESHING.md](Features/MARCHING_CUBES_MESHING.md) | The Marching Cubes mesher: LOD stride, geomorph, the transition ribbon, seams |
-| [RENDERING_SYSTEM.md](Features/RENDERING_SYSTEM.md) | `FVoxelMeshRenderer`, render regions, the scene proxy, crossfades, water tiles |
+| [RENDERING_SYSTEM.md](Features/RENDERING_SYSTEM.md) | `FVoxelMeshRenderer`, render regions, the scene proxy, the terrain on Nanite (a world's option), a world's shadow method, crossfades, water tiles |
 | [MATERIAL_SYSTEM.md](Features/MATERIAL_SYSTEM.md) | The material registry and atlas, saved texture arrays, the master material, hardness, the far field's material blend |
 | [EDIT_LAYER.md](Features/EDIT_LAYER.md) | Edits, brushes, undo and redo, system edits outside the history, persistence |
 | [SCATTER_SYSTEM.md](Features/SCATTER_SYSTEM.md) | Scatter extraction from the voxels, placement, the scatter horizon, HISM regions, voxel trees, edit readers |

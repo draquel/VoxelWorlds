@@ -906,8 +906,8 @@ height row (row 4: R the slice, G the channel, B whether the material has a heig
 variation (so the relief follows the texture) and blends the materials by the soft-border weights, the data both copies
 of a duplicated border vertex share, so the borders do not crack (the border test, the parent's
 `Documentation/RUNTIME_NANITE_OPTIN_PLAN.md` section 2). A material without a height stays at the centre. 10 uu about a
-centre of 0.5 by default (an instance overrides it), fading out with the displacement's screen size. The cost and the
-look are in the plan's O4 results.
+centre of 0.5 by default (an instance overrides it), fading out with the displacement's screen size. The cost is in
+RENDERING_SYSTEM.md ("The Terrain on Nanite"), the look and the gates in the plan's O4 results (frozen).
 
 See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed setup instructions.
 
