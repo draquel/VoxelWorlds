@@ -14,6 +14,8 @@
 #include "ChunkRenderData.h"
 #include "DistanceBandLODStrategy.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 /**
  * The far-field suites' one rig (code review CR2, STREAM-22): a far field over a world configuration with synchronous
  * builds, its view, convergence and window for the sphere and the plane alike through the far field's frame
@@ -117,3 +119,5 @@ namespace VoxelFarFieldTestRig
 		}
 	};
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS
