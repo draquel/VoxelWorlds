@@ -4,6 +4,8 @@
 #include "Misc/AutomationTest.h"
 #include "VoxelNaniteEncoder.h"
 #include "VoxelChunkNaniteSceneProxy.h"
+#include "VoxelShadowMethod.h"
+#include "HAL/IConsoleManager.h"
 #include "VoxelLocalVertexFactory.h"
 #include "Rendering/NaniteResources.h"
 
@@ -218,6 +220,53 @@ bool FVoxelNaniteTerrainSettingTest::RunTest(const FString& Parameters)
 		}
 	}
 	TestTrue(TEXT("This engine's format was checked"), IsVoxelNaniteFormatVerified());
+	return true;
+}
+
+/**
+ * A world's shadow method, D164 (Documentation/RUNTIME_NANITE_OPTIN_PLAN.md): Project leaves r.Shadow.Virtual.Enable as it
+ * is; a world asking for virtual shadow maps sets 1 while it runs, a second one holds it too, and the value from before
+ * comes back only when the last one ends; a world asking for shadow maps sets 0; two worlds that disagree leave the last
+ * one's value until both end. Skipped when the console set the cvar (it outranks every world).
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWorldShadowMethodTest,
+	"VoxelWorlds.Rendering.Nanite.WorldShadowMethod",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelWorldShadowMethodTest::RunTest(const FString& Parameters)
+{
+	IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Shadow.Virtual.Enable"));
+	if (!TestNotNull(TEXT("r.Shadow.Virtual.Enable exists"), CVar))
+	{
+		return false;
+	}
+	if ((CVar->GetFlags() & ECVF_SetByMask) == ECVF_SetByConsole)
+	{
+		AddInfo(TEXT("r.Shadow.Virtual.Enable was set at the console: it outranks a world's choice; skipped"));
+		return true;
+	}
+	TestEqual(TEXT("No world holds the shadow method before"), FVoxelShadowMethodOverride::GetHolders(), 0);
+	const int32 Before = CVar->GetInt();
+
+	TestFalse(TEXT("Project: nothing held"), FVoxelShadowMethodOverride::Acquire(EVoxelShadowMethod::Project, TEXT("Test")));
+	TestEqual(TEXT("Project: the value untouched"), CVar->GetInt(), Before);
+
+	TestTrue(TEXT("Virtual shadow maps: held"), FVoxelShadowMethodOverride::Acquire(EVoxelShadowMethod::VirtualShadowMaps, TEXT("Test A")));
+	TestEqual(TEXT("Virtual shadow maps: 1"), CVar->GetInt(), 1);
+	TestTrue(TEXT("A second world: held"), FVoxelShadowMethodOverride::Acquire(EVoxelShadowMethod::VirtualShadowMaps, TEXT("Test B")));
+	FVoxelShadowMethodOverride::Release();
+	TestEqual(TEXT("One world left: still 1"), CVar->GetInt(), 1);
+	FVoxelShadowMethodOverride::Release();
+	TestEqual(TEXT("The last world ended: the value from before"), CVar->GetInt(), Before);
+
+	TestTrue(TEXT("Shadow maps: held"), FVoxelShadowMethodOverride::Acquire(EVoxelShadowMethod::ShadowMaps, TEXT("Test C")));
+	TestEqual(TEXT("Shadow maps: 0"), CVar->GetInt(), 0);
+	TestTrue(TEXT("A world that disagrees: held"), FVoxelShadowMethodOverride::Acquire(EVoxelShadowMethod::VirtualShadowMaps, TEXT("Test D")));
+	TestEqual(TEXT("The last world wins"), CVar->GetInt(), 1);
+	FVoxelShadowMethodOverride::Release();
+	FVoxelShadowMethodOverride::Release();
+	TestEqual(TEXT("Both ended: the value from before"), CVar->GetInt(), Before);
+	TestEqual(TEXT("No world holds it after"), FVoxelShadowMethodOverride::GetHolders(), 0);
 	return true;
 }
 

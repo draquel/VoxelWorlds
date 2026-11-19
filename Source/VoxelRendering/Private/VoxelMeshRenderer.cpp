@@ -4,6 +4,8 @@
 #include "VoxelRendering.h"
 #include "VoxelRegionComponent.h"
 #include "VoxelChunkNaniteSceneProxy.h"
+#include "VoxelShadowMethod.h"
+#include "Misc/App.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelMaterialAtlas.h"
 #include "VoxelBiomeLookup.h"
@@ -73,12 +75,24 @@ void FVoxelMeshRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguratio
 	Actor->SetActorLabel(TEXT("VoxelCustomVFContainer"));
 #endif
 
+	// The world's shadow method (D164), before the first region component reads the virtual shadow maps for its Nanite
+	// setting's Auto; nothing to draw on a dedicated server
+	if (FApp::CanEverRender() && World->GetNetMode() != NM_DedicatedServer)
+	{
+		bHoldsShadowMethod = FVoxelShadowMethodOverride::Acquire(WorldConfig->ShadowMethod, World->GetName());
+	}
+
 	// The primary world component: the only one on a heightmap world (at the world origin), region (0, 0, 0) on a planet.
 	// It lives as long as the renderer; region components come and go with their content.
 	OriginRegionComponent = CreateRegionComponent(FIntVector::ZeroValue);
 	if (!OriginRegionComponent)
 	{
 		UE_LOG(LogVoxelRendering, Error, TEXT("FVoxelMeshRenderer: Failed to create world component"));
+		if (bHoldsShadowMethod)
+		{
+			FVoxelShadowMethodOverride::Release();
+			bHoldsShadowMethod = false;
+		}
 		Actor->Destroy();
 		ContainerActor.Reset();
 		return;
@@ -90,9 +104,10 @@ void FVoxelMeshRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguratio
 		bIsSmooth ? TEXT("true") : TEXT("false"),
 		Regions.IsSplit() ? *FString::Printf(TEXT("of %d^3 chunks"), Regions.RegionChunks) : TEXT("off (one primitive at the origin)"));
 	// The terrain on Nanite or not, and why (D158): the world's setting, the override, and where Nanite can draw
-	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelMeshRenderer: the terrain on Nanite %s (setting %s, voxel.Render.Nanite %d, virtual shadows %d, net mode %d)"),
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelMeshRenderer: the terrain on Nanite %s (setting %s, voxel.Render.Nanite %d, virtual shadows %d, shadow method %s, net mode %d)"),
 		OriginRegionComponent->IsNaniteTerrain() ? TEXT("on") : TEXT("off"), *UEnum::GetValueAsString(WorldConfig->NaniteTerrain),
-		GetVoxelNaniteOverride(), IsVoxelVirtualShadowMapEnabled() ? 1 : 0, int32(World->GetNetMode()));
+		GetVoxelNaniteOverride(), IsVoxelVirtualShadowMapEnabled() ? 1 : 0, *UEnum::GetValueAsString(WorldConfig->ShadowMethod),
+		int32(World->GetNetMode()));
 
 	bIsInitialized = true;
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelMeshRenderer initialized"));
@@ -246,6 +261,13 @@ void FVoxelMeshRenderer::Shutdown()
 	// Clear all chunks and water tiles first
 	ClearAllChunks();
 	ClearAllWaterTiles();
+
+	// The world's shadow method ends with it (D164)
+	if (bHoldsShadowMethod)
+	{
+		FVoxelShadowMethodOverride::Release();
+		bHoldsShadowMethod = false;
+	}
 
 	// Destroy the components (the primary one is among them)
 	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)

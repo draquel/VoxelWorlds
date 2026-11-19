@@ -158,7 +158,9 @@ other Nanite content it costs about 1 ms of GPU and 1.5 ms of render thread, Nan
 already draws Nanite content it costs nothing measurable. The terrain on Nanite is therefore a world's choice (D158,
 the parent's `Documentation/RUNTIME_NANITE_OPTIN_PLAN.md`): `UVoxelWorldConfiguration::NaniteTerrain` is Off, On, or
 Auto (the default: on when the project draws its shadows with virtual shadow maps, which need the terrain on Nanite),
-and `voxel.Render.Nanite` overrides it. A world that does not choose it encodes nothing and draws as before. Chunk LOD,
+and `voxel.Render.Nanite` overrides it. A world that does not choose it encodes nothing and draws as before. A world
+can also ask for virtual shadow maps while it runs (`ShadowMethod`, D164: a planet seen from altitude), which the
+project otherwise leaves off; Auto then puts its terrain on Nanite. Chunk LOD,
 seams and crossfades stay ours: Nanite rasterizes each mesh (clusters in index order, every page a root page, no
 simplification), `FVoxelChunkNaniteSceneProxy` draws it, and a fading mesh draws through `FVoxelChunkSceneProxy` until
 its fade ends. The far field and the water stay on the hand-built renderer.

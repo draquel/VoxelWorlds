@@ -64,6 +64,26 @@ enum class EVoxelNaniteTerrain : uint8
 };
 
 /**
+ * The shadow method a world asks for while it runs (D164): the project's, or virtual shadow maps or shadow maps for this
+ * world alone. A planet seen from altitude draws the terrain's distant cast shadows only with virtual shadow maps, at
+ * about the GPU time of shadow maps (with its terrain on Nanite, which EVoxelNaniteTerrain::Auto then gives it); a plane
+ * world pays more for them. The shadow method is a project-wide setting (r.Shadow.Virtual.Enable), so a world's choice
+ * holds from its renderer's start to its end.
+ */
+UENUM(BlueprintType)
+enum class EVoxelShadowMethod : uint8
+{
+	/** The project's setting, untouched */
+	Project,
+
+	/** Virtual shadow maps while the world runs */
+	VirtualShadowMaps,
+
+	/** Shadow maps (cascades) while the world runs */
+	ShadowMaps
+};
+
+/**
  * Edit operation mode for terrain modifications.
  */
 UENUM(BlueprintType)
