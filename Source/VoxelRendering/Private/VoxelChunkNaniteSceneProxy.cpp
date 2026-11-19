@@ -10,6 +10,7 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialRenderProxy.h"
+#include "MeshCardBuild.h" // FCardRepresentationData (G245: the non-unity build)
 #include "MeshCardRepresentation.h"
 #include "MeshBatch.h"
 #include "SceneManagement.h"
