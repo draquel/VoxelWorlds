@@ -2486,6 +2486,11 @@ UVoxelMaterialAtlas* UVoxelChunkManager::GetMaterialAtlas() const
 	return MeshRenderer ? MeshRenderer->GetMaterialAtlas() : nullptr;
 }
 
+const FVoxelMaterialTable& UVoxelChunkManager::GetMaterialTable() const
+{
+	return MaterialTable.IsValid() ? *MaterialTable : FVoxelMaterialTable::Defaults();
+}
+
 // ==================== Internal Update Methods ====================
 
 FLODQueryContext UVoxelChunkManager::BuildQueryContext() const

@@ -81,6 +81,9 @@ struct VOXELCORE_API FVoxelMaterialTextureConfig
 
     /** The material this one turns into on steep smooth terrain (VP2-O3); -1, its own ID or an unconfigured ID: never */
     int32 SlopeMaterialID = -1;
+
+    /** The ground underfoot (G247; Surface Class below); Unset keeps the default's class for the ID */
+    EVoxelSurfaceClass SurfaceClass = EVoxelSurfaceClass::Unset;
 };
 ```
 
@@ -610,6 +613,36 @@ The reserved slots, and materials an atlas adds past the registry's list, keep t
 number means: in VoxelCharacterPlugin a cubic world's block breaks after `Hardness / MiningSpeed` while the primary action
 is held (`UVCBlockInteractionComponent::GetBreakSeconds`; bare hands 1, the stone pickaxe 1.5, the iron pickaxe 2),
 decided on the server; smooth worlds dig at once (D32).
+
+---
+
+## Surface Class (G247)
+
+`FVoxelMaterialDefinition::SurfaceClass` (`EVoxelSurfaceClass`: Stone, Dirt, Grass, Sand, Snow, Ice, Mud, Wood, Metal, or
+Unset) is what kind of ground the material is underfoot. The voxel engine names the class and reads nothing from it; a
+game gives each class its meaning (VoxelCharacterPlugin: the friction, the hardness and the footsteps' surface,
+`UVCMovementComponent::SurfaceClassToSurfaceType`). Until G247 the character held its own table by material ID (code
+review CR2, VCP-14), so a material an atlas added, such as the demo's road and trail, had no surface.
+
+| Class | The registry's defaults |
+|-------|-------------------------|
+| Grass | Grass, Leaves |
+| Dirt | Dirt |
+| Stone | Stone, Coal, Diamond |
+| Sand | Sand, Sandstone |
+| Snow | Snow |
+| Ice | Frozen Dirt |
+| Metal | Iron, Gold, Copper |
+| Wood | Wood |
+| Unset | the reserved slots, and an ID past the defaults |
+
+Unlike the hardness, an atlas sets it: `FVoxelMaterialTextureConfig::SurfaceClass` replaces the default's class in the
+world's table (`FVoxelMaterialTable::FromAtlas`) where it names one and keeps it where it is Unset, so a material the
+atlas adds has its own ground. The demo's road (7) is Stone and its trail (8) Dirt in the three atlases with roads
+(`Scripts/setup_poi_roads.py`). A game reads the class from the world's table, `UVoxelChunkManager::GetMaterialTable`
+(the atlas's, or the defaults without one). A dedicated server binds the world actor's atlas as a client does and holds
+the same table, so both machines read one surface (a net walk on the demo's road and trail, G247). Tests
+`VoxelWorlds.MaterialRegistry.SurfaceClasses`, `VoxelWorlds.Streaming.Cubic.TwoWorldsOwnAtlases`.
 
 ---
 
