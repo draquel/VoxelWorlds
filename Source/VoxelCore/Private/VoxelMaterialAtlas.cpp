@@ -225,10 +225,15 @@ void UVoxelMaterialAtlas::BuildMaterialLUT()
 	const int32 SliceRow = 3;
 	const int32 HeightRow = 4;
 
-	// Create or recreate the LUT texture
+	// Create or recreate the LUT texture. Every atlas's LUT lives in the transient package, so each gets a name of its own:
+	// CreateTransient with a name an object there already has reconstructs that object in place, and under one shared
+	// name a second atlas's build (a PIE on a map with another atlas) rewrote the first atlas's LUT, which the first atlas
+	// kept and bound on every later PIE, its materials sampling the other atlas's slices until the editor restarted (G211)
 	if (!MaterialLUT || MaterialLUT->GetSizeX() != LUTWidth || MaterialLUT->GetSizeY() != LUTHeight)
 	{
-		MaterialLUT = UTexture2D::CreateTransient(LUTWidth, LUTHeight, PF_B8G8R8A8, TEXT("VoxelMaterialLUT"));
+		const FName LUTName = MakeUniqueObjectName(GetTransientPackage(), UTexture2D::StaticClass(),
+			FName(*FString::Printf(TEXT("%s_MaterialLUT"), *GetName())));
+		MaterialLUT = UTexture2D::CreateTransient(LUTWidth, LUTHeight, PF_B8G8R8A8, LUTName);
 		if (!MaterialLUT)
 		{
 			UE_LOG(LogVoxelMaterialAtlas, Error, TEXT("UVoxelMaterialAtlas: Failed to create LUT texture"));
@@ -327,8 +332,8 @@ void UVoxelMaterialAtlas::BuildMaterialLUT()
 
 	bLUTDirty = false;
 
-	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("Built material LUT (%d x %d) with %d material configs"),
-		LUTWidth, LUTHeight, MaterialConfigs.Num());
+	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("Built material LUT %s (%d x %d) for %s with %d material configs"),
+		*MaterialLUT->GetName(), LUTWidth, LUTHeight, *GetName(), MaterialConfigs.Num());
 }
 
 bool UVoxelMaterialAtlas::AreTextureArraysDirty() const
