@@ -8,6 +8,7 @@
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelCubeSphere.h"
 #include "HAL/IConsoleManager.h"
+#include "Testing/VoxelTestScopedCVar.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -1073,8 +1074,13 @@ bool FPlanetCutoverTest::RunTest(const FString& Parameters)
 {
 	using namespace PlanetShellWindowTestUtils;
 
+	// The configuration's cut-over for the run, whatever the console set (voxel.Stream.VoxelCutover -1), and the overrides
+	// below over it: each set at the variable's own priority, at least code's, since a code set under a console one is
+	// ignored (G249).
+	const VoxelTesting::FScopedCVar ConfiguredCutover(TEXT("voxel.Stream.VoxelCutover"), -1.0f);
+
 	// The rule.
-	TestFalse(TEXT("Rule: active under the cut-over"), FDistanceBandLODStrategy::ComputeCutoverState(false, 39000.0, 40000.0));
+	TestFalse(TEXT("Rule: active under the cut-over"),FDistanceBandLODStrategy::ComputeCutoverState(false, 39000.0, 40000.0));
 	TestTrue(TEXT("Rule: suspended over it"), FDistanceBandLODStrategy::ComputeCutoverState(false, 40001.0, 40000.0));
 	TestTrue(TEXT("Rule: a suspended window stays suspended over the resume altitude"), FDistanceBandLODStrategy::ComputeCutoverState(true, 35000.0, 40000.0));
 	TestFalse(TEXT("Rule: ... and resumes under it"), FDistanceBandLODStrategy::ComputeCutoverState(true, 33000.0, 40000.0));
@@ -1181,18 +1187,20 @@ bool FPlanetCutoverTest::RunTest(const FString& Parameters)
 		}
 
 		// voxel.Stream.VoxelCutover: an override, and 0 for never.
-		if (IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.VoxelCutover")))
+		if (IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.VoxelCutover")))
 		{
-			const float Saved = Var->GetFloat();
 			const FVector Up = GetSites()[1].Up;
 			const FVector Ground = Terrain.SurfacePoint(Up);
-			Var->Set(0.0f, ECVF_SetByCode);
-			Strategy.Update(MakeContext(Ground + Up * (10.0 * Cutover)), 1.0f / 60.0f);
-			TestFalse(*FString::Printf(TEXT("%s: voxel.Stream.VoxelCutover 0 never suspends"), Case.Name), Strategy.IsWindowSuspended());
-			Var->Set(5000.0f, ECVF_SetByCode);
-			Strategy.Update(MakeContext(Ground + Up * 6000.0), 1.0f / 60.0f);
-			TestTrue(*FString::Printf(TEXT("%s: voxel.Stream.VoxelCutover 5000 suspends at 6,000 up"), Case.Name), Strategy.IsWindowSuspended());
-			Var->Set(Saved, ECVF_SetByCode);
+			{
+				const VoxelTesting::FScopedCVar Never(TEXT("voxel.Stream.VoxelCutover"), 0.0f);
+				Strategy.Update(MakeContext(Ground + Up * (10.0 * Cutover)), 1.0f / 60.0f);
+				TestFalse(*FString::Printf(TEXT("%s: voxel.Stream.VoxelCutover 0 never suspends"), Case.Name), Strategy.IsWindowSuspended());
+			}
+			{
+				const VoxelTesting::FScopedCVar Override(TEXT("voxel.Stream.VoxelCutover"), 5000.0f);
+				Strategy.Update(MakeContext(Ground + Up * 6000.0), 1.0f / 60.0f);
+				TestTrue(*FString::Printf(TEXT("%s: voxel.Stream.VoxelCutover 5000 suspends at 6,000 up"), Case.Name), Strategy.IsWindowSuspended());
+			}
 		}
 		Config->RemoveFromRoot();
 	}
@@ -1219,6 +1227,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetCutoverResumeGuardTest,
 bool FPlanetCutoverResumeGuardTest::RunTest(const FString& Parameters)
 {
 	using namespace PlanetShellWindowTestUtils;
+
+	// The configuration's cut-over, whatever the console set (G249).
+	const VoxelTesting::FScopedCVar ConfiguredCutover(TEXT("voxel.Stream.VoxelCutover"), -1.0f);
 
 	// The rule, C = 40,000 (resumes below 34,000).
 	TestFalse(TEXT("Rule: active, the viewer under the cut-over, the camera over it: stays active"), FDistanceBandLODStrategy::ComputeCutoverState(false, 30000.0, 40000.0, 60000.0));
@@ -1299,6 +1310,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlanetCutoverFarFieldGateTest,
 bool FPlanetCutoverFarFieldGateTest::RunTest(const FString& Parameters)
 {
 	using namespace PlanetShellWindowTestUtils;
+
+	// The configuration's cut-over, whatever the console set (G249).
+	const VoxelTesting::FScopedCVar ConfiguredCutover(TEXT("voxel.Stream.VoxelCutover"), -1.0f);
 
 	constexpr float ViewDistance = 40000.0f;
 	for (const FPlanetCase& Case : GetPlanetCases())
