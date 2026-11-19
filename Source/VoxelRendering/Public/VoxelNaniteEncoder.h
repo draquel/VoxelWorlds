@@ -27,6 +27,22 @@ struct VOXELRENDERING_API FVoxelNaniteEncodeSettings
 	 * and each vertex stored once per triangle using it).
 	 */
 	bool bVertexReuse = true;
+
+	/**
+	 * The material IDs drawn masked (alpha cutout: the leaves; FVoxelMaterialDefinition::bIsMasked), one bit each (D162). A
+	 * triangle whose material (UV1.x of its first corner) is set here goes to material section 1, drawn with the masked
+	 * material; every other triangle to section 0, drawn opaque. All clear: one section, the triangles in input order.
+	 */
+	uint64 MaskedMaterials[4] = { 0, 0, 0, 0 };
+
+	/** @return Whether any material is drawn masked */
+	bool HasMaskedMaterials() const { return (MaskedMaterials[0] | MaskedMaterials[1] | MaskedMaterials[2] | MaskedMaterials[3]) != 0; }
+
+	/** @return Whether MaterialID is drawn masked */
+	bool IsMaskedMaterial(int32 MaterialID) const
+	{
+		return MaterialID >= 0 && MaterialID < 256 && (MaskedMaterials[MaterialID >> 6] >> (MaterialID & 63) & 1) != 0;
+	}
 };
 
 /** What an encode made (counts and sizes for voxel.Render.NaniteStats) */
@@ -43,13 +59,18 @@ struct VOXELRENDERING_API FVoxelNaniteEncodeStats
 	int64 RootDataBytes = 0;
 	/** The position precision used (lower than asked when a cluster needed it) */
 	int32 PositionPrecision = 0;
+	/** Triangles in material section 1 (masked, D162), and the sections the resource uses (1 or 2) */
+	int32 NumMaskedTriangles = 0;
+	int32 NumMaterialSections = 1;
 	double EncodeSeconds = 0.0;
 };
 
 /**
  * Encode a chunk mesh as a Nanite resource whose pages are all root pages (nothing streams), under a flat hierarchy whose
  * clusters are always drawn: Nanite as a rasterizer, no level of detail inside the mesh. Clusters are cut in index
- * order (at most 128 triangles and 256 vertices). Degenerate triangles (two equal indices) are dropped. Any thread.
+ * order (at most 128 triangles and 256 vertices), the masked materials' triangles (Settings.MaskedMaterials) after the
+ * others, each cluster in one material section (0 opaque, 1 masked). Degenerate triangles (two equal indices) are
+ * dropped. Any thread.
  *
  * The resource is plain data until FResources::InitResources hands it to the engine's streaming manager.
  *
@@ -62,6 +83,19 @@ struct VOXELRENDERING_API FVoxelNaniteEncodeStats
 VOXELRENDERING_API TUniquePtr<Nanite::FResources> EncodeVoxelNaniteMesh(TConstArrayView<FVoxelLocalVertex> Vertices,
 	TConstArrayView<uint32> Indices, const FVoxelNaniteEncodeSettings& Settings = FVoxelNaniteEncodeSettings(),
 	FVoxelNaniteEncodeStats* OutStats = nullptr);
+
+/**
+ * The triangles an encode keeps, in the order it stores them: degenerate ones dropped, then (with masked materials) the
+ * opaque ones before the masked ones, each group in input order (D162). Any thread.
+ *
+ * @param Vertices    The mesh's vertices (UV1.x is the material)
+ * @param Indices     Triangle indices into Vertices
+ * @param Settings    The masked materials
+ * @param OutIndices  Receives three indices a triangle, in the encode's order
+ * @param OutSections Receives each triangle's material section (0 opaque, 1 masked)
+ */
+VOXELRENDERING_API void OrderVoxelNaniteTriangles(TConstArrayView<FVoxelLocalVertex> Vertices, TConstArrayView<uint32> Indices,
+	const FVoxelNaniteEncodeSettings& Settings, TArray<uint32>& OutIndices, TArray<uint8>& OutSections);
 
 /** What a validation found (the largest differences between the decoded mesh and the input) */
 struct VOXELRENDERING_API FVoxelNaniteValidation
@@ -82,7 +116,7 @@ struct VOXELRENDERING_API FVoxelNaniteValidation
 /**
  * Decode a resource EncodeVoxelNaniteMesh made, on the CPU, as the GPU transcode would read it (the fixup chunks, the page
  * and cluster headers, the packed clusters, the strip indices, the byte streams), and compare it with the input: the same
- * triangles in the same order and winding, positions within half a quantization step, normals and tangents within their
+ * triangles in the same order (OrderVoxelNaniteTriangles) and winding, each in its cluster's material section, positions within half a quantization step, normals and tangents within their
  * bits, colours and UV1 (material and face type) exact, UV0 within the UV encoding's precision. Also checks each page's
  * GPU size against a root page, and that every cluster is reached by exactly one hierarchy slot. Any thread.
  *

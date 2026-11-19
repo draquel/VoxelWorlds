@@ -1959,6 +1959,19 @@ void UVoxelRegionComponent::SetMaterialAtlas(UVoxelMaterialAtlas* InAtlas)
 {
 	MaterialAtlas = InAtlas;
 
+	// The materials the atlas draws masked go to the Nanite meshes' masked section (D162); the meshes made after this
+	FMemory::Memzero(NaniteMaskedMaterials, sizeof(NaniteMaskedMaterials));
+	if (MaterialAtlas)
+	{
+		for (int32 MaterialID = 0; MaterialID < 256; ++MaterialID)
+		{
+			if (MaterialAtlas->IsMaterialMasked(uint8(MaterialID)))
+			{
+				NaniteMaskedMaterials[MaterialID >> 6] |= uint64(1) << (MaterialID & 63);
+			}
+		}
+	}
+
 	if (MaterialAtlas)
 	{
 		// The atlas's material table is its world's (the chunk manager's meshers hold it), not the registry's (G101)
@@ -2742,6 +2755,8 @@ void UVoxelRegionComponent::CreateChunkPrimitive(FChunkPrimitive& Primitive, con
 		FVoxelChunkNaniteSceneProxy::FInit NaniteInit;
 		NaniteInit.Mesh = Mesh;
 		NaniteInit.Material = GetNaniteMaterial();
+		// The masked triangles draw with the terrain's own material, which is masked (D162)
+		NaniteInit.MaskedMaterial = VoxelMaterial ? VoxelMaterial.Get() : nullptr;
 		NaniteInit.FeatureLevel = FeatureLevel;
 		NaniteInit.bRayTracing = bChunkPrimitiveRayTracing;
 		NaniteInit.bPositionOnly = FLocalVertexFactory::StaticType.SupportsManualVertexFetch(FeatureLevel);
@@ -2807,9 +2822,9 @@ void UVoxelRegionComponent::SubmitChunkPrimitive(const FIntVector4& Key, TArray<
 	{
 		if (!IsVoxelNaniteAsyncWanted())
 		{
-			Mesh->BuildNanite_GameThread(this, bRadialFaceUp, FaceUpCenter);
+			Mesh->BuildNanite_GameThread(this, bRadialFaceUp, FaceUpCenter, NaniteMaskedMaterials);
 		}
-		else if (Mesh->StartNaniteEncode_GameThread(bRadialFaceUp, FaceUpCenter))
+		else if (Mesh->StartNaniteEncode_GameThread(bRadialFaceUp, FaceUpCenter, NaniteMaskedMaterials))
 		{
 			// It draws without Nanite until the task is done (ProcessNaniteEncodes)
 			PendingNaniteEncodes.Emplace(Key, Mesh);

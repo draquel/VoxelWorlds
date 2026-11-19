@@ -598,6 +598,10 @@ private:
 	/** Whether the project drew shadows with virtual shadow maps when the setting was applied (Auto's input) */
 	bool bNaniteAutoVirtualShadows = false;
 
+	/** The material IDs the atlas draws masked (the leaves), one bit each: their triangles go to the Nanite meshes' masked
+	 *  section (D162; SetMaterialAtlas) */
+	uint64 NaniteMaskedMaterials[4] = { 0, 0, 0, 0 };
+
 	/** Cached chunk data for game thread tracking */
 	struct FChunkInfo
 	{

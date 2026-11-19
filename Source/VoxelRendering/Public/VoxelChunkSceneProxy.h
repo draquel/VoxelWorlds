@@ -120,21 +120,23 @@ public:
 	 * @param Owner         The UObject the resource is registered under (the region component)
 	 * @param bRadialFaceUp Face types against a planet's radial up (spherical SP-D3)
 	 * @param FaceUpCenter  The planet centre (world space)
+	 * @param MaskedMaterials The material IDs drawn masked, one bit each (D162)
 	 * @return Whether the mesh has a Nanite resource (false: no triangles, a failed encode or validation; it then draws
 	 *         through FVoxelChunkSceneProxy)
 	 */
-	bool BuildNanite_GameThread(const UObject* Owner, bool bRadialFaceUp, const FVector& FaceUpCenter);
+	bool BuildNanite_GameThread(const UObject* Owner, bool bRadialFaceUp, const FVector& FaceUpCenter, const uint64 (&MaskedMaterials)[4]);
 
 	/**
 	 * Game thread, at submit (runtime Nanite): start encoding a copy of the vertices on a task (converted there as
 	 * BuildNanite_GameThread converts them); the mesh draws without Nanite meanwhile. FinishNaniteEncode_GameThread takes
 	 * the result once IsNaniteEncodeDone.
 	 *
-	 * @param bRadialFaceUp Face types against a planet's radial up
-	 * @param FaceUpCenter  The planet centre (world space)
+	 * @param bRadialFaceUp   Face types against a planet's radial up
+	 * @param FaceUpCenter    The planet centre (world space)
+	 * @param MaskedMaterials The material IDs drawn masked, one bit each (FVoxelNaniteEncodeSettings::MaskedMaterials)
 	 * @return Whether a task started (false: no triangles, or a resource or a task already)
 	 */
-	bool StartNaniteEncode_GameThread(bool bRadialFaceUp, const FVector& FaceUpCenter);
+	bool StartNaniteEncode_GameThread(bool bRadialFaceUp, const FVector& FaceUpCenter, const uint64 (&MaskedMaterials)[4]);
 
 	/** @return Whether an encode task was started and has not been taken yet */
 	bool IsNaniteEncodePending() const { return NaniteJob.IsValid(); }
@@ -160,6 +162,8 @@ public:
 	TUniquePtr<Nanite::FResources> NaniteResources;
 	int32 NanitePages = 0;
 	int64 NaniteGpuBytes = 0;
+	/** The material sections the resource's clusters use: 1, or 2 when it holds masked triangles (section 1, D162) */
+	int32 NaniteMaterialSections = 1;
 
 	/** The LOD it was meshed at, its box relative to Origin, and Origin (fixed at construction, any thread) */
 	const int32 LODLevel;

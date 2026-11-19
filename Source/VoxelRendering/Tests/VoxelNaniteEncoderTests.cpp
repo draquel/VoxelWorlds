@@ -79,10 +79,14 @@ namespace
 	}
 
 	bool RunCase(FAutomationTestBase& Test, const TCHAR* Name, const TArray<FVoxelLocalVertex>& Vertices, const TArray<uint32>& Indices,
-		bool bVertexReuse, FVoxelNaniteEncodeStats& OutStats)
+		bool bVertexReuse, FVoxelNaniteEncodeStats& OutStats, TConstArrayView<int32> MaskedMaterials = {})
 	{
 		FVoxelNaniteEncodeSettings Settings;
 		Settings.bVertexReuse = bVertexReuse;
+		for (const int32 MaterialID : MaskedMaterials)
+		{
+			Settings.MaskedMaterials[MaterialID >> 6] |= uint64(1) << (MaterialID & 63);
+		}
 		TUniquePtr<Nanite::FResources> Resources = EncodeVoxelNaniteMesh(Vertices, Indices, Settings, &OutStats);
 		if (!Test.TestTrue(FString::Printf(TEXT("%s: encoded"), Name), Resources.IsValid()))
 		{
@@ -107,7 +111,9 @@ namespace
  * with positions within half a quantization step, normals and tangents within their bits, colours, tangent signs and
  * UV1 (material and face type) exact. Cases: a terrain-like grid (shared vertices), a sphere (normals everywhere,
  * vertices far apart in index order), a far chunk's span (the position precision lowered to fit 21 bits), degenerate
- * triangles dropped; each with and without vertex reuse. Reuse stores fewer vertices than three a triangle.
+ * triangles dropped; the grid with two of its materials masked (D162: their triangles after the others, each cluster in
+ * one material section, which the decode checks); each with and without vertex reuse. Reuse stores fewer vertices than
+ * three a triangle.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNaniteEncodeRoundTripTest,
 	"VoxelWorlds.Rendering.Nanite.EncodeRoundTrip",
@@ -144,6 +150,22 @@ bool FVoxelNaniteEncodeRoundTripTest::RunTest(const FString& Parameters)
 		RunCase(*this, TEXT("Degenerate"), DegenerateVertices, DegenerateIndices, bReuse, DegenerateStats);
 
 		TestEqual(TEXT("Degenerate triangles dropped"), DegenerateStats.NumTriangles, GridStats.NumTriangles);
+
+		// Two materials masked (the leaves, D162): their triangles in section 1, after the others
+		const int32 Masked[] = { 7, 30 };
+		FVoxelNaniteEncodeStats MaskedStats;
+		RunCase(*this, TEXT("Masked"), GridVertices, GridIndices, bReuse, MaskedStats, Masked);
+		int32 ExpectedMasked = 0;
+		for (int32 i = 0; i + 2 < GridIndices.Num(); i += 3)
+		{
+			const int32 MaterialID = FMath::RoundToInt(GridVertices[GridIndices[i]].TexCoord1.X);
+			ExpectedMasked += (MaterialID == 7 || MaterialID == 30) ? 1 : 0;
+		}
+		TestTrue(TEXT("The grid has masked triangles"), ExpectedMasked > 0);
+		TestEqual(TEXT("Masked triangles counted"), MaskedStats.NumMaskedTriangles, ExpectedMasked);
+		TestEqual(TEXT("Two material sections"), MaskedStats.NumMaterialSections, 2);
+		TestEqual(TEXT("No masked materials, one section"), GridStats.NumMaterialSections, 1);
+		TestEqual(TEXT("Every triangle kept"), MaskedStats.NumTriangles, GridStats.NumTriangles);
 		TestTrue(TEXT("The far chunk lowered the position precision"), FarStats.PositionPrecision < 4);
 		TestTrue(TEXT("Several pages for the sphere"), SphereStats.NumPages > 1);
 		if (bReuse)

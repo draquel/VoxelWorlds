@@ -27,6 +27,8 @@ struct VOXELRENDERING_API FVoxelNaniteCounters
 		double EncodeSeconds = 0.0;
 		double MaxEncodeSeconds = 0.0;
 		int64 EncodedTriangles = 0;
+		/** Of those, the triangles in a masked section (the leaves, D162) */
+		int64 MaskedTriangles = 0;
 		/** Encodes that failed or did not decode to their input (the mesh then draws without Nanite) */
 		int64 Failures = 0;
 		/** Nanite primitives created, and fades that ended by swapping to one (D154) */
@@ -38,7 +40,7 @@ struct VOXELRENDERING_API FVoxelNaniteCounters
 	static FCounts Get();
 	/** Clears the encode counts (the live ones stay) */
 	static void ResetEncodes();
-	static void AddEncode(double Seconds, int64 Triangles, bool bFailed);
+	static void AddEncode(double Seconds, int64 Triangles, bool bFailed, int64 MaskedTriangles = 0);
 	static void AddLive(int64 Resources, int64 Pages, int64 GpuBytes);
 	static void AddPrimitive();
 	static void AddFadeSwap();
@@ -126,8 +128,11 @@ public:
 	{
 		/** The mesh it draws: has a Nanite resource handed to the streaming manager */
 		FVoxelChunkMeshRef Mesh;
-		/** The terrain material for Nanite (opaque where one is set: voxel.Render.Nanite.Material) */
+		/** The terrain material for Nanite's section 0 (opaque: voxel.Render.Nanite.Material) */
 		UMaterialInterface* Material = nullptr;
+		/** The terrain's masked material for section 1, the masked triangles' (D162; the world's terrain material), if the
+		 *  mesh has any */
+		UMaterialInterface* MaskedMaterial = nullptr;
 		ERHIFeatureLevel::Type FeatureLevel = ERHIFeatureLevel::SM5;
 		/** As FVoxelChunkSceneProxy::FInit */
 		bool bRayTracing = false;
@@ -189,6 +194,8 @@ public:
 private:
 	FVoxelChunkMeshRef Mesh;
 	UMaterialInterface* Material = nullptr;
+	/** Section 1's material (D162), or Material when Nanite cannot draw the masked one */
+	UMaterialInterface* MaskedMaterial = nullptr;
 	ERHIFeatureLevel::Type FeatureLevel;
 	bool bRayTracing = false;
 	/** Ray traced through Nanite's own geometry (r.RayTracing.Nanite.Mode other than 0, read when the proxy is made):
