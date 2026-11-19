@@ -4,6 +4,8 @@
 #include "VoxelWorldsSettings.h"
 #include "VoxelSceneProxy.h"
 #include "VoxelChunkSceneProxy.h"
+#include "VoxelChunkNaniteSceneProxy.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "PrimitiveSceneDesc.h"
 #include "PrimitiveSceneProxyDesc.h"
 #include "SceneInterface.h"
@@ -306,6 +308,16 @@ void UVoxelRegionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 	AdvanceFades();
 
+	// Encodes finished on their tasks swap their slots to Nanite (runtime Nanite spike); the tick stays on while any run
+	if (PendingNaniteEncodes.Num() > 0)
+	{
+		ProcessNaniteEncodes();
+		if (PendingNaniteEncodes.Num() > 0)
+		{
+			SetComponentTickEnabled(true);
+		}
+	}
+
 	// Chunks stream in and out every frame: refresh the bounds and hand them to the render scene at most once per
 	// tick, and only when they actually moved (UpdateBounds alone does not reach the scene).
 	if (bTotalBoundsDirty || bRenderBoundsStale)
@@ -369,7 +381,11 @@ FBoxSphereBounds UVoxelRegionComponent::CalcBounds(const FTransform& LocalToWorl
 
 void UVoxelRegionComponent::GetUsedMaterials(TArray<UMaterialInterface*>& OutMaterials, bool bGetDebugMaterials) const
 {
-	for (UMaterialInterface* Used : { VoxelMaterial.Get(), WaterMaterial.Get(), FadeMaterial.Get() })
+	// The Nanite primitives' material too (runtime Nanite spike): the shader compiler recreates the primitives of a
+	// material that gets new shaders through this list, and a Nanite primitive left out keeps shading commands built
+	// for the old shaders (G235)
+	for (UMaterialInterface* Used : { VoxelMaterial.Get(), WaterMaterial.Get(), FadeMaterial.Get(),
+		static_cast<UMaterialInterface*>(NaniteMaterialInstance.Get()) })
 	{
 		if (Used)
 		{
@@ -1195,23 +1211,45 @@ bool UVoxelRegionComponent::GetChunkDrawInfo(const FIntVector& ChunkCoord, FVoxe
 	{
 		// The chunk's primitive (G116), and the totals over this component's primitives
 		const FChunkPrimitive* Primitive = ChunkPrimitives.Find(FVoxelFadeScheduler::ChunkKey(ChunkCoord));
-		const FVoxelChunkSceneProxy* ChunkProxy = Primitive ? Primitive->Proxy : nullptr;
+		const FVoxelChunkSceneProxy* ChunkProxy = Primitive ? Primitive->GetChunkProxy() : nullptr;
+		// A Nanite primitive (runtime Nanite spike) answers for its mesh the same way
+		const FVoxelChunkNaniteSceneProxy* NaniteProxy = Primitive && Primitive->bNanite && Primitive->Proxy
+			? static_cast<const FVoxelChunkNaniteSceneProxy*>(Primitive->Proxy) : nullptr;
 		TArray<const FVoxelChunkSceneProxy*> AllProxies;
+		TArray<const FVoxelChunkNaniteSceneProxy*> AllNaniteProxies;
 		AllProxies.Reserve(ChunkPrimitives.Num());
 		for (const TPair<FIntVector4, FChunkPrimitive>& Pair : ChunkPrimitives)
 		{
-			if (Pair.Value.Proxy)
+			if (const FVoxelChunkSceneProxy* Each = Pair.Value.GetChunkProxy())
 			{
-				AllProxies.Add(Pair.Value.Proxy);
+				AllProxies.Add(Each);
+			}
+			else if (Pair.Value.bNanite && Pair.Value.Proxy)
+			{
+				AllNaniteProxies.Add(static_cast<const FVoxelChunkNaniteSceneProxy*>(Pair.Value.Proxy));
 			}
 		}
 		FVoxelChunkDrawInfo Info;
 		ENQUEUE_RENDER_COMMAND(VoxelChunkPrimitiveDrawInfo)(
-			[ChunkProxy, AllProxies = MoveTemp(AllProxies), &Info](FRHICommandListImmediate& RHICmdList)
+			[ChunkProxy, NaniteProxy, AllProxies = MoveTemp(AllProxies), AllNaniteProxies = MoveTemp(AllNaniteProxies), &Info](FRHICommandListImmediate& RHICmdList)
 			{
 				if (ChunkProxy)
 				{
 					ChunkProxy->GetDrawInfo_RenderThread(Info);
+				}
+				else if (NaniteProxy)
+				{
+					NaniteProxy->GetDrawInfo_RenderThread(Info);
+				}
+				for (const FVoxelChunkNaniteSceneProxy* Each : AllNaniteProxies)
+				{
+					Info.ProxyMeshBufferBytes += Each->GetMeshBufferBytes_RenderThread();
+					const uint64 Bytes = Each->GetRayTracingBytes_RenderThread();
+					if (Bytes > 0)
+					{
+						(Each->IsSeam() ? Info.ProxyRayTracingSeams : Info.ProxyRayTracingChunks) += 1;
+						Info.ProxyRayTracingBytes += Bytes;
+					}
 				}
 				for (const FVoxelChunkSceneProxy* Each : AllProxies)
 				{
@@ -1491,9 +1529,9 @@ void UVoxelRegionComponent::FlushHoldReleases()
 		TArray<FVoxelChunkSceneProxy*> Released;
 		for (const FIntVector4& Key : PendingHoldReleases)
 		{
-			if (const FChunkPrimitive* Primitive = ChunkPrimitives.Find(Key); Primitive && Primitive->Proxy)
+			if (const FChunkPrimitive* Primitive = ChunkPrimitives.Find(Key); Primitive && Primitive->GetChunkProxy())
 			{
-				Released.Add(Primitive->Proxy);
+				Released.Add(Primitive->GetChunkProxy());
 			}
 		}
 		PendingHoldReleases.Reset();
@@ -1635,9 +1673,9 @@ void UVoxelRegionComponent::AdvanceFades()
 			}
 			if (bUseChunkPrimitives)
 			{
-				if (const FChunkPrimitive* Primitive = ChunkPrimitives.Find(Pair.Key); Primitive && Primitive->Proxy)
+				if (const FChunkPrimitive* Primitive = ChunkPrimitives.Find(Pair.Key); Primitive && Primitive->GetChunkProxy())
 				{
-					PrimitiveAlphas.Emplace(Primitive->Proxy, Pair.Value);
+					PrimitiveAlphas.Emplace(Primitive->GetChunkProxy(), Pair.Value);
 				}
 			}
 			else if (FVoxelFadeScheduler::IsSeamKey(Pair.Key))
@@ -1910,6 +1948,7 @@ void UVoxelRegionComponent::SetMaterialAtlas(UVoxelMaterialAtlas* InAtlas)
 		// The atlas's material table is its world's (the chunk manager's meshers hold it), not the registry's (G101)
 		// Update material parameters if we have a dynamic instance
 		UpdateMaterialAtlasParameters();
+		SyncNaniteMaterialParameters();
 	}
 }
 
@@ -1931,6 +1970,7 @@ UMaterialInstanceDynamic* UVoxelRegionComponent::CreateVoxelMaterialInstance(UMa
 
 		// Configure with atlas parameters
 		UpdateMaterialAtlasParameters();
+		SyncNaniteMaterialParameters();
 
 		UE_LOG(LogVoxelRendering, Log, TEXT("Created dynamic material instance from: %s"), *MasterMaterial->GetName());
 	}
@@ -1945,6 +1985,7 @@ void UVoxelRegionComponent::SetBiomeLookup(UTexture2D* InLookup)
 	{
 		DynamicMaterialInstance->SetTextureParameterValue(FVoxelBiomeLookup::ParameterName, BiomeLookup);
 	}
+	SyncNaniteMaterialParameters();
 }
 
 void UVoxelRegionComponent::UpdateMaterialAtlasParameters()
@@ -2406,6 +2447,7 @@ UVoxelRegionComponent::FPendingChunkPrimitive UVoxelRegionComponent::MakePending
 	FPendingChunkPrimitive Pending;
 	Pending.Key = Key;
 	Pending.Proxy = Primitive.Proxy;
+	Pending.SceneData = Primitive.SceneData;
 	const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Any = Primitive.Mesh.IsValid() ? Primitive.Mesh : Primitive.Previous;
 	if (Any.IsValid())
 	{
@@ -2421,7 +2463,7 @@ UVoxelRegionComponent::FPendingChunkPrimitive UVoxelRegionComponent::MakePending
 void UVoxelRegionComponent::FillChunkPrimitiveSceneDesc(const FPendingChunkPrimitive& Pending, FPrimitiveSceneDesc& OutDesc)
 {
 	OutDesc.SceneProxy = Pending.Proxy;
-	OutDesc.PrimitiveSceneData = &Pending.Proxy->SceneData;
+	OutDesc.PrimitiveSceneData = Pending.SceneData;
 	OutDesc.PrimitiveUObject = this;
 	OutDesc.Mobility = Mobility;
 	// At the chunk's origin, its vertices float offsets a chunk across
@@ -2444,6 +2486,7 @@ void UVoxelRegionComponent::DestroyChunkPrimitiveRenderState(const FIntVector4& 
 	FVoxelChunkPrimitiveCounters::AddRemoved(1);
 	Scene->BatchRemovePrimitives(TArray<FPrimitiveSceneProxy*>{ Primitive->Proxy });
 	Primitive->Proxy = nullptr;
+	Primitive->SceneData = nullptr;
 	Primitive->Interface->NotifyRemoved();
 	// The engine recreates a primitive after a material recompile or a feature level change: the next one reads the
 	// materials' relevance again
@@ -2463,7 +2506,7 @@ void UVoxelRegionComponent::CreateChunkPrimitiveRenderState(const FIntVector4& K
 	}
 	// A new primitive over the meshes the slot holds (their buffers stay: the render thread made them once), with the
 	// slot's fade if one runs
-	Primitive->Proxy = CreateChunkPrimitive(Key, Primitive->Mesh, Primitive->Previous, ActiveFades.Contains(Key));
+	CreateChunkPrimitive(*Primitive, Key, Primitive->Mesh, Primitive->Previous, ActiveFades.Contains(Key));
 	Primitive->bPendingAdd = false;
 	FPrimitiveSceneDesc Desc;
 	FillChunkPrimitiveSceneDesc(MakePendingChunkPrimitive(Key, *Primitive), Desc);
@@ -2558,7 +2601,107 @@ void UVoxelRegionComponent::EnsureChunkPrimitiveMode()
 	RequestRenderBoundsRefresh();
 }
 
-FVoxelChunkSceneProxy* UVoxelRegionComponent::CreateChunkPrimitive(const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh,
+FVoxelChunkSceneProxy* UVoxelRegionComponent::FChunkPrimitive::GetChunkProxy() const
+{
+	return bNanite ? nullptr : static_cast<FVoxelChunkSceneProxy*>(Proxy);
+}
+
+UMaterialInterface* UVoxelRegionComponent::GetNaniteMaterial()
+{
+	UMaterialInterface* Terrain = VoxelMaterial ? VoxelMaterial.Get() : UMaterial::GetDefaultMaterial(MD_Surface);
+	static const TConsoleVariableData<FString>* MaterialPath =
+		IConsoleManager::Get().FindTConsoleVariableDataString(TEXT("voxel.Render.Nanite.Material"));
+	const FString Path = MaterialPath ? MaterialPath->GetValueOnGameThread() : FString();
+	if (Path.IsEmpty())
+	{
+		return Terrain;
+	}
+	UMaterialInterface* Parent = NaniteMaterialInstance ? NaniteMaterialInstance->Parent.Get() : nullptr;
+	if (!NaniteMaterialInstance || !Parent || Parent->GetPathName() != Path)
+	{
+		UMaterialInterface* NewParent = LoadObject<UMaterialInterface>(nullptr, *Path);
+		if (!NewParent)
+		{
+			UE_LOG(LogVoxelRendering, Warning, TEXT("voxel.Render.Nanite.Material: %s does not load; Nanite draws with the terrain material"), *Path);
+			return Terrain;
+		}
+		NaniteMaterialInstance = UMaterialInstanceDynamic::Create(NewParent, this);
+		SyncNaniteMaterialParameters();
+	}
+	return NaniteMaterialInstance;
+}
+
+void UVoxelRegionComponent::ProcessNaniteEncodes()
+{
+	check(IsInGameThread());
+	const bool bWanted = IsVoxelNaniteWanted();
+	for (int32 i = PendingNaniteEncodes.Num() - 1; i >= 0; --i)
+	{
+		TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe> Mesh = PendingNaniteEncodes[i].Value;
+		if (!Mesh->IsNaniteEncodeDone())
+		{
+			continue;
+		}
+		const FIntVector4 Key = PendingNaniteEncodes[i].Key;
+		PendingNaniteEncodes.RemoveAtSwap(i);
+		const FChunkPrimitive* Primitive = ChunkPrimitives.Find(Key);
+		// A mesh replaced or removed meanwhile is not handed to the engine at all
+		const bool bCurrent = Primitive && Primitive->Mesh == Mesh;
+		if (bCurrent && Mesh->FinishNaniteEncode_GameThread(this) && bWanted && !Primitive->bNanite && !ActiveFades.Contains(Key))
+		{
+			SubmitChunkPrimitiveMesh(Key, Mesh, /*bFade*/ false);
+		}
+		else if (!bCurrent)
+		{
+			Mesh->NaniteJob.Reset();
+		}
+		// The game thread's reference goes on the render thread, as every chunk mesh's does
+		ReleaseChunkMeshOnRenderThread(MoveTemp(Mesh));
+	}
+}
+
+void UVoxelRegionComponent::SyncNaniteMaterialParameters()
+{
+	if (!NaniteMaterialInstance || !VoxelMaterial)
+	{
+		return;
+	}
+	// Every parameter's value as the terrain material resolves it, through its whole parent chain (the default instance's
+	// tiling and sharpness, the atlas arrays and the LUT set at runtime): copying only the dynamic instance's own overrides
+	// left the Nanite material at the master's defaults (a triplanar scale of 0: one texel a material, a flat colour)
+	UMaterialInterface* Terrain = VoxelMaterial.Get();
+	TArray<FMaterialParameterInfo> Infos;
+	TArray<FGuid> Ids;
+	Terrain->GetAllScalarParameterInfo(Infos, Ids);
+	for (const FMaterialParameterInfo& Info : Infos)
+	{
+		float Value;
+		if (Terrain->GetScalarParameterValue(FHashedMaterialParameterInfo(Info), Value))
+		{
+			NaniteMaterialInstance->SetScalarParameterValueByInfo(Info, Value);
+		}
+	}
+	Terrain->GetAllVectorParameterInfo(Infos, Ids);
+	for (const FMaterialParameterInfo& Info : Infos)
+	{
+		FLinearColor Value;
+		if (Terrain->GetVectorParameterValue(FHashedMaterialParameterInfo(Info), Value))
+		{
+			NaniteMaterialInstance->SetVectorParameterValueByInfo(Info, Value);
+		}
+	}
+	Terrain->GetAllTextureParameterInfo(Infos, Ids);
+	for (const FMaterialParameterInfo& Info : Infos)
+	{
+		UTexture* Value = nullptr;
+		if (Terrain->GetTextureParameterValue(FHashedMaterialParameterInfo(Info), Value) && Value)
+		{
+			NaniteMaterialInstance->SetTextureParameterValueByInfo(Info, Value);
+		}
+	}
+}
+
+void UVoxelRegionComponent::CreateChunkPrimitive(FChunkPrimitive& Primitive, const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh,
 	const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Previous, bool bFading)
 {
 	UMaterialInterface* MaterialToUse = VoxelMaterial ? VoxelMaterial.Get() : UMaterial::GetDefaultMaterial(MD_Surface);
@@ -2576,6 +2719,26 @@ FVoxelChunkSceneProxy* UVoxelRegionComponent::CreateChunkPrimitive(const FIntVec
 	Desc.ComponentId = FPrimitiveSceneInfoData().PrimitiveSceneId;
 	// The sun's far cascades take the coarse terrain only (D-VP3: the region proxy's per-mesh filter, per primitive)
 	Desc.bCastFarShadow = bCastFarShadow && Mesh.IsValid() && Mesh->LODLevel >= GetVoxelFarShadowMinLOD();
+
+	// A mesh with a Nanite resource draws through Nanite while no fade runs (runtime Nanite spike, D154)
+	if (!bFading && Mesh.IsValid() && Mesh->HasNanite() && IsVoxelNaniteWanted())
+	{
+		FVoxelChunkNaniteSceneProxy::FInit NaniteInit;
+		NaniteInit.Mesh = Mesh;
+		NaniteInit.Material = GetNaniteMaterial();
+		NaniteInit.FeatureLevel = FeatureLevel;
+		NaniteInit.bRayTracing = bChunkPrimitiveRayTracing;
+		NaniteInit.bPositionOnly = FLocalVertexFactory::StaticType.SupportsManualVertexFetch(FeatureLevel);
+		NaniteInit.bRadialFaceUp = bRadialFaceUp;
+		NaniteInit.FaceUpCenter = FaceUpCenter;
+		NaniteInit.bSeam = FVoxelFadeScheduler::IsSeamKey(Key);
+		NaniteInit.bLumenCards = ChunkPrimitiveCards.HasCards();
+		FVoxelChunkNaniteSceneProxy* NaniteProxy = new FVoxelChunkNaniteSceneProxy(Desc, MoveTemp(NaniteInit));
+		Primitive.Proxy = NaniteProxy;
+		Primitive.SceneData = &NaniteProxy->SceneData;
+		Primitive.bNanite = true;
+		return;
+	}
 
 	FVoxelChunkSceneProxy::FInit Init;
 	Init.Mesh = Mesh;
@@ -2606,7 +2769,10 @@ FVoxelChunkSceneProxy* UVoxelRegionComponent::CreateChunkPrimitive(const FIntVec
 	Init.FaceUpCenter = FaceUpCenter;
 	Init.bSeam = FVoxelFadeScheduler::IsSeamKey(Key);
 	Init.bLumenCards = ChunkPrimitiveCards.HasCards();
-	return new FVoxelChunkSceneProxy(Desc, MoveTemp(Init));
+	FVoxelChunkSceneProxy* ChunkProxy = new FVoxelChunkSceneProxy(Desc, MoveTemp(Init));
+	Primitive.Proxy = ChunkProxy;
+	Primitive.SceneData = &ChunkProxy->SceneData;
+	Primitive.bNanite = false;
 }
 
 void UVoxelRegionComponent::SubmitChunkPrimitive(const FIntVector4& Key, TArray<FVoxelVertex>&& Vertices, TArray<uint32>&& Indices,
@@ -2619,8 +2785,22 @@ void UVoxelRegionComponent::SubmitChunkPrimitive(const FIntVector4& Key, TArray<
 		// Not registered: nothing to draw into (the registration's ConsumeLostRenderData brings it back)
 		return;
 	}
-	SubmitChunkPrimitiveMesh(Key, MakeShared<FVoxelChunkMesh, ESPMode::ThreadSafe>(MoveTemp(Vertices), MoveTemp(Indices), LODLevel,
-		LocalBounds, Origin, ChunkMeshBytes.ToSharedRef(), ChunkPrimitiveCards, PrebuiltCards), bFade);
+	const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe> Mesh = MakeShared<FVoxelChunkMesh, ESPMode::ThreadSafe>(MoveTemp(Vertices), MoveTemp(Indices), LODLevel,
+		LocalBounds, Origin, ChunkMeshBytes.ToSharedRef(), ChunkPrimitiveCards, PrebuiltCards);
+	if (IsVoxelNaniteWanted())
+	{
+		if (!IsVoxelNaniteAsyncWanted())
+		{
+			Mesh->BuildNanite_GameThread(this, bRadialFaceUp, FaceUpCenter);
+		}
+		else if (Mesh->StartNaniteEncode_GameThread(bRadialFaceUp, FaceUpCenter))
+		{
+			// It draws without Nanite until the task is done (ProcessNaniteEncodes)
+			PendingNaniteEncodes.Emplace(Key, Mesh);
+			SetComponentTickEnabled(true);
+		}
+	}
+	SubmitChunkPrimitiveMesh(Key, Mesh, bFade);
 }
 
 void UVoxelRegionComponent::SubmitChunkPrimitiveMesh(const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh, bool bFade)
@@ -2660,7 +2840,7 @@ void UVoxelRegionComponent::SubmitChunkPrimitiveMesh(const FIntVector4& Key, con
 	}
 	Primitive.Mesh = Mesh;
 	Primitive.Previous = Previous;
-	Primitive.Proxy = CreateChunkPrimitive(Key, Mesh, Previous, bFading);
+	CreateChunkPrimitive(Primitive, Key, Mesh, Previous, bFading);
 	Primitive.bPendingAdd = true;
 	PendingPrimitiveAdds.Add(MakePendingChunkPrimitive(Key, Primitive));
 }
@@ -2678,7 +2858,16 @@ void UVoxelRegionComponent::ClearChunkPrimitiveFade(const FIntVector4& Key)
 		RemoveChunkPrimitive(Key);
 		return;
 	}
-	if (FVoxelChunkSceneProxy* Proxy = Primitive->Proxy)
+	if (Primitive->Mesh->HasNanite() && IsVoxelNaniteWanted())
+	{
+		// The fading primitive leaves the scene and a Nanite one over the same mesh joins it in the same flush (runtime
+		// Nanite spike, D154): one more removal and add a fade
+		const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe> Mesh = Primitive->Mesh;
+		FVoxelNaniteCounters::AddFadeSwap();
+		SubmitChunkPrimitiveMesh(Key, Mesh, /*bFade*/ false);
+		return;
+	}
+	if (FVoxelChunkSceneProxy* Proxy = Primitive->GetChunkProxy())
 	{
 		ENQUEUE_RENDER_COMMAND(ClearVoxelChunkPrimitiveFade)(
 			[Proxy](FRHICommandListImmediate& RHICmdList)
@@ -2698,7 +2887,7 @@ void UVoxelRegionComponent::RetireChunkPrimitive(FChunkPrimitive& Primitive)
 		if (Primitive.bPendingAdd)
 		{
 			// Never handed to the scene: out of the queue, and deleted on the render thread (after any command that names it)
-			FVoxelChunkSceneProxy* Proxy = Primitive.Proxy;
+			FPrimitiveSceneProxy* Proxy = Primitive.Proxy;
 			PendingPrimitiveAdds.RemoveAllSwap([Proxy](const FPendingChunkPrimitive& Pending) { return Pending.Proxy == Proxy; });
 			ENQUEUE_RENDER_COMMAND(DeleteVoxelChunkPrimitive)(
 				[Proxy](FRHICommandListImmediate&)
@@ -2713,6 +2902,8 @@ void UVoxelRegionComponent::RetireChunkPrimitive(FChunkPrimitive& Primitive)
 		}
 	}
 	Primitive.Proxy = nullptr;
+	Primitive.SceneData = nullptr;
+	Primitive.bNanite = false;
 	Primitive.bPendingAdd = false;
 	ReleaseChunkMeshOnRenderThread(MoveTemp(Primitive.Mesh));
 	ReleaseChunkMeshOnRenderThread(MoveTemp(Primitive.Previous));

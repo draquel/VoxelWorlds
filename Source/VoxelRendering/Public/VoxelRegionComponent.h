@@ -14,6 +14,7 @@
 
 class FVoxelSceneProxy;
 class FVoxelChunkSceneProxy;
+struct FPrimitiveSceneInfoData;
 class FVoxelChunkMesh;
 class FVoxelChunkPrimitiveInterface;
 class IPrimitiveComponent;
@@ -552,6 +553,11 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> DynamicMaterialInstance;
 
+	/** The terrain material Nanite primitives draw with (runtime Nanite spike): an instance of voxel.Render.Nanite.Material
+	 *  with the terrain material's parameters, or null for the terrain material itself */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> NaniteMaterialInstance;
+
 	/** Voxel size in world units */
 	UPROPERTY(EditAnywhere, Category = "Voxel", meta = (ClampMin = "1"))
 	float VoxelSize = 100.0f;
@@ -770,7 +776,13 @@ private:
 	/** One chunk interior's or seam bucket's primitive and the game thread's reference to the mesh it draws */
 	struct FChunkPrimitive
 	{
-		FVoxelChunkSceneProxy* Proxy = nullptr;
+		/** An FVoxelChunkSceneProxy, or an FVoxelChunkNaniteSceneProxy when bNanite (runtime Nanite spike) */
+		FPrimitiveSceneProxy* Proxy = nullptr;
+		/** The proxy's scene record (FPrimitiveSceneDesc::PrimitiveSceneData) */
+		FPrimitiveSceneInfoData* SceneData = nullptr;
+		bool bNanite = false;
+		/** @return The proxy as an FVoxelChunkSceneProxy, null for none or a Nanite one (fades and draw info are its) */
+		FVoxelChunkSceneProxy* GetChunkProxy() const;
 		TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe> Mesh;
 		/** The mesh its crossfade dithers out (step 2), until the fade ends */
 		TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe> Previous;
@@ -784,7 +796,8 @@ private:
 	struct FPendingChunkPrimitive
 	{
 		FIntVector4 Key;
-		FVoxelChunkSceneProxy* Proxy = nullptr;
+		FPrimitiveSceneProxy* Proxy = nullptr;
+		FPrimitiveSceneInfoData* SceneData = nullptr;
 		FVector Origin = FVector::ZeroVector;
 		FBox LocalBox = FBox(ForceInit);
 	};
@@ -880,9 +893,28 @@ private:
 	void DestroyChunkPrimitiveRenderState(const FIntVector4& Key);
 	void CreateChunkPrimitiveRenderState(const FIntVector4& Key);
 
-	/** @return A new primitive drawing Mesh for Key, with Previous and Key's fade when bFading (game thread) */
-	FVoxelChunkSceneProxy* CreateChunkPrimitive(const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh,
+	/**
+	 * A new primitive drawing Mesh for Key, with Previous and Key's fade when bFading, into the slot (game thread): an
+	 * FVoxelChunkNaniteSceneProxy when the mesh has a Nanite resource and no fade runs (runtime Nanite spike, D154), an
+	 * FVoxelChunkSceneProxy otherwise
+	 */
+	void CreateChunkPrimitive(FChunkPrimitive& Primitive, const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh,
 		const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Previous, bool bFading);
+
+	/** @return The material Nanite primitives draw with (NaniteMaterialInstance, or the terrain material) */
+	UMaterialInterface* GetNaniteMaterial();
+
+	/** Copy every parameter of the terrain material, as it resolves them, onto NaniteMaterialInstance (when there is one) */
+	void SyncNaniteMaterialParameters();
+
+	/** Meshes whose Nanite encode runs on a task (runtime Nanite spike, voxel.Render.Nanite.Async), with their slot */
+	TArray<TPair<FIntVector4, TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>>> PendingNaniteEncodes;
+
+	/**
+	 * Game thread, each tick while encodes run: take the finished ones and swap each slot still drawing that mesh, with no
+	 * fade running, to its Nanite primitive (a fade that ends later swaps then, D154)
+	 */
+	void ProcessNaniteEncodes();
 
 	/** Critical section for chunk info access */
 	mutable FCriticalSection ChunkInfoLock;
