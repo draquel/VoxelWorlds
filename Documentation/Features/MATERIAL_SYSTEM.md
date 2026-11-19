@@ -709,7 +709,7 @@ every voxel vertex, vertex colour R its second, and vertex colour A 255 less the
 
 ```hlsl
 // Inputs: MaterialID (MF_GetMaterialID), SecondaryR, VertexAlpha, VertexG, VertexB (VertexColor R, A, G, B)
-#if PIXELSHADER
+#if PIXELSHADER || IS_NANITE_SHADING_PASS  // Nanite's shading pass picks too (the terrain on Nanite, D161)
 if (VertexAlpha < 254.5 / 255.0)                     // alpha below 255 marks a blend
 {
     float W2 = saturate((254.0 / 255.0 - VertexAlpha) * (255.0 / 254.0));
@@ -876,6 +876,24 @@ The master material (M_VoxelMaster) must:
 
 When the opaque MID overrides blend mode back to `BLEND_Opaque`, UE ignores the OpacityMask pin entirely — no performance cost for opaque chunks.
 
+### The Terrain on Nanite (D161, D162)
+
+A world whose terrain is drawn through Nanite (`UVoxelWorldConfiguration::NaniteTerrain`, ARCHITECTURE.md "Nanite as an
+option") draws each Nanite mesh in two material sections:
+
+- **Section 0, opaque:** `MI_VoxelMaster_Nanite`, an instance of `M_VoxelMaster` with its blend mode overridden to
+  Opaque (`voxel.Render.Nanite.Material`). It compiles the master's own graph, so nothing is kept in step by hand; the
+  region component gives it the terrain material's parameters at runtime (`SyncNaniteMaterialParameters`).
+- **Section 1, masked:** the triangles of the materials the atlas draws masked (`IsMaterialMasked`: the leaves), with the
+  world's own terrain material, which is Masked. The encoder puts them after the others and keeps each cluster in one
+  section, so only their clusters take Nanite's programmable raster. A mesh without them has one section.
+
+`M_VoxelMaster` is marked used with Nanite for both (`Scripts/setup_nanite_material.py` in the parent makes the instance
+and sets the flag). Two things in the master behave differently in Nanite's compute shading, where it is not a pixel
+shader: FarFieldMaterialPick picks only under `PIXELSHADER || IS_NANITE_SHADING_PASS` (with `PIXELSHADER` alone the soft
+borders drew hard on Nanite), and the triplanar functions take their texture derivatives analytically there (a Custom
+node's `ddx` does not compile in it). Before D161 the opaque section was drawn with a copy of the master, M_VoxelMaster_Nanite, removed since.
+
 See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed setup instructions.
 
 ---
@@ -897,6 +915,7 @@ See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed 
 **Material Assets (`/VoxelWorlds/Materials/`):**
 - `M_VoxelMaster` - Unified master material
 - `M_VoxelMaster_Fade` - The crossfade twin (Masked)
+- `MI_VoxelMaster_Nanite` - The terrain on Nanite's opaque section (D161, "The Terrain on Nanite")
 - `MI_VoxelDefault` - Default material instance
 - `MPC_VoxelMaterial` - `MacroVariation`, set by `voxel.Material.MacroVariation`
 - `Functions/MF_GetMaterialID` - MaterialID extraction

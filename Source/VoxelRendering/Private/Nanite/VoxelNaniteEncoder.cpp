@@ -263,6 +263,8 @@ namespace
 		/** Three cluster vertex indices a triangle, in the order the decode returns them */
 		TArray<uint8, TInlineAllocator<NANITE_MAX_CLUSTER_INDICES>> Indexes;
 		uint32 NumTris = 0;
+		/** The material section of every triangle in the cluster (0 opaque, 1 masked; D162) */
+		uint32 MaterialIndex = 0;
 
 		/** Strip description: [dword of 32 triangles][IsStart, IsLeft, IsRef]; refs and new vertices per dword */
 		uint32 StripBitmasks[4][3] = {};
@@ -336,9 +338,10 @@ namespace
 	/**
 	 * Cut the triangle list into clusters in index order. Each triangle is a strip start whose first corners are 5-bit
 	 * references back from the cluster's newest vertex and whose others are new vertices (rotated, winding kept, so the
-	 * references come first, as the decode reads them).
+	 * references come first, as the decode reads them). A cluster holds one material section: a triangle of another
+	 * section starts a new cluster (Sections: each triangle's, in the order of Indices; empty = all 0).
 	 */
-	TArray<FCluster> BuildClusters(TConstArrayView<uint32> Indices, int32 NumVertices, bool bVertexReuse, int32& OutNumTriangles)
+	TArray<FCluster> BuildClusters(TConstArrayView<uint32> Indices, TConstArrayView<uint8> Sections, int32 NumVertices, bool bVertexReuse, int32& OutNumTriangles)
 	{
 		TArray<FCluster> Clusters;
 		TArray<int32> LocalIndex;
@@ -356,6 +359,7 @@ namespace
 				continue;
 			}
 			++OutNumTriangles;
+			const uint32 Section = Sections.Num() > TriangleIndex ? Sections[TriangleIndex] : 0u;
 
 			const auto IsReference = [&](uint32 Vertex) -> bool
 			{
@@ -370,13 +374,14 @@ namespace
 			bool bRef[3] = { IsReference(Corners[0]), IsReference(Corners[1]), IsReference(Corners[2]) };
 			int32 NumRefs = int32(bRef[0]) + int32(bRef[1]) + int32(bRef[2]);
 			if (Clusters.Num() == 0 || Clusters.Last().NumTris == NANITE_MAX_CLUSTER_TRIANGLES
-				|| Clusters.Last().SourceVertices.Num() + (3 - NumRefs) > NANITE_MAX_CLUSTER_VERTICES)
+				|| Clusters.Last().SourceVertices.Num() + (3 - NumRefs) > NANITE_MAX_CLUSTER_VERTICES
+				|| Clusters.Last().MaterialIndex != Section)
 			{
 				if (Clusters.Num() > 0)
 				{
 					Clusters.Last().FinishStrips();
 				}
-				Clusters.AddDefaulted();
+				Clusters.AddDefaulted_GetRef().MaterialIndex = Section;
 				bRef[0] = bRef[1] = bRef[2] = false;
 				NumRefs = 0;
 			}
@@ -762,8 +767,9 @@ namespace
 		Out.SetNumUVs(NumTexCoords);
 		Out.SetColorMode(Cluster.ColorMode);
 		Out.UVBitOffsets = UVBitOffsets;
-		// One material: index 0 over all the triangles (the fast path: Material0Length - 1 in bits 18-24)
-		Out.PackedMaterialInfo = (Cluster.NumTris - 1u) << 18;
+		// One material a cluster, its section over all the triangles (the fast path: Material0Index in bits 0-5,
+		// Material0Length - 1 in bits 18-24; D162)
+		Out.PackedMaterialInfo = Cluster.MaterialIndex | ((Cluster.NumTris - 1u) << 18);
 		Out.SetParentLODError(1e10f);
 		Out.SetParentSphereBoundRadius(Radius);
 		return Out;
@@ -811,9 +817,36 @@ namespace
 	}
 }
 
-TUniquePtr<Nanite::FResources> EncodeVoxelNaniteMesh(TConstArrayView<FVoxelLocalVertex> InVertices, TConstArrayView<uint32> Indices,
+void OrderVoxelNaniteTriangles(TConstArrayView<FVoxelLocalVertex> Vertices, TConstArrayView<uint32> Indices,
+	const FVoxelNaniteEncodeSettings& Settings, TArray<uint32>& OutIndices, TArray<uint8>& OutSections)
+{
+	OutIndices.Reset(Indices.Num());
+	OutSections.Reset(Indices.Num() / 3);
+	TArray<uint32> Masked;
+	for (int32 t = 0; t + 2 < Indices.Num(); t += 3)
+	{
+		const uint32 A = Indices[t], B = Indices[t + 1], C = Indices[t + 2];
+		if (A == B || B == C || A == C)
+		{
+			continue;
+		}
+		const bool bMasked = Settings.HasMaskedMaterials() && A < uint32(Vertices.Num())
+			&& Settings.IsMaskedMaterial(FMath::RoundToInt(Vertices[A].TexCoord1.X));
+		TArray<uint32>& Into = bMasked ? Masked : OutIndices;
+		Into.Add(A);
+		Into.Add(B);
+		Into.Add(C);
+	}
+	OutSections.Init(0, OutIndices.Num() / 3);
+	OutSections.AddUninitialized(Masked.Num() / 3);
+	FMemory::Memset(OutSections.GetData() + OutIndices.Num() / 3, 1, Masked.Num() / 3);
+	OutIndices.Append(Masked);
+}
+
+TUniquePtr<Nanite::FResources> EncodeVoxelNaniteMesh(TConstArrayView<FVoxelLocalVertex> InVertices, TConstArrayView<uint32> InIndices,
 	const FVoxelNaniteEncodeSettings& Settings, FVoxelNaniteEncodeStats* OutStats)
 {
+	TConstArrayView<uint32> Indices = InIndices;
 	const double StartTime = FPlatformTime::Seconds();
 	for (const uint32 Index : Indices)
 	{
@@ -831,8 +864,17 @@ TUniquePtr<Nanite::FResources> EncodeVoxelNaniteMesh(TConstArrayView<FVoxelLocal
 		Vertices[i] = ToSourceVertex(InVertices[i]);
 	}
 
+	// The masked materials' triangles after the others (D162); without masked materials, the input as it is
+	TArray<uint32> OrderedIndices;
+	TArray<uint8> Sections;
+	if (Settings.HasMaskedMaterials())
+	{
+		OrderVoxelNaniteTriangles(InVertices, InIndices, Settings, OrderedIndices, Sections);
+		Indices = OrderedIndices;
+	}
+
 	int32 NumTriangles = 0;
-	TArray<FCluster> Clusters = BuildClusters(Indices, Vertices.Num(), Settings.bVertexReuse, NumTriangles);
+	TArray<FCluster> Clusters = BuildClusters(Indices, Sections, Vertices.Num(), Settings.bVertexReuse, NumTriangles);
 	if (Clusters.Num() == 0)
 	{
 		return nullptr;
@@ -1157,6 +1199,12 @@ TUniquePtr<Nanite::FResources> EncodeVoxelNaniteMesh(TConstArrayView<FVoxelLocal
 		OutStats->GpuBytes = GpuBytes;
 		OutStats->RootDataBytes = Resources->RootData.Num();
 		OutStats->PositionPrecision = Precision;
+		OutStats->NumMaskedTriangles = 0;
+		for (const uint8 Section : Sections)
+		{
+			OutStats->NumMaskedTriangles += Section;
+		}
+		OutStats->NumMaterialSections = OutStats->NumMaskedTriangles > 0 ? 2 : 1;
 		OutStats->EncodeSeconds = FPlatformTime::Seconds() - StartTime;
 	}
 	return Resources;
@@ -1289,17 +1337,10 @@ FVoxelNaniteValidation ValidateVoxelNaniteMesh(const Nanite::FResources& Resourc
 		return Result;
 	};
 
-	// The input triangles the encoder kept, in order
+	// The input triangles the encoder kept, in the order it stored them, and each one's material section
 	TArray<uint32> Triangles;
-	for (int32 t = 0; t + 2 < Indices.Num(); t += 3)
-	{
-		if (Indices[t] != Indices[t + 1] && Indices[t + 1] != Indices[t + 2] && Indices[t] != Indices[t + 2])
-		{
-			Triangles.Add(Indices[t]);
-			Triangles.Add(Indices[t + 1]);
-			Triangles.Add(Indices[t + 2]);
-		}
-	}
+	TArray<uint8> Sections;
+	OrderVoxelNaniteTriangles(InVertices, Indices, Settings, Triangles, Sections);
 
 	if (Resources.NumRootPages != uint32(Resources.PageStreamingStates.Num()) || Resources.HasStreamingData())
 	{
@@ -1517,6 +1558,13 @@ FVoxelNaniteValidation ValidateVoxelNaniteMesh(const Nanite::FResources& Resourc
 				if (TriangleCursor + 2 >= Triangles.Num())
 				{
 					return Fail(TEXT("more triangles decoded than encoded"));
+				}
+				// One material a cluster (D162): the fast path's first material over all its triangles
+				const uint32 PackedMaterial = Packed.PackedMaterialInfo;
+				if ((PackedMaterial & 63u) != Sections[TriangleCursor / 3] || ((PackedMaterial >> 18) & 127u) != NumTris - 1u)
+				{
+					return Fail(FString::Printf(TEXT("page %d cluster %u triangle %u: material info %08x, section %u expected"),
+						PageIndex, c, t, PackedMaterial, Sections[TriangleCursor / 3]));
 				}
 				// The same triangle, in some rotation that keeps the winding
 				const FVoxelLocalVertex* Source[3] = { &InVertices[Triangles[TriangleCursor]], &InVertices[Triangles[TriangleCursor + 1]], &InVertices[Triangles[TriangleCursor + 2]] };

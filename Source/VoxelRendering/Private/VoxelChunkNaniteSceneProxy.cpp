@@ -57,10 +57,11 @@ namespace
 
 	TAutoConsoleVariable<FString> CVarVoxelNaniteMaterial(
 		TEXT("voxel.Render.Nanite.Material"),
-		TEXT("/VoxelWorlds/Materials/M_VoxelMaster_Nanite.M_VoxelMaster_Nanite"),
-		TEXT("The material the terrain's Nanite primitives draw with (A/B), as an object path: an opaque copy of the terrain master\n")
-		TEXT("with Nanite usage, given the terrain material's parameters. Empty = the terrain material itself (which must then\n")
-		TEXT("be opaque and allow Nanite). Read when a Nanite primitive is created."),
+		TEXT("/VoxelWorlds/Materials/MI_VoxelMaster_Nanite.MI_VoxelMaster_Nanite"),
+		TEXT("The material the terrain's Nanite primitives draw their opaque section with (A/B), as an object path: an instance of\n")
+		TEXT("the terrain master with its blend mode overridden to Opaque (D161), given the terrain material's parameters; the\n")
+		TEXT("masked section (the leaves, D162) draws with the terrain material itself. Empty = the terrain material for both.\n")
+		TEXT("Read when a Nanite primitive is created."),
 		ECVF_Default);
 
 	std::atomic<int64> GLiveResources{ 0 };
@@ -70,6 +71,7 @@ namespace
 	std::atomic<int64> GEncodeMicroseconds{ 0 };
 	std::atomic<int64> GMaxEncodeMicroseconds{ 0 };
 	std::atomic<int64> GEncodedTriangles{ 0 };
+	std::atomic<int64> GMaskedTriangles{ 0 };
 	std::atomic<int64> GFailures{ 0 };
 	std::atomic<int64> GPrimitives{ 0 };
 	std::atomic<int64> GFadeSwaps{ 0 };
@@ -88,10 +90,10 @@ namespace
 			const FVoxelNaniteCounters::FCounts Counts = FVoxelNaniteCounters::Get();
 			UE_LOG(LogVoxelRendering, Display,
 				TEXT("voxel.Render.NaniteStats: %s; live %lld resources, %lld root pages (%.1f MB of pool), %.1f MB of page data; ")
-				TEXT("%lld encodes, %lld triangles, %.2f ms mean, %.2f ms longest, %.3f us a triangle; %lld failures; %lld primitives, %lld fade swaps"),
+				TEXT("%lld encodes, %lld triangles (%lld masked), %.2f ms mean, %.2f ms longest, %.3f us a triangle; %lld failures; %lld primitives, %lld fade swaps"),
 				*FString::Printf(TEXT("voxel.Render.Nanite %d"), GetVoxelNaniteOverride()), Counts.LiveResources, Counts.LivePages,
 				Counts.LivePages * double(NANITE_ROOT_PAGE_GPU_SIZE) / (1024.0 * 1024.0), Counts.LiveGpuBytes / (1024.0 * 1024.0),
-				Counts.Encodes, Counts.EncodedTriangles, Counts.Encodes > 0 ? Counts.EncodeSeconds * 1000.0 / Counts.Encodes : 0.0,
+				Counts.Encodes, Counts.EncodedTriangles, Counts.MaskedTriangles, Counts.Encodes > 0 ? Counts.EncodeSeconds * 1000.0 / Counts.Encodes : 0.0,
 				Counts.MaxEncodeSeconds * 1000.0, Counts.EncodedTriangles > 0 ? Counts.EncodeSeconds * 1e6 / Counts.EncodedTriangles : 0.0,
 				Counts.Failures, Counts.Primitives, Counts.FadeSwaps);
 		}));
@@ -109,6 +111,7 @@ FVoxelNaniteCounters::FCounts FVoxelNaniteCounters::Get()
 	Counts.EncodeSeconds = GEncodeMicroseconds.load(std::memory_order_relaxed) * 1e-6;
 	Counts.MaxEncodeSeconds = GMaxEncodeMicroseconds.load(std::memory_order_relaxed) * 1e-6;
 	Counts.EncodedTriangles = GEncodedTriangles.load(std::memory_order_relaxed);
+	Counts.MaskedTriangles = GMaskedTriangles.load(std::memory_order_relaxed);
 	Counts.Failures = GFailures.load(std::memory_order_relaxed);
 	Counts.Primitives = GPrimitives.load(std::memory_order_relaxed);
 	Counts.FadeSwaps = GFadeSwaps.load(std::memory_order_relaxed);
@@ -121,13 +124,15 @@ void FVoxelNaniteCounters::ResetEncodes()
 	GEncodeMicroseconds = 0;
 	GMaxEncodeMicroseconds = 0;
 	GEncodedTriangles = 0;
+	GMaskedTriangles = 0;
 	GFailures = 0;
 	GPrimitives = 0;
 	GFadeSwaps = 0;
 }
 
-void FVoxelNaniteCounters::AddEncode(double Seconds, int64 Triangles, bool bFailed)
+void FVoxelNaniteCounters::AddEncode(double Seconds, int64 Triangles, bool bFailed, int64 MaskedTriangles)
 {
+	GMaskedTriangles.fetch_add(MaskedTriangles, std::memory_order_relaxed);
 	const int64 Microseconds = int64(Seconds * 1e6);
 	GEncodes.fetch_add(1, std::memory_order_relaxed);
 	GEncodeMicroseconds.fetch_add(Microseconds, std::memory_order_relaxed);
@@ -253,7 +258,7 @@ void FVoxelNaniteEncodeJob::Run()
 namespace
 {
 	TSharedPtr<FVoxelNaniteEncodeJob, ESPMode::ThreadSafe> MakeNaniteJob(const TArray<FVoxelVertex>& Vertices, const TArray<uint32>& Indices,
-		const FVector& Origin, bool bRadialFaceUp, const FVector& FaceUpCenter)
+		const FVector& Origin, bool bRadialFaceUp, const FVector& FaceUpCenter, const uint64 (&MaskedMaterials)[4])
 	{
 		TSharedPtr<FVoxelNaniteEncodeJob, ESPMode::ThreadSafe> Job = MakeShared<FVoxelNaniteEncodeJob, ESPMode::ThreadSafe>();
 		Job->Vertices = Vertices;
@@ -261,12 +266,13 @@ namespace
 		Job->bRadialFaceUp = bRadialFaceUp;
 		Job->LocalFaceUpCenter = FVector3f(FaceUpCenter - Origin);
 		Job->Settings.bVertexReuse = CVarVoxelNaniteReuse.GetValueOnGameThread() != 0;
+		FMemory::Memcpy(Job->Settings.MaskedMaterials, MaskedMaterials, sizeof(Job->Settings.MaskedMaterials));
 		Job->bValidate = IsVoxelNaniteValidationWanted();
 		return Job;
 	}
 }
 
-bool FVoxelChunkMesh::StartNaniteEncode_GameThread(bool bRadialFaceUp, const FVector& FaceUpCenter)
+bool FVoxelChunkMesh::StartNaniteEncode_GameThread(bool bRadialFaceUp, const FVector& FaceUpCenter, const uint64 (&MaskedMaterials)[4])
 {
 	check(IsInGameThread());
 	if (NaniteResources.IsValid() || NaniteJob.IsValid() || PendingVertices.Num() == 0 || PendingIndices.Num() < 3)
@@ -274,7 +280,7 @@ bool FVoxelChunkMesh::StartNaniteEncode_GameThread(bool bRadialFaceUp, const FVe
 		return false;
 	}
 	// Copies: the render thread consumes the mesh's own arrays when its first primitive is added
-	NaniteJob = MakeNaniteJob(PendingVertices, PendingIndices, Origin, bRadialFaceUp, FaceUpCenter);
+	NaniteJob = MakeNaniteJob(PendingVertices, PendingIndices, Origin, bRadialFaceUp, FaceUpCenter, MaskedMaterials);
 	UE::Tasks::Launch(UE_SOURCE_LOCATION, [Job = NaniteJob]() { Job->Run(); });
 	return true;
 }
@@ -298,7 +304,7 @@ bool FVoxelChunkMesh::FinishNaniteEncode_GameThread(const UObject* Owner)
 		UE_LOG(LogVoxelRendering, Error, TEXT("Nanite encode of a chunk mesh (LOD %d, %d triangles) does not decode to its input: %s"),
 			LODLevel, Job->Stats.NumTriangles, *Job->Error);
 	}
-	FVoxelNaniteCounters::AddEncode(Job->Stats.EncodeSeconds, Job->Stats.NumTriangles, bFailed);
+	FVoxelNaniteCounters::AddEncode(Job->Stats.EncodeSeconds, Job->Stats.NumTriangles, bFailed, Job->Stats.NumMaskedTriangles);
 	if (bFailed || !Owner)
 	{
 		return false;
@@ -306,20 +312,21 @@ bool FVoxelChunkMesh::FinishNaniteEncode_GameThread(const UObject* Owner)
 	NaniteResources = MoveTemp(Job->Result);
 	NanitePages = Job->Stats.NumPages;
 	NaniteGpuBytes = Job->Stats.GpuBytes;
+	NaniteMaterialSections = Job->Stats.NumMaterialSections;
 	// The streaming manager takes it on the render thread (before any primitive over it is added: the add is enqueued later)
 	NaniteResources->InitResources(Owner);
 	FVoxelNaniteCounters::AddLive(1, NanitePages, NaniteGpuBytes);
 	return true;
 }
 
-bool FVoxelChunkMesh::BuildNanite_GameThread(const UObject* Owner, bool bRadialFaceUp, const FVector& FaceUpCenter)
+bool FVoxelChunkMesh::BuildNanite_GameThread(const UObject* Owner, bool bRadialFaceUp, const FVector& FaceUpCenter, const uint64 (&MaskedMaterials)[4])
 {
 	check(IsInGameThread());
 	if (NaniteResources.IsValid() || NaniteJob.IsValid() || PendingVertices.Num() == 0 || PendingIndices.Num() < 3 || !Owner)
 	{
 		return NaniteResources.IsValid();
 	}
-	NaniteJob = MakeNaniteJob(PendingVertices, PendingIndices, Origin, bRadialFaceUp, FaceUpCenter);
+	NaniteJob = MakeNaniteJob(PendingVertices, PendingIndices, Origin, bRadialFaceUp, FaceUpCenter, MaskedMaterials);
 	NaniteJob->Run();
 	return FinishNaniteEncode_GameThread(Owner);
 }
@@ -330,6 +337,7 @@ FVoxelChunkNaniteSceneProxy::FVoxelChunkNaniteSceneProxy(const FPrimitiveScenePr
 	: Nanite::FSceneProxyBase(Desc)
 	, Mesh(MoveTemp(Init.Mesh))
 	, Material(Init.Material)
+	, MaskedMaterial(Init.MaskedMaterial)
 	, FeatureLevel(Init.FeatureLevel)
 	, bRayTracing(Init.bRayTracing && Mesh.IsValid())
 	, bPositionOnly(Init.bPositionOnly)
@@ -349,6 +357,15 @@ FVoxelChunkNaniteSceneProxy::FVoxelChunkNaniteSceneProxy(const FPrimitiveScenePr
 			Material ? *Material->GetName() : TEXT("no material"));
 		Material = UMaterial::GetDefaultMaterial(MD_Surface);
 	}
+	// The masked triangles' section (D162): the terrain's own masked material; one Nanite cannot draw leaves the leaves
+	// opaque, drawn with the section 0 material
+	const int32 NumSections = FMath::Clamp(Mesh->NaniteMaterialSections, 1, 2);
+	if (NumSections > 1 && (!MaskedMaterial || !IsOpaqueOrMaskedBlendMode(*MaskedMaterial) || !MaskedMaterial->CheckMaterialUsage_Concurrent(MATUSAGE_Nanite)))
+	{
+		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelChunkNaniteSceneProxy: the masked material %s cannot be drawn by Nanite; masked triangles draw opaque"),
+			MaskedMaterial ? *MaskedMaterial->GetName() : TEXT("(none)"));
+		MaskedMaterial = Material;
+	}
 
 	bVerifyUsedMaterials = false;
 	bCastStaticShadow = false;
@@ -360,13 +377,16 @@ FVoxelChunkNaniteSceneProxy::FVoxelChunkNaniteSceneProxy(const FPrimitiveScenePr
 	bOpaqueOrMasked = true;
 	EnableGPUSceneSupportFlags();
 
-	MaterialSections.SetNum(1);
-	FMaterialSection& Section = MaterialSections[0];
-	Section.MaterialIndex = 0;
-	Section.bCastShadow = true;
-	Section.bHidden = false;
-	Section.ShadingMaterialProxy = Material->GetRenderProxy();
-	MaterialMaxIndex = 0;
+	MaterialSections.SetNum(NumSections);
+	for (int32 SectionIndex = 0; SectionIndex < NumSections; ++SectionIndex)
+	{
+		FMaterialSection& Section = MaterialSections[SectionIndex];
+		Section.MaterialIndex = SectionIndex;
+		Section.bCastShadow = true;
+		Section.bHidden = false;
+		Section.ShadingMaterialProxy = (SectionIndex == 0 ? Material : MaskedMaterial)->GetRenderProxy();
+	}
+	MaterialMaxIndex = NumSections - 1;
 	// The section's relevance, raster material (the default one unless the material is masked or programmable) and
 	// displacement
 	OnMaterialsUpdated();
@@ -486,11 +506,15 @@ Nanite::FResourceMeshInfo FVoxelChunkNaniteSceneProxy::GetResourceMeshInfo() con
 	Info.NumNodes = Resources.NumHierarchyNodes;
 	Info.NumVertices = Resources.NumInputVertices;
 	Info.NumTriangles = Resources.NumInputTriangles;
-	Info.NumMaterials = 1;
+	Info.NumMaterials = MaterialSections.Num();
 	Info.NumResidentClusters = Resources.NumResidentClusters;
-	// One section, material 0 (Nanite's ray tracing maps each material index to its geometry segment)
-	Info.NumSegments = 1;
-	Info.SegmentMapping.Init(0, 1);
+	// A section a material index: 0 opaque, 1 masked (D162); Nanite's ray tracing maps each to its geometry segment
+	Info.NumSegments = MaterialSections.Num();
+	Info.SegmentMapping.SetNum(MaterialSections.Num());
+	for (int32 SectionIndex = 0; SectionIndex < MaterialSections.Num(); ++SectionIndex)
+	{
+		Info.SegmentMapping[SectionIndex] = SectionIndex;
+	}
 	Info.DebugName = bSeam ? FName(TEXT("VoxelSeamBucket")) : FName(TEXT("VoxelChunk"));
 	return Info;
 }
@@ -526,7 +550,10 @@ void FVoxelChunkNaniteSceneProxy::GetStaticRayTracingInstances(FStaticRayTracing
 		return;
 	}
 	const FRayTracingGeometry* Geometry = Mesh->RayTracingGeometry.Get();
-	const FMaterialRenderProxy* MaterialProxy = Material ? Material->GetRenderProxy() : nullptr;
+	// One segment over the kept buffers: with masked triangles the masked material, as the terrain's own renderer draws
+	// every triangle with it (D162)
+	UMaterialInterface* RayTracingMaterial = Mesh->NaniteMaterialSections > 1 && MaskedMaterial ? MaskedMaterial : Material;
+	const FMaterialRenderProxy* MaterialProxy = RayTracingMaterial ? RayTracingMaterial->GetRenderProxy() : nullptr;
 	if (!Geometry || !Geometry->IsValid() || Geometry->IsEvicted() || !MaterialProxy || !Mesh->IsDrawable())
 	{
 		return;
