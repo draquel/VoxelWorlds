@@ -45,6 +45,25 @@ enum class EMeshingMode : uint8
 };
 
 /**
+ * Whether a world's terrain (chunk interiors and seam buckets) is drawn through Nanite (D158): the meshes encoded as Nanite
+ * resources at runtime, for a world built around Nanite content or virtual shadow maps. Without it the terrain is drawn as
+ * it always was, with no encode and no cost.
+ */
+UENUM(BlueprintType)
+enum class EVoxelNaniteTerrain : uint8
+{
+	/** Never: the terrain's own renderer */
+	Off,
+
+	/** Always, where the platform supports Nanite */
+	On,
+
+	/** When the project draws its shadows with virtual shadow maps (r.Shadow.Virtual.Enable when the world starts), which
+	 *  need the terrain on Nanite to cache its shadow; otherwise as Off */
+	Auto
+};
+
+/**
  * Edit operation mode for terrain modifications.
  */
 UENUM(BlueprintType)

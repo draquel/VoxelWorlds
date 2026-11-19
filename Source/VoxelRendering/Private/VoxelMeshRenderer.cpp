@@ -3,6 +3,7 @@
 #include "VoxelMeshRenderer.h"
 #include "VoxelRendering.h"
 #include "VoxelRegionComponent.h"
+#include "VoxelChunkNaniteSceneProxy.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelMaterialAtlas.h"
 #include "VoxelBiomeLookup.h"
@@ -88,6 +89,10 @@ void FVoxelMeshRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguratio
 		bIsSmooth ? TEXT("Triplanar") : TEXT("Cubic"),
 		bIsSmooth ? TEXT("true") : TEXT("false"),
 		Regions.IsSplit() ? *FString::Printf(TEXT("of %d^3 chunks"), Regions.RegionChunks) : TEXT("off (one primitive at the origin)"));
+	// The terrain on Nanite or not, and why (D158): the world's setting, the override, and where Nanite can draw
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelMeshRenderer: the terrain on Nanite %s (setting %s, voxel.Render.Nanite %d, virtual shadows %d, net mode %d)"),
+		OriginRegionComponent->IsNaniteTerrain() ? TEXT("on") : TEXT("off"), *UEnum::GetValueAsString(WorldConfig->NaniteTerrain),
+		GetVoxelNaniteOverride(), IsVoxelVirtualShadowMapEnabled() ? 1 : 0, int32(World->GetNetMode()));
 
 	bIsInitialized = true;
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelMeshRenderer initialized"));
@@ -115,6 +120,8 @@ UVoxelRegionComponent* FVoxelMeshRenderer::CreateRegionComponent(const FIntVecto
 	Component->SetWorldOrigin(WorldConfig->WorldOrigin);
 	// A planet's face types (top, side, bottom) go by the radial up (spherical SP-D3); its centre is WorldOrigin.
 	Component->SetRadialFaceUp(WorldConfig->WorldMode == EWorldMode::SphericalPlanet, WorldConfig->WorldOrigin);
+	// The terrain on Nanite or not (D158): the world's choice, under voxel.Render.Nanite
+	Component->SetNaniteTerrain(WorldConfig->NaniteTerrain);
 
 	// Sync material mode with configuration's meshing mode
 	// Both MarchingCubes and DualContouring use triplanar texturing instead of atlas faces

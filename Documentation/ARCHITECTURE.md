@@ -150,14 +150,18 @@ and stores float offsets from it, in every world mode; generation keeps size-R v
 and the noise is split-origin. Heightmap worlds are exact to the range of a double position and planets to about
 1,000 km, with no world-origin shift ([TRAVERSAL_LIMITS.md](Research/TRAVERSAL_LIMITS.md)).
 
-**No Nanite.** The engine builds Nanite resources in the editor only, but its renderer takes a resource encoded at
-runtime, as Voxel Plugin 2 does ([RUNTIME_NANITE_RESEARCH.md](Research/RUNTIME_NANITE_RESEARCH.md)). A spike encoded
-the chunk meshes on a task and drew them through a Nanite proxy of their own (2026-11-16 to 11-18; the parent's
-`Documentation/RUNTIME_NANITE_SPIKE_PLAN.md`, the branch spike/runtime-nanite): it works, and it was dropped. On a
-world with no other Nanite content it costs about 1 ms of GPU and 1.5 ms of render thread, Nanite's fixed per-frame
-cost; on one that already draws Nanite content it costs nothing measurable and buys nothing measurable; VSM, Nanite's
-own ray tracing and tessellation (about 5 ms of GPU, cracks at material borders) bring no win. The hand-built renderer
-and LOD stay; the plan's N4 lists what would reopen it.
+**Nanite as an option, not the default.** The engine builds Nanite resources in the editor only, but its renderer
+takes a resource encoded at runtime, as Voxel Plugin 2 does ([RUNTIME_NANITE_RESEARCH.md](Research/RUNTIME_NANITE_RESEARCH.md)).
+A spike encoded the chunk meshes on a task and drew them through a Nanite proxy of its own (2026-11-16 to 11-18; the
+parent's `Documentation/RUNTIME_NANITE_SPIKE_PLAN.md`): it works, and as a default it was dropped. On a world with no
+other Nanite content it costs about 1 ms of GPU and 1.5 ms of render thread, Nanite's fixed per-frame cost; on one that
+already draws Nanite content it costs nothing measurable. The terrain on Nanite is therefore a world's choice (D158,
+the parent's `Documentation/RUNTIME_NANITE_OPTIN_PLAN.md`): `UVoxelWorldConfiguration::NaniteTerrain` is Off, On, or
+Auto (the default: on when the project draws its shadows with virtual shadow maps, which need the terrain on Nanite),
+and `voxel.Render.Nanite` overrides it. A world that does not choose it encodes nothing and draws as before. Chunk LOD,
+seams and crossfades stay ours: Nanite rasterizes each mesh (clusters in index order, every page a root page, no
+simplification), `FVoxelChunkNaniteSceneProxy` draws it, and a fading mesh draws through `FVoxelChunkSceneProxy` until
+its fade ends. The far field and the water stay on the hand-built renderer.
 
 **Runtime Virtual Textures.** The scene proxy emits RVT mesh batches when the configuration lists
 `RuntimeVirtualTextures` (copied onto each region component before it registers), and `M_VoxelMaster` has a Runtime
