@@ -257,6 +257,21 @@ from raised views: a hill's shadow that faded at 200 m now runs on across the fa
 200 m is a thin band and almost no pixel changes. With the near cascades shortened (r.Shadow.DistanceScale 0.1) every
 terrain shadow past 2,000 uu comes from the far cascades, which shows them working end to end.
 
+### A World's Shadow Method (D164)
+
+The shadow method is the project's (shadow maps here: the cascades above; `r.Shadow.Virtual.Enable 0`), but a world can
+ask for its own while it runs: `UVoxelWorldConfiguration::ShadowMethod`, Project (the default, untouched),
+VirtualShadowMaps or ShadowMaps. `FVoxelShadowMethodOverride` sets the cvar when the world's renderer starts (before the
+first region component reads it for the terrain's Nanite setting, so Auto then puts the terrain on Nanite) and gives
+the value from before back when the last world that set it ends; worlds that disagree are logged and the last one wins;
+a value typed at the console wins over every world; a dedicated server sets nothing. The renderer's "the terrain on
+Nanite" line names the world's shadow method.
+
+The case for it (the parent's `Documentation/RUNTIME_NANITE_OPTIN_PLAN.md`, O3): a planet seen from altitude. At a low
+sun virtual shadow maps draw the terrain's cast shadows across the disc, where the cascades end; with the terrain on
+Nanite they cost about the cascades' GPU time on the planet routes (0.5-0.8 ms more render thread). On a plane world
+they cost 0.6-1.0 ms more GPU for sharper near shadows, so the project keeps the cascades.
+
 ### What Lumen Sees
 
 Lumen (hardware ray tracing on this project: `r.Lumen.HardwareRayTracing` 1) traces the ray tracing scene, so the

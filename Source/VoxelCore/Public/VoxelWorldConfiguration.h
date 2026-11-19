@@ -525,6 +525,15 @@ public:
 	EVoxelNaniteTerrain NaniteTerrain = EVoxelNaniteTerrain::Auto;
 
 	/**
+	 * The shadow method this world asks for while it runs (D164): Project leaves the project's; VirtualShadowMaps for a
+	 * planet seen from altitude (its terrain then goes on Nanite under NaniteTerrain Auto); ShadowMaps the cascades. Set
+	 * when the world's renderer starts, before NaniteTerrain's Auto reads it, and restored when the last world that set it
+	 * ends; a value typed at the console wins over it. Never on a dedicated server.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering")
+	EVoxelShadowMethod ShadowMethod = EVoxelShadowMethod::Project;
+
+	/**
 	 * Runtime Virtual Textures the terrain writes into.
 	 *
 	 * The UVoxelRegionComponent is created at runtime by the custom-VF renderer; this list is

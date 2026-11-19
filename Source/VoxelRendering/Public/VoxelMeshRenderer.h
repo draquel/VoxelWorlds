@@ -183,6 +183,9 @@ private:
 	/** Whether renderer has been initialized */
 	bool bIsInitialized = false;
 
+	/** Whether this world holds the shadow method it asked for (D164, FVoxelShadowMethodOverride): released at Shutdown */
+	bool bHoldsShadowMethod = false;
+
 	/** Owning world */
 	TWeakObjectPtr<UWorld> CachedWorld;
 
