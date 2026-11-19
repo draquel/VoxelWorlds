@@ -12,6 +12,8 @@
 #include "VoxelWorldConfiguration.h"
 #include "VoxelWorldModeFactory.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 // ==================== FVoxelSurfaceQuery Tests ====================
 //
 // Verifies the shared surface-query utility (used by both FVoxelTreeInjector and the
@@ -263,3 +265,5 @@ bool FVoxelSurfaceQueryClimateTest::RunTest(const FString& Parameters)
 	Biomes->RemoveFromRoot();
 	return true;
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS

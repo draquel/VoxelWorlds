@@ -8,6 +8,8 @@
 #include "ChunkRenderData.h"
 #include "VoxelMaterialRegistry.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 // ==================== Helper Functions ====================
 
 namespace CubicMeshingTestHelpers
@@ -742,3 +744,5 @@ bool FCubicMeshingSeamClosureTest::RunTest(const FString& Parameters)
 	Mesher.Shutdown();
 	return true;
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS

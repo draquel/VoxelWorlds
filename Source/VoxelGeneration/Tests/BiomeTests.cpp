@@ -7,6 +7,8 @@
 #include "VoxelBiomeConfiguration.h"
 #include "VoxelMaterialRegistry.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 // ==================== Biome Blending Tests ====================
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBiomeBlendStructTest, "VoxelWorlds.Biome.BlendStruct",
@@ -495,3 +497,5 @@ bool FBiomeConfigurationBlendedMaterialTest::RunTest(const FString& Parameters)
 
 	return true;
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS

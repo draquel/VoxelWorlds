@@ -24,6 +24,8 @@
 #include "VoxelSurfaceQuery.h"
 #include "VoxelData.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 namespace
 {
 	// Demo-representative terrain config (matches /Game/PluginTesting/Demo/DemoWorldConfig).
@@ -512,3 +514,5 @@ bool FVoxelHeightConditioningLineParityTest::RunTest(const FString& Parameters)
 	Config->RemoveFromRoot();
 	return true;
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS

@@ -21,6 +21,8 @@
 #include "RenderingThread.h"
 #include "RHI.h"             // GUsingNullRHI: GPU tests skip under -nullrhi
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCPUNoiseGeneratorTest, "VoxelWorlds.Generation.CPUNoiseGenerator",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -2680,3 +2682,5 @@ bool FVoxelGPUvsCPUWaterBodiesParityTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("GPU==CPU parity with a lake and a river reach, plane and planet, across LOD 0/1/2"), bAllPass);
 	return true;
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS

@@ -7,6 +7,8 @@
 #include "Engine/Texture2D.h"
 #include "UObject/StrongObjectPtr.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 // The biome lookup the master materials read for the weather's snow and wetness (P3): one texel per biome ID with the
 // ends of the biome's temperature range mapped from [-1, 1] to a byte, B 255 where the biome exists; the middle elsewhere.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelBiomeLookupEncodeTest, "VoxelWorlds.Rendering.BiomeLookup.Encode",
@@ -67,3 +69,5 @@ bool FVoxelBiomeLookupTwoWorldsTest::RunTest(const FString& Parameters)
 	TestNotEqual(TEXT("Under a name of its own"), Second->GetFName(), First->GetFName());
 	return true;
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS

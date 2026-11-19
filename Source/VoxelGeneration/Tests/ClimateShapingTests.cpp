@@ -10,6 +10,8 @@
 #include "VoxelGenerationShared.ush"
 #include "VoxelNoise.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 namespace ClimateShapingTestUtils
 {
 	/** The field the table describes: a 2-octave climate field, sampled over four plane tiles of ~200 x 200 features. */
@@ -228,3 +230,5 @@ bool FVoxelNoiseRidgedTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Climate fields are not ridged"), FVoxelNoise::MakeFieldParams(1, 0.001f).bRidged);
 	return true;
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS
