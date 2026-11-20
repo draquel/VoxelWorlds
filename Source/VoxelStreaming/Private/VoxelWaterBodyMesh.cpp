@@ -20,6 +20,13 @@ void FVoxelWaterBodyMesh::AddQuad(int32 A, int32 B, int32 C, int32 D)
 	++Quads;
 }
 
+void FVoxelWaterBodyMesh::AddTriangle(int32 A, int32 B, int32 C)
+{
+	// Counter-clockwise corners face up as (A, C, B), as AddQuad's.
+	Top.Triangles.Append({ A, C, B });
+	++ShoreTriangles;
+}
+
 void FVoxelWaterBodyMesh::FinishUnderside()
 {
 	// The same vertices (the top's normal: it shades from below as the water tiles' back faces do), every triangle
@@ -42,6 +49,7 @@ bool FVoxelWaterBodyMesh::Build(const FVoxelWaterBody& Body, const FVoxelWaterFr
 	Out.Top.Reset();
 	Out.Underside.Reset();
 	Out.Quads = 0;
+	Out.ShoreTriangles = 0;
 	Out.Origin = FVector::ZeroVector;
 	const double Voxel = FMath::Max(VoxelSize, 1.0);
 	if (Body.Kind == EVoxelWaterBodyKind::Lake && Body.Lake.IsValid() && Body.Lake->NumCells() > 0 && Body.Lake->IsRadial() == Frame.bRadial)
@@ -69,23 +77,115 @@ void FVoxelWaterBodyMesh::BuildLake(const FVoxelWaterBody& Body, const FVoxelWat
 	// A grid point's UV: voxels along the grid's two axes from its minimum corner.
 	const auto GridUV = [CellSize, VoxelSize](double GX, double GY) { return FVector2D(GX * CellSize / VoxelSize, GY * CellSize / VoxelSize); };
 
-	if (!Frame.bRadial)
+	FVector AxisX = FVector::ForwardVector, AxisY = FVector::RightVector, Centre = FVector::UpVector;
+	if (Frame.bRadial)
 	{
-		// A heightmap lake: flat, so the cells merge into rectangles (a row of cells as wide as it runs, then as many
-		// rows down as hold the same run), each one quad at the level.
+		Lake.GetTangentFrame(AxisX, AxisY, Centre);
+		Out.Origin = Frame.Center + Centre * Level;
+	}
+	else
+	{
 		const FBox2D& Bounds = Lake.GetBounds2D();
 		Out.Origin = FVector(Bounds.GetCenter().X, Bounds.GetCenter().Y, Level);
+	}
+	// A vertex at a point of the grid (in cells; may be a fraction): at the level, its normal the local up, its tangent
+	// along the grid's first axis.
+	const auto MakeVertex = [&](double GX, double GY)
+	{
+		const FVector Position = Lake.GetGridPoint(GX, GY, Level, Frame.Center);
+		if (!Frame.bRadial)
+		{
+			return Out.AddVertex(Position, FVector::UpVector, FVector::ForwardVector, GridUV(GX, GY), 0.0f);
+		}
+		const FVector Up = (Position - Frame.Center).GetSafeNormal(UE_SMALL_NUMBER, Centre);
+		const FVector Tangent = (AxisX - Up * FVector::DotProduct(AxisX, Up)).GetSafeNormal(UE_SMALL_NUMBER, AxisX);
+		return Out.AddVertex(Position, Up, Tangent, GridUV(GX, GY), 0.0f);
+	};
+
+	// The shore (G229): with the ground at the cells' corners and centres, how far a point of the half grid (corners at
+	// even coordinates, a cell's centre at odd ones) lies under the level and its margin. Positive is drawn. A corner on
+	// the footprint's outline (a corner of a cell outside it) takes no margin: on a gentle shore the ground at the level
+	// and its margin may lie past the footprint's cell of shore, and a sheet drawn to the outline there would show the
+	// outline's steps again. So the sheet reaches the outline only where the ground there lies under the level itself
+	// (the rim narrower than a cell a hand-placed lake warns about).
+	const bool bShore = Lake.HasGround();
+	const double Margin = ShoreMarginVoxels * VoxelSize;
+	const auto Wetness = [&Lake, Level, Margin](const FIntPoint& Half)
+	{
+		if (Half.X & 1)
+		{
+			return Level + Margin - Lake.GetCentreGround(Half.X / 2, Half.Y / 2);
+		}
+		const int32 GX = Half.X / 2;
+		const int32 GY = Half.Y / 2;
+		const bool bOutline = !Lake.HasCell(GX - 1, GY - 1) || !Lake.HasCell(GX, GY - 1) || !Lake.HasCell(GX - 1, GY) || !Lake.HasCell(GX, GY);
+		return Level + (bOutline ? 0.0 : Margin) - Lake.GetCornerGround(GX, GY);
+	};
+	// A cell drawn whole: a cell of the footprint, and with the ground every one of its corners and its centre wet.
+	const auto IsWhole = [&](int32 X, int32 Y)
+	{
+		if (!Lake.HasCell(X, Y))
+		{
+			return false;
+		}
+		if (!bShore)
+		{
+			return true;
+		}
+		const FIntPoint Half(2 * X, 2 * Y);
+		return Wetness(Half) > 0.0 && Wetness(Half + FIntPoint(2, 0)) > 0.0 && Wetness(Half + FIntPoint(2, 2)) > 0.0
+			&& Wetness(Half + FIntPoint(0, 2)) > 0.0 && Wetness(Half + FIntPoint(1, 1)) > 0.0;
+	};
+
+	// Vertices shared between cells, by the points of the half grid they lie between and how far along: a corner is the
+	// pair of itself, a cut point the pair of its edge's ends in order, so the two cells beside an edge make one vertex.
+	TMap<TPair<FIntPoint, FIntPoint>, int32> Shared;
+	// Each shared vertex's point of the grid, in cells: the shore's triangles are judged on the grid's plane.
+	TMap<int32, FVector2D> GridOf;
+	const auto SharedVertex = [&](FIntPoint A, FIntPoint B, double T)
+	{
+		if (B.X < A.X || (B.X == A.X && B.Y < A.Y))
+		{
+			Swap(A, B);
+			T = 1.0 - T;
+		}
+		if (T <= UE_KINDA_SMALL_NUMBER)
+		{
+			B = A;
+		}
+		else if (T >= 1.0 - UE_KINDA_SMALL_NUMBER)
+		{
+			A = B;
+		}
+		const TPair<FIntPoint, FIntPoint> Key(A, B);
+		if (const int32* Found = Shared.Find(Key))
+		{
+			return *Found;
+		}
+		const double Along = A == B ? 0.0 : T;
+		const double GX = 0.5 * FMath::Lerp(static_cast<double>(A.X), static_cast<double>(B.X), Along);
+		const double GY = 0.5 * FMath::Lerp(static_cast<double>(A.Y), static_cast<double>(B.Y), Along);
+		const int32 Vertex = MakeVertex(GX, GY);
+		Shared.Add(Key, Vertex);
+		GridOf.Add(Vertex, FVector2D(GX, GY));
+		return Vertex;
+	};
+
+	if (!Frame.bRadial)
+	{
+		// A heightmap lake: flat, so the whole cells merge into rectangles (a row of cells as wide as it runs, then as
+		// many rows down as hold the same run), each one quad at the level.
 		TBitArray<> Taken(false, Size.X * Size.Y);
 		for (int32 Y = 0; Y < Size.Y; ++Y)
 		{
 			for (int32 X = 0; X < Size.X; ++X)
 			{
-				if (!Lake.HasCell(X, Y) || Taken[Y * Size.X + X])
+				if (!IsWhole(X, Y) || Taken[Y * Size.X + X])
 				{
 					continue;
 				}
 				int32 Width = 1;
-				while (X + Width < Size.X && Lake.HasCell(X + Width, Y) && !Taken[Y * Size.X + X + Width])
+				while (X + Width < Size.X && IsWhole(X + Width, Y) && !Taken[Y * Size.X + X + Width])
 				{
 					++Width;
 				}
@@ -95,7 +195,7 @@ void FVoxelWaterBodyMesh::BuildLake(const FVoxelWaterBody& Body, const FVoxelWat
 					bool bRow = true;
 					for (int32 I = 0; I < Width && bRow; ++I)
 					{
-						bRow = Lake.HasCell(X + I, Y + Height) && !Taken[(Y + Height) * Size.X + X + I];
+						bRow = IsWhole(X + I, Y + Height) && !Taken[(Y + Height) * Size.X + X + I];
 					}
 					if (!bRow)
 					{
@@ -109,48 +209,82 @@ void FVoxelWaterBodyMesh::BuildLake(const FVoxelWaterBody& Body, const FVoxelWat
 						Taken[(Y + J) * Size.X + X + I] = true;
 					}
 				}
-				int32 Corners[4];
-				const FIntPoint Grid[4] = { FIntPoint(X, Y), FIntPoint(X + Width, Y), FIntPoint(X + Width, Y + Height), FIntPoint(X, Y + Height) };
-				for (int32 Corner = 0; Corner < 4; ++Corner)
-				{
-					Corners[Corner] = Out.AddVertex(Lake.GetGridPoint(Grid[Corner].X, Grid[Corner].Y, Level, Frame.Center), FVector::UpVector,
-						FVector::ForwardVector, GridUV(Grid[Corner].X, Grid[Corner].Y), 0.0f);
-				}
-				Out.AddQuad(Corners[0], Corners[1], Corners[2], Corners[3]);
+				const int32 A = MakeVertex(X, Y);
+				const int32 B = MakeVertex(X + Width, Y);
+				const int32 C = MakeVertex(X + Width, Y + Height);
+				const int32 D = MakeVertex(X, Y + Height);
+				Out.AddQuad(A, B, C, D);
 			}
 		}
+	}
+	else
+	{
+		// A planet lake: the sheet lies on the sphere of the level's radius. A quad a cell, its corners the grid's corners
+		// carried out along their own directions and shared between the cells that meet there, so the sheet has no seam.
+		for (int32 Y = 0; Y < Size.Y; ++Y)
+		{
+			for (int32 X = 0; X < Size.X; ++X)
+			{
+				if (IsWhole(X, Y))
+				{
+					const FIntPoint Half(2 * X, 2 * Y);
+					const int32 A = SharedVertex(Half, Half, 0.0);
+					const int32 B = SharedVertex(Half + FIntPoint(2, 0), Half + FIntPoint(2, 0), 0.0);
+					const int32 C = SharedVertex(Half + FIntPoint(2, 2), Half + FIntPoint(2, 2), 0.0);
+					const int32 D = SharedVertex(Half + FIntPoint(0, 2), Half + FIntPoint(0, 2), 0.0);
+					Out.AddQuad(A, B, C, D);
+				}
+			}
+		}
+	}
+	if (!bShore)
+	{
 		return;
 	}
 
-	// A planet lake: the sheet lies on the sphere of the level's radius. A quad a cell, its corners the grid's corners
-	// carried out along their own directions and shared between the cells that meet there, so the sheet has no seam.
-	FVector AxisX, AxisY, Centre;
-	Lake.GetTangentFrame(AxisX, AxisY, Centre);
-	Out.Origin = Frame.Center + Centre * Level;
-	TMap<FIntPoint, int32> Vertices;
-	const auto Corner = [&](int32 GX, int32 GY)
-	{
-		const FIntPoint Key(GX, GY);
-		if (const int32* Found = Vertices.Find(Key))
-		{
-			return *Found;
-		}
-		const FVector Position = Lake.GetGridPoint(GX, GY, Level, Frame.Center);
-		const FVector Up = (Position - Frame.Center).GetSafeNormal(UE_SMALL_NUMBER, Centre);
-		const FVector Tangent = (AxisX - Up * FVector::DotProduct(AxisX, Up)).GetSafeNormal(UE_SMALL_NUMBER, AxisX);
-		return Vertices.Add(Key, Out.AddVertex(Position, Up, Tangent, GridUV(GX, GY), 0.0f));
-	};
+	// The cells of the shore: four triangles a cell (two corners and the centre, counter-clockwise as the quad's
+	// corners), each cut to its wet part where the ground, linear along the triangle's edges, crosses the level and its
+	// margin. A triangle cut by a line is a triangle or a quad, drawn as a fan.
 	for (int32 Y = 0; Y < Size.Y; ++Y)
 	{
 		for (int32 X = 0; X < Size.X; ++X)
 		{
-			if (Lake.HasCell(X, Y))
+			if (!Lake.HasCell(X, Y) || IsWhole(X, Y))
 			{
-				const int32 A = Corner(X, Y);
-				const int32 B = Corner(X + 1, Y);
-				const int32 C = Corner(X + 1, Y + 1);
-				const int32 D = Corner(X, Y + 1);
-				Out.AddQuad(A, B, C, D);
+				continue;
+			}
+			const FIntPoint Corners[4] = { FIntPoint(2 * X, 2 * Y), FIntPoint(2 * X + 2, 2 * Y), FIntPoint(2 * X + 2, 2 * Y + 2), FIntPoint(2 * X, 2 * Y + 2) };
+			const FIntPoint Middle(2 * X + 1, 2 * Y + 1);
+			for (int32 Side = 0; Side < 4; ++Side)
+			{
+				const FIntPoint Points[3] = { Corners[Side], Corners[(Side + 1) % 4], Middle };
+				const double Wet[3] = { Wetness(Points[0]), Wetness(Points[1]), Wetness(Points[2]) };
+				TArray<int32, TInlineAllocator<4>> Polygon;
+				for (int32 I = 0; I < 3; ++I)
+				{
+					const int32 J = (I + 1) % 3;
+					if (Wet[I] > 0.0)
+					{
+						Polygon.Add(SharedVertex(Points[I], Points[I], 0.0));
+					}
+					if ((Wet[I] > 0.0) != (Wet[J] > 0.0))
+					{
+						Polygon.Add(SharedVertex(Points[I], Points[J], Wet[I] / (Wet[I] - Wet[J])));
+					}
+				}
+				// A sliver (a cut point next to a corner, three points nearly in line) is left out: on a planet the sheet
+				// lies on a sphere, and three points nearly in line on the grid's plane make there a triangle whose
+				// facing the sphere's curve decides. What it covered is under a ten-thousandth of a cell.
+				for (int32 K = 1; K + 1 < Polygon.Num(); ++K)
+				{
+					const FVector2D A = GridOf.FindRef(Polygon[0]);
+					const FVector2D B = GridOf.FindRef(Polygon[K]);
+					const FVector2D C = GridOf.FindRef(Polygon[K + 1]);
+					if (FVector2D::CrossProduct(B - A, C - A) > 2.0e-4)
+					{
+						Out.AddTriangle(Polygon[0], Polygon[K], Polygon[K + 1]);
+					}
+				}
 			}
 		}
 	}

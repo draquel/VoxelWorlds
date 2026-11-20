@@ -312,6 +312,43 @@ struct VOXELCORE_API FVoxelWaterLake
 	 */
 	FVector GetGridPoint(double GridX, double GridY, double Level, const FVector& PlanetCenter) const;
 
+	/**
+	 * The place a point of the grid stands for, as a maker of footprints reads the ground at.
+	 * @param GridX Cells along the grid's first axis from its minimum corner (whole numbers are corners, halves centres)
+	 * @param GridY Cells along its second axis
+	 * @return The column (X, Y, 0) on a heightmap world, the unit direction from the planet centre on a planet
+	 */
+	FVector GetGridPlace(double GridX, double GridY) const;
+
+	/**
+	 * A copy of a footprint that carries the ground at its cells' corners and centres (G229): a lake's drawn sheet is cut
+	 * to the water and a margin of shore with it (FVoxelWaterBodyMesh), so that beyond the voxel window, where the far
+	 * field's coarser ground does not hide the footprint's cell of shore, the sheet does not show the cells' steps. Read
+	 * by the drawing alone: the footprint, the sample and generation are the same with it or without it.
+	 * @param Lake The footprint
+	 * @param GroundAt Asked of the corners and the centre of each footprint cell with the place they stand for
+	 *        (GetGridPlace): the ground there as a water level (world Z, or the distance from the planet centre)
+	 * @return The copy (a footprint with no cells: a plain copy)
+	 */
+	static TSharedRef<const FVoxelWaterLake> WithGround(const FVoxelWaterLake& Lake, TFunctionRef<double(const FVector&)> GroundAt);
+
+	/** @return Whether the footprint carries the ground at its cells' corners and centres (WithGround) */
+	bool HasGround() const { return CornerGround.Num() > 0; }
+
+	/**
+	 * @param GridX A corner along the grid's first axis, 0 to Size.X
+	 * @param GridY A corner along its second, 0 to Size.Y
+	 * @return The ground at a corner of a footprint cell as a water level (HasGround; 0 for a corner of no footprint cell)
+	 */
+	double GetCornerGround(int32 GridX, int32 GridY) const;
+
+	/**
+	 * @param CellX A cell of the footprint
+	 * @param CellY
+	 * @return The ground at the cell's centre as a water level (HasGround; 0 for a cell outside the footprint)
+	 */
+	double GetCentreGround(int32 CellX, int32 CellY) const;
+
 	/** @return A planet lake's tangent axes at its centre and the centre's direction (unset for a heightmap lake) */
 	void GetTangentFrame(FVector& OutAxisX, FVector& OutAxisY, FVector& OutCentre) const
 	{
@@ -345,6 +382,15 @@ private:
 	FVector AxisY = FVector::RightVector;
 	double PlanetRadius = 0.0;
 	double CapAngle = 0.0;
+
+	/**
+	 * WithGround: the ground at the grid's corners ((Size.X + 1) * (Size.Y + 1), row by row) and at its cells' centres
+	 * (Size.X * Size.Y), as offsets from GroundBase, so a float holds a planet's distances from its centre to a hundredth
+	 * of a unit. Empty without it.
+	 */
+	double GroundBase = 0.0;
+	TArray<float> CornerGround;
+	TArray<float> CentreGround;
 };
 
 /**

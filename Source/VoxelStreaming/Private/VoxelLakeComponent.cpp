@@ -4,6 +4,7 @@
 #include "VoxelStreaming.h"
 #include "VoxelChunkManager.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelBlockSurface.h"
 #include "Components/SplineComponent.h"
 
 bool UVoxelLakeComponent::BuildLake(const UVoxelChunkManager& Manager, FVoxelLakeBuild& Out) const
@@ -113,6 +114,12 @@ bool UVoxelLakeComponent::BuildLake(const UVoxelChunkManager& Manager, FVoxelLak
 			Outline.Add(FVector2D(Place.X, Place.Y));
 		}
 		Out.Footprint = FVoxelWaterLake::MakeFromOutline(Outline, Cell, IsUnder);
+	}
+	// The ground at the footprint's cells' corners and centres, for the drawn sheet to follow the shore and not the
+	// cells' steps (G229). A block world's water and shore are block columns, which the cells' squares already follow.
+	if (Out.Footprint->NumCells() > 0 && !FVoxelBlockSurface::UsesBlockSurface(*Configuration))
+	{
+		Out.Footprint = FVoxelWaterLake::WithGround(*Out.Footprint, [&](const FVector& Place) { return GetNaturalHeight(Manager, Place) + LevelBase; });
 	}
 
 	// The cells of the footprint that lie under the level: the ones inside the outline, counted above, and any of the

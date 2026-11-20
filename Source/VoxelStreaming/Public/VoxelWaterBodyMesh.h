@@ -13,7 +13,13 @@
  *
  * - A lake is a sheet over its footprint's cells at its level. On a heightmap world the cells are merged into
  *   rectangles, each a quad at world Z = the level. On a planet the sheet lies on the sphere of the level's radius: a
- *   quad a cell, its corners the grid's corners carried out along their own directions, shared between cells.
+ *   quad a cell, its corners the grid's corners carried out along their own directions, shared between cells. When
+ *   the footprint carries its ground (FVoxelWaterLake::WithGround, G229), a cell whose corners and centre all lie
+ *   under the level and its margin (ShoreMarginVoxels) is drawn so; a cell of the shore is drawn as four triangles,
+ *   corner, corner and centre, each cut where the ground, linear between those three points, rises over the level
+ *   and its margin, the cut points shared by the cells beside it. So the sheet's edge follows the shore, not the
+ *   cells' steps, and from beyond the voxel window, where the far field's coarser ground does not hide a cell of
+ *   shore, no square shows.
  * - A river reach is a ribbon along its polyline, two vertices a vertex of the reach, at the vertex's surface level and
  *   to its footprint's half width on either side (the bed's half width and its falloff: the banks rise over the surface
  *   across the falloff, so the ribbon's edges lie tucked under them). Level across the river, sloped along it.
@@ -41,8 +47,19 @@ struct VOXELSTREAMING_API FVoxelWaterBodyMesh
 	/** The same triangles turned over, with the top's normals: the surface seen from under it */
 	FVoxelPlanetOceanMesh Underside;
 
-	/** How many quads the surface has */
+	/** How many quads the surface has: whole cells, or on a heightmap world rectangles of them */
 	int32 Quads = 0;
+
+	/** How many triangles the cut cells of a lake's shore add (a lake whose footprint carries its ground) */
+	int32 ShoreTriangles = 0;
+
+	/**
+	 * How far over the level, in voxels, the ground under a lake's sheet may stand where its footprint carries the
+	 * ground: up close the ground hides the sheet where it stands over the level, so the margin costs nothing there and
+	 * covers the voxels' surface lying a little off the ground read at the cells' corners; from far it is how far up
+	 * the shore the sheet's smooth edge may show. A corner on the footprint's outline takes none (BuildLake)
+	 */
+	static constexpr double ShoreMarginVoxels = 0.1;
 
 	/** @return Whether nothing was built (a body with no footprint) */
 	bool IsEmpty() const { return Top.Triangles.Num() == 0; }
@@ -70,6 +87,9 @@ private:
 
 	/** Add a quad of four top vertices, counter-clockwise seen from above (A, B, C, D). */
 	void AddQuad(int32 A, int32 B, int32 C, int32 D);
+
+	/** Add a triangle of three top vertices, counter-clockwise seen from above (a cut cell of a lake's shore). */
+	void AddTriangle(int32 A, int32 B, int32 C);
 
 	/** Make the underside from the top: the same vertices, each triangle turned over. */
 	void FinishUnderside();

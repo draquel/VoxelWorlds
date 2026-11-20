@@ -737,6 +737,13 @@ namespace VoxelHydrologyPrivate
 			const FVector2D Origin(FineGrid.Offset.X + (FootMin.X - Lead) * Fine, FineGrid.Offset.Y + (FootMin.Y - Lead) * Fine);
 			Shape = FVoxelWaterLake::Make(Origin, Fine, Size, MoveTemp(Bits));
 		}
+		// The ground at the footprint's cells' corners and centres, for the drawn sheet to follow the shore and not the
+		// cells' steps (G229). A block world's cells are its columns, whose squares are the shore already.
+		if (!bBlocks)
+		{
+			const double LevelBase = Ground.GetLevelBase();
+			Shape = FVoxelWaterLake::WithGround(*Shape, [&Ground, LevelBase](const FVector& Place) { return Ground.HeightAt(Place) + LevelBase; });
+		}
 		Lake.Body = FVoxelWaterBody::MakeLake(BodyId, BodyLevel, Shape.ToSharedRef(), Ground.GetFrame(), Lake.Depth + Ground.ChunkWorldSize, Settings.LakeMinCaveDepth);
 		Lake.bKept = true;
 	}
