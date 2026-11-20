@@ -77,27 +77,32 @@ lines"). For a road 6 voxels wide with a falloff of 4 voxels (a reach, the half 
 A spline within the bound makes the line it draws, vertex for vertex. Where a spline breaks it, the component makes the
 line again when the world starts (D134):
 
-- **It rounds the corners.** They are spread along the line, one vertex further each way at a time, until every vertex
-  is within the bound, and no further. The line's two ends stay where the spline's are. A 60 degree corner of that road
-  is spread over 3 m each way and the line then runs within 0.75 m of the spline; a right angle over 7.4 m, within
-  2.2 m of it. The spreading stops at twice the reach each way (10.5 m for that road), which is enough for a corner of
-  up to about 100 degrees and leaves the line within 3.1 m of the spline, six tenths of the reach.
+- **It rounds the corners.** Each corner that breaks the bound gets an arc of the radius the bound asks for: the
+  reach with a tenth to spare, 5.9 m for that road (G225). The arc meets the two legs at the radius times
+  tan(turn / 2) from the corner and moves the corner by the radius times (1 / cos(turn / 2) - 1): 0.9 m for a
+  60 degree corner of that road, 2.4 m for a right angle, 5.9 m (about a reach) for 120 degrees and 16.8 m for 150.
+  The rest of the line stays where the spline is, and the line's two ends stay where the spline's are. A corner too
+  near an end for its arc keeps the end and lets the end's direction go: the arc runs through the end itself (a right
+  angle 4 m from the end of that road's line moves by 2.2 m), or through both ends of a short line.
 - **Follow Terrain: it makes the profile again** on the rounded line, with the same smoothing and Max Grade, and holds
   the grade through each bend to what the turn left there allows. A tight bend on a slope is levelled out, with more
   cut and fill, where it would have creased. A line whose turns are within the bound, and which only climbs too
   steeply through them, keeps its vertices and gets the flatter profile alone.
 - **Spline Height: the heights stay the spline's,** read along the rounded line. The profile is yours, so the turn
-  itself has to fit the grade and the corner is spread further: a 60 degree corner of that road over 6 m each way on
-  a 15 % grade and 8.7 m on 20 %, where the same corner following the terrain needs 3. A right angle fits on up to
-  about 10 %; on 15 % or more, as any corner on a steep grade, it does not fit within twice the reach.
-- **What is out of reach keeps its warning.** A corner of much over 100 degrees, a hairpin, a corner at the spline's
-  height on a steep grade: the line takes the rounding that came nearest the bound (none, when none helped) and the
-  log's warning names what is left. Draw such a bend as a curve.
+  itself has to fit the grade and the corner takes a wider radius, by as much as the grade asks: about one and a half
+  times the reach's for a 60 degree corner on 15 %. The radius stops at three times the reach's (17.6 m for that
+  road); a corner on a grade that asks for more (a right angle on 40 %) keeps its warning.
+- **What is out of reach keeps its warning.** A hairpin (a corner of over 160 degrees), two corners too close for an
+  arc each (an S or a U of two right angles closer than about two radii), a short line whose ends lie over two radii
+  apart round its corner, a corner at the spline's height on a steep grade: the line takes the rounding that came
+  nearest the bound (none, when none helped) and the log's warning names what is left. Draw such a bend as a curve.
 
 When the component has made a line again its first warning says so: "the spline breaks the bend bound (its sharpest bend
-turns 4.1 times what the bound allows there): the line's corners are rounded over 296 uu each way along it, so the line
-runs up to 75 uu from its spline, and its profile is flatter through the bends" (a 60 degree corner on a hillside, the
-road held to 20 %: `Documentation/TerrainLines/L5/` at the project root has it before and after). For the line to run
+turns 14.3 times what the bound allows there): the line's corners are rounded to arcs of 587 uu radius, so the line runs
+up to 592 uu from its spline, and its profile is flatter through the bends" (a 120 degree corner, the road held to 20 %:
+`Documentation/TerrainLines/G225/` at the project root has it before and after; L5's 60 degree corner is in
+`Documentation/TerrainLines/L5/`). How far the line runs from its spline is measured both ways: at a rounded corner it is
+the arc's middle from the spline's corner. For the line to run
 exactly where the spline does, draw the bend within the bound: curve points with tangents, or enough points, to a
 radius of the reach on a gentle grade (5 m for that road), 13 m at 25 %.
 
@@ -109,11 +114,11 @@ whatever they say; the warnings say where it is not what you drew, and where it 
 
 | Warning | What to change |
 |---|---|
-| "the spline breaks the bend bound ...: the line's corners are rounded over N uu each way along it, so the line runs up to M uu from its spline" | Nothing, if the rounded line is the one you want: the terrain has no crease. For the line to follow the spline, draw the bend within the bound ("Bends") |
+| "the spline breaks the bend bound ...: the line's corners are rounded to arcs of N uu radius, so the line runs up to M uu from its spline" | Nothing, if the rounded line is the one you want: the terrain has no crease. For the line to follow the spline, draw the bend within the bound ("Bends") |
 | "... the line runs where the spline does, and its profile is flatter through the bends" | Nothing: the line climbs less through its bends than Max Grade would let it |
-| "... the line still breaks the bound" | The rounding stopped short (it spreads a corner over no more than twice the reach). The next two warnings say what is left |
+| "... the line still breaks the bound" | The rounding stopped short (a corner's radius is at most three times the reach's; a hairpin, or two corners too close for an arc each, is left as drawn). The next two warnings say what is left |
 | "vertices break the bend bound" | The line still turns too sharply for its slope: on the inside of the bend the levelled ground steps. At the spline's height, lower the grade through the bend or widen the curve (a radius of at least 5 m for a 6-voxel road on up to a 10 % grade, 13 m at 25 %) |
-| "turn so sharply ... that their bisector meets a neighbour's inside the reach" | A corner too sharp to round (much over 100 degrees). Draw it as a curve with a radius of at least the half width plus the falloff |
+| "turn so sharply ... that their bisector meets a neighbour's inside the reach" | A bend the rounding left: a hairpin of over 160 degrees, or two corners too close for an arc each. Draw it as a curve with a radius of at least the half width plus the falloff, and leave that much between two corners |
 | "within twice the reach of each other" | The line comes back on itself or crosses itself (a hairpin, a closed loop's join). Keep its parts farther apart, or use two lines |
 | "the cut and fill cap" | The target is more than half a chunk from the natural ground: chunks there may not stream. Lower the offset, or let the line follow the terrain more closely (a smaller smoothing distance, a higher max grade) |
 | "under two voxels" | The core or the falloff is too narrow to mesh cleanly |

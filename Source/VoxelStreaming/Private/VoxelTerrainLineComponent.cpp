@@ -66,19 +66,62 @@ namespace VoxelTerrainLinePrivate
 	}
 
 	/**
-	 * @param Point A point
-	 * @param Polyline A polyline
-	 * @param First, Last The segments to look at (clamped to the polyline's)
-	 * @return The distance from the point to the nearest of those segments
+	 * How far a rounded line runs from its spline, both ways: the farthest any vertex lies from the spline, or any point
+	 * of the spline from the line (a rounded corner's move, the arc's middle from the spline's corner, which the spline's
+	 * samples may cut). The spline is read every eighth of a step; each vertex is held against the stretch of it around
+	 * its own place along the spline, as far each way as a corner's arc reaches.
+	 * @param Spline The spline
+	 * @param Points The line's vertices (world X and Y with Z 0; on a planet the points on the datum sphere)
+	 * @param Along Each vertex's place along the spline (world units)
+	 * @param Step The spline's sampling step
+	 * @param Radius The corners' radius
+	 * @param Planet The planet, for a planet line (else null)
+	 * @return The distance (world units)
 	 */
-	double DistanceToPolyline(const FVector& Point, TConstArrayView<FVector> Polyline, int32 First, int32 Last)
+	double GetFarthestFromSpline(const USplineComponent& Spline, TConstArrayView<FVector> Points, TConstArrayView<double> Along, double Step, double Radius,
+		const FSphericalPlanetParams* Planet)
 	{
-		double Best = TNumericLimits<double>::Max();
-		for (int32 Segment = FMath::Max(First, 0); Segment <= FMath::Min(Last, Polyline.Num() - 2); ++Segment)
+		const double Length = Spline.GetSplineLength();
+		const double Fine = 0.125 * Step;
+		const int32 Num = FMath::Max(1, FMath::CeilToInt32(Length / Fine));
+		TArray<FVector> Read;
+		Read.Reserve(Num + 1);
+		for (int32 Index = 0; Index <= Num; ++Index)
 		{
-			Best = FMath::Min(Best, FMath::PointDistToSegmentSquared(Point, Polyline[Segment], Polyline[Segment + 1]));
+			const FVector World = Spline.GetLocationAtDistanceAlongSpline(static_cast<float>(Length * Index / Num), ESplineCoordinateSpace::World);
+			Read.Add(Planet ? (World - Planet->PlanetCenter).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector) * Planet->PlanetRadius : FVector(World.X, World.Y, 0.0));
 		}
-		return Best < TNumericLimits<double>::Max() ? FMath::Sqrt(Best) : 0.0;
+		// An arc of up to 160 degrees reaches its radius x tan(80 degrees), under six radii, each way along its corner.
+		const double Reach = 6.0 * Radius + 2.0 * Step;
+		const double PerRead = Length / Num;
+		double Farthest = 0.0;
+		for (int32 Index = 0; Index < Points.Num(); ++Index)
+		{
+			const int32 First = FMath::Max(0, FMath::FloorToInt32((Along[Index] - Reach) / PerRead));
+			const int32 Last = FMath::Min(Num, FMath::CeilToInt32((Along[Index] + Reach) / PerRead));
+			double Nearest = TNumericLimits<double>::Max();
+			for (int32 Segment = First; Segment < Last; ++Segment)
+			{
+				Nearest = FMath::Min(Nearest, FMath::PointDistToSegmentSquared(Points[Index], Read[Segment], Read[Segment + 1]));
+			}
+			Farthest = FMath::Max(Farthest, Nearest < TNumericLimits<double>::Max() ? FMath::Sqrt(Nearest) : 0.0);
+		}
+		int32 FirstVertex = 0;
+		for (int32 Index = 0; Index <= Num; ++Index)
+		{
+			const double At = Length * Index / Num;
+			while (FirstVertex + 1 < Points.Num() && Along[FirstVertex + 1] < At - Reach)
+			{
+				++FirstVertex;
+			}
+			double Nearest = TNumericLimits<double>::Max();
+			for (int32 Vertex = FirstVertex; Vertex + 1 < Points.Num() && Along[Vertex] <= At + Reach; ++Vertex)
+			{
+				Nearest = FMath::Min(Nearest, FMath::PointDistToSegmentSquared(Read[Index], Points[Vertex], Points[Vertex + 1]));
+			}
+			Farthest = FMath::Max(Farthest, Nearest < TNumericLimits<double>::Max() ? FMath::Sqrt(Nearest) : 0.0);
+		}
+		return Farthest;
 	}
 }
 
@@ -308,55 +351,46 @@ bool UVoxelTerrainLineComponent::BuildLineParamsFromSpline(const USplineComponen
 			return GetBendRatio(*FVoxelConditioningLine::Make(Try), VoxelSize, PlanetRadius);
 		};
 
-		// Round the corners: spread them along the line (each point the mean of the points around it, twice over) over one
-		// more vertex each way per try, and sample the result evenly, until every vertex is within the bound with the
-		// shape functions' margin. So a corner is rounded as far as the bound asks and no further. The spreading stops at
-		// twice the line's reach each way, which brings a corner of up to about 100 degrees within the bound and leaves
-		// the line within two thirds of the reach of its spline; a line still outside the bound there (a sharper corner, a
-		// corner at the spline's height on a steep grade, a hairpin) takes the try that came nearest and keeps its warning. The sampled points are tried
-		// first as they are: a line that follows the terrain and only steps on its grade keeps them, and gets the flatter
-		// profile alone.
-		const int32 MaxReach = FMath::FloorToInt32(2.0 * Sampled->GetHeightReach() / Step);
-		TArray<FVector> Spread;
-		int32 Reach = 0;
+		// Round the corners (G225): an arc fitted into each corner that turns more than an arc of the radius does, the
+		// radius the reach asks for with the shape functions' margin (FitCornerArcs; an arc turns evenly, where the mean of
+		// the points around a corner that L5 took turns most at its middle). A line that follows the terrain is then within
+		// the bound: its profile holds the grade to the turn. At the spline's own height the turn must also fit the
+		// spline's grade there, so a try still outside the bound takes a wider radius, by as much as it was outside, up
+		// to three times the reach's radius; a line still outside the bound there (a corner on a steep grade, a hairpin,
+		// an S too tight for two arcs) takes the try that came nearest and keeps its warning. The sampled points are
+		// tried first as they are: a line that follows the terrain and only steps on its grade keeps them, and gets the
+		// flatter profile alone.
+		const double BaseRadius = FShape::GetCornerRadius(Spacing, FShape::GetMaxTurnForReach(Spacing, Sampled->GetHeightReach()));
+		const double MaxRadius = 3.0 * BaseRadius;
+		constexpr int32 MaxTries = 8;
 		double Ratio = JudgeTry();
-		int32 BestReach = 0;
 		double BestRatio = Ratio;
+		double BestRadius = 0.0;
 		TArray<FVector> BestPoints = Points;
 		TArray<double> BestAlong = Along;
-		while (Ratio > (Reach == 0 ? 1.0 : FShape::BoundMargin) && Reach < MaxReach)
+		TArray<double> Places;
+		double Radius = BaseRadius;
+		for (int32 Attempt = 0; Ratio > 1.0 && Attempt < MaxTries; ++Attempt)
 		{
-			++Reach;
-			FShape::SpreadCorners(Drawn, Step, Reach * Step, Spread);
+			const FShape::FCornerArcs Arcs = FShape::FitCornerArcs(Drawn, Spacing, Radius, Points, &Places);
+			if (Arcs.NumArcs == 0)
+			{
+				// No corner could take an arc (a hairpin; legs too short for one on both sides): a wider radius fits none either.
+				break;
+			}
 			if (bPlanet)
 			{
-				// A mean of points on a sphere lies under it.
-				for (FVector& Point : Spread)
+				// The arc of a corner on the sphere is drawn in the plane of its two legs, a little under the sphere.
+				for (FVector& Point : Points)
 				{
 					Point = Point.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector) * PlanetRadius;
 				}
 			}
-			FShape::ResampleEvenly(Spread, Spacing, Points);
-
-			// Each spread point is a sampled point moved, so it keeps that point's place along the spline; a vertex of the
-			// even sampling lies between two of them, and reads the spline in between.
-			const int32 Num = Points.Num();
-			const double SpreadLength = FShape::GetLength(Spread);
-			Along.SetNumUninitialized(Num);
-			int32 Segment = 0;
-			double SegmentStart = 0.0;
-			double SegmentLength = FVector::Dist(Spread[0], Spread[1]);
-			for (int32 Index = 0; Index < Num; ++Index)
+			// A vertex's place along the sampled points is its place along the spline, in steps.
+			Along.SetNumUninitialized(Points.Num());
+			for (int32 Index = 0; Index < Points.Num(); ++Index)
 			{
-				const double At = Num > 1 ? SpreadLength * Index / (Num - 1) : 0.0;
-				while (Segment < Spread.Num() - 2 && At > SegmentStart + SegmentLength)
-				{
-					SegmentStart += SegmentLength;
-					++Segment;
-					SegmentLength = FVector::Dist(Spread[Segment], Spread[Segment + 1]);
-				}
-				const double T = SegmentLength > UE_DOUBLE_SMALL_NUMBER ? FMath::Clamp((At - SegmentStart) / SegmentLength, 0.0, 1.0) : 0.0;
-				Along[Index] = FMath::Min((Segment + T) * Step, Length);
+				Along[Index] = FMath::Min(Places[Index] * Step, Length);
 			}
 			Along[0] = 0.0;
 			Along.Last() = Length;
@@ -364,30 +398,25 @@ bool UVoxelTerrainLineComponent::BuildLineParamsFromSpline(const USplineComponen
 			if (Ratio < BestRatio)
 			{
 				BestRatio = Ratio;
-				BestReach = Reach;
+				BestRadius = Radius;
 				BestPoints = Points;
 				BestAlong = Along;
 			}
-		}
-		if (Reach != BestReach)
-		{
-			// The bound was out of reach: the try that came nearest it (the sampled points themselves when no spreading
-			// helped, as on legs too short to spread a corner over).
-			Reach = BestReach;
-			Points = MoveTemp(BestPoints);
-			Along = MoveTemp(BestAlong);
-			JudgeTry();
-		}
-
-		if (Reach > 0)
-		{
-			// How far the line runs from its spline: each vertex against the stretch of the sampled spline it came from.
-			Bends.CornerDistance = Reach * Step;
-			for (int32 Index = 0; Index < Points.Num(); ++Index)
+			if (Radius >= MaxRadius)
 			{
-				const int32 Near = FMath::FloorToInt32(Along[Index] / Step);
-				Bends.FarthestFromSpline = FMath::Max(Bends.FarthestFromSpline, DistanceToPolyline(Points[Index], Drawn, Near - 2 * Reach - 1, Near + 2 * Reach + 1));
+				break;
 			}
+			Radius = FMath::Min(MaxRadius, Radius * FMath::Max(1.25, Ratio / FShape::BoundMargin));
+		}
+		// The try that came nearest the bound: the last one when it is within it, else the nearest (the sampled points
+		// themselves when no arc helped).
+		Points = MoveTemp(BestPoints);
+		Along = MoveTemp(BestAlong);
+		JudgeTry();
+		if (BestRadius > 0.0)
+		{
+			Bends.CornerRadius = BestRadius;
+			Bends.FarthestFromSpline = GetFarthestFromSpline(*Spline, Points, Along, Step, BestRadius, bPlanet ? &PlanetParams : nullptr);
 		}
 
 		if (bFollow)
@@ -436,8 +465,8 @@ FString UVoxelTerrainLineComponent::DescribeBends(const FVoxelTerrainLineBends& 
 	FString Done = FString::Printf(TEXT("the spline breaks the bend bound (its sharpest bend turns %.1f times what the bound allows there): "), Bends.DrawnBendRatio);
 	if (Bends.WasRounded())
 	{
-		Done += FString::Printf(TEXT("the line's corners are rounded over %.0f uu each way along it, so the line runs up to %.0f uu from its spline, %s"),
-			Bends.CornerDistance, Bends.FarthestFromSpline,
+		Done += FString::Printf(TEXT("the line's corners are rounded to arcs of %.0f uu radius, so the line runs up to %.0f uu from its spline, %s"),
+			Bends.CornerRadius, Bends.FarthestFromSpline,
 			Bends.bProfileFlattened ? TEXT("and its profile is flatter through the bends") : TEXT("at the spline's heights along it"));
 	}
 	else
@@ -446,7 +475,7 @@ FString UVoxelTerrainLineComponent::DescribeBends(const FVoxelTerrainLineBends& 
 	}
 	if (Bends.BendRatio > 1.0)
 	{
-		Done += FString::Printf(TEXT("; the line still breaks the bound (its sharpest bend turns %.1f times what the bound allows): corners are spread over no more than twice the line's reach each way"), Bends.BendRatio);
+		Done += FString::Printf(TEXT("; the line still breaks the bound (its sharpest bend turns %.1f times what the bound allows): a corner's radius is at most three times what the reach asks for, and a hairpin or an S too tight for two arcs is left as drawn"), Bends.BendRatio);
 	}
 	return Done;
 }

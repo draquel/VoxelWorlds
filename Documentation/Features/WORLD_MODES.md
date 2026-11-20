@@ -158,13 +158,22 @@ is immutable and shared from then on.
   point the mean of the points within a distance each way, twice over), wider each try. It averages the whole line,
   keeps the two ends, moves no point further than twice the distance it spread over, and reports the worst turn
   left, whether that is within the bound, and the farthest move; a line that comes back on itself is reported as
-  outside the bound. `MakeProfile` makes a levelled line's targets: the ground averaged along the line (the window
+  outside the bound. `FitCornerArcs` (G225) rounds only the corners, each with an arc of a radius (`GetCornerRadius`:
+  the one whose vertices turn by the margin times a bound), which turns evenly where an average turns most at a
+  corner's middle: a corner (a run of vertices that turn the same way by more than the arc does) is widened a vertex
+  at a time until the arc tangent to the line before it and the line after it fits between them, its tangent points
+  at the radius times tan(turn / 2) from where the two lines meet; a corner too near an end keeps the end and lets its
+  direction go (the arc through the end, tangent to the other side's line, or through both ends of a short line). It
+  hands back each vertex's place along the polyline given, the corners rounded and left (over 160 degrees, two that
+  come within an arc of each other, a short line whose ends are over two radii apart) and the farthest move, both
+  ways. `MakeProfile` makes a levelled line's targets: the ground averaged along the line (the window
   narrowing toward the ends), held from the start to a grade and, at each vertex that turns, to the grade the bend
   bound leaves there (`GetMaxGradeForTurn`, with a margin of a tenth), the start at a given height or the ground's, the end at a given height or where the grades bring it.
   A line made from those targets steps by less than a tenth of a voxel across every bisector whatever its turns: a
   tight bend on a slope is levelled, with more cut and fill, which the caller judges against its cap. The roads
-  between POIs are made with it (VoxelWorldPOI's `FPOIRoads`), and so is a hand-placed line whose spline breaks the
-  bend bound ("The hand-placed line", below; the plan's L5). `MakeRiverProfile` is its lower-only twin for a river
+  between POIs are made with it (VoxelWorldPOI's `FPOIRoads`: `RoundCorners`, whose corners are 45 and 90 degrees),
+  and so is a hand-placed line whose spline breaks the bend bound (`FitCornerArcs`; "The hand-placed line", below;
+  the plan's L5). `MakeRiverProfile` is its lower-only twin for a river
   (the hydrology plan's H4; `WATER_SYSTEM.md`, "The river and the lake placed by hand"): a surface that is only ever
   lowered (never rising downstream, a margin under both banks, a tuck under the water it meets), a bed a depth under
   it that starts from nothing at a head, and the bed deepened, by up to the depth again, where its grade at a vertex
@@ -199,40 +208,42 @@ spline to a polyline and adds it to the chunk manager (`AddConditioningLine`):
   (`GetLineId`): stable for the same level, the same on every machine (a PIE world's package is renamed, its actors
   are not; a client's copy of a level actor carries the server's name), and where lines meet the higher order is
   applied later and wins on its core. Lines of order 0 have ids from 0 to 2^32 - 1.
-- **The bends** (D134, the plan's L5). A hand-drawn spline breaks the bend bound easily: a tight curve on a grade, or
+- **The bends** (D134, the plan's L5; the corners' arcs G225). A hand-drawn spline breaks the bend bound easily: a tight curve on a grade, or
   a corner. The line above is judged first as sampled, by the bound's two checks as one number
   (`FVoxelTerrainLineBends::DrawnBendRatio`: the worst vertex's turn over the turn the bound allows there; the
   arithmetic of `FVoxelConditioningLine::GetWarnings` on the same vertices). At 1 or under, the sampled line is the
   line, vertex for vertex, and nothing below runs. Over 1 the component makes the line again with
   `FVoxelConditioningLineShape`:
   - **The corners.** The sampled points (world X and Y; on a planet the points on the datum sphere, before they become
-    directions again) are spread with `SpreadCorners` over one more vertex each way per try and sampled evenly
-    (`ResampleEvenly`), until the try's worst vertex is within 0.9 of the bound, so a corner is rounded as far as
-    the bound asks and no further; the two ends stay. The spreading stops at twice the line's reach each way. That
-    brings a corner of up to about 100 degrees within the bound and leaves the line within two thirds of the reach of
-    its spline (a 6-voxel road, reach 525 uu: a 60 degree corner is spread over 296 uu and the line runs up to 75 uu
-    from the spline; a right angle 741 uu and 222 uu; 100 degrees the whole 1,037 uu and 310 uu). A sharper corner
-    would need more than the averaging does well (120 degrees: 1,944 uu, which moves the corner twice as far as an
-    arc of the reach's radius would; G225), so the line then takes the try that came nearest the bound (the sampled
-    points, when no spreading helped, as on legs too short to spread a corner over) and keeps the warning. A try is judged as a line: following the terrain by its turns alone (its profile comes after), at the
-    spline's height with the spline's heights on it.
-  - **Along the spline.** Each spread point is a sampled point moved, so it keeps that point's distance along the
-    spline, and a vertex of the even sampling reads the spline between two of them: its half width (the scale Y) and,
-    at the spline's height, its target. The rounded line is shorter through a corner than the spline, so it climbs the
-    same rise there on a steeper grade (a 60 degree corner on 15 %: 17.3 % at its middle), which is why a corner at
-    the spline's height is spread further than one that follows the terrain, and why a right angle on 15 % or more
-    stays outside the bound.
+    directions again) are rounded with `FitCornerArcs` to the radius the reach asks for (`GetCornerRadius` of the
+    reach's bound: the reach over 0.9, a little more) and sampled evenly; the two ends stay. A corner moves by the
+    radius times (1 / cos(turn / 2) - 1), and the rest of the line stays on the spline (a 6-voxel road, reach 525 uu,
+    radius 587: a 60 degree corner moves 91 uu, a right angle 243, 120 degrees 587, about a reach, 150 degrees
+    1,682). A line that follows the terrain is then within the bound. At the spline's height a try still outside the
+    bound (its grade asks for a wider radius) takes one wider by as much as it was outside, up to three times the
+    reach's radius. A line the arcs cannot bring within the bound (a hairpin of over 160 degrees, two corners closer
+    than an arc each needs, a corner at the spline's height on a steep grade) takes the try that came nearest it (the
+    sampled points, when no arc helped) and keeps the warning. A try is judged as a line: following the terrain by
+    its turns alone (its profile comes after), at the spline's height with the spline's heights on it. Before G225
+    the corners were spread with `SpreadCorners` (the mean of the points around each, twice over), whose window a
+    corner needs grows fast with its turn: within twice the reach it rounded a corner of up to about 100 degrees, and
+    a corner near an end got a kink.
+  - **Along the spline.** `FitCornerArcs` hands back each vertex's place along the sampled points (an arc's vertices
+    spread evenly between its two tangent points' places), which is its place along the spline: there it reads its
+    half width (the scale Y) and, at the spline's height, its target. The rounded line is shorter through a corner
+    than the spline, so it climbs the same rise there on a steeper grade (a 60 degree corner on 15 %: 17.3 % at its
+    middle), which is why a corner at the spline's height takes a wider radius than one that follows the terrain.
   - **The profile,** following the terrain: `MakeProfile` on the rounded vertices with the natural ground under them,
     the component's `SmoothingDistance` and `MaxGrade` and the widest half width. It is the profile above with the
     grade held, at each vertex that turns, to what the bend bound leaves there, so the target steps by less than a
     tenth of a voxel across every bisector whatever turn is left. A line whose turns are within the bound as sampled
     and that only stepped on its grade keeps its vertices and gets this profile alone.
   - **What is said.** `GetLineBends` has the numbers (`FVoxelTerrainLineBends`: the ratio as sampled and as made, the
-    distance the corners were spread over, the farthest the line runs from the spline, measured from each vertex to
-    the stretch of the sampled spline it came from, whether the profile was made again), and the first sentence of
-    `GetLineWarnings` says them: "the spline breaks the bend bound (its sharpest bend turns 4.1 times what the bound
-    allows there): the line's corners are rounded over 296 uu each way along it, so the line runs up to 75 uu from its
-    spline, and its profile is flatter through the bends".
+    corners' radius, the farthest the line runs from the spline or the spline from it, measured against the spline
+    read every eighth of a step around each vertex's place: a rounded corner's move, whether the profile was made
+    again), and the first sentence of `GetLineWarnings` says them: "the spline breaks the bend bound (its sharpest
+    bend turns 14.3 times what the bound allows there): the line's corners are rounded to arcs of 587 uu radius, so the
+    line runs up to 592 uu from its spline, and its profile is flatter through the bends".
 - **The limits** are checked on the line as made when it is registered (`UVoxelChunkManager::GetConditioningLineWarnings`)
   and logged as warnings with the actor's name; the component keeps them after the sentence about its bends
   (`GetLineWarnings`) and adds the line whatever they say. A bend the rounding could not bring within the bound is
