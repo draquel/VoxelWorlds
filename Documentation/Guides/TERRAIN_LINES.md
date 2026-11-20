@@ -98,8 +98,8 @@ line again when the world starts (D134):
   nearest the bound (none, when none helped) and the log's warning names what is left. Draw such a bend as a curve.
 
 When the component has made a line again its first warning says so: "the spline breaks the bend bound (its sharpest bend
-turns 7.4 times what the bound allows there): the line's corners are rounded to arcs of 587 uu radius, so the line runs
-up to 600 uu from its spline, and its profile is flatter through the bends" (a 120 degree corner, the road held to 20 %:
+turns 14.3 times what the bound allows there): the line's corners are rounded to arcs of 587 uu radius, so the line runs
+up to 592 uu from its spline, and its profile is flatter through the bends" (a 120 degree corner, the road held to 20 %:
 `Documentation/TerrainLines/G225/` at the project root has it before and after; L5's 60 degree corner is in
 `Documentation/TerrainLines/L5/`). How far the line runs from its spline is measured both ways: at a rounded corner it is
 the arc's middle from the spline's corner. For the line to run

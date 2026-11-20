@@ -242,8 +242,8 @@ spline to a polyline and adds it to the chunk manager (`AddConditioningLine`):
     corners' radius, the farthest the line runs from the spline or the spline from it, measured against the spline
     read every eighth of a step around each vertex's place: a rounded corner's move, whether the profile was made
     again), and the first sentence of `GetLineWarnings` says them: "the spline breaks the bend bound (its sharpest
-    bend turns 7.4 times what the bound allows there): the line's corners are rounded to arcs of 587 uu radius, so the
-    line runs up to 600 uu from its spline, and its profile is flatter through the bends".
+    bend turns 14.3 times what the bound allows there): the line's corners are rounded to arcs of 587 uu radius, so the
+    line runs up to 592 uu from its spline, and its profile is flatter through the bends".
 - **The limits** are checked on the line as made when it is registered (`UVoxelChunkManager::GetConditioningLineWarnings`)
   and logged as warnings with the actor's name; the component keeps them after the sentence about its bends
   (`GetLineWarnings`) and adds the line whatever they say. A bend the rounding could not bring within the bound is
