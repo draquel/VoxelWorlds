@@ -362,6 +362,11 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   partly covered patch stays drawn a voxel under the voxel surface, which hides it: no gap and no overlap along the
   window's ragged edge, and no far-field floor in a hole or cave where the chunks are drawn. Patch geometry never depends
   on the window: the hole moves with the window by visibility alone, recomputed when a chunk changes state.
+  The voxel under the window's edge is open: nothing closes the step down to the far field, which a viewer inside the
+  window never faces. Seen from outside the window (a camera kilometres from the streaming viewer with the streaming
+  paused, as a capture script does; for about a second after a 44 km teleport while the window streams in) the view
+  passes under the voxel ground's edge onto far field the voxel ground shadows and hides from the sky, and the step
+  draws as a black stepped band or chunk-wide notches (G258, traced on `Review_TerrainLines_Planet` 2026-11-20).
 - **Residency.** One patch component (`UVoxelFarFieldPatchComponent`: sections drawn like a procedural mesh's, through
   `FLocalVertexFactory`) per resident patch at the patch's origin (its centre's point on the
   datum, double), vertices as float offsets of the patch's size; a patch hidden for 10 s releases its component and
