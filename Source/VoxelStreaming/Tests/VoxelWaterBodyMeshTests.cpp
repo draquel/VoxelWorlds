@@ -25,6 +25,11 @@
 //   hold the width from both segments), so the head, whose width is nothing, is a point, and the mouth's vertices lie
 //   at the record's last level; the second texture coordinate runs downstream by the length, the tangent is the
 //   direction downstream, and the speed rides in the second channel.
+// - Streaming.Water.BodyMesh.LakeShore: a lake in a bowl whose footprint carries its ground (G229), on a plane and a
+//   planet. The ground read back at the corners and centres; the sheet cut to the shore: every point whose ground lies
+//   under the level under it, none whose ground stands over the level and its margin, its area the bowl's at the level
+//   and the margin (the uncut sheet's is the cells', steps and all), every triangle facing up, a planet's cut points
+//   shared by the cells beside them, the underside the top turned over.
 // - Streaming.Water.BodyMeshes.Plane / .Planet: a streamed world with a lake and a river reach added at its start.
 //   A mesh a body within a tick, a lake with the water's material and a river reach with the river's, and none
 //   once the configuration names no water material; each underside shows only while the viewer is under that body's
@@ -326,6 +331,242 @@ bool FVoxelWaterBodyMeshReachTest::RunTest(const FString& Parameters)
 			Measure(GentleMesh.Underside, GentleMesh.Origin, Frame.Center, bPlanet, Area, FacingUp, FacingDown);
 			TestTrue(FString::Printf(TEXT("%s: and its underside faces down everywhere"), Name), FacingUp == 0 && FacingDown == 2 * (Num - 1));
 		}
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterBodyMeshLakeShoreTest, "VoxelWorlds.Streaming.Water.BodyMesh.LakeShore",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelWaterBodyMeshLakeShoreTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelWaterBodyMeshTest;
+	// A lake in a bowl, its ground (Depth under the level at the middle, rising as the square of the distance from it)
+	// read into the footprint (G229). Its footprint is the cells whose centres lie under the level, grown by one, as the
+	// makers' are. The sheet cut to the shore: it covers every point whose ground lies under the level, no point whose
+	// ground stands over the level and its margin, its area is the bowl's at the level and margin and not the cells',
+	// every triangle faces up, a planet's cut points are shared by the cells beside them, and the underside is the top
+	// turned over. The same footprint without the ground draws every cell, as before. A shallow bowl too, whose ground
+	// at the level and its margin lies past the footprint's cell of shore: the sheet does not reach the footprint's
+	// outline where the ground there stands over the level (no step of the outline shows).
+	const double VoxelSize = 75.0;
+	const double Cell = 4.0 * VoxelSize;
+	const double ShoreRadius = 2000.0;
+	const double Margin = FVoxelWaterBodyMesh::ShoreMarginVoxels * VoxelSize;
+	const FIntPoint Size(20, 20);
+
+	for (const int32 Case : { 0, 1, 2, 3 })
+	{
+		const bool bPlanet = (Case & 1) != 0;
+		const bool bShallow = Case >= 2;
+		const double Depth = bShallow ? 20.0 : 600.0;
+		const double Rise = Depth / (ShoreRadius * ShoreRadius);
+		const TCHAR* Name = bShallow ? (bPlanet ? TEXT("Planet, shallow") : TEXT("Plane, shallow")) : (bPlanet ? TEXT("Planet") : TEXT("Plane"));
+		FVoxelWaterFrame Frame;
+		Frame.bRadial = bPlanet;
+		Frame.Center = FVector(12345.0, -54321.0, 777.0);
+		Frame.DatumRadius = 250000.0;
+		const FVector Up = FVector(-0.2, 0.5, 0.8).GetSafeNormal();
+		const FVector2D Middle(3.0e5, -1.5e5);
+		const double Level = bPlanet ? Frame.DatumRadius + 812.5 : 812.5;
+		// The ground at a place as a water level: the distance from the bowl's middle along the ground (on the planet,
+		// along the datum sphere).
+		const auto GroundAt = [&](const FVector& Place)
+		{
+			const double Distance = bPlanet ? Frame.DatumRadius * FMath::Acos(FMath::Clamp(FVector::DotProduct(Place.GetSafeNormal(), Up), -1.0, 1.0))
+				: FVector2D::Distance(FVector2D(Place.X, Place.Y), Middle);
+			return Level - Depth + Rise * Distance * Distance;
+		};
+		const FVector2D Origin = Middle - FVector2D(0.5 * Size.X * Cell, 0.5 * Size.Y * Cell);
+		const auto MakeShape = [&](TBitArray<> Bits)
+		{
+			return bPlanet ? FVoxelWaterLake::MakeOnSphere(Up, Frame.DatumRadius, Cell, Size, MoveTemp(Bits)) : FVoxelWaterLake::Make(Origin, Cell, Size, MoveTemp(Bits));
+		};
+		// The cells whose centres lie under the level, grown by one cell.
+		const TSharedRef<const FVoxelWaterLake> Grid = MakeShape(TBitArray<>(true, Size.X * Size.Y));
+		TBitArray<> Bits(false, Size.X * Size.Y);
+		int32 NumWet = 0;
+		for (int32 Y = 0; Y < Size.Y; ++Y)
+		{
+			for (int32 X = 0; X < Size.X; ++X)
+			{
+				if (GroundAt(Grid->GetGridPlace(X + 0.5, Y + 0.5)) >= Level)
+				{
+					continue;
+				}
+				++NumWet;
+				for (int32 J = FMath::Max(Y - 1, 0); J <= FMath::Min(Y + 1, Size.Y - 1); ++J)
+				{
+					for (int32 I = FMath::Max(X - 1, 0); I <= FMath::Min(X + 1, Size.X - 1); ++I)
+					{
+						Bits[J * Size.X + I] = true;
+					}
+				}
+			}
+		}
+		const TSharedRef<const FVoxelWaterLake> Plain = MakeShape(Bits);
+		const TSharedRef<const FVoxelWaterLake> Footprint = FVoxelWaterLake::WithGround(*Plain, GroundAt);
+
+		// The copy is the same footprint and carries the ground read at its corners and centres.
+		bool bSameCells = Footprint->NumCells() == Plain->NumCells() && Footprint->GetSize() == Plain->GetSize();
+		double WorstGround = 0.0;
+		for (int32 Y = 0; Y < Size.Y; ++Y)
+		{
+			for (int32 X = 0; X < Size.X; ++X)
+			{
+				bSameCells &= Footprint->HasCell(X, Y) == Plain->HasCell(X, Y);
+				if (Footprint->HasCell(X, Y))
+				{
+					WorstGround = FMath::Max3(WorstGround, FMath::Abs(Footprint->GetCentreGround(X, Y) - GroundAt(Footprint->GetGridPlace(X + 0.5, Y + 0.5))),
+						FMath::Abs(Footprint->GetCornerGround(X + 1, Y + 1) - GroundAt(Footprint->GetGridPlace(X + 1, Y + 1))));
+				}
+			}
+		}
+		TestTrue(FString::Printf(TEXT("%s: the footprint with its ground has the same cells"), Name), bSameCells && Footprint->HasGround() && !Plain->HasGround());
+		TestTrue(FString::Printf(TEXT("%s: the ground read back at the corners and centres (worst %.4f)"), Name, WorstGround), WorstGround < 0.05);
+
+		FVoxelWaterBodyMesh Mesh, Whole;
+		const FVoxelWaterBody Body = FVoxelWaterBody::MakeLake(73, Level, Footprint, Frame, 2000.0);
+		const FVoxelWaterBody PlainBody = FVoxelWaterBody::MakeLake(73, Level, Plain, Frame, 2000.0);
+		if (!TestTrue(FString::Printf(TEXT("%s: the lake's sheet is built"), Name), FVoxelWaterBodyMesh::Build(Body, Frame, VoxelSize, Mesh))
+			|| !TestTrue(FString::Printf(TEXT("%s: the sheet without the ground is built"), Name), FVoxelWaterBodyMesh::Build(PlainBody, Frame, VoxelSize, Whole)))
+		{
+			continue;
+		}
+
+		// Every vertex at the level, and where the ground stands no higher than the level and its margin (the bowl's
+		// ground lies under the line between two of its points: a cut point read on that line is no higher).
+		double WorstLevel = 0.0, HighestGround = -UE_DOUBLE_BIG_NUMBER;
+		for (int32 V = 0; V < Mesh.Top.Positions.Num(); ++V)
+		{
+			const FVector P = Mesh.GetWorldPosition(V);
+			WorstLevel = FMath::Max(WorstLevel, FMath::Abs(Frame.HeightOf(P) - Level));
+			const FVector Place = bPlanet ? (P - Frame.Center).GetSafeNormal() : FVector(P.X, P.Y, 0.0);
+			HighestGround = FMath::Max(HighestGround, GroundAt(Place) - Level);
+		}
+		TestTrue(FString::Printf(TEXT("%s: every vertex lies at the lake's level (worst %.4f)"), Name, WorstLevel), WorstLevel < 0.01);
+		TestTrue(FString::Printf(TEXT("%s: no vertex stands where the ground is over the level and its margin (the highest %.2f over the level, the margin %.1f)"),
+			Name, HighestGround, Margin), HighestGround <= Margin + 0.1);
+
+		double Area = 0.0, WholeArea = 0.0;
+		int32 FacingUp = 0, FacingDown = 0, WholeUp = 0, WholeDown = 0;
+		Measure(Mesh.Top, Mesh.Origin, Frame.Center, bPlanet, Area, FacingUp, FacingDown);
+		Measure(Whole.Top, Whole.Origin, Frame.Center, bPlanet, WholeArea, WholeUp, WholeDown);
+		// The area of the bowl where the ground lies under the level and its margin: a disk (on the planet, measured
+		// on the sphere of the level, a little more than on the datum).
+		const double DrawnRadius = FMath::Sqrt((Depth + Margin) / Rise);
+		const double BowlArea = UE_DOUBLE_PI * DrawnRadius * DrawnRadius * (bPlanet ? FMath::Square(Level / Frame.DatumRadius) : 1.0);
+		AddInfo(FString::Printf(TEXT("%s: %d wet cells, %d of the footprint; the sheet %d quads and %d shore triangles, %d vertices, area %.0f; the bowl's %.0f; the cells' sheet %.0f (%d quads)"),
+			Name, NumWet, Footprint->NumCells(), Mesh.Quads, Mesh.ShoreTriangles, Mesh.Top.Positions.Num(), Area, BowlArea, WholeArea, Whole.Quads));
+		TestTrue(FString::Printf(TEXT("%s: some cells are whole and some cut"), Name), Mesh.Quads > 0 && Mesh.ShoreTriangles > 0);
+		TestTrue(FString::Printf(TEXT("%s: every triangle of the top faces up (%d up, %d down, of %d quads and %d triangles)"), Name, FacingUp, FacingDown, Mesh.Quads, Mesh.ShoreTriangles), FacingUp == Mesh.Quads * 2 + Mesh.ShoreTriangles && FacingDown == 0);
+		if (!bShallow)
+		{
+			TestTrue(FString::Printf(TEXT("%s: the sheet's area is the bowl's under the level and its margin (%.0f against %.0f)"), Name, Area, BowlArea),
+				FMath::Abs(Area - BowlArea) < 0.01 * BowlArea);
+			TestTrue(FString::Printf(TEXT("%s: without the ground the sheet covers the cells, the steps included (%.0f against %.0f)"), Name, WholeArea, BowlArea),
+				WholeArea > 1.2 * BowlArea && WholeUp == Whole.Quads * 2 && Whole.ShoreTriangles == 0);
+		}
+
+		// The footprint's outline: no vertex at a corner of it whose ground stands over the level. The shallow bowl has
+		// such corners whose ground lies under the level and its margin, where a margin would draw the outline's steps.
+		int32 OutlineDry = 0, OutlineInMargin = 0, OutlineDrawn = 0;
+		for (int32 GY = 0; GY <= Size.Y; ++GY)
+		{
+			for (int32 GX = 0; GX <= Size.X; ++GX)
+			{
+				const int32 Around = (Footprint->HasCell(GX - 1, GY - 1) ? 1 : 0) + (Footprint->HasCell(GX, GY - 1) ? 1 : 0)
+					+ (Footprint->HasCell(GX - 1, GY) ? 1 : 0) + (Footprint->HasCell(GX, GY) ? 1 : 0);
+				if (Around == 0 || Around == 4 || Footprint->GetCornerGround(GX, GY) <= Level)
+				{
+					continue;
+				}
+				++OutlineDry;
+				OutlineInMargin += Footprint->GetCornerGround(GX, GY) < Level + Margin ? 1 : 0;
+				const FVector Corner = Footprint->GetGridPoint(GX, GY, Level, Frame.Center);
+				for (int32 V = 0; V < Mesh.Top.Positions.Num(); ++V)
+				{
+					if (FVector::DistSquared(Mesh.GetWorldPosition(V), Corner) < 0.25)
+					{
+						++OutlineDrawn;
+						break;
+					}
+				}
+			}
+		}
+		AddInfo(FString::Printf(TEXT("%s: %d corners of the outline over the level, %d of them under the level and its margin"), Name, OutlineDry, OutlineInMargin));
+		TestEqual(FString::Printf(TEXT("%s: the sheet reaches no corner of the outline whose ground stands over the level"), Name), OutlineDrawn, 0);
+		if (bShallow)
+		{
+			TestTrue(FString::Printf(TEXT("%s: the shallow bowl has outline corners under the level and its margin"), Name), OutlineInMargin > 0);
+		}
+
+		// A sixth of a cell apart over the grid: a point whose ground lies under the level is under the sheet, and one
+		// whose ground stands over the level and its margin is not.
+		const auto UnderSheet = [&](const FVector& Point)
+		{
+			for (int32 i = 0; i + 2 < Mesh.Top.Triangles.Num(); i += 3)
+			{
+				const FVector A = Mesh.GetWorldPosition(Mesh.Top.Triangles[i]);
+				const FVector B = Mesh.GetWorldPosition(Mesh.Top.Triangles[i + 1]);
+				const FVector C = Mesh.GetWorldPosition(Mesh.Top.Triangles[i + 2]);
+				const FVector OnPlane = FVector::PointPlaneProject(Point, A, B, C);
+				if (FVector::Dist(Point, OnPlane) > 1.0)
+				{
+					continue;
+				}
+				const FVector Bary = FMath::ComputeBaryCentric2D(OnPlane, A, B, C);
+				if (Bary.X >= -1.0e-6 && Bary.Y >= -1.0e-6 && Bary.Z >= -1.0e-6)
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+		int32 Wet = 0, WetCovered = 0, Dry = 0, DryCovered = 0;
+		for (int32 J = 1; J < 6 * Size.Y; J += 2)
+		{
+			for (int32 I = 1; I < 6 * Size.X; I += 2)
+			{
+				const double GX = I / 6.0, GY = J / 6.0;
+				const double Ground = GroundAt(Footprint->GetGridPlace(GX, GY));
+				if (Ground < Level - 1.0)
+				{
+					++Wet;
+					WetCovered += UnderSheet(Footprint->GetGridPoint(GX, GY, Level, Frame.Center)) ? 1 : 0;
+				}
+				else if (Ground > Level + Margin + 1.0)
+				{
+					++Dry;
+					DryCovered += UnderSheet(Footprint->GetGridPoint(GX, GY, Level, Frame.Center)) ? 1 : 0;
+				}
+			}
+		}
+		TestTrue(FString::Printf(TEXT("%s: the points read"), Name), Wet > 100 && Dry > 100);
+		TestEqual(FString::Printf(TEXT("%s: every point whose ground lies under the level (by a unit) is under the sheet"), Name), WetCovered, Wet);
+		TestEqual(FString::Printf(TEXT("%s: no point whose ground stands over the level and its margin is under it"), Name), DryCovered, 0);
+
+		if (bPlanet)
+		{
+			// The cells share their corners and their cut points: no two vertices at one place.
+			int32 Doubled = 0;
+			for (int32 A = 0; A < Mesh.Top.Positions.Num(); ++A)
+			{
+				for (int32 B = A + 1; B < Mesh.Top.Positions.Num(); ++B)
+				{
+					Doubled += FVector::DistSquared(Mesh.Top.Positions[A], Mesh.Top.Positions[B]) < 1.0e-4 ? 1 : 0;
+				}
+			}
+			TestEqual(TEXT("Planet: the cells beside one another share their vertices"), Doubled, 0);
+		}
+
+		// The underside: the same vertices and normals, every triangle turned over.
+		double UnderArea = 0.0;
+		int32 UnderUp = 0, UnderDown = 0;
+		Measure(Mesh.Underside, Mesh.Origin, Frame.Center, bPlanet, UnderArea, UnderUp, UnderDown);
+		TestTrue(FString::Printf(TEXT("%s: the underside is the top turned over"), Name),
+			Mesh.Underside.Triangles.Num() == Mesh.Top.Triangles.Num() && UnderDown == FacingUp && UnderUp == 0
+			&& FMath::IsNearlyEqual(UnderArea, Area, 1.0e-6 * Area) && Mesh.Underside.Normals == Mesh.Top.Normals);
 	}
 	return true;
 }

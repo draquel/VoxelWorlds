@@ -1,6 +1,7 @@
 # Water System Architecture
 
-> State as of 2026-11-16 (the hydrology plan's H1 to H8: "Lakes and river reaches", "A chunk's water columns",
+> State as of 2026-11-19 (G229: a lake's sheet cut to its shore, in "Lakes and river reaches drawn"); 2026-11-16
+> (the hydrology plan's H1 to H8: "Lakes and river reaches", "A chunk's water columns",
 > "Lakes and river reaches drawn", "The river and the lake placed by hand" and "Ponds and brooks from the seed", under
 > "On a Planet"; the water plan's W1, 2026-11-13: the material paragraphs; its W2: "The water levels"; the rest as of
 > code review CR5, 2026-11-02).
@@ -420,8 +421,23 @@ drawn by one mesh of its own, made from its record, with an underside; the sea's
   the sphere of the lake's level, the cells sharing their corners (`FVoxelWaterLake::GetGridPoint`). A river reach is
   a ribbon: two vertices a reach vertex, half the footprint's width to either side of it at the vertex's surface
   level, so the ribbon is level across the river and slopes along it as the sample's level does; at a bend the two
-  edges are mitred (to twice the half width at most). The sheet covers the whole footprint: the ground hides it where
-  the ground stands over the level, as the sea's sheet is hidden by a coast. A vertex is an offset from the mesh's
+  edges are mitred (to twice the half width at most). Without more, the sheet covers the whole footprint and the
+  ground hides it where the ground stands over the level, as the sea's sheet is hidden by a coast. A lake made by a
+  maker that reads the ground (the hand-placed lake and the generated pond, below; not on a block world, whose
+  cells are its columns) carries the natural ground at its cells' corners and centres
+  (`FVoxelWaterLake::WithGround`, G229), and its sheet is cut to the shore: a cell whose corners and centre all lie
+  under the level and a margin (`FVoxelWaterBodyMesh::ShoreMarginVoxels`, a tenth of a voxel; none at a corner on
+  the footprint's outline) is drawn whole, and a cell of the shore as four triangles (two corners and the centre),
+  each cut where the ground, linear between them, rises over the level and the margin, the cut points shared with the
+  cells beside it. The outline takes no margin because on a gentle shore the ground at the level and a margin can lie
+  past the footprint's cell of shore, and a sheet drawn out to the outline there shows its steps again: the sheet
+  reaches the outline only where the ground there lies under the level (a rim narrower than a cell). A cut piece
+  thinner than a ten-thousandth of a cell is left out: on a planet three points nearly in line on the grid's plane
+  make a triangle on the sphere whose facing the sphere's curve decides. Up close the ground hides the sheet
+  past the shore whether it is cut or not; beyond the voxel window the far field's coarser ground does not, and an
+  uncut sheet showed its footprint's square cell of shore along the edge (G229): a cut one shows the shore's own line,
+  no further up it than the margin. A river reach's ribbon is not cut (from far its edges are toothed where the far
+  field's ground crosses it, and it reads as one line). A vertex is an offset from the mesh's
   origin (the lake's middle, the reach's middle vertex), so the floats stay small on a far body. The first texture
   coordinate counts voxels (across and along a reach; the grid's two axes on a lake), the second holds the water
   material id and, on a reach, its flow speed; a reach's tangent is the direction downstream and its normal the local
@@ -449,7 +465,11 @@ drawn by one mesh of its own, made from its record, with an underside; the sea's
 
 Tests: `Streaming.Water.BodyMesh.Lake`, `.BodyMesh.Reach` (the geometry against the record on a plane and a planet:
 the level at each vertex, the sheet over every footprint cell and no other, the head and the mouth, the planet's
-vertices on the sphere of the level, the winding, the underside); `Streaming.Water.BodyMeshes.Plane`, `.Planet` (a
+vertices on the sphere of the level, the winding, the underside); `.BodyMesh.LakeShore` (a lake in a bowl whose
+ground its footprint carries, on a plane and a planet: the ground read back, every point under the level under the
+sheet and none over the level and its margin, the sheet's area the bowl's at the level and the margin where the
+uncut sheet's is the cells', the cut points shared; a shallow bowl whose ground at the level and the margin lies past
+the footprint: no corner of the outline over the level drawn); `Streaming.Water.BodyMeshes.Plane`, `.Planet` (a
 streamed world with a lake and a river reach: a mesh a body with its material, the underside by the camera's place,
 the switch, a body kept across a change elsewhere, no tile layer wet in the lake's column while a sea column's is,
 nothing drawn without a material, the dedicated server's rule).
@@ -504,7 +524,8 @@ it, a mesh draws it.
   `LevelMargin`, so the drawn rim holds; or the actor's own height) and makes the footprint from the outline with the
   filter above: the cells inside whose ground lies under the level, grown by one cell (`CellSizeVoxels`, 4). So the
   footprint is the water and a cell of shore, as the plan's section 5.1 asks of a maker of footprints, and the sheet
-  is no wider. The record's depth is the deepest cell read and a chunk; `MinCaveDepth` (8) is the body's. No ground
+  no wider: it carries the natural ground at its cells' corners and centres, so the sheet is cut to the shore (G229,
+  above; not on a block world). The record's depth is the deepest cell read and a chunk; `MinCaveDepth` (8) is the body's. No ground
   moves. A lake with nothing under its level adds no body.
 - **What they say** (`GetBodyWarnings`, logged as "Water body <actor>: ..."): what was done about the spline's bends
   (the terrain line's sentence); a spline at its own height that rises downstream or stands over a bank, with how
@@ -573,7 +594,9 @@ world that names none has no generator, no source and no term in its fingerprint
     footprint whose ground lies under the level. The fine flood's rim is the lowest ground every way out of the
     hollow's surroundings crosses (never over the hollow's own rim); the footprint is the cells it took under the
     level and one fine cell round them; the level is `LakeLevelMarginVoxels` under the rim and under every ground on
-    the footprint's edge, read a voxel apart. A lake is a body when its water is `MinLakeDepthVoxels` deep and covers
+    the footprint's edge, read a voxel apart. Off a block world the footprint carries the natural ground at its
+    cells' corners and centres, for the sheet to be cut to the shore (G229, "Lakes and river reaches drawn"). A lake
+    is a body when its water is `MinLakeDepthVoxels` deep and covers
     `MinLakeArea`. A lake is found by any descent that comes to its pit, a river's or not.
   - *River systems* (`BuildSystem`, a `FVoxelHydrologySystem`): the rivers that end at one mouth form a tree, and a
     river reach is a chain of it between a spring, a join, a lake and the mouth. A reach's floor is as wide as the

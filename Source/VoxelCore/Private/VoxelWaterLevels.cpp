@@ -565,16 +565,94 @@ FVector FVoxelWaterLake::GetCellCentre(int32 CellX, int32 CellY, double Level, c
 
 FVector FVoxelWaterLake::GetGridPoint(double GridX, double GridY, double Level, const FVector& PlanetCenter) const
 {
+	if (!bRadial)
+	{
+		const FVector2D P = Origin + FVector2D(GridX * CellSize, GridY * CellSize);
+		return FVector(P.X, P.Y, Level);
+	}
+	return PlanetCenter + GetGridPlace(GridX, GridY) * Level;
+}
+
+FVector FVoxelWaterLake::GetGridPlace(double GridX, double GridY) const
+{
 	const FVector2D P = Origin + FVector2D(GridX * CellSize, GridY * CellSize);
 	if (!bRadial)
 	{
-		return FVector(P.X, P.Y, Level);
+		return FVector(P.X, P.Y, 0.0);
 	}
 	// The direction whose datum point projects onto the tangent plane at P.
 	const double U = FMath::Clamp(P.X / PlanetRadius, -1.0, 1.0);
 	const double V = FMath::Clamp(P.Y / PlanetRadius, -1.0, 1.0);
 	const double W = FMath::Sqrt(FMath::Max(0.0, 1.0 - U * U - V * V));
-	return PlanetCenter + (AxisX * U + AxisY * V + Centre * W) * Level;
+	return AxisX * U + AxisY * V + Centre * W;
+}
+
+TSharedRef<const FVoxelWaterLake> FVoxelWaterLake::WithGround(const FVoxelWaterLake& Lake, TFunctionRef<double(const FVector&)> GroundAt)
+{
+	TSharedRef<FVoxelWaterLake> Copy = MakeShared<FVoxelWaterLake>(Lake);
+	Copy->CornerGround.Reset();
+	Copy->CentreGround.Reset();
+	Copy->GroundBase = 0.0;
+	if (Lake.CellCount == 0)
+	{
+		return Copy;
+	}
+	const FIntPoint Size = Lake.Size;
+	const int32 Stride = Size.X + 1;
+	Copy->CornerGround.Init(0.0f, Stride * (Size.Y + 1));
+	Copy->CentreGround.Init(0.0f, Size.X * Size.Y);
+	// Each corner is read once, by the first footprint cell that has it; the first ground read is the base the floats
+	// are measured from.
+	TBitArray<> CornerRead(false, Copy->CornerGround.Num());
+	bool bBase = false;
+	const auto Offset = [&](double Ground)
+	{
+		if (!bBase)
+		{
+			Copy->GroundBase = Ground;
+			bBase = true;
+		}
+		return static_cast<float>(Ground - Copy->GroundBase);
+	};
+	for (int32 Y = 0; Y < Size.Y; ++Y)
+	{
+		for (int32 X = 0; X < Size.X; ++X)
+		{
+			if (!Lake.HasCell(X, Y))
+			{
+				continue;
+			}
+			Copy->CentreGround[Y * Size.X + X] = Offset(GroundAt(Lake.GetGridPlace(X + 0.5, Y + 0.5)));
+			for (const FIntPoint& Corner : { FIntPoint(X, Y), FIntPoint(X + 1, Y), FIntPoint(X + 1, Y + 1), FIntPoint(X, Y + 1) })
+			{
+				const int32 Index = Corner.Y * Stride + Corner.X;
+				if (!CornerRead[Index])
+				{
+					CornerRead[Index] = true;
+					Copy->CornerGround[Index] = Offset(GroundAt(Lake.GetGridPlace(Corner.X, Corner.Y)));
+				}
+			}
+		}
+	}
+	return Copy;
+}
+
+double FVoxelWaterLake::GetCornerGround(int32 GridX, int32 GridY) const
+{
+	if (!HasGround() || GridX < 0 || GridY < 0 || GridX > Size.X || GridY > Size.Y)
+	{
+		return 0.0;
+	}
+	return GroundBase + CornerGround[GridY * (Size.X + 1) + GridX];
+}
+
+double FVoxelWaterLake::GetCentreGround(int32 CellX, int32 CellY) const
+{
+	if (!HasGround() || !HasCell(CellX, CellY))
+	{
+		return 0.0;
+	}
+	return GroundBase + CentreGround[CellY * Size.X + CellX];
 }
 
 // ==================== A body ====================
