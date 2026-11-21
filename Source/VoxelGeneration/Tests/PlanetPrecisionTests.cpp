@@ -634,8 +634,8 @@ bool FVoxelPlanetFaceEdgeContinuityTest::RunTest(const FString& Parameters)
 		{ TEXT("small planet (R 250,000, terrain noise only)"), SmallNoise },
 		{ TEXT("1,000 km planet (R 1e8, Review_Planet_L's terrain noise only)"), LargeNoise },
 	};
-	for (const TCHAR* Asset : { TEXT("/Game/PluginTesting/Review/Review_Planet.Review_Planet"), TEXT("/Game/PluginTesting/Review/Review_Planet_M.Review_Planet_M"),
-		TEXT("/Game/PluginTesting/Review/Review_Planet_L.Review_Planet_L") })
+	for (const TCHAR* Asset : { TEXT("/Game/PluginTesting/Tests/Review/Review_Planet.Review_Planet"), TEXT("/Game/PluginTesting/Tests/Review/Review_Planet_M.Review_Planet_M"),
+		TEXT("/Game/PluginTesting/Tests/Review/Review_Planet_L.Review_Planet_L") })
 	{
 		const UVoxelWorldConfiguration* Config = LoadObject<UVoxelWorldConfiguration>(nullptr, Asset);
 		if (!Config || Config->WorldMode != EWorldMode::SphericalPlanet)

@@ -7,14 +7,16 @@
 #include "VoxelData.h"
 #include "VoxelEditTypes.h"
 #include "VoxelScatterTypes.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelScatterManager.generated.h"
 
+class UMaterialInstanceDynamic;
 class UVoxelWorldConfiguration;
 class UVoxelScatterRenderer;
 class IVoxelWorldMode;
 class FVoxelMaterialTable;
 class UVoxelCaveConfiguration;
-struct FVoxelConditioningZone;
+struct FVoxelConditioning;
 
 struct FScatterExtractionContext;
 
@@ -36,7 +38,35 @@ enum class EVoxelScatterOutsideReads : uint8
 	PlanetShell,
 };
 
+/** What a hand-off the distance pass asks for did (UVoxelScatterManager::SetChunkHandOffRequester). */
+enum class EVoxelScatterHandOff : uint8
+{
+	/** The chunk's voxels were handed off (HandOffChunkVoxels) */
+	HandedOff,
+	/** Not yet: its voxels are being made ready off the game thread (a far-compressed chunk's snapshot decoding on a
+	 *  worker, G130); the chunk stays awaiting and is asked for again on a later pass */
+	Pending,
+	/** The chunk has no voxel data any more: it is dropped */
+	Gone,
+};
+
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnChunkScatterReady, const FIntVector& /*ChunkCoord*/, int32 /*SpawnPointCount*/);
+
+/** A scatter definition's dynamic material instance made or released (FScatterDefinition::bDynamicMaterials). */
+DECLARE_MULTICAST_DELEGATE_TwoParams(FOnScatterDynamicMaterial, const FString& /*DefinitionName*/, UMaterialInstanceDynamic* /*Material*/);
+
+/** One dynamic material instance the scatter draws a definition's slot with (UVoxelScatterManager::GetAllDynamicMaterials). */
+struct FVoxelScatterDynamicMaterial
+{
+	/** The definition's Name, the instance's published name */
+	FString DefinitionName;
+	/** The definition's ScatterID */
+	int32 ScatterID = 0;
+	/** The material slot */
+	int32 Slot = 0;
+	/** The instance, shared by every region's component of the definition */
+	UMaterialInstanceDynamic* Material = nullptr;
+};
 
 /**
  * Voxel Scatter Manager.
@@ -94,6 +124,14 @@ public:
 	void ValidateScatterDistances() const;
 
 	/**
+	 * Start loading a skeletal definition's assets ahead (UVoxelScatterRenderer::PreloadDefinition) once the renderer is
+	 * up; Initialize does every configured definition, AddScatterDefinition the one it adds.
+	 *
+	 * @param Definition The definition
+	 */
+	void PreloadDefinitionAssets(const FScatterDefinition& Definition);
+
+	/**
 	 * Check if manager is initialized.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
@@ -111,6 +149,26 @@ public:
 	 */
 	void Update(const FVector& ViewerPosition, float DeltaTime);
 
+	/**
+	 * The viewers beside Update's (G217): on a server, the pawns of the players other than the one the streaming follows.
+	 * Every distance the manager decides by (a type's spawn distance, the scatter radius, the clean-up beyond them) is a
+	 * chunk's distance from the nearest viewer, so the server holds the scatter (its collision, what a player chops)
+	 * around each of its players where it has their chunks. The chunk manager sets them each tick; nothing is kept per
+	 * player.
+	 *
+	 * @param InViewers This tick's further viewers (empty on a client and in a standalone game)
+	 */
+	void SetFurtherViewers(const TArray<FVector>& InViewers) { FurtherViewers = InViewers; }
+
+	/**
+	 * A point's distance from the nearest viewer: Update's alone without further ones (the same arithmetic as before
+	 * them), else the least of them all.
+	 *
+	 * @param Point A chunk's centre
+	 * @return The distance (uu)
+	 */
+	float GetViewerDistance(const FVector& Point) const;
+
 	// ==================== Scatter Definitions ====================
 
 	/**
@@ -120,6 +178,9 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
 	void AddScatterDefinition(const FScatterDefinition& Definition);
+
+	/** The spawn distance of a definition whose SpawnDistance is 0 (the configuration's ScatterRadius), uu. */
+	float GetScatterRadius() const { return ScatterRadius; }
 
 	/**
 	 * Get all scatter definitions.
@@ -189,6 +250,30 @@ public:
 	 * @return The renderer; null before Initialize and after Shutdown.
 	 */
 	const UVoxelScatterRenderer* GetScatterRenderer() const;
+
+	// ==================== Dynamic Materials ====================
+
+	/**
+	 * The dynamic material instances a definition is drawn with (FScatterDefinition::bDynamicMaterials): one per override
+	 * slot, made when the definition's first component is, shared by every region's component, released at Shutdown.
+	 *
+	 * @param DefinitionName The definition's Name (every definition of that name)
+	 * @return The instances; empty before the definition's first component, without the flag, or after Shutdown
+	 */
+	TArray<UMaterialInstanceDynamic*> GetDynamicMaterials(const FString& DefinitionName) const;
+
+	/**
+	 * Every dynamic material instance the scatter draws with, for a game that binds after some were made.
+	 *
+	 * @param OutMaterials Filled with one entry per definition slot
+	 */
+	void GetAllDynamicMaterials(TArray<FVoxelScatterDynamicMaterial>& OutMaterials) const;
+
+	/** A definition's dynamic material instance was made (its first component, one call per slot). */
+	FOnScatterDynamicMaterial OnDynamicMaterialCreated;
+
+	/** A definition's dynamic material instance is dropped (Shutdown): stop using it. */
+	FOnScatterDynamicMaterial OnDynamicMaterialReleased;
 
 	/**
 	 * A digest of every cached spawn point, for comparing two builds' scatter on the same route (spherical Phase 4's
@@ -545,15 +630,26 @@ public:
 	void SetMaterialTable(TSharedPtr<const FVoxelMaterialTable> InMaterials) { MaterialTable = MoveTemp(InMaterials); }
 
 	/**
-	 * How to gather the terrain conditioning zones over a chunk's world box, the zones generation layered onto it: the
+	 * How to gather the terrain conditioning over a chunk's world box, what generation layered onto it: the
 	 * chunk manager's region gather on a heightmap (its XY footprint, world modes review G23), the cap the box subtends
-	 * on a planet (GetPlanetCapOfBox + GatherConditioningZonesOnSphere, spherical SP-B10). Called on the game thread
-	 * when a chunk's extraction is set up (FScatterExtractionContext::ConditioningZones). Unset: no zones (the world
+	 * on a planet (GetPlanetCapOfBox + GatherConditioningOnSphere, spherical SP-B10). Called on the game thread
+	 * when a chunk's extraction is set up (FScatterExtractionContext::Conditioning). Unset: no conditioning (the world
 	 * mode's natural surface).
 	 */
-	void SetConditioningGatherer(TFunction<void(const FBox& /*ChunkBox*/, TArray<FVoxelConditioningZone>& /*OutZones*/)> InGatherer)
+	void SetConditioningGatherer(TFunction<void(const FBox& /*ChunkBox*/, FVoxelConditioning& /*Out*/)> InGatherer)
 	{
 		ConditioningGatherer = MoveTemp(InGatherer);
+	}
+
+	/**
+	 * How to gather the water levels over a chunk's world box (UVoxelChunkManager::GatherWaterLevels, complete): the sea
+	 * and the lakes and river reaches there, which decide an instance's underwater class at its own position (the
+	 * hydrology plan's section 5.5). Called on the game thread when a chunk's extraction is set up
+	 * (FScatterExtractionContext::Water). Unset: the configuration's sea.
+	 */
+	void SetWaterGatherer(TFunction<FVoxelWaterLevels(const FBox& /*ChunkBox*/)> InGatherer)
+	{
+		WaterGatherer = MoveTemp(InGatherer);
 	}
 
 	/**
@@ -574,10 +670,14 @@ public:
 	 * is handed off only when it submits a mesh, and while walking every chunk arrives at the window's front beyond every
 	 * spawn distance, so without this its scatter waited for its next mesh, the LOD refine near the viewer, and popped
 	 * there. The distance pass calls it on the game thread for the chunks awaiting their first extraction that have come
-	 * within the scatter horizon, nearest first, MaxDistanceSpawnChunksPerPass a pass. Returns false when the chunk has
-	 * no voxel data any more (it is dropped). Unset: those chunks wait for their next mesh (the behaviour before).
+	 * within the scatter horizon, nearest first, MaxDistanceSpawnChunksPerPass a pass. Returns Gone when the chunk has
+	 * no voxel data any more (it is dropped), Pending when its voxels are not ready without a game-thread wait (it stays
+	 * awaiting for the next pass and counts against the pass's limit). Unset: those chunks wait for their next mesh (the
+	 * behaviour before).
+	 *
+	 * @param InRequester Hands the chunk off; returns what it did
 	 */
-	void SetChunkHandOffRequester(TFunction<bool(const FIntVector& /*ChunkCoord*/)> InRequester)
+	void SetChunkHandOffRequester(TFunction<EVoxelScatterHandOff(const FIntVector& /*ChunkCoord*/)> InRequester)
 	{
 		ChunkHandOffRequester = MoveTemp(InRequester);
 	}
@@ -668,14 +768,17 @@ protected:
 	/** The world's material table for the drawn material (see SetMaterialTable). */
 	TSharedPtr<const FVoxelMaterialTable> MaterialTable;
 
-	/** The chunk's conditioning zones (see SetConditioningGatherer). */
-	TFunction<void(const FBox&, TArray<FVoxelConditioningZone>&)> ConditioningGatherer;
+	/** The chunk's conditioning (see SetConditioningGatherer). */
+	TFunction<void(const FBox&, FVoxelConditioning&)> ConditioningGatherer;
+
+	/** The chunk's water levels (see SetWaterGatherer). */
+	TFunction<FVoxelWaterLevels(const FBox&)> WaterGatherer;
 
 	/** A chunk's edit layer (see SetEditLayerSource). */
 	TFunction<const FChunkEditLayer*(const FIntVector&)> EditLayerSource;
 
 	/** How to hand a chunk off again (see SetChunkHandOffRequester). */
-	TFunction<bool(const FIntVector&)> ChunkHandOffRequester;
+	TFunction<EVoxelScatterHandOff(const FIntVector&)> ChunkHandOffRequester;
 
 	/**
 	 * Chunks handed off with every type out of range and nothing cached (G79). The distance pass hands them off again
@@ -852,6 +955,9 @@ protected:
 
 	/** Last viewer position (for debug drawing) */
 	FVector LastViewerPosition = FVector::ZeroVector;
+
+	/** The viewers beside Update's (SetFurtherViewers, G217) */
+	TArray<FVector> FurtherViewers;
 
 	// ==================== Deferred Generation Queue ====================
 

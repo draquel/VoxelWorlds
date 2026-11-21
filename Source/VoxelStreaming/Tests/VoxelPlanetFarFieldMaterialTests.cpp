@@ -41,7 +41,7 @@ namespace VoxelFarFieldMaterialTestUtils
 		TSharedPtr<IVoxelWorldMode> Mode;
 		TSharedPtr<const FVoxelFarFieldSurface> Surface;
 		FVoxelFarFieldSettings Settings;
-		const TArray<FVoxelConditioningZone> NoZones;
+		const FVoxelConditioning NoZones;
 
 		FRig()
 		{
@@ -69,7 +69,7 @@ namespace VoxelFarFieldMaterialTestUtils
 			Config->WaterRadius = 250000.0f - 500.0f;
 
 			Mode = FVoxelWorldModeFactory::Create(*Config);
-			Surface = FVoxelFarFieldSurface::Make(*Config, Mode);
+			Surface = FVoxelFarFieldSurface::Make(*Config, Mode, FVoxelWaterLevels::FromConfig(*Config));
 			const FSphericalPlanetWorldMode& Planet = Surface->GetPlanet();
 			Settings.Center = Planet.GetPlanetParams().PlanetCenter;
 			Settings.Radius = Planet.GetPlanetParams().PlanetRadius;

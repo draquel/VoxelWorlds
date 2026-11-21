@@ -208,9 +208,9 @@ bool FVoxelPlanetPrecisionProbeTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelPlanetPrecisionProbe;
 	const TCHAR* Assets[] = {
-		TEXT("/Game/PluginTesting/Review/Review_Planet.Review_Planet"),
-		TEXT("/Game/PluginTesting/Review/Review_Planet_M.Review_Planet_M"),
-		TEXT("/Game/PluginTesting/Review/Review_Planet_L.Review_Planet_L"),
+		TEXT("/Game/PluginTesting/Tests/Review/Review_Planet.Review_Planet"),
+		TEXT("/Game/PluginTesting/Tests/Review/Review_Planet_M.Review_Planet_M"),
+		TEXT("/Game/PluginTesting/Tests/Review/Review_Planet_L.Review_Planet_L"),
 	};
 	int32 Probed = 0;
 	for (const TCHAR* Asset : Assets)

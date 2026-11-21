@@ -52,6 +52,14 @@ public:
     virtual void GetChunksToUnload(TArray<FIntVector>& OutUnload, const TSet<FIntVector>& LoadedChunks,
         const FLODQueryContext& Context) const = 0;
     static int32 SelectUnloadCandidates(/* veto first, cap second */);
+    // The window a viewer standing at Viewer.ViewerPosition would have within HorizonDistance of it (the load window, or
+    // with bKeep the keep window), whatever the strategy's own viewer and the cut-over: a further viewer's ground window
+    // (G217, see "Integration with ChunkManager").
+    virtual void GetWindowChunksAround(const FLODQueryContext& Viewer, float HorizonDistance, bool bKeep,
+        TArray<FIntVector>& OutChunks) const;
+    // The band of a chunk's distance from a viewer standing at ViewerPosition (no balance, no hysteresis): what far
+    // compression judges a ground window's chunk by.
+    virtual int32 GetDistanceBandLODAround(const FIntVector& ChunkCoord, const FVector& ViewerPosition) const;
 
     // Lifecycle
     virtual void Initialize(const UVoxelWorldConfiguration* WorldConfig) = 0;
@@ -354,6 +362,11 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   partly covered patch stays drawn a voxel under the voxel surface, which hides it: no gap and no overlap along the
   window's ragged edge, and no far-field floor in a hole or cave where the chunks are drawn. Patch geometry never depends
   on the window: the hole moves with the window by visibility alone, recomputed when a chunk changes state.
+  The voxel under the window's edge is open: nothing closes the step down to the far field, which a viewer inside the
+  window never faces. Seen from outside the window (a camera kilometres from the streaming viewer with the streaming
+  paused, as a capture script does; for about a second after a 44 km teleport while the window streams in) the view
+  passes under the voxel ground's edge onto far field the voxel ground shadows and hides from the sky, and the step
+  draws as a black stepped band or chunk-wide notches (G258, traced on `Review_TerrainLines_Planet` 2026-11-20).
 - **Residency.** One patch component (`UVoxelFarFieldPatchComponent`: sections drawn like a procedural mesh's, through
   `FLocalVertexFactory`) per resident patch at the patch's origin (its centre's point on the
   datum, double), vertices as float offsets of the patch's size; a patch hidden for 10 s releases its component and
@@ -381,7 +394,7 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   `voxel.World.FarFieldDistance` of the camera (2,000,000 uu, the island far ocean's reach; about 10 x 10 tiles about
   the camera, made as it moves and dropped with their trees past it) and, on a bounded world, only over the island's bounds box, which
   they never leave; a patch is culled past the far distance or wholly outside the box (there is no horizon on a plane).
-  The surface is the generated height (`IVoxelWorldMode::GetTerrainHeightAt` with the heightmap conditioning zones, as
+  The surface is the generated height (`IVoxelWorldMode::GetTerrainHeightAt` with the heightmap conditioning lines and zones, as
   `GetGeneratedSurfaceHeight` reads it; in a cubic world the block top of the column, `FVoxelBlockSurface`, so the far
   field meets the blocks at the window's edge without a step), local up is +Z, the materials
   `FVoxelSurfaceQuery::QuerySurfaceConditions` and its mix (`QuerySurfaceMaterialMix`, G45's rule with the heightmap
@@ -397,8 +410,16 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   against a planet's 29-56 MB): heightmap worlds take their own budget, `voxel.World.FarFieldHeightmapError` (4 px; 0 =
   `voxel.World.FarFieldError`). An island's far ocean is its open sea past the bounds box and its static seabed (D37: two
   seas inside the bounds would z-fight; the grid water that stood in for unloaded columns while the far field was off
-  went in code review CR1, D-CR13). Heightmap conditioning zones rebuild the patches they meet
-  (`InvalidateBox`), a planet's radial ones the caps. The build queue's priority offset for non-root patches is 1e12
+  went in code review CR1, D-CR13). A conditioning zone or line that is added, and a region a conditioner
+  names, rebuild the patches they meet that take conditioning (`FVoxelFarField::InvalidateRegion`: a box on a heightmap
+  world, a cap on a planet; `FVoxelFarFieldFrame::RegionOfZone`, `RegionOfLine`). A patch samples the surface at its
+  vertices, a vertex spacing apart, so it takes every conditioning line as at least 0.71 of that spacing wide
+  (`FVoxelFarFieldFrame::LeastLineHalfWidth`, `FVoxelConditioning::LeastHalfWidth`; the terrain lines plan's L3), for
+  the height and for the band: it gathers over its footprint grown by as much, meets a changed region from that much
+  farther off, and a road narrower than the spacing is an unbroken band across it instead of dashes. The material
+  samplers take the patch's conditioning (`SampleMaterialMix`, `SampleConditions`): on a line's band a vertex's mix is
+  the band's material alone, as the voxels there are (`WORLD_MODES.md`, "The surface under a line"). Patches wider
+  than `ZoneGatherMax` take no conditioning, zones or lines. Test `VoxelWorlds.FarField.Plane.ConditioningLineBand`. The build queue's priority offset for non-root patches is 1e12
   (it was 1e30, which a double adds a distance to without change, so with six builds a tick the patches under the
   camera could starve behind thousands of far ones: found on the plane, the planet's six roots and horizon hid it).
 
@@ -503,6 +524,13 @@ bounded by geometry:
   a chunk diagonal past it); a planet only chunks in its terrain shell and above its horizon, each within its surface
   slab or near the viewer below it (WM-BP8).
 - **Edits:** edited chunks pin-load within the view distance and stay to the unload distance, outside the window too.
+- **Further viewers (a server's other players, G217):** each adds a ground window, the chunks this same window holds
+  for a viewer standing at its pawn within its collision shell's radius and two chunk widths (three kept), edited
+  chunks within that reach included (`GetWindowChunksAround`; [STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md),
+  "Further viewers and their ground windows"). The strategy itself has one viewer: these chunks are loaded and kept by
+  the chunk manager, mesh at the LOD their distance from the streaming viewer gives, and are far-compressed by the
+  distance band of their nearest viewer (`GetDistanceBandLODAround`), so a further player's near bands stay resident
+  as the first's do. A client and a standalone game have none.
 - **The pipeline:** chunks mid-generation or mid-meshing finish before they unload; `MaxChunksToUnloadPerFrame` paces
   unloading, not residency.
 
@@ -532,6 +560,10 @@ A chunk's voxels are 1 MB at 64^3. Two rules keep the window's memory down witho
   on the big planets (G67; tests `Compression.CollapseToUniform`,
   `Streaming.{Planet,Plane}.UniformAtGeneration`).
 
+A chunk of a further viewer's ground window (a server's other players, G217) is far from the streaming viewer, whose
+band would compress it under that player's feet: the band of its nearest viewer decides instead
+(`IVoxelLODStrategy::GetDistanceBandLODAround`, the raw band of the distance), with LOD on or off.
+
 The snapshot cache those readers share (shells for collision cooks, copy-on-write resident arrays) is described in
 [STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md). `voxel.FarCompression.Stats` logs residency and compression memory,
 `voxel.FarCompression.Decodes` where compressed data was expanded.
@@ -550,6 +582,13 @@ Each tick `UVoxelChunkManager`:
    manager's vetoes into `SelectUnloadCandidates`. After a camera cut (more than a chunk) it runs a second streaming
    pass in the same frame for the new camera (`UpdateStreamingForCamera`, every world mode since MP1).
 4. Re-meshes chunks whose balanced LOD changed (with a crossfade, `RENDERING_SYSTEM.md`) and updates the far field.
+
+The strategy answers for one viewer, the streaming viewer (the first player's camera). On a server the chunk manager
+gathers every other player's pawn each tick as a further viewer and asks the strategy what its window would hold around
+each (`GetWindowChunksAround`, with a context whose viewer is that pawn: the same `ForEachWindowCandidateWithin`
+enumeration `GetVisibleChunks` runs, for another viewer and reach, with the island and planet culls and without the
+cut-over, the LOD or the frustum). It loads those chunks itself and refuses their unload while a viewer needs them
+(G217; [STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md)).
 
 ---
 

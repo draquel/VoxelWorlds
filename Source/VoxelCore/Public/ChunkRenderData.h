@@ -5,6 +5,58 @@
 #include "CoreMinimal.h"
 #include "ChunkRenderData.generated.h"
 
+/**
+ * A vertex's material blend (VP2-O4, soft material borders), as FChunkMeshData::MaterialBlends carries it: 0 for none,
+ * else the blend flag, the second material in bits 8-15 and, where the quad has a third, the third flag and the third
+ * material in bits 16-23; the weight flags mark the material the vertex shows (the second, the third, or neither: the
+ * quad's own). The Dual Contouring meshers set it on the vertices of a quad whose cells have more than one material; the
+ * renderer passes it to the shader as vertex colour (R the second material, A its weight; G the third, B its weight:
+ * M_VoxelMaster's FarFieldMaterialPick), so the weights interpolate across the triangles and a border fades over a cell.
+ */
+namespace VoxelMaterialBlend
+{
+	inline constexpr uint32 BlendFlag = 1;
+	inline constexpr uint32 WeightFlag = 2;       // the vertex shows the second material
+	inline constexpr uint32 ThirdWeightFlag = 4;  // the vertex shows the third material
+	inline constexpr uint32 ThirdFlag = 8;        // the quad has a third material
+	inline constexpr uint32 FlagMask = 0xF;
+
+	/**
+	 * @param Secondary The quad's second material
+	 * @param bShowsSecondary Whether the vertex shows it
+	 * @param bHasThird Whether the quad has a third material
+	 * @param Third The third material (with bHasThird)
+	 * @param bShowsThird Whether the vertex shows it
+	 * @return The code of a vertex in the blend
+	 */
+	FORCEINLINE uint32 Encode(uint8 Secondary, bool bShowsSecondary, bool bHasThird = false, uint8 Third = 0, bool bShowsThird = false)
+	{
+		return (static_cast<uint32>(Secondary) << 8) | BlendFlag | (bShowsSecondary ? WeightFlag : 0)
+			| (bHasThird ? (ThirdFlag | (static_cast<uint32>(Third) << 16) | (bShowsThird ? ThirdWeightFlag : 0)) : 0);
+	}
+
+	/** @return Whether the code is a blend */
+	FORCEINLINE bool IsBlend(uint32 Code) { return (Code & BlendFlag) != 0; }
+
+	/** @return Whether the vertex shows the second material (its weight 1) */
+	FORCEINLINE bool ShowsSecondary(uint32 Code) { return (Code & WeightFlag) != 0; }
+
+	/** @return The blend's second material */
+	FORCEINLINE uint8 Secondary(uint32 Code) { return static_cast<uint8>(Code >> 8); }
+
+	/** @return Whether the blend has a third material */
+	FORCEINLINE bool HasThird(uint32 Code) { return (Code & ThirdFlag) != 0; }
+
+	/** @return Whether the vertex shows the third material (its weight 1) */
+	FORCEINLINE bool ShowsThird(uint32 Code) { return (Code & ThirdWeightFlag) != 0; }
+
+	/** @return The blend's third material (valid with HasThird) */
+	FORCEINLINE uint8 Third(uint32 Code) { return static_cast<uint8>(Code >> 16); }
+
+	/** @return The code without its weight flags: equal across a triangle (the blend is flat per triangle) */
+	FORCEINLINE uint32 WithoutWeights(uint32 Code) { return Code & ~(WeightFlag | ThirdWeightFlag); }
+}
+
 /** The Lumen cards a mesh worker fitted to a mesh for the renderer (G116): defined by VoxelRendering, opaque here */
 struct FVoxelPrebuiltChunkMeshCards;
 
@@ -43,6 +95,13 @@ struct VOXELCORE_API FChunkMeshData
 	UPROPERTY()
 	TArray<FColor> Colors;
 
+	/**
+	 * Each vertex's material blend (VoxelMaterialBlend, VP2-O4): the Dual Contouring meshers fill it for every vertex,
+	 * other meshers leave it empty (no blend)
+	 */
+	UPROPERTY()
+	TArray<uint32> MaterialBlends;
+
 	/** Triangle indices */
 	UPROPERTY()
 	TArray<uint32> Indices;
@@ -63,6 +122,7 @@ struct VOXELCORE_API FChunkMeshData
 		UVs.Reset();
 		UV1s.Reset();
 		Colors.Reset();
+		MaterialBlends.Reset();
 		Indices.Reset();
 		bHasMaskedMaterial = false;
 		PrebuiltLumenCards.Reset();
@@ -94,6 +154,7 @@ struct VOXELCORE_API FChunkMeshData
 			+ UVs.GetAllocatedSize()
 			+ UV1s.GetAllocatedSize()
 			+ Colors.GetAllocatedSize()
+			+ MaterialBlends.GetAllocatedSize()
 			+ Indices.GetAllocatedSize();
 	}
 };

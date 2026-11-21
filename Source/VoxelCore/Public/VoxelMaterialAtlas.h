@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "VoxelMaterialDefinition.h"
 #include "VoxelMaterialAtlas.generated.h"
 
 class FVoxelMaterialTable;
@@ -25,6 +26,16 @@ enum class EVoxelFaceType : uint8
 /**
  * Atlas tile position (column, row).
  */
+/** A channel of a texture (the height map's, FVoxelMaterialTextureConfig::HeightChannel) */
+UENUM(BlueprintType)
+enum class EVoxelTextureChannel : uint8
+{
+	R,
+	G,
+	B,
+	A
+};
+
 USTRUCT(BlueprintType)
 struct VOXELCORE_API FVoxelAtlasTile
 {
@@ -107,6 +118,17 @@ struct VOXELCORE_API FVoxelMaterialTextureConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Source Textures")
 	TSoftObjectPtr<UTexture2D> RoughnessTexture;
 
+	/**
+	 * Height map for this material (HeightChannel holds it: a Megascans surface's packed ORDp texture has it in B), read
+	 * by a tessellated terrain material's displacement (the terrain on Nanite, D163). None: the material does not move.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Source Textures")
+	TSoftObjectPtr<UTexture2D> HeightTexture;
+
+	/** The channel of HeightTexture that holds the height */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Source Textures")
+	EVoxelTextureChannel HeightChannel = EVoxelTextureChannel::R;
+
 	// ===== Per-Material Properties =====
 
 	/** Scale for triplanar projection (smooth terrain). Higher = more tiling. */
@@ -136,6 +158,15 @@ struct VOXELCORE_API FVoxelMaterialTextureConfig
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Properties", meta = (ClampMin = "-1", ClampMax = "254"))
 	int32 SlopeMaterialID = -1;
+
+	/**
+	 * What kind of ground the material is underfoot (G247): the class a game maps to its surfaces (friction, footsteps).
+	 * Unset keeps the class of the registry's default for the ID (FVoxelMaterialDefinition::SurfaceClass), none for an ID
+	 * past the defaults or a reserved one: set it for every material the atlas adds (the demo's road Stone, its trail Dirt).
+	 * Gameplay data, read on a dedicated server too (FVoxelMaterialTable::FromAtlas).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Properties")
+	EVoxelSurfaceClass SurfaceClass = EVoxelSurfaceClass::Unset;
 
 	// ===== 2D Map Representation =====
 
@@ -231,6 +262,11 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Texture Arrays")
 	TObjectPtr<UTexture2DArray> RoughnessArray;
 
+	/** Height Texture2DArray for a tessellated terrain material's displacement (<Atlas>_HeightArray, built like
+	 *  AlbedoArray from the configs' HeightTexture; none when no config has one) */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Texture Arrays")
+	TObjectPtr<UTexture2DArray> HeightArray;
+
 	/** Target texture size for generated arrays (textures will be resized to match) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Texture Arrays", meta = (ClampMin = "64", ClampMax = "4096"))
 	int32 TextureArraySize = 512;
@@ -251,6 +287,10 @@ public:
 	/** Each MaterialID's slice in RoughnessArray (as AlbedoArraySlices) */
 	UPROPERTY(VisibleAnywhere, AdvancedDisplay, Category = "Texture Arrays")
 	TArray<uint8> RoughnessArraySlices;
+
+	/** Each MaterialID's slice in HeightArray (as AlbedoArraySlices; whether a material has a height is the LUT's height row) */
+	UPROPERTY(VisibleAnywhere, AdvancedDisplay, Category = "Texture Arrays")
+	TArray<uint8> HeightArraySlices;
 
 #if WITH_EDITORONLY_DATA
 	/**
@@ -368,7 +408,7 @@ public:
 	 * This texture encodes per-material, per-face atlas positions.
 	 * Call this after modifying MaterialConfigs.
 	 *
-	 * LUT Format: 256 x 4 texture (one column per MaterialID), read by texel (Load), not by UV
+	 * LUT Format: 256 x 5 texture (one column per MaterialID), read by texel (Load), not by UV
 	 * - Row 0: Top face tiles
 	 * - Row 1: Side face tiles
 	 * - Row 2: Bottom face tiles
@@ -379,6 +419,8 @@ public:
 	 * - Row 3: the material's texture array slices (smooth terrain): R = AlbedoArray slice, G = NormalArray slice,
 	 *   B = RoughnessArray slice (AlbedoArraySlices, NormalArraySlices, RoughnessArraySlices), A = the material's
 	 *   SlopeMaterialID plus one, 0 for none (GetSlopeMaterialID)
+	 * - Row 4: the material's height (a tessellated material's displacement, D163): R = HeightArray slice
+	 *   (HeightArraySlices), G = HeightChannel (0-3), B = 255 when the material has a HeightTexture, else 0
 	 *
 	 * BuildTextureArrays() rebuilds an existing LUT in place, so materials bound to it read the new slices.
 	 */
@@ -560,6 +602,7 @@ private:
 		bool bAlbedo = false;
 		bool bNormal = false;
 		bool bRoughness = false;
+		bool bHeight = false;
 	};
 
 	/**

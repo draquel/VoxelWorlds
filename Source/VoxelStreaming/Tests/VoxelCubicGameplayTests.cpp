@@ -17,6 +17,9 @@
 #include "IVoxelWorldMode.h"
 #include "DistanceBandLODStrategy.h"
 #include "IVoxelMeshRenderer.h"
+#include "VoxelTerrainConditioning.h"
+#include "VoxelConditioningLine.h"
+#include "VoxelWaterLevels.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -26,7 +29,8 @@
 //
 // A cubic block at voxel layer k spans [k V, (k + 1) V) above WorldOrigin and the top face of the topmost solid block lies
 // up to a block above the density isosurface. The surface queries must return that top face, exactly what the streamed
-// voxels hold, at any WorldOrigin and inside a conditioning zone; a smooth world's queries must be what they were.
+// voxels hold, at any WorldOrigin and inside a conditioning zone; a smooth world's queries must stay the isosurface (read
+// from the voxel-grid columns since G165).
 // ---------------------------------------------------------------------------
 
 namespace VoxelCubicGameplayTestUtils
@@ -390,11 +394,12 @@ bool FVoxelCubicBlockSurfaceSmoothUnchangedTest::RunTest(const FString& Paramete
 
 		// GetGeneratedSurfacePoint: the world mode's height with the zones blended in, bit for bit.
 		const float Natural = static_cast<float>(WM->GetSurfaceOnUpLine(FVector(X, Y, 0.0), Config->NoiseParams).Position.Z);
-		const float Expected = FVoxelTerrainConditioning::ApplyToHeight(X, Y, Natural, { Pad });
+		const float Expected = FVoxelConditioning::OfZones({ Pad }).ApplyToHeight(X, Y, Natural);
 		Generated += Manager->GetGeneratedSurfacePoint(FVector(X, Y, 0.0)).Z == Expected ? 1 : 0;
 
-		// QueryEditMergedSurfacePoint: the column at (X, Y) from one chunk under the estimate to one above, interpolated
-		// where the density crosses the threshold (FVoxelSurfaceQuery::ExtractSurfaceFromColumn), as before.
+		// QueryEditMergedSurfacePoint: the four voxel-grid columns around (X, Y) from one chunk under the estimate to one
+		// above, each interpolated where the density crosses the threshold (FVoxelSurfaceQuery::ExtractSurfaceFromColumn)
+		// and blended bilinearly, the nearest column's material (G165).
 		FVoxelSurfaceSample Hit;
 		if (!Manager->QueryEditMergedSurfacePoint(FVector(X, Y, 0.0), Hit))
 		{
@@ -403,22 +408,48 @@ bool FVoxelCubicBlockSurfaceSmoothUnchangedTest::RunTest(const FString& Paramete
 		const float Height = static_cast<float>(Hit.Position.Z);
 		const uint8 Material = Hit.MaterialID;
 		++Loaded;
+		const double VS = Config->VoxelSize;
 		const int32 Window = Config->ChunkSize;
-		const float BaseZ = Natural - Window * Config->VoxelSize;
-		TArray<FVoxelData> Column;
-		for (int32 i = 0; i < 2 * Window + 1; ++i)
+		const FIntPoint Cell = Test.ColumnOf(X, Y);
+		const double FX = (X - Config->WorldOrigin.X) / VS - Cell.X;
+		const double FY = (Y - Config->WorldOrigin.Y) / VS - Cell.Y;
+		const int64 BaseK = FMath::FloorToInt64((Natural - Config->WorldOrigin.Z) / VS) - Window;
+		const float BaseZ = static_cast<float>(Config->WorldOrigin.Z + BaseK * VS);
+		double Sum = 0.0, WeightSum = 0.0, Best = -1.0;
+		uint8 RefMaterial = 0;
+		for (int32 Corner = 0; Corner < 4; ++Corner)
 		{
-			Column.Add(Manager->GetVoxelAt(FVector(X, Y, BaseZ + i * Config->VoxelSize)));
+			const int32 DX = Corner & 1, DY = Corner >> 1;
+			const double Weight = (DX ? FX : 1.0 - FX) * (DY ? FY : 1.0 - FY);
+			if (Weight <= 0.0)
+			{
+				continue;
+			}
+			TArray<FVoxelData> Column;
+			for (int32 i = 0; i < 2 * Window + 1; ++i)
+			{
+				Column.Add(Manager->GetVoxelAt(Test.VoxelCentre(Cell.X + DX, Cell.Y + DY, BaseK + i)));
+			}
+			float ColumnHeight = 0.0f;
+			uint8 ColumnMaterial = 0, ColumnBiome = 0;
+			if (FVoxelSurfaceQuery::ExtractSurfaceFromColumn(Column, BaseZ, Config->VoxelSize, ColumnHeight, ColumnMaterial, ColumnBiome))
+			{
+				Sum += Weight * ColumnHeight;
+				WeightSum += Weight;
+				if (Weight > Best)
+				{
+					Best = Weight;
+					RefMaterial = ColumnMaterial;
+				}
+			}
 		}
-		float RefHeight = 0.0f;
-		uint8 RefMaterial = 0, RefBiome = 0;
-		const bool bRef = FVoxelSurfaceQuery::ExtractSurfaceFromColumn(Column, BaseZ, Config->VoxelSize, RefHeight, RefMaterial, RefBiome);
-		EditMerged += bRef && Height == RefHeight && Material == RefMaterial ? 1 : 0;
+		const bool bRef = WeightSum > 0.0;
+		EditMerged += bRef && FMath::IsNearlyEqual(Height, static_cast<float>(Sum / WeightSum), 0.01f) && Material == RefMaterial ? 1 : 0;
 	}
-	AddInfo(FString::Printf(TEXT("generated %d / 300, edit-merged %d / %d as before"), Generated, EditMerged, Loaded));
+	AddInfo(FString::Printf(TEXT("generated %d / 300, edit-merged %d / %d from the voxel-grid columns"), Generated, EditMerged, Loaded));
 	TestEqual(TEXT("GetGeneratedSurfacePoint unchanged in a smooth world"), Generated, 300);
 	TestTrue(TEXT("Loaded columns sampled"), Loaded >= 200);
-	TestEqual(TEXT("QueryEditMergedSurfacePoint unchanged in a smooth world"), EditMerged, Loaded);
+	TestEqual(TEXT("QueryEditMergedSurfacePoint reads the voxel-grid columns in a smooth world"), EditMerged, Loaded);
 
 	Test.Stop();
 	return true;
@@ -560,6 +591,475 @@ bool FVoxelCubicVoxelTreesFindAndFellTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Fell: felling it again removes nothing"), Manager->FellVoxelTree(ToFell->Tree, true), 0);
 		TestEqual(TEXT("Fell: outside the undo history"), Manager->GetEditManager()->GetUndoCount(), 0);
 	}
+
+	Test.Stop();
+	return true;
+}
+
+// Voxel trees along a conditioning line (Documentation/TERRAIN_LINES_PLAN.md, L3), through the chunk manager: a block
+// world streamed with a levelled line that keeps a width clear. The injection and the tree queries gather the same
+// lines (UVoxelChunkManager::GatherTreeConditioning), so no tree stands inside the clear width (the trees the seed
+// plants there without the line have no trunk in the voxels), and the trees beside the line, on ground it moved, are
+// found by their trunk blocks.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCubicVoxelTreesLineClearWidthTest,
+	"VoxelWorlds.Cubic.VoxelTrees.LineClearWidth",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelCubicVoxelTreesLineClearWidthTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelCubicGameplayTestUtils;
+
+	FGameplayWorld Test;
+	Test.Start(TEXT("VoxelCubicTreesLineWorld"), EMeshingMode::Cubic, true, FVoxelConditioningZone(FVector2D::ZeroVector, 0.0f, 0.0f, 0.0f));
+	UVoxelChunkManager* Manager = Test.Manager;
+	const UVoxelWorldConfiguration* Config = Test.Config;
+	const float VoxelSize = Config->VoxelSize;
+
+	// A levelled line through the viewer's column, three blocks over the ground along it (the natural height averaged over
+	// nine vertices and held to a grade of 40 %, so the line keeps within the cut and fill cap and a block a column), with
+	// a wide falloff and clear to five voxels: added before the first tick, so every chunk generates with it.
+	const FVector2D Site(Config->WorldOrigin.X, Config->WorldOrigin.Y);
+	TArray<FVector2D> Path;
+	TArray<float> NaturalAlong;
+	for (int32 Step = -20; Step <= 20; ++Step)
+	{
+		const FVector2D P = Site + FVector2D(0.8, 0.6) * (Step * 2.0 * VoxelSize);
+		Path.Add(P);
+		NaturalAlong.Add(static_cast<float>(Manager->GetWorldMode()->GetSurfaceOnUpLine(FVector(P.X, P.Y, 0.0), Config->NoiseParams).Position.Z));
+	}
+	TArray<float> Targets;
+	for (int32 Index = 0; Index < Path.Num(); ++Index)
+	{
+		float Sum = 0.0f;
+		int32 Count = 0;
+		for (int32 Other = FMath::Max(0, Index - 4); Other <= FMath::Min(Path.Num() - 1, Index + 4); ++Other)
+		{
+			Sum += NaturalAlong[Other];
+			++Count;
+		}
+		Targets.Add(Sum / Count + 3.0f * VoxelSize);
+	}
+	const float MaxStep = 0.4f * 2.0f * VoxelSize;
+	for (int32 Index = 1; Index < Targets.Num(); ++Index)
+	{
+		Targets[Index] = FMath::Clamp(Targets[Index], Targets[Index - 1] - MaxStep, Targets[Index - 1] + MaxStep);
+	}
+	for (int32 Index = Targets.Num() - 2; Index >= 0; --Index)
+	{
+		Targets[Index] = FMath::Clamp(Targets[Index], Targets[Index + 1] - MaxStep, Targets[Index + 1] + MaxStep);
+	}
+	FVoxelConditioningLineParams Params;
+	Params.FalloffWidth = 8.0f * VoxelSize;
+	Params.Id = 1;
+	Params.Surface.ClearHalfWidth = 5.0f * VoxelSize;
+	for (int32 Index = 0; Index < Path.Num(); ++Index)
+	{
+		Params.Vertices.Add(FVoxelConditioningLineVertex(FVector(Path[Index].X, Path[Index].Y, 0.0), Targets[Index], 3.0f * VoxelSize));
+	}
+	const float Target = Params.Vertices[Params.Vertices.Num() / 2].TargetHeight;
+	const FVoxelConditioningLineRef Line = FVoxelConditioningLine::Make(Params);
+	Manager->AddConditioningLine(Line);
+	FVoxelConditioning Conditioning;
+	Conditioning.Lines.Add(Line);
+	TestTrue(TEXT("The pipeline settled"), Test.Settle());
+
+	// The trees the seed plants around the viewer without the line, and those of them inside the clear width.
+	const int32 N = Config->ChunkSize;
+	const uint8 TrunkMaterial = Config->TreeTemplates[0].TrunkMaterialID;
+	int32 NaturalInClear = 0;
+	int32 TrunksInClear = 0;
+	for (int32 CX = -2; CX <= 1; ++CX)
+	{
+		for (int32 CY = -2; CY <= 1; ++CY)
+		{
+			TArray<FIntVector> Positions;
+			TArray<int32> Templates;
+			TArray<uint32> Seeds;
+			FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), N, VoxelSize, Config->WorldOrigin, Config->WorldSeed,
+				Config->NoiseParams, *Manager->GetWorldMode(), Config->TreeDensity, Config->TreeTemplates, nullptr, false, 0.0f,
+				Positions, Templates, Seeds);
+			for (const FIntVector& Base : Positions)
+			{
+				const FVector Centre = Manager->GlobalVoxelToWorldCentre(Base);
+				if (!Conditioning.IsClearedAt(Centre.X - 0.5 * VoxelSize, Centre.Y - 0.5 * VoxelSize))
+				{
+					continue;
+				}
+				++NaturalInClear;
+				// No trunk in the column there: the three blocks over the ground the line leaves.
+				const double Ground = Manager->GetGeneratedSurfacePoint(FVector(Centre.X, Centre.Y, 0.0)).Z;
+				for (int32 Up = 0; Up < 3; ++Up)
+				{
+					const FVoxelData Voxel = Manager->GetVoxelAt(FVector(Centre.X, Centre.Y, Ground + (Up + 0.5) * VoxelSize));
+					TrunksInClear += (Voxel.IsSolid() && Voxel.MaterialID == TrunkMaterial) ? 1 : 0;
+				}
+			}
+		}
+	}
+
+	// The trees standing around the viewer, as the manager finds them: none inside the clear width, and the ones the line
+	// reaches found by their own trunk blocks.
+	TArray<FVoxelTreeInstance> Standing;
+	Manager->FindVoxelTreesNear(FVector(Site.X, Site.Y, Target), 2000.0f, Standing);
+	int32 StandingInClear = 0;
+	int32 Beside = 0;
+	int32 BesideMoved = 0;
+	int32 TrunkBlocks = 0;
+	int32 Found = 0;
+	FVoxelConditioningLineSample At;
+	for (const FVoxelTreeInstance& Tree : Standing)
+	{
+		const FVector Centre = Manager->GlobalVoxelToWorldCentre(Tree.BaseVoxel);
+		const double X = Centre.X - 0.5 * VoxelSize;
+		const double Y = Centre.Y - 0.5 * VoxelSize;
+		StandingInClear += Conditioning.IsClearedAt(X, Y) ? 1 : 0;
+		if (!Line->Sample(X, Y, 0.0, At) || At.Weight <= 0.0f)
+		{
+			continue;
+		}
+		++Beside;
+		const float Natural = static_cast<float>(Manager->GetWorldMode()->GetSurfaceOnUpLine(FVector(X, Y, 0.0), Config->NoiseParams).Position.Z);
+		BesideMoved += FMath::Abs(Conditioning.ApplyToHeight(X, Y, Natural) - Natural) >= VoxelSize ? 1 : 0;
+		TArray<FVoxelTreeVoxel> Blocks;
+		Manager->GetVoxelTreeBlocks(Tree, Blocks);
+		for (const FVoxelTreeVoxel& Block : Blocks)
+		{
+			if (!Block.bTrunk)
+			{
+				continue;
+			}
+			++TrunkBlocks;
+			FVoxelTreeInstance Hit;
+			Found += (Manager->FindVoxelTreeAt(Manager->GlobalVoxelToWorldCentre(Block.GlobalVoxel), Hit) && Hit.BaseVoxel == Tree.BaseVoxel) ? 1 : 0;
+		}
+	}
+	AddInfo(FString::Printf(TEXT("%d trees planted inside the clear width without the line, %d trunk blocks standing there; %d trees standing within 2,000 uu, %d of them inside the clear width; %d beside the line (%d on ground it moved a block or more), %d of their %d trunk blocks found their tree"),
+		NaturalInClear, TrunksInClear, Standing.Num(), StandingInClear, Beside, BesideMoved, Found, TrunkBlocks));
+	TestTrue(TEXT("Without the line trees are planted inside the clear width (non-vacuous)"), NaturalInClear >= 3);
+	TestEqual(TEXT("No trunk stands inside the clear width"), TrunksInClear, 0);
+	TestTrue(TEXT("Trees stand around the viewer"), Standing.Num() >= 8);
+	TestEqual(TEXT("No standing tree is inside the clear width"), StandingInClear, 0);
+	TestTrue(TEXT("Trees stand beside the line on ground it moved (non-vacuous)"), BesideMoved >= 1 && TrunkBlocks >= 3);
+	TestTrue(TEXT("The trunk blocks of the trees beside the line find their tree"), Found >= TrunkBlocks * 95 / 100);
+
+	Test.Stop();
+	return true;
+}
+
+// Voxel trees on a conditioning zone (G206), through the chunk manager: a block world streamed with a pad around the
+// viewer, flat at a height the natural ground is blocks above and blocks below. The injection and the tree queries
+// gather the same conditioning, zones and all (UVoxelChunkManager::GatherTreeConditioning), so a tree whose column is
+// on the pad stands on it: its foot is in the pad's top layer, ground under it (it was planted at the natural height, in
+// the air over a pad cut into a slope and under the ground of a raised one). A world with no conditioning
+// plants exactly the trees it planted.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCubicVoxelTreesOnAPadTest,
+	"VoxelWorlds.Cubic.VoxelTrees.OnAPad",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelCubicVoxelTreesOnAPadTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelCubicGameplayTestUtils;
+
+	// The pad: 1,350 uu of flat around the viewer's column and a ring of 600, at a height inside the hills' range.
+	const FVector2D Site(1234.5, -543.25); // the fixture's WorldOrigin
+	const FVoxelConditioningZone Pad(Site, 1350.0f, 600.0f, 120.0f);
+	FGameplayWorld Test;
+	Test.Start(TEXT("VoxelCubicTreesPadWorld"), EMeshingMode::Cubic, true, Pad);
+	UVoxelChunkManager* Manager = Test.Manager;
+	const UVoxelWorldConfiguration* Config = Test.Config;
+	const float VoxelSize = Config->VoxelSize;
+	const int32 N = Config->ChunkSize;
+	TestTrue(TEXT("The pad is at the viewer's column"), FVector2D(Config->WorldOrigin.X, Config->WorldOrigin.Y).Equals(Site));
+	TestTrue(TEXT("The pipeline settled"), Test.Settle());
+	FVoxelConditioning Conditioning;
+	Conditioning.Zones.Add(Pad);
+	const FVoxelConditioning Empty;
+
+	// The trees of the chunks around the viewer: with the pad, with no conditioning at all, and with a set that holds
+	// nothing.
+	int32 OnPad = 0, OnPadMoved = 0, OffLevel = 0, InRing = 0, RingOffLevel = 0, Outside = 0, OutsideMissing = 0, EmptyDifferent = 0, Natural = 0;
+	for (int32 CX = -3; CX <= 2; ++CX)
+	{
+		for (int32 CY = -3; CY <= 2; ++CY)
+		{
+			TArray<FIntVector> With, Without, WithEmpty;
+			TArray<int32> WithTemplates, WithoutTemplates, EmptyTemplates;
+			TArray<uint32> WithSeeds, WithoutSeeds, EmptySeeds;
+			auto Compute = [&](const FVoxelConditioning* Set, TArray<FIntVector>& Positions, TArray<int32>& Templates, TArray<uint32>& Seeds)
+			{
+				FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), N, VoxelSize, Config->WorldOrigin, Config->WorldSeed,
+					Config->NoiseParams, *Manager->GetWorldMode(), Config->TreeDensity, Config->TreeTemplates, nullptr, false, 0.0f,
+					Positions, Templates, Seeds, Set);
+			};
+			Compute(&Conditioning, With, WithTemplates, WithSeeds);
+			Compute(nullptr, Without, WithoutTemplates, WithoutSeeds);
+			Compute(&Empty, WithEmpty, EmptyTemplates, EmptySeeds);
+			Natural += Without.Num();
+			// No conditioning, whichever way it is said: the same trees, value for value.
+			EmptyDifferent += (WithEmpty == Without && EmptyTemplates == WithoutTemplates && EmptySeeds == WithoutSeeds) ? 0 : 1;
+			for (const FIntVector& Base : With)
+			{
+				// The injector judges a tree at its column's corner.
+				const FVector Centre = Manager->GlobalVoxelToWorldCentre(Base);
+				const double X = Centre.X - 0.5 * VoxelSize;
+				const double Y = Centre.Y - 0.5 * VoxelSize;
+				const float Ground = static_cast<float>(Manager->GetWorldMode()->GetSurfaceOnUpLine(FVector(X, Y, 0.0), Config->NoiseParams).Position.Z);
+				const float Weight = Pad.GetWeightAt(X, Y);
+				const int32 Expected = FMath::FloorToInt32((Conditioning.ApplyToHeight(X, Y, Ground) - Config->WorldOrigin.Z) / VoxelSize);
+				if (Weight >= 1.0f)
+				{
+					++OnPad;
+					OnPadMoved += FMath::Abs(Pad.TargetHeight - Ground) >= VoxelSize ? 1 : 0;
+					// On the flat: the pad's own level, whatever the natural ground there.
+					OffLevel += Base.Z == FMath::FloorToInt32((Pad.TargetHeight - Config->WorldOrigin.Z) / VoxelSize) ? 0 : 1;
+				}
+				else if (Weight > 0.0f)
+				{
+					++InRing;
+					RingOffLevel += Base.Z == Expected ? 0 : 1;
+				}
+				else
+				{
+					++Outside;
+					// Clear of the pad: the tree the natural ground has there.
+					OutsideMissing += Without.Contains(Base) ? 0 : 1;
+				}
+			}
+		}
+	}
+	TestTrue(TEXT("Trees are planted on the pad where it moved the ground a block or more, in its ring and clear of it (non-vacuous)"), OnPadMoved >= 3 && InRing >= 1 && Outside >= 10);
+	TestEqual(TEXT("A tree on the pad's flat stands at the pad's level"), OffLevel, 0);
+	TestEqual(TEXT("A tree in the pad's ring stands on the ground the ring makes"), RingOffLevel, 0);
+	TestEqual(TEXT("A tree clear of the pad is the natural ground's"), OutsideMissing, 0);
+	TestEqual(TEXT("With no conditioning the trees are the ones planted without it, for a null set and for an empty one"), EmptyDifferent, 0);
+
+	// G222: the same pad with a clear radius (what a POI whose claim keeps its pad bare asks for) plants no tree inside
+	// it, and every other tree is the one the pad without it planted, template and seed alike.
+	{
+		FVoxelConditioningZone ClearPad = Pad;
+		ClearPad.ClearRadius = Pad.InnerRadius;
+		FVoxelConditioning Clearing;
+		Clearing.Zones.Add(ClearPad);
+		int32 InClearBefore = 0, InClearAfter = 0, Removed = 0, Changed = 0;
+		for (int32 CX = -3; CX <= 2; ++CX)
+		{
+			for (int32 CY = -3; CY <= 2; ++CY)
+			{
+				TArray<FIntVector> With, Cleared;
+				TArray<int32> WithTemplates, ClearedTemplates;
+				TArray<uint32> WithSeeds, ClearedSeeds;
+				auto Compute = [&](const FVoxelConditioning& Set, TArray<FIntVector>& Positions, TArray<int32>& Templates, TArray<uint32>& Seeds)
+				{
+					FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), N, VoxelSize, Config->WorldOrigin, Config->WorldSeed,
+						Config->NoiseParams, *Manager->GetWorldMode(), Config->TreeDensity, Config->TreeTemplates, nullptr, false, 0.0f,
+						Positions, Templates, Seeds, &Set);
+				};
+				Compute(Conditioning, With, WithTemplates, WithSeeds);
+				Compute(Clearing, Cleared, ClearedTemplates, ClearedSeeds);
+				auto InClear = [&](const FIntVector& Base)
+				{
+					const FVector Centre = Manager->GlobalVoxelToWorldCentre(Base);
+					return Clearing.IsZoneClearedAt(Centre.X - 0.5 * VoxelSize, Centre.Y - 0.5 * VoxelSize);
+				};
+				int32 Next = 0;
+				for (int32 Index = 0; Index < With.Num(); ++Index)
+				{
+					if (InClear(With[Index]))
+					{
+						++InClearBefore;
+						++Removed;
+						continue;
+					}
+					// The trees left keep their order: the clearing skips a tree after its draws, as a line's does.
+					const bool bSame = Cleared.IsValidIndex(Next) && Cleared[Next] == With[Index]
+						&& ClearedTemplates[Next] == WithTemplates[Index] && ClearedSeeds[Next] == WithSeeds[Index];
+					Changed += bSame ? 0 : 1;
+					++Next;
+				}
+				Changed += Cleared.Num() - Next;
+				for (const FIntVector& Base : Cleared)
+				{
+					InClearAfter += InClear(Base) ? 1 : 0;
+				}
+			}
+		}
+		AddInfo(FString::Printf(TEXT("A clear radius of %.0f uu: %d tree(s) inside it without it, %d with it; %d other tree(s) changed"),
+			ClearPad.ClearRadius, InClearBefore, InClearAfter, Changed));
+		TestTrue(TEXT("Without the clear radius trees are planted inside it (non-vacuous)"), InClearBefore >= 3);
+		TestEqual(TEXT("No tree is planted inside the clear radius"), InClearAfter, 0);
+		TestEqual(TEXT("Every tree outside it is the one planted without it"), Changed, 0);
+
+		// A planet zone clears along the datum sphere; a zone of the other kind clears nothing.
+		const double Radius = 100000.0;
+		FVoxelConditioning Planet;
+		FVoxelConditioningZone& Cap = Planet.Zones.Add_GetRef(FVoxelConditioningZone::MakeRadial(FVector::UpVector, 1000.0f, 500.0f, 0.0f));
+		Cap.ClearRadius = 1000.0f;
+		const FVector Inside = FQuat(FVector::ForwardVector, 900.0 / Radius).RotateVector(FVector::UpVector);
+		const FVector Beyond = FQuat(FVector::ForwardVector, 1100.0 / Radius).RotateVector(FVector::UpVector);
+		TestTrue(TEXT("A planet zone clears 900 uu along the surface from its centre"), Planet.IsZoneClearedOnSphere(Inside, Radius));
+		TestFalse(TEXT("... and not 1,100 uu"), Planet.IsZoneClearedOnSphere(Beyond, Radius));
+		TestFalse(TEXT("A planet zone clears nothing on a heightmap"), Planet.IsZoneClearedAt(0.0, 0.0));
+		TestFalse(TEXT("A heightmap zone clears nothing on a sphere"), Clearing.IsZoneClearedOnSphere(FVector::UpVector, Radius));
+	}
+
+	// In the streamed voxels: each tree the manager finds on the pad has the pad's top block under it and its trunk on it.
+	TArray<FVoxelTreeInstance> Standing;
+	Manager->FindVoxelTreesNear(FVector(Site.X, Site.Y, Pad.TargetHeight), 1900.0f, Standing);
+	const uint8 TrunkMaterial = Config->TreeTemplates[0].TrunkMaterialID;
+	const uint8 LeafMaterial = Config->TreeTemplates[0].LeafMaterialID;
+	int32 StandingOnPad = 0, OnItsBlock = 0, Found = 0, TrunkBlocks = 0;
+	for (const FVoxelTreeInstance& Tree : Standing)
+	{
+		const FVector Centre = Manager->GlobalVoxelToWorldCentre(Tree.BaseVoxel);
+		if (Pad.GetWeightAt(Centre.X - 0.5 * VoxelSize, Centre.Y - 0.5 * VoxelSize) < 1.0f)
+		{
+			continue;
+		}
+		++StandingOnPad;
+		// A tree's lowest block is set into the ground's top layer, as on natural ground: the base voxel is in the pad's top
+		// layer (the generated surface is its top face), the tree's blocks rise from it, and the block under it is ground
+		// (with the natural height the foot of a tree on a cut pad had air under it, and one on a raised pad was buried).
+		auto IsTree = [&](const FVoxelData& Voxel) { return Voxel.IsSolid() && (Voxel.MaterialID == TrunkMaterial || Voxel.MaterialID == LeafMaterial); };
+		const FVoxelData Below = Manager->GetVoxelAt(Centre - FVector(0.0, 0.0, VoxelSize));
+		const FVoxelData Foot = Manager->GetVoxelAt(Centre);
+		const FVoxelData Over = Manager->GetVoxelAt(Centre + FVector(0.0, 0.0, VoxelSize));
+		const double Top = Manager->GetGeneratedSurfacePoint(FVector(Centre.X, Centre.Y, 0.0)).Z;
+		OnItsBlock += (Below.IsSolid() && !IsTree(Below) && IsTree(Foot) && IsTree(Over) && FMath::Abs(Top - (Centre.Z + 0.5 * VoxelSize)) < 0.5) ? 1 : 0;
+		TArray<FVoxelTreeVoxel> Blocks;
+		Manager->GetVoxelTreeBlocks(Tree, Blocks);
+		for (const FVoxelTreeVoxel& Block : Blocks)
+		{
+			if (!Block.bTrunk)
+			{
+				continue;
+			}
+			++TrunkBlocks;
+			FVoxelTreeInstance Hit;
+			Found += (Manager->FindVoxelTreeAt(Manager->GlobalVoxelToWorldCentre(Block.GlobalVoxel), Hit) && Hit.BaseVoxel == Tree.BaseVoxel) ? 1 : 0;
+		}
+	}
+	AddInfo(FString::Printf(TEXT("%d trees planted on the pad's flat (%d where the natural ground is a block or more off the pad), %d in its ring, %d clear of it (%d without the pad in the same chunks); %d standing on the flat in the voxels, %d with their foot in the pad's top layer and ground under it; %d of their %d trunk blocks found their tree"),
+		OnPad, OnPadMoved, InRing, Outside, Natural, StandingOnPad, OnItsBlock, Found, TrunkBlocks));
+	TestTrue(TEXT("Trees stand on the pad in the voxels (non-vacuous)"), StandingOnPad >= 3);
+	TestEqual(TEXT("Each tree on the pad stands in the pad's top layer, ground under its foot and the tree rising from it"), OnItsBlock, StandingOnPad);
+	TestTrue(TEXT("The trunk blocks of the trees on the pad find their tree"), TrunkBlocks >= 3 && Found >= TrunkBlocks * 95 / 100);
+
+	Test.Stop();
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Voxel trees at a lake (the hydrology plan's H1, section 5.4): a tree is tested against the water level over its own
+// column, so no tree stands in a pond and the ones beside it are as they were.
+//
+// - Cubic.VoxelTrees.Lake: a block world with trees and the sea off; a lake over the four chunks south-west of the
+//   viewer, its level over every piece of ground there. The injector's positions with the lake's water levels hold no
+//   tree in the footprint and the same trees as without them everywhere else; the streamed world has no trunk where a
+//   tree would have stood in the lake, and the chunk manager's tree queries find the trees around it and none in it.
+// ---------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelCubicVoxelTreesLakeTest,
+	"VoxelWorlds.Cubic.VoxelTrees.Lake",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelCubicVoxelTreesLakeTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelCubicGameplayTestUtils;
+
+	FGameplayWorld Test;
+	Test.Start(TEXT("VoxelCubicTreesLakeWorld"), EMeshingMode::Cubic, true, FVoxelConditioningZone(FVector2D::ZeroVector, 0.0f, 0.0f, 0.0f));
+	UVoxelChunkManager* Manager = Test.Manager;
+	const UVoxelWorldConfiguration* Config = Test.Config;
+	const int32 N = Config->ChunkSize;
+	const double ChunkWorldSize = Config->GetChunkWorldSize();
+	const float VoxelSize = Config->VoxelSize;
+
+	// The lake, added before the world's first tick: the chunks (-2, -2) to (-1, -1), a cell a voxel column, its level
+	// 300 over the highest ground under it.
+	const FVector2D LakeMin(Config->WorldOrigin.X - 2.0 * ChunkWorldSize, Config->WorldOrigin.Y - 2.0 * ChunkWorldSize);
+	double Highest = -TNumericLimits<double>::Max();
+	for (int32 I = 0; I <= 2 * N; I += 2)
+	{
+		for (int32 J = 0; J <= 2 * N; J += 2)
+		{
+			Highest = FMath::Max(Highest, static_cast<double>(Manager->GetGeneratedSurfacePoint(FVector(LakeMin.X + I * VoxelSize, LakeMin.Y + J * VoxelSize, 0.0)).Z));
+		}
+	}
+	const TSharedRef<const FVoxelWaterLake> LakeCells = FVoxelWaterLake::Make(LakeMin, VoxelSize, FIntPoint(2 * N, 2 * N), TBitArray<>(true, 4 * N * N));
+	const FVoxelWaterFrame Frame = Manager->GetWaterLevels().GetFrame();
+	Manager->AddWaterBody(FVoxelWaterBody::MakeLake(1, Highest + 300.0, LakeCells, Frame, 2000.0));
+	TestEqual(TEXT("The lake was added before any generation request"), Manager->GetNumLateConditioningSources(), 0);
+	TestTrue(TEXT("The pipeline settled"), Test.Settle());
+	TestTrue(TEXT("The world injects voxel trees"), Manager->HasVoxelTrees());
+
+	// The injector's trees over the chunks around the lake, without water and with the lake's levels.
+	const FBox Around(FVector(LakeMin.X - 2.0 * ChunkWorldSize, LakeMin.Y - 2.0 * ChunkWorldSize, -UE_LARGE_WORLD_MAX),
+		FVector(LakeMin.X + 4.0 * ChunkWorldSize, LakeMin.Y + 4.0 * ChunkWorldSize, UE_LARGE_WORLD_MAX));
+	const FVoxelWaterLevels Levels = Manager->GatherWaterLevels(Around, EVoxelConditioningGather::Complete);
+	TestFalse(TEXT("The gather over the chunks holds the lake"), Levels.IsSeaAlone());
+	const auto InLake = [&](const FIntVector& BaseVoxel)
+	{
+		const FVector Centre = Manager->GlobalVoxelToWorldCentre(BaseVoxel);
+		return LakeCells->Covers(Centre.X, Centre.Y);
+	};
+	TArray<FIntVector> Dry, Wet;
+	for (int32 CX = -3; CX <= 0; ++CX)
+	{
+		for (int32 CY = -3; CY <= 0; ++CY)
+		{
+			TArray<FIntVector> Positions;
+			TArray<int32> Templates;
+			TArray<uint32> Seeds;
+			FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), N, VoxelSize, Config->WorldOrigin, Config->WorldSeed,
+				Config->NoiseParams, *Manager->GetWorldMode(), Config->TreeDensity, Config->TreeTemplates, nullptr, false, 0.0f,
+				Positions, Templates, Seeds);
+			Dry.Append(Positions);
+			Positions.Reset();
+			Templates.Reset();
+			Seeds.Reset();
+			FVoxelTreeInjector::ComputeTreePositionsForChunk(FIntVector(CX, CY, 0), N, VoxelSize, Config->WorldOrigin, Config->WorldSeed,
+				Config->NoiseParams, *Manager->GetWorldMode(), Config->TreeDensity, Config->TreeTemplates, nullptr, false, 0.0f,
+				Positions, Templates, Seeds, nullptr, &Levels);
+			Wet.Append(Positions);
+		}
+	}
+	TArray<FIntVector> DryInLake, DryOutside;
+	for (const FIntVector& Base : Dry)
+	{
+		(InLake(Base) ? DryInLake : DryOutside).Add(Base);
+	}
+	int32 WetInLake = 0;
+	for (const FIntVector& Base : Wet)
+	{
+		WetInLake += InLake(Base) ? 1 : 0;
+	}
+	AddInfo(FString::Printf(TEXT("%d trees over 16 chunks without water, %d of them in the lake's footprint; %d with the lake"), Dry.Num(), DryInLake.Num(), Wet.Num()));
+	TestTrue(TEXT("Trees would stand in the footprint without the lake (non-vacuous)"), DryInLake.Num() >= 3);
+	TestTrue(TEXT("Trees stand around it"), DryOutside.Num() >= 8);
+	TestEqual(TEXT("With the lake's levels no tree is placed in the footprint"), WetInLake, 0);
+	TestTrue(TEXT("... and the trees outside it are the same ones"), Wet == DryOutside);
+
+	// The streamed voxels: no trunk where a tree would have stood in the lake; the trees beside it are found.
+	const FVoxelTreeTemplate& AnyTemplate = Config->TreeTemplates[0];
+	int32 TrunksInLake = 0;
+	for (const FIntVector& Base : DryInLake)
+	{
+		const FVoxelData Voxel = Manager->GetVoxelAt(Manager->GlobalVoxelToWorldCentre(Base + FIntVector(0, 0, 1)));
+		TrunksInLake += (Voxel.IsSolid() && Voxel.MaterialID == AnyTemplate.TrunkMaterialID) ? 1 : 0;
+		FVoxelTreeInstance Hit;
+		TrunksInLake += Manager->FindVoxelTreeAt(Manager->GlobalVoxelToWorldCentre(Base + FIntVector(0, 0, 1)), Hit) ? 1 : 0;
+	}
+	TestEqual(TEXT("The streamed world has no trunk where the lake stands"), TrunksInLake, 0);
+	TArray<FVoxelTreeInstance> Standing;
+	const FVector LakeCentre(LakeMin.X + ChunkWorldSize, LakeMin.Y + ChunkWorldSize, Highest);
+	Manager->FindVoxelTreesNear(LakeCentre, static_cast<float>(2.5 * ChunkWorldSize), Standing);
+	int32 StandingInLake = 0;
+	for (const FVoxelTreeInstance& Tree : Standing)
+	{
+		StandingInLake += InLake(Tree.BaseVoxel) ? 1 : 0;
+	}
+	TestTrue(TEXT("The tree query finds the trees around the lake"), Standing.Num() >= 4);
+	TestEqual(TEXT("... and none in it"), StandingInLake, 0);
 
 	Test.Stop();
 	return true;

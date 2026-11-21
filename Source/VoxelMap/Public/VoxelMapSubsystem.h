@@ -6,6 +6,7 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "VoxelMapTypes.h"
 #include "VoxelMapEditOverlay.h"
+#include "VoxelMapExploredMask.h"
 #include "VoxelMapTileFrame.h"
 #include "VoxelMapTileQueue.h"
 #include "VoxelMapTileStore.h"
@@ -13,7 +14,7 @@
 #include "VoxelEditTypes.h"
 #include "VoxelWorldModeTypes.h"
 #include "VoxelCubeSphere.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "TimerManager.h"
 #include "VoxelMapSubsystem.generated.h"
 
@@ -21,29 +22,6 @@ class IVoxelWorldMode;
 class UVoxelChunkManager;
 class UVoxelEditManager;
 class UVoxelBiomeConfiguration;
-struct FVoxelFarFieldSurface;
-
-/**
- * A planet's coarse albedo for the world map's globe zoomed out (spherical Phase 6, WM-BP11): a cube-sphere grid of at
- * most UVoxelMapSubsystem::GlobeAlbedoCellsPerEdge cells a face edge, each the colour of the surface at its centre as a
- * tile pixel draws it (water by depth under the sea; land the surface material, shaded by elevation and a hillshade),
- * sampled from the analytic surface the far field draws (FVoxelFarFieldSurface). Where a pixel of the globe spans many
- * tiles, the world map reads this instead of one tile pixel each.
- */
-struct VOXELMAP_API FVoxelMapGlobeAlbedo
-{
-	/** The albedo's cells (the same faces and warp as the tile grid, coarser) */
-	FVoxelCubeSphereGrid Grid;
-
-	/** One colour per cell, atlas order: Y * 6N + X */
-	TArray<FColor> Colors;
-
-	/** Time the build took (s, on its thread) */
-	double BuildSeconds = 0.0;
-
-	/** The colour of a cell (atlas coordinate). */
-	const FColor& At(const FIntPoint& Cell) const { return Colors[Cell.Y * 6 * Grid.GetCellsPerEdge() + Cell.X]; }
-};
 
 /**
  * World subsystem that manages 2D map tile data for voxel terrain.
@@ -63,10 +41,18 @@ struct VOXELMAP_API FVoxelMapGlobeAlbedo
  * edit-merged snapshots (UVoxelChunkManager::GetVoxelSnapshot) and redraw, building the overlay in the tile
  * task. Tiles whose chunks are not loaded keep their current overlay until a chunk of theirs generates.
  *
- * Tile images live under a fixed memory budget (world modes review WM-E2, finding KI15; FVoxelMapTileStore): every
- * drawn tile keeps a small overview image, and the detail image only while recently used (voxel.Map.DetailBudgetMB,
- * voxel.Map.OverviewBudgetMB). Exploration is separate and never evicted: a tile that lost its images is drawn again
- * when the minimap (RequestTilesInRadius) or the world map (RequestTileImage) asks for it.
+ * The tile pyramid (MAP_PYRAMID_PLAN.md P1, D84): a tile has a level (FVoxelMapTileId; level L covers 2^L x 2^L
+ * level-0 tiles at the same pixels), and images are drawn for the views, not for exploration. Each view (the minimap,
+ * the world map) asks for the tiles it shows at the level matching its texels (RequestView, LevelForTexel), nearest its
+ * centre first; a new view replaces that view's last request. The images live in one least-recently-used store of every
+ * level under one budget (FVoxelMapTileStore, voxel.Map.TileBudgetMB). Exploration is separate and never evicted, and
+ * marking a tile explored draws nothing.
+ *
+ * The explored mask (MAP_PYRAMID_PLAN.md P2): exploration is an FVoxelMapExploredMask over level-0 tiles (bitmap blocks
+ * of 64 x 64 tiles, full blocks collapsed), so a whole explored planet costs kilobytes, ExploreAll fills a world at once,
+ * and a view's fog of war is read from it per texel at any level. On a planet the top levels of the pyramid (the
+ * coarsest with at most 4 x 4 tiles a face, and those above it) are drawn when the map resolves its world and kept
+ * (EVoxelMapRequester::Prefetch, pinned in the store), so the globe zoomed out always has an image.
  *
  * Planets (spherical Phase 4, WORLD_MODES_REVIEW_PLAN.md §18, WM-SY8): a tile is a cell of the cube-sphere grid
  * (FVoxelCubeSphereGrid, N = ceil((pi / 2) * R / chunk size) cells a face edge, so a tile is about a chunk across),
@@ -87,98 +73,111 @@ public:
 	// --- Tile Queries ---
 
 	/**
-	 * Get a generated tile: its detail image, or its overview when the detail was evicted (the tile's Resolution says
-	 * which; callers scale by it). Counts as a use, which keeps the tile's images from eviction.
+	 * Get a level-0 tile's image. Counts as a use, which keeps the image from eviction.
 	 * @return The image, or nullptr if the tile has none (not drawn yet, or evicted)
 	 */
 	const FVoxelMapTile* GetTile(FIntPoint TileCoord) const;
 
-	/** Check if a tile has an image (detail or overview), regardless of exploration state. */
+	/**
+	 * Get a tile's image at any level of the pyramid (MAP_PYRAMID_PLAN.md P1).
+	 * @param Id The tile
+	 * @param bTouch Count this read as a use (keeps the image from eviction)
+	 * @return The image (possibly stale: its redraw is queued), or nullptr if the tile has none
+	 */
+	const FVoxelMapTile* FindTile(const FVoxelMapTileId& Id, bool bTouch = true) const;
+
+	/** Check if a level-0 tile has an image, regardless of exploration state. */
 	bool HasTile(FIntPoint TileCoord) const;
 
-	/** Check if a tile has its full-resolution image. */
-	bool HasTileDetail(FIntPoint TileCoord) const;
+	/**
+	 * A view's request (MAP_PYRAMID_PLAN.md P1, D84): the tiles a view shows, at the level matching its texels
+	 * (LevelForTexel), nearest its centre first. It replaces the requester's last request: tiles that left the view stop
+	 * waiting. The tiles without an image (or with a stale one) are queued, the minimap's before the world map's; the
+	 * images arrive through OnMapTileReady. An empty request clears the requester's (a view closed).
+	 * @param Requester The view (EVoxelMapRequester::Minimap or WorldMap)
+	 * @param NearestFirst The tiles it shows
+	 * @return Number of tiles queued
+	 */
+	int32 RequestView(EVoxelMapRequester Requester, TConstArrayView<FVoxelMapTileId> NearestFirst);
 
 	/**
-	 * Ask for an explored tile's image when it has none (evicted), or its detail when bDetail and it only has the
-	 * overview. The world map calls this for the tiles it shows (WM-E2).
-	 * @param TileCoord Tile coordinate (chunk X, Y)
-	 * @param bDetail Want the full-resolution image (a zoomed-in view), not just the overview
-	 * @return True if a drawing was queued (or the tile's queued drawing now keeps its detail)
+	 * The pyramid level whose pixels match a texel of a view (FVoxelMapTileFrame::LevelForTexel): the coarsest whose
+	 * pixels are at most the texel apart.
+	 * @param TexelWorldSize The texel's size (uu)
+	 * @return The level (0 before the map has resolved its world)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
-	bool RequestTileImage(FIntPoint TileCoord, bool bDetail);
+	int32 LevelForTexel(double TexelWorldSize) const { return bCacheResolved ? TileFrame.LevelForTexel(TexelWorldSize) : 0; }
 
-	/** The tile images and their budgets (diagnostics, tests). */
+	/** The tile images at every level and their budget (diagnostics, tests). */
 	const FVoxelMapTileStore& GetTileStore() const { return TileStore; }
 
-	/**
-	 * Pixels a side of a tile's overview image: the detail resolution over FVoxelMapTileStore::OverviewDownsample.
-	 * A view that shows more texels per tile than this wants detail (RequestTileImage).
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
-	int32 GetTileOverviewResolution() const { return FMath::Max(1, CachedChunkSize / FVoxelMapTileStore::OverviewDownsample); }
+	/** The draw queue (diagnostics, tests). */
+	const FVoxelMapTileQueue& GetTileQueue() const { return TileQueue; }
 
-	/** Apply voxel.Map.DetailBudgetMB / voxel.Map.OverviewBudgetMB (called when they change). */
+	/** Apply voxel.Map.TileBudgetMB (called when it changes). */
 	void ApplyTileBudgets();
 
 	/**
 	 * Debug (voxel.Map.ExploreAll): mark every tile that overlaps the world's bounds explored, as a fully explored save
-	 * restores it, and queue their images (overview only). Unbounded worlds: the tiles within Radius of Center. A planet
-	 * (spherical Phase 6, WM-BP11): its whole atlas up to voxel.Map.ExploreAllMaxTiles tiles (16 million on a 50 km
-	 * planet, 6.4 billion at 1,000 km), else that many nearest Center; the images of the nearest
-	 * PlanetExploreAllImageTiles queued, the rest drawn when the map shows them.
-	 * @return Number of tiles explored
+	 * restores it, filling the explored mask with no cap (MAP_PYRAMID_PLAN.md P2): a planet's six faces (16 million tiles on
+	 * a 50 km planet, whole blocks at once), an island's bounds; on an unbounded world the square of tiles within Radius of
+	 * Center. No image is queued: the views ask for what they show (P1).
+	 * @param Center The pawn (an unbounded world's square is around it)
+	 * @param Radius An unbounded world's half square (uu)
+	 * @return Number of tiles of the area, explored now (those explored before included)
 	 */
 	int64 ExploreAllTiles(const FVector& Center, float Radius);
 
-	/** Planets: ExploreAllTiles queues the images of at most this many tiles (nearest first); the rest draw when shown. */
-	static constexpr int32 PlanetExploreAllImageTiles = 65536;
+	// --- The globe zoomed out (MAP_PYRAMID_PLAN.md P2) ---
 
-	// --- The globe zoomed out (spherical Phase 6, WM-BP11) ---
-
-	/** Most cells along a globe albedo's face edge (never more than the tile grid has). */
-	static constexpr int32 GlobeAlbedoCellsPerEdge = 256;
+	/** A planet's top levels are prefetched from the coarsest with at most this many tiles along a face's edge. */
+	static constexpr int32 PrefetchTilesPerFaceEdge = 4;
 
 	/**
-	 * A planet's coarse albedo for the globe zoomed out (FVoxelMapGlobeAlbedo). The first call starts the build on a
-	 * worker thread (about a second at 256 cells a face edge); OnMapTileReady fires with (-1, -1) when it is ready.
-	 * @return The albedo, or null until it is built (and in heightmap worlds)
+	 * The finest of the pyramid levels drawn when the map resolves a planet and kept (pinned in the store; with the levels
+	 * above it, 6 x 16 + 6 x 4 + 6 tiles from level 9 on the 50 km planet): the globe zoomed out always has an image. They
+	 * replace the globe albedo (spherical Phase 6's WM-BP11).
+	 * @return The level, or INDEX_NONE (a heightmap world, or before the map has resolved its world)
 	 */
-	const FVoxelMapGlobeAlbedo* GetGlobeAlbedo();
-
-	/**
-	 * Whether any explored tile lies in a cell of the globe albedo's grid: the globe's fog of war zoomed out.
-	 * @param AlbedoCell Atlas coordinate in the albedo's grid
-	 * @return True when explored (false without an albedo)
-	 */
-	bool IsGlobeCellExplored(const FIntPoint& AlbedoCell);
-
-	/**
-	 * Pure: build a planet's globe albedo (any thread): every cell's colour from the analytic surface at its centre.
-	 * @param Surface The planet's analytic surface
-	 * @param CellsPerEdge Cells along a face edge
-	 * @param MaterialPalette Colour per material id (256)
-	 * @param AltitudeMin Lowest terrain altitude over the datum (the depth shading)
-	 * @param AltitudeMax Highest (the elevation shading)
-	 * @return The albedo
-	 */
-	static TSharedPtr<FVoxelMapGlobeAlbedo> BuildGlobeAlbedo(const FVoxelFarFieldSurface& Surface, int32 CellsPerEdge,
-		const TArray<FColor>& MaterialPalette, float AltitudeMin, float AltitudeMax);
+	int32 GetPrefetchLevel() const { return PrefetchLevel; }
 
 	// --- Exploration ---
 
 	/**
-	 * Mark tiles in radius as explored and request generation for any not yet cached.
-	 * Call this from external code (character plugin) to drive predictive generation.
+	 * Mark the tiles in a radius explored (the minimap calls it for its area every refresh). Draws nothing: the views
+	 * ask for the images they show (RequestView).
 	 *
 	 * @param WorldPos Player or camera world position
 	 * @param Radius World-unit radius around the position to explore
 	 */
 	void RequestTilesInRadius(const FVector& WorldPos, float Radius);
 
-	/** Check if a tile has been explored. */
+	/** Check if a level-0 tile has been explored (one lookup in the explored mask). */
 	bool IsTileExplored(FIntPoint TileCoord) const;
+
+	/**
+	 * The exploration (MAP_PYRAMID_PLAN.md P2): a mask over level-0 tiles by face, (Face, U, V) the cell of the cube-sphere
+	 * grid's face on a planet (TileToMaskTile), (0, X, Y) the chunk column on a heightmap world. A view reads its fog of war
+	 * from it per texel (FVoxelMapExploredMask::FReader::IsAnyExplored at the view's level).
+	 */
+	const FVoxelMapExploredMask& GetExploredMask() const { return ExploredMask; }
+
+	/**
+	 * A level-0 tile's place in the explored mask.
+	 * @param TileCoord The tile (a planet's atlas coordinate; a chunk column)
+	 * @param OutFace The face (0 on a heightmap world)
+	 * @param OutU The tile along the face (X on a heightmap world)
+	 * @param OutV The tile across it (Y)
+	 * @return False for a tile outside a planet's atlas
+	 */
+	bool TileToMaskTile(FIntPoint TileCoord, int32& OutFace, int32& OutU, int32& OutV) const;
+
+	/** @return The number of explored level-0 tiles */
+	int64 GetNumExploredTiles() const { return ExploredMask.Num(); }
+
+	/** A count bumped whenever a tile is newly explored: a view whose fog of war may have changed draws again. */
+	uint64 GetExplorationRevision() const { return ExplorationRevision; }
 
 	/**
 	 * Whether a tile holds any of the world: it overlaps the world mode's footprint (an island's R + falloff; every
@@ -200,32 +199,52 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
 	FVoxelWorldBounds GetWorldBounds() const { return CachedWorldBounds; }
 
-	/** Get all explored tile coords. */
-	const TSet<uint64>& GetExploredTiles() const { return ExploredTiles; }
+	/**
+	 * Every explored tile's coordinate (a planet's atlas coordinate; a chunk column). O(explored): tests and diagnostics.
+	 * @param OutTiles Receives the tiles (emptied first)
+	 */
+	void GetExploredTiles(TArray<FIntPoint>& OutTiles) const;
 
 	/**
-	 * The explored tiles as a compact blob for a save: zlib-compressed int32 (X, Y) pairs, base64-encoded. A string
-	 * keeps it JSON-safe (packed 64-bit keys would lose precision as JSON numbers) and small (neighbouring tiles
-	 * compress well).
-	 * @param OutCount Receives the number of tiles encoded (needed to decode)
-	 * @return The encoded tiles; empty when nothing is explored
+	 * The explored tiles as a compact blob for a save (MAP_PYRAMID_PLAN.md P2): the explored mask's blocks, full ones by
+	 * coordinate and partial ones by their bits (EncodeExploredMask), a few kilobytes for a whole explored planet. A string
+	 * keeps it JSON-safe.
+	 * @param OutCount Receives the number of tiles explored (at most MAX_int32; 0 when nothing is)
+	 * @return The encoded mask; empty when nothing is explored
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
 	FString ExportExploredTiles(int32& OutCount) const;
 
 	/**
-	 * Restore explored tiles saved by ExportExploredTiles and queue their map images. Merges into the current set:
-	 * exploration only grows, and tiles already explored this session (the spawn area streams in before a save
-	 * loads) stay explored.
+	 * Restore explored tiles saved by ExportExploredTiles: the mask's blob, or the coordinate pairs saves held before the
+	 * mask (EncodeTileCoords), converted. Queues no image: the views ask for what they show (MAP_PYRAMID_PLAN.md P1).
+	 * Merges into the current exploration: it only grows, and tiles already explored this session (the spawn area streams
+	 * in before a save loads) stay explored. Before the map has resolved its world the blob waits for it.
 	 * @param Encoded The blob from ExportExploredTiles
-	 * @param Count   The tile count ExportExploredTiles reported
-	 * @return Number of tiles restored (0 for an empty or malformed blob)
+	 * @param Count   The tile count ExportExploredTiles reported (the coordinate pairs need it to decode)
+	 * @return Number of tiles the blob holds (0 for an empty or malformed blob)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
 	int32 ImportExploredTiles(const FString& Encoded, int32 Count);
 
 	/**
-	 * Pure: encode tile coordinates (see ExportExploredTiles).
+	 * Pure: encode an explored mask (see ExportExploredTiles). Binary: magic 'VMXM' and the uncompressed size, then the
+	 * zlib-compressed FVoxelMapExploredMask::Save data; base64-encoded.
+	 * @param Mask The mask
+	 * @return The blob; empty for an empty mask or a compression failure
+	 */
+	static FString EncodeExploredMask(const FVoxelMapExploredMask& Mask);
+
+	/**
+	 * Pure: decode EncodeExploredMask output.
+	 * @param Encoded The blob
+	 * @param OutMask Receives the mask (its configuration too)
+	 * @return False when the blob is not a mask blob or is malformed (OutMask left empty)
+	 */
+	static bool DecodeExploredMask(const FString& Encoded, FVoxelMapExploredMask& OutMask);
+
+	/**
+	 * Pure: encode tile coordinates, the explored blob before the mask (ImportExploredTiles still reads it).
 	 * @param Tiles Tile coordinates to encode
 	 * @return Base64 of the zlib-compressed int32 (X, Y) pairs; empty for no tiles or a compression failure
 	 */
@@ -290,7 +309,8 @@ public:
 	static bool DecodeEditOverlays(const FString& Encoded, TArray<FVoxelMapTileOverlay>& OutOverlays);
 
 	/**
-	 * Redraw every explored tile, keeping the current images until the new ones land.
+	 * Redraw every tile image, keeping the current images until the new ones land: the tiles the views show are queued, the
+	 * rest marked stale and drawn again when a view asks for them.
 	 * @param bRebuildOverlays Also rebuild the edit overlay of every tile with edits (from loaded chunks)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Map")
@@ -298,14 +318,17 @@ public:
 
 	/**
 	 * One-line state summary for diagnostics (voxel.Map.Stats).
-	 * @return Cached / explored / queued tiles, overlays and their pending state
+	 * @return Cached / explored / queued tiles, the drawing counters since the last reset, overlays and their pending state
 	 */
 	FString GetDebugStats() const;
 
+	/** Restart the drawing counters GetDebugStats reports (voxel.Map.Stats reset; the map scaling plan's M0, G163). */
+	void ResetDebugStats();
+
 	/**
 	 * Debug (voxel.Map.Capture): write the explored tiles around a world position to a PNG, north up as the world map
-	 * draws them, with the position marked. Copies the cached tile pixels, so before/after comparisons need no UI
-	 * capture.
+	 * draws them, with the position marked. Copies the cached tile pixels, each level-0 pixel from the finest level stored
+	 * over it, so before/after comparisons need no UI capture.
 	 * @param Center            World position at the image centre
 	 * @param RadiusTiles       Tiles from the centre tile to each edge (0-64)
 	 * @param FilePath          Output .png path
@@ -363,8 +386,8 @@ public:
 
 	// --- Events ---
 
-	/** Fired on game thread when a tile finishes generating. */
-	DECLARE_MULTICAST_DELEGATE_OneParam(FOnMapTileReady, FIntPoint);
+	/** Fired on game thread when a tile's image (at any level) is stored. */
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnMapTileReady, const FVoxelMapTileId&);
 	FOnMapTileReady OnMapTileReady;
 
 protected:
@@ -383,16 +406,48 @@ private:
 	UFUNCTION()
 	void OnChunkGenerated(FIntVector ChunkCoord);
 
-	/** Terrain conditioning changed (POI pads registered after the first tiles): rebuild every tile image. */
-	void HandleTerrainConditioningChanged();
+	/**
+	 * Terrain conditioning changed (UVoxelChunkManager::OnTerrainConditioningChangedIn): the tile images the changed
+	 * region reaches are stale and drawn again; every image when it changed everywhere (a conditioner was set after the
+	 * first tiles), only the tiles a zone, a line or a conditioner's late line meets otherwise.
+	 */
+	void HandleTerrainConditioningChanged(const FVoxelConditioningRegion& Region);
+
+	/** Mark a level-0 tile explored (ExplorationRevision counts the new ones). */
+	void MarkExplored(FIntPoint TileCoord);
+
+	/** Apply an explored blob to the mask (the world resolved). @return Tiles the blob holds, -1 when malformed */
+	int32 ApplyExploredBlob(const FString& Encoded, int32 Count);
+
+	/** On a planet: ask for the top levels' tiles and pin them (GetPrefetchLevel), when the map resolves its world. */
+	void PrefetchTopLevels();
 
 	/**
-	 * Queue a tile for background generation and start what the concurrency cap allows.
-	 * @param TileCoord   Tile coordinate
-	 * @param bInvalidate The tile's current image is stale: a drawing already running is discarded and redone
-	 * @param bPriority   Draw before the backlog (edit refreshes)
+	 * A tile's image is stale (an edit or the terrain conditioning changed under it): a drawing running is discarded, the
+	 * stored image stays on screen marked stale, and the tile is queued again for each view that shows it.
+	 * @param Id The tile
+	 * @return True if the tile had an image or a drawing
 	 */
-	void QueueTileGeneration(FIntPoint TileCoord, bool bInvalidate = false, bool bPriority = false);
+	bool InvalidateTile(const FVoxelMapTileId& Id);
+
+	/** InvalidateTile for the coarser tiles over a level-0 tile (its edit overlay changed: their pixels read it). */
+	void InvalidateAncestors(FIntPoint Tile0);
+
+	/** Mark every stored image stale and queue again the ones the views show (RedrawAllTiles, a conditioning change). */
+	int32 InvalidateAllTiles();
+
+	/**
+	 * InvalidateAllTiles for the tiles a change of conditioning reaches (FVoxelMapTileFrame::MeetsConditioningRegion).
+	 * @param Region Where the conditioning changed
+	 * @return How many tiles were made stale
+	 */
+	int32 InvalidateTilesIn(const FVoxelConditioningRegion& Region);
+
+	/**
+	 * The colour of a level-0 pixel from the finest level stored over it (voxel.Map.Capture).
+	 * @return False when no level holds it
+	 */
+	bool SampleStoredPixel(FIntPoint Tile0, int32 PX, int32 PY, FColor& OutColor) const;
 
 	/** Start waiting tiles up to MaxConcurrentTileGenTasks. */
 	void LaunchWaitingTiles();
@@ -400,10 +455,10 @@ private:
 	/**
 	 * Launch a tile drawing (the queue already marked it drawing). Captures inputs on the game thread, draws on a
 	 * background thread, stores the result back on the game thread.
-	 * @param TileCoord  Tile coordinate
+	 * @param Id         The tile, at any level
 	 * @param Generation The tile's queue generation at start (a mismatch at completion discards the result)
 	 */
-	void GenerateTileAsync(FIntPoint TileCoord, uint32 Generation);
+	void GenerateTileAsync(const FVoxelMapTileId& Id, uint32 Generation);
 
 	/** Resolve the chunk manager and cache configuration. Returns true if ready. */
 	bool ResolveChunkManager();
@@ -448,7 +503,7 @@ private:
 	 * Game thread: store a finished drawing (either world kind), unless it went stale or the subsystem is shutting down;
 	 * then start the waiting tiles.
 	 */
-	void FinishTileDrawing(FIntPoint TileCoord, TArray<FColor>&& PixelData, int32 Resolution, uint32 Generation, bool bRebuild,
+	void FinishTileDrawing(const FVoxelMapTileId& Id, TArray<FColor>&& PixelData, int32 Resolution, uint32 Generation, bool bRebuild,
 		const TSharedPtr<const FVoxelMapEditOverlay>& Overlay, bool bOverlayPending, float AnalyticMin, float AnalyticMax);
 
 	/** The tile a step away: TileCoord + (DX, DY) on a plane; the grid's neighbour (across a face edge too) on a planet. */
@@ -502,21 +557,32 @@ private:
 	 */
 	FVoxelMapTileFrame TileFrame;
 
-	// Tile storage: images under the budgets (WM-E2), and the exploration set (never evicted; saved)
+	// Tile storage: images of every level under one budget (MAP_PYRAMID_PLAN.md P1), and the exploration (level-0 tiles,
+	// never evicted; saved; P2)
 	FVoxelMapTileStore TileStore;
-	TSet<uint64> ExploredTiles;
+	FVoxelMapExploredMask ExploredMask;
 
-	/** Tiles whose queued drawing should keep its detail image (the minimap's area, a zoomed-in world map) */
-	TSet<uint64> DetailWanted;
+	/** Explored blobs imported before the map resolved its world (the mask's faces come from the world): applied then. */
+	TArray<TPair<FString, int32>> PendingExploredBlobs;
 
-	/** Which tiles wait for a (re)draw, which are drawing, and per-tile generations (game thread). */
+	/** The finest prefetched level (GetPrefetchLevel), INDEX_NONE without. */
+	int32 PrefetchLevel = INDEX_NONE;
+
+	/** Bumped when a tile is newly explored (GetExplorationRevision). */
+	uint64 ExplorationRevision = 0;
+
+	/** Which tiles wait for a (re)draw, by requester, which are drawing, and per-tile generations (game thread). */
 	FVoxelMapTileQueue TileQueue;
 
-	/** Binding on the chunk manager's OnTerrainConditioningChanged. */
+	/** What each view shows, as it last asked (RequestView): an invalidated tile in a view is queued again for it. */
+	TSet<FVoxelMapTileId> ViewTiles[static_cast<int32>(EVoxelMapRequester::Num)];
+
+	/** Binding on the chunk manager's OnTerrainConditioningChangedIn. */
 	FDelegateHandle ConditioningChangedHandle;
 
-	/** Explored tiles were imported before the map could resolve its world: queue their images once it can. */
-	bool bGenerateExploredWhenReady = false;
+	/** Binding on the chunk manager's OnWaterBodiesChanged (the same handler: the tiles the region meets draw again). */
+	FDelegateHandle WaterBodiesChangedHandle;
+
 	FCriticalSection TileMutex;		// Guards TileStore writes (made on the game thread when a drawing completes)
 
 	/** Max concurrent async tile generation tasks. */
@@ -548,14 +614,28 @@ private:
 	/** One-shot coalescing timer for FlushOverlayRefresh. */
 	FTimerHandle OverlayRefreshTimer;
 
-	// --- Planets (WM-SY8) ---
-
-	/** The globe albedo (GetGlobeAlbedo), whether its build is in flight, and the albedo cells holding an explored tile. */
-	TSharedPtr<const FVoxelMapGlobeAlbedo> GlobeAlbedo;
-	bool bGlobeAlbedoBuilding = false;
-	TSet<uint64> GlobeExploredCells;
-	int32 GlobeExploredFromCount = -1;
-	double GlobeExploredRefreshedSeconds = 0.0;
+	/**
+	 * Drawing counters since the last ResetDebugStats (voxel.Map.Stats; the map scaling plan's M0, G163): how fast tiles
+	 * draw, how many drawings replaced an image the store still held, and how many images a view asked for.
+	 */
+	struct FDrawStats
+	{
+		/** Drawings stored. */
+		int64 Drawn = 0;
+		/** Of those, drawings of a tile the store already held (an invalidation). */
+		int64 Replaced = 0;
+		/** Tiles the views' requests queued (RequestView). */
+		int64 ImageRequests = 0;
+		/** Tile images a change of terrain conditioning made stale (HandleTerrainConditioningChanged). */
+		int64 ConditioningStale = 0;
+		/** The most tiles waiting at once. */
+		int32 WaitingPeak = 0;
+		/** Worker seconds spent drawing the stored tiles. */
+		double DrawSeconds = 0.0;
+		/** FPlatformTime::Seconds() at the last reset. */
+		double SinceSeconds = 0.0;
+	};
+	FDrawStats DrawStats;
 
 	/** GFrameCounter of the last overlay gather: LaunchWaitingTiles starts at most one rebuild per frame. */
 	uint64 LastOverlayGatherFrame = MAX_uint64;

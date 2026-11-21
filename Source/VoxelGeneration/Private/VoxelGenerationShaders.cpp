@@ -11,3 +11,7 @@ IMPLEMENT_GLOBAL_SHADER(FVoxelUndergroundApplyCS, "/Plugin/VoxelWorlds/Private/V
 IMPLEMENT_GLOBAL_SHADER(FVoxelWaterFloodSweepRadialCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "WaterFloodSweepRadialCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FVoxelWaterLineSeedCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "WaterLineSeedCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FVoxelUndergroundLinesCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "UndergroundLinesCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FVoxelWaterColumnSeedColumnsCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "WaterColumnSeedColumnsCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FVoxelWaterFloodSweepColumnsCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "WaterFloodSweepColumnsCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FVoxelWaterLineSeedColumnsCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "WaterLineSeedColumnsCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FVoxelWaterFloodSweepRadialColumnsCS, "/Plugin/VoxelWorlds/Private/VoxelPostPasses.usf", "WaterFloodSweepRadialColumnsCS", SF_Compute);

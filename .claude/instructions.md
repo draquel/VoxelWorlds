@@ -22,8 +22,8 @@ section true on its date); the Features docs are the current truth.
 
 | Module | What it holds |
 |--------|---------------|
-| `VoxelCore` | Voxel and chunk types, the world configuration and `UVoxelWorldsSettings`, material and biome registries, the edit manager, the sea surface, cube-sphere and render-region math; no dependency on another voxel module |
-| `VoxelGeneration` | CPU and GPU generation, the noise (`FVoxelNoise`), world modes behind `IVoxelWorldMode` and `FVoxelWorldModeFactory`, surface queries, conditioning zones, the tree injector |
+| `VoxelCore` | Voxel and chunk types, the world configuration and `UVoxelWorldsSettings`, material and biome registries, the edit manager, the sea surface and the water levels, cube-sphere and render-region math; no dependency on another voxel module |
+| `VoxelGeneration` | CPU and GPU generation, the noise (`FVoxelNoise`), world modes behind `IVoxelWorldMode` and `FVoxelWorldModeFactory`, surface queries, conditioning zones and lines, the tree injector, the hydrology generator (`FVoxelHydrology`) |
 | `VoxelLOD` | `IVoxelLODStrategy` and `FDistanceBandLODStrategy`: the voxel window, bands, horizons, the cut-over |
 | `VoxelMeshing` | `IVoxelMesher`: the CPU cubic, Marching Cubes and Dual Contouring meshers (chunk meshes and seams), the water mesher |
 | `VoxelRendering` | `IVoxelMeshRenderer` and `FVoxelMeshRenderer`: a `UVoxelRegionComponent` per render region, `FVoxelSceneProxy`, the crossfades |
@@ -52,11 +52,45 @@ section true on its date); the Features docs are the current truth.
   a compressed chunk on the game thread.
 - **World modes through `IVoxelWorldMode`.** Build modes and their params only through `FVoxelWorldModeFactory`; game code
   reaches bounds, local up, altitude and the surface coordinate through the chunk manager (`Voxel|World` functions).
-  Never assume +Z is up or compare a Z with `WaterLevel`: the sea is `FVoxelSeaSurface` (`UVoxelChunkManager::GetSeaSurface`).
+  Never assume +Z is up or compare a Z with `WaterLevel`: water is read through the world's water levels, which hold
+  the sea, the lakes and the river reaches: `UVoxelChunkManager::SampleWater` at a position,
+  `GatherWaterLevels` over the bounds a reader works on (then `Sample` and `GetRange` on that snapshot),
+  `IsVoxelUnderWater` for a voxel of a chunk as generation's fill tests it (the chunk's water columns,
+  `FVoxelChunkWaterColumns`: a level per column, per down-line on a planet), and
+  `GetWaterLevels` only for what means the sea itself (`GetSea` for geometry drawn at it). Never copy the sea's
+  snapshot for a reader of "the water here": a lake stands over it. `FVoxelWaterLevels::FromConfig` is the only reader
+  of the configuration's `WaterLevel` and `WaterRadius` (WATER_SYSTEM.md, "The water levels", "Lakes and river
+  reaches"). What draws water is split the same way: the tiles, the far field's sea, the far ocean and the shell
+  draw the sea alone, and a lake or a river reach is drawn by its own mesh from its record (`FVoxelWaterBodyMesh`,
+  the chunk manager's `FVoxelWaterBodyMeshOwner`); a new kind of body is drawn there, not by teaching the sea's
+  drawing a second level.
 - **The surface ladder.** `UVoxelChunkManager::QuerySurfacePoint` with `EVoxelSurfaceLayer`: `Natural` (the world
-  mode's), `Generated` (zones applied, block tops on a cubic world; `GetGeneratedSurfacePoint`) or `EditMerged`
+  mode's), `Generated` (conditioning lines and zones applied, block tops on a cubic world; `GetGeneratedSurfacePoint`) or `EditMerged`
   (the loaded voxels; `QueryEditMergedSurfacePoint`). Pick the rung you mean; `GetTerrainHeightAt` is a heightmap's
   natural height and degrades on a planet.
+- **Conditioning and water bodies register at the world's start.** A chunk generates with the conditioning (zones,
+  lines, the conditioners' own) and the water bodies its request gathered, once. Whatever supplies either registers
+  before the chunk manager's first tick, on `UVoxelChunkManager::OnInitialized` (fired at the end of `Initialize`), as
+  `UVoxelTerrainLineComponent`, the hand-placed river and lake (`UVoxelRiverComponent`, `UVoxelLakeComponent`: a
+  river's bed and its river reach from one spline, a lake from a closed one; WATER_SYSTEM.md, "The river and the lake
+  placed by hand") and the game's POI conditioner do (`AddTerrainConditioner`: a world may have several;
+  `AddWaterBody`, `AddWaterBodySource`); a source registered after a request was built is warned about and counted
+  (`GetNumLateConditioningSources`, G187). A test adds its zones, lines and bodies before it sets a viewer.
+- **Generated hydrology is a setting per world.** A configuration that names a `UVoxelHydrologyConfiguration` has
+  ponds and brooks generated from its seed (`FVoxelHydrology`, pure; `FVoxelHydrologyNetwork`, the chunk manager's,
+  registered as a water body source and a conditioner before `OnInitialized` fires; WATER_SYSTEM.md, "Ponds and
+  brooks from the seed"). The generator reads the natural ground alone and must give the same bodies from any region:
+  a descent's way on from a cell is the cell's alone, a lake is its pit's, a river system its mouth's. A change to
+  what the same settings generate raises `FVoxelHydrology::Version` (the fingerprint's term), never the generation
+  version: a world that names none must generate what it did. A reader that asks for every body of many places (the
+  POI layer's placement) asks `HoldsWaterBodies` first when its own caller takes what is at hand, and works the
+  bodies out ahead on the network's worker (`WarmUp`), never inside a far-field or a map gather. It works in every
+  world mode: a region is a box on a heightmap world and a cap on a planet (`FVoxelConditioningRegion`; the gathers,
+  the warm-up and `HoldsWaterBodiesOnSphere` take caps), a planet's cells are a cube sphere's and their neighbours
+  come from `FVoxelCubeSphereGrid::GetAdjacentCell` (the same from both sides of a face's edge: never `Neighbour`
+  for a walk that must find the same cells from any face), and on a planet nothing that runs per frame may list the
+  bodies of a wide cap (a 50 km planet holds thousands near a viewer): ask the range the tiles keep
+  (`GetLevelRangeAtHandOnSphere`) or a small cap.
 - **Precision.** Planets are precise to about 1,000 km and heightmaps to the double range of a position: never hold a
   value of size R in float (altitudes in double on the CPU, the chunk's frame on the GPU, `PlanetFrame.ush`); primitives
   sit at their render region's origin (`FVoxelRenderRegions`) and store float offsets from it.

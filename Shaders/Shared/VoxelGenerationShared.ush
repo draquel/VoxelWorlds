@@ -97,6 +97,34 @@
 // Smoothstep at a voxel's offset 0..3 in its 4-voxel lattice cell, in 32nds: 3t^2 - 2t^3 at t = 0, 1/4, 1/2, 3/4.
 #define VOXELGEN_BLEND_DITHER_FAR_WEIGHT { 0u, 5u, 16u, 27u }
 
+// ==================== Climate equalisation (FVoxelBiomeSnapshot::EqualizeField, ClimateShaping.ush) ====================
+
+// The 2-octave climate field's CDF (FVoxelNoise::MakeFieldParams: Simplex, persistence 0.5, lacunarity 2) at
+// VOXELGEN_CLIMATE_CDF_COUNT values evenly spaced over [-1, 1]: Cdf[i] = P(field < -1 + 2 i / (COUNT - 1)). Measured by
+// VoxelWorlds.Biome.ClimateEqualize.Table, which prints the table when it drifts from this one; the equalised value is
+// 2 Cdf(v) - 1, linear between entries.
+#define VOXELGEN_CLIMATE_CDF_COUNT 129
+#define VOXELGEN_CLIMATE_CDF { \
+	0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000004f, 0.000025f, 0.000065f, 0.000116f, \
+	0.000196f, 0.000314f, 0.000507f, 0.000781f, 0.001149f, 0.001616f, 0.002204f, 0.002971f, \
+	0.003902f, 0.005047f, 0.006469f, 0.008155f, 0.010060f, 0.012221f, 0.014730f, 0.017617f, \
+	0.020858f, 0.024472f, 0.028381f, 0.032686f, 0.037371f, 0.042557f, 0.048089f, 0.054005f, \
+	0.060308f, 0.066977f, 0.074123f, 0.081773f, 0.089966f, 0.098607f, 0.107873f, 0.117666f, \
+	0.127942f, 0.138757f, 0.150055f, 0.161883f, 0.174208f, 0.187024f, 0.200431f, 0.214419f, \
+	0.228828f, 0.243640f, 0.258843f, 0.274493f, 0.290497f, 0.306810f, 0.323392f, 0.340173f, \
+	0.357231f, 0.374516f, 0.391994f, 0.409766f, 0.427694f, 0.445764f, 0.463776f, 0.481956f, \
+	0.500491f, 0.519121f, 0.537445f, 0.555545f, 0.573508f, 0.591309f, 0.609061f, 0.626453f, \
+	0.643677f, 0.660712f, 0.677436f, 0.694048f, 0.710340f, 0.726305f, 0.741878f, 0.757022f, \
+	0.771798f, 0.786195f, 0.800083f, 0.813393f, 0.826211f, 0.838553f, 0.850292f, 0.861608f, \
+	0.872392f, 0.882646f, 0.892322f, 0.901579f, 0.910281f, 0.918420f, 0.926019f, 0.933092f, \
+	0.939753f, 0.945998f, 0.951896f, 0.957432f, 0.962575f, 0.967300f, 0.971637f, 0.975574f, \
+	0.979170f, 0.982461f, 0.985337f, 0.987843f, 0.989989f, 0.991897f, 0.993553f, 0.994955f, \
+	0.996109f, 0.997038f, 0.997772f, 0.998363f, 0.998830f, 0.999191f, 0.999475f, 0.999669f, \
+	0.999788f, 0.999871f, 0.999928f, 0.999972f, 0.999995f, 1.000000f, 1.000000f, 1.000000f, \
+	1.000000f \
+}
+
+
 // ==================== The Simplex kernel (FVoxelNoise, VoxelNoise.ush) ====================
 
 // The twelve gradient vectors; V(x, y, z) is each side's vector constructor.

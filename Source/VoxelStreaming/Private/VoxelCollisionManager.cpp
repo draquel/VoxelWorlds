@@ -95,6 +95,14 @@ UVoxelCollisionComponent::UVoxelCollisionComponent(const FObjectInitializer& Obj
 	bCastDynamicShadow = false;
 	SetCanEverAffectNavigation(false);
 
+	// Static: a chunk's collision is placed once, before it is registered, and replaced (never moved) when its chunk is
+	// re-cooked. To the engine a Movable component is a dynamic movement base (MovementBaseUtility::IsDynamicBase): a
+	// character standing on one sends and receives its position relative to that base, and this component is made on
+	// each machine on its own (the container actor is not replicated), so neither side can resolve the other's. A client
+	// then dropped every server correction and a dedicated server corrected every move of a client on terrain (G215).
+	// With a static base both send world positions and a correction needs no base.
+	Mobility = EComponentMobility::Static;
+
 	// Use the standard "BlockAll" collision profile (WorldStatic, blocks all channels).
 	// This ensures proper physics filter data for character movement sweeps (ECC_Pawn),
 	// line traces (ECC_WorldStatic, ECC_Visibility), and camera collision (ECC_Camera).
@@ -174,8 +182,10 @@ void UVoxelCollisionManager::Initialize(UVoxelWorldConfiguration* Config, UVoxel
 		return;
 	}
 
-	// Add a root component to the container
+	// Add a root component to the container. Static, as the chunk components under it are: the engine refuses to attach a
+	// static component to a parent that is not (the container stays at the world's zero for its whole life).
 	USceneComponent* RootComponent = NewObject<USceneComponent>(CollisionContainerActor, TEXT("RootComponent"));
+	RootComponent->SetMobility(EComponentMobility::Static);
 	CollisionContainerActor->SetRootComponent(RootComponent);
 	RootComponent->RegisterComponent();
 
@@ -198,6 +208,8 @@ void UVoxelCollisionManager::Initialize(UVoxelWorldConfiguration* Config, UVoxel
 	// Reset cached state
 	LastViewerPosition = FVector(FLT_MAX);
 	bPendingInitialUpdate = true;
+	FurtherFoci.Reset();
+	LastSweepFurtherFoci.Reset();
 
 	// Reset statistics
 	TotalCollisionsGenerated = 0;
@@ -225,6 +237,8 @@ void UVoxelCollisionManager::Shutdown()
 	CookingQueueSet.Empty();
 	AsyncCollisionInProgress.Empty();
 	PendingNeighborRecooks.Empty();
+	FurtherFoci.Reset();
+	LastSweepFurtherFoci.Reset();
 
 	// Drain completed queue (results may still be arriving)
 	{
@@ -316,11 +330,24 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 	SecondsSinceDecisions += DeltaTime;
 	const float ResweepSeconds = VoxelSettings::Resolve(CVarCollisionResweepSeconds, UVoxelWorldsSettings::Get().CollisionResweepSeconds);
 	const bool bPeriodicResweep = ResweepSeconds > 0.0f && SecondsSinceDecisions >= ResweepSeconds;
-	if (DistanceMoved > MoveThreshold || LastViewerPosition.X == FLT_MAX || bPendingInitialUpdate || bStartedMoving || bPeriodicResweep)
+	// The further foci (G217: a server's other players): one that came, left or moved past the threshold since the last
+	// sweep sweeps again, as the first focus's move does.
+	bool bFurtherFociChanged = FurtherFoci.Num() != LastSweepFurtherFoci.Num();
+	for (int32 Index = 0; Index < FurtherFoci.Num() && !bFurtherFociChanged; ++Index)
+	{
+		bFurtherFociChanged = FVector::Dist(FurtherFoci[Index].Position, LastSweepFurtherFoci[Index]) > MoveThreshold;
+	}
+	if (DistanceMoved > MoveThreshold || LastViewerPosition.X == FLT_MAX || bPendingInitialUpdate || bStartedMoving || bPeriodicResweep
+		|| bFurtherFociChanged)
 	{
 		UpdateCollisionDecisions(FocusPosition);
 		LastViewerPosition = FocusPosition;
 		SecondsSinceDecisions = 0.0f;
+		LastSweepFurtherFoci.Reset(FurtherFoci.Num());
+		for (const FVoxelCollisionFocus& Focus : FurtherFoci)
+		{
+			LastSweepFurtherFoci.Add(Focus.Position);
+		}
 
 		// Once we've queued or generated any collision, initial load is complete
 		if (bPendingInitialUpdate && (CookingQueue.Num() > 0 || AsyncCollisionInProgress.Num() > 0 || CollisionData.Num() > 0))
@@ -339,6 +366,11 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 	// descending chunk's center is far below, so distance-priority deprioritizes it until the pawn is
 	// already dropping in). This closes the residual sustained-traversal / downhill fall-through.
 	ForcePathCoverage(FocusPosition, FocusVelocity);
+	// ... and under every further focus (G217), whose velocity is its pawn's.
+	for (const FVoxelCollisionFocus& Focus : FurtherFoci)
+	{
+		ForcePathCoverage(Focus.Position, Focus.Velocity);
+	}
 
 	// 3. Process dirty chunks (from edits, and neighbours that arrived after a cook: G32) — just queues requests, lightweight
 	ProcessNeighborRecooks();
@@ -361,6 +393,25 @@ FVector UVoxelCollisionManager::ResolveFocusPosition(const FVector& FallbackView
 		}
 	}
 	return FallbackViewerPosition;
+}
+
+float UVoxelCollisionManager::GetFocusRadius(const FVector& Velocity) const
+{
+	// The first focus's rule (Update): the base plus the lead of the horizontal speed, never under the configured radius.
+	const float ConfiguredBase = CVarCollisionBaseRadius.GetValueOnGameThread();
+	const float Base = ConfiguredBase > 0.0f ? ConfiguredBase : CollisionRadius;
+	const float Speed = static_cast<float>(FVector2D(Velocity.X, Velocity.Y).Size());
+	return FMath::Max(Base + Speed * VoxelSettings::Resolve(CVarCollisionLeadSeconds, UVoxelWorldsSettings::Get().CollisionLeadSeconds), CollisionRadius);
+}
+
+float UVoxelCollisionManager::GetNearestFocusDistance(const FVector& Point, const FVector& FirstFocus) const
+{
+	float Distance = FVector::Dist(Point, FirstFocus);
+	for (const FVoxelCollisionFocus& Focus : FurtherFoci)
+	{
+		Distance = FMath::Min(Distance, static_cast<float>(FVector::Dist(Point, Focus.Position)));
+	}
+	return Distance;
 }
 
 void UVoxelCollisionManager::ForcePathCoverage(const FVector& FocusPosition, const FVector& FocusVelocity)
@@ -465,7 +516,7 @@ void UVoxelCollisionManager::ProcessDirtyChunks(const FVector& ViewerPosition)
 			const FVector ChunkCenter = Configuration->WorldOrigin
 				+ FVector(Data.ChunkCoord) * ChunkWorldSize
 				+ FVector(ChunkWorldSize * 0.5f);
-			const float Distance = FVector::Dist(ChunkCenter, ViewerPosition);
+			const float Distance = GetNearestFocusDistance(ChunkCenter, ViewerPosition);
 			const float Priority = GetDirtyPriority(Data, Distance);
 
 			// Request regeneration
@@ -932,6 +983,13 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 	const float EffectiveRadius = FMath::Max(CurrentEffectiveRadius, CollisionRadius);
 	const float CollisionRadiusSq = EffectiveRadius * EffectiveRadius;
 
+	// The further foci's shells (G217): each its own radius, by its own speed.
+	TArray<float, TInlineAllocator<8>> FurtherRadiusSq;
+	for (const FVoxelCollisionFocus& Focus : FurtherFoci)
+	{
+		FurtherRadiusSq.Add(FMath::Square(GetFocusRadius(Focus.Velocity)));
+	}
+
 	// Find chunks that need collision loaded
 	TSet<FIntVector> ChunksNeedingCollision;
 
@@ -951,6 +1009,16 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 		if (DistanceSq <= CollisionRadiusSq)
 		{
 			ChunksNeedingCollision.Add(ChunkCoord);
+			continue;
+		}
+		// Within a further focus's shell (G217).
+		for (int32 Index = 0; Index < FurtherFoci.Num(); ++Index)
+		{
+			if (FVector::DistSquared(ChunkCenter, FurtherFoci[Index].Position) <= FurtherRadiusSq[Index])
+			{
+				ChunksNeedingCollision.Add(ChunkCoord);
+				break;
+			}
 		}
 	}
 
@@ -965,8 +1033,8 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 			const FVector ChunkCenter = Configuration->WorldOrigin
 				+ FVector(ChunkCoord) * ChunkWorldSize
 				+ FVector(ChunkWorldSize * 0.5f);
-			const float Distance = FVector::Dist(ChunkCenter, ViewerPosition);
-			const float Priority = CollisionRadius - Distance; // Closer = higher priority
+			const float Distance = GetNearestFocusDistance(ChunkCenter, ViewerPosition);
+			const float Priority = CollisionRadius - Distance; // Closer (to the nearest focus) = higher priority
 
 			RequestCollision(ChunkCoord, Priority);
 		}
@@ -976,7 +1044,7 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 			const FVector ChunkCenter = Configuration->WorldOrigin
 				+ FVector(ChunkCoord) * ChunkWorldSize
 				+ FVector(ChunkWorldSize * 0.5f);
-			const float Distance = FVector::Dist(ChunkCenter, ViewerPosition);
+			const float Distance = GetNearestFocusDistance(ChunkCenter, ViewerPosition);
 			const float Priority = GetDirtyPriority(*Data, Distance);
 
 			RequestCollision(ChunkCoord, Priority);
@@ -1177,8 +1245,8 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 				ChaosVertices.Add(Chaos::TVec3<Chaos::FRealSingle>(V.X, V.Y, V.Z));
 			}
 
-			// Render winding -> physics winding (see BuildPhysicsTriangles).
-			BuildPhysicsTriangles(Indices, ChaosTriangles);
+			// Render winding -> physics winding, without the triangles of no area (see BuildPhysicsTriangles).
+			BuildPhysicsTriangles(Indices, Vertices, ChaosTriangles);
 
 			// Create the Chaos trimesh implicit object (thread-safe — pure data construction)
 			TRefCountPtr<Chaos::FTriangleMeshImplicitObject> TriMesh = new Chaos::FTriangleMeshImplicitObject(
@@ -1262,6 +1330,27 @@ void UVoxelCollisionManager::BuildPhysicsTriangles(const TArray<uint32>& RenderI
 			static_cast<int32>(RenderIndices[i * 3 + 0]),
 			static_cast<int32>(RenderIndices[i * 3 + 2])));
 	}
+}
+
+int32 UVoxelCollisionManager::BuildPhysicsTriangles(const TArray<uint32>& RenderIndices, const TArray<FVector3f>& Positions,
+	TArray<Chaos::TVector<int32, 3>>& OutTriangles)
+{
+	BuildPhysicsTriangles(RenderIndices, OutTriangles);
+
+	// A triangle with no area has no normal: the engine's cooker cleans such triangles out (the voxel trimesh skips the
+	// cooker), and a query that hits one reports a normal of no length, which the engine's hit check ensures on (G230).
+	// The meshers can emit one where two of a quad's vertices meet. Dropping it leaves no hole: it covers no ground.
+	const int32 Before = OutTriangles.Num();
+	OutTriangles.RemoveAllSwap([&Positions](const Chaos::TVector<int32, 3>& Tri)
+	{
+		if (!Positions.IsValidIndex(Tri[0]) || !Positions.IsValidIndex(Tri[1]) || !Positions.IsValidIndex(Tri[2]))
+		{
+			return true;
+		}
+		const FVector3f& A = Positions[Tri[0]];
+		return FVector3f::CrossProduct(Positions[Tri[1]] - A, Positions[Tri[2]] - A).SizeSquared() <= UE_SMALL_NUMBER;
+	}, EAllowShrinking::No);
+	return Before - OutTriangles.Num();
 }
 
 void UVoxelCollisionManager::ApplyEmptyCollisionResult(const FIntVector& ChunkCoord)
@@ -1552,6 +1641,7 @@ UPrimitiveComponent* UVoxelCollisionManager::CreateCollisionComponent(const FInt
 	const FBox ChunkLocalBounds(FVector::ZeroVector, FVector(ChunkWorldSize));
 	CollisionComp->SetCollisionBodySetup(BodySetup, ChunkLocalBounds);
 
+	// Placed before it is registered: the component is static (see its constructor) and is never moved afterwards.
 	CollisionComp->SetupAttachment(CollisionContainerActor->GetRootComponent());
 	CollisionComp->SetWorldLocation(ChunkWorldPos);
 
@@ -1574,22 +1664,9 @@ UPrimitiveComponent* UVoxelCollisionManager::CreateCollisionComponent(const FInt
 		CollisionComp->BodyInstance.IsValidBodyInstance() ? TEXT("Yes") : TEXT("NO"),
 		BodySetup->TriMeshGeometries.Num());
 
-	// Verification trace: confirm the collision component responds to line traces.
-	// Traces downward through the center of the chunk — should hit terrain if any surface exists.
-	if (CachedWorld)
-	{
-		const FVector TraceStart = ChunkWorldPos + FVector(ChunkWorldSize * 0.5f, ChunkWorldSize * 0.5f, ChunkWorldSize + 100.f);
-		const FVector TraceEnd = ChunkWorldPos + FVector(ChunkWorldSize * 0.5f, ChunkWorldSize * 0.5f, -100.f);
-		FHitResult VerifyHit;
-		const bool bVerifyHit = CachedWorld->LineTraceSingleByChannel(VerifyHit, TraceStart, TraceEnd, ECC_WorldStatic);
-		UE_LOG(LogVoxelCollision, Log,
-			TEXT("  Verification trace for chunk (%d,%d,%d): %s%s"),
-			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z,
-			bVerifyHit ? TEXT("HIT") : TEXT("MISS"),
-			bVerifyHit ? *FString::Printf(TEXT(" at Z=%.0f comp=%s"), VerifyHit.ImpactPoint.Z,
-				VerifyHit.GetComponent() ? *VerifyHit.GetComponent()->GetName() : TEXT("null")) : TEXT(""));
-	}
-
+	// No trace through the new body here: the check from the collision's first days traced down the chunk's middle for
+	// every component it made, and a hit with a normal of no length fired an engine ensure (G230). The collision tests
+	// trace the bodies they need.
 	return CollisionComp;
 }
 

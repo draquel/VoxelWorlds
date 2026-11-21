@@ -132,6 +132,33 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
 	int32 MoistureSeedOffset = 5678;
 
+	// ==================== Climate shaping ====================
+
+	/**
+	 * Remap temperature and moisture through the fields' fixed distribution (VOXELGEN_CLIMATE_CDF), so each is uniform
+	 * on [-1, 1]: a biome's box then covers its share of the world (a box of width 0.5 on one axis, a quarter). The raw
+	 * 2-octave fields cluster near 0, so without it a box near +-1 is nearly empty. Moves every biome border of a world
+	 * that turns it on.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Climate")
+	bool bEqualizeClimate = false;
+
+	/**
+	 * Planets: how far temperature leans toward latitude, 0 (the noise field alone) to 1 (latitude alone). The latitude
+	 * temperature is 1 at the equator and -1 at the poles, linear in sin(latitude), so it is uniform by area like an
+	 * equalised field. Ignored on heightmap worlds.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Climate", meta = (ClampMin = "0", ClampMax = "1"))
+	float TemperatureLatitudeWeight = 0.0f;
+
+	/**
+	 * Temperature lost per 10,000 uu (100 m) of terrain above the datum (world Z 0 on a heightmap, the datum radius on a
+	 * planet, as the height rules measure it), so high ground turns to the colder biomes. 0 = off. Applied after the
+	 * latitude blend; the result is clamped to [-1, 1] with the other axes.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Climate", meta = (ClampMin = "0", ClampMax = "10"))
+	float TemperatureLapseRate = 0.0f;
+
 	// ==================== Continentalness ====================
 
 	/**
@@ -153,6 +180,14 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (EditCondition = "bEnableContinentalness"))
 	int32 ContinentalnessSeedOffset = 9012;
+
+	/**
+	 * Remap continentalness through the fields' fixed distribution, uniform on [-1, 1], before the height curves and
+	 * the biome gate read it: a curve key at c then sits at the (c + 1) / 2 quantile of the land. Moves the coasts and
+	 * the heights of a world that turns it on.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continentalness", meta = (EditCondition = "bEnableContinentalness"))
+	bool bEqualizeContinentalness = false;
 
 	/**
 	 * Maps continentalness [-1,1] to height offset in world units.

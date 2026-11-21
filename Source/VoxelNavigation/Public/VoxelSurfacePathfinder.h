@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelSurfacePathfinder.generated.h"
 
 /** Tunables of the surface pathfinder (feature 10). Distances in world units. */
@@ -84,12 +84,20 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavParams
 	int32 PocketCells = 512;
 
 	/**
-	 * The world's sea (spherical SP-E1), set by UVoxelSurfaceNavigationSubsystem from the chunk manager
-	 * (UVoxelChunkManager::GetSeaSurface, the WaterLevel plane generation floods, G19): when enabled it decides
-	 * IsUnderwater instead of bHasWater / WaterLevel, so a planet's cells test the sphere of WaterRadius. Not exposed to
-	 * Blueprint.
+	 * The world's water levels (spherical SP-E1), set by UVoxelSurfaceNavigationSubsystem from the chunk manager
+	 * (UVoxelChunkManager::GetWaterLevels: the sea's plane generation floods, G19, or its sphere on a planet): with
+	 * water they decide IsUnderwater instead of bHasWater / WaterLevel, cell by cell. A sea converts (a search in a
+	 * frame of its own passes the sea in that frame). Not exposed to Blueprint.
 	 */
-	FVoxelSeaSurface Sea;
+	FVoxelWaterLevels Water;
+
+	/**
+	 * The water over a cell, asked of the world (UVoxelChunkManager::SampleWater), set by
+	 * UVoxelSurfaceNavigationSubsystem while the world holds a lake or a river reach: the level over the cell itself
+	 * decides IsUnderwater, in place of Water (the sea's, one level everywhere). X, Y and Height are in the frame the
+	 * search runs in (a planet's region frame converts them). Unset: Water. Game thread. Not exposed to Blueprint.
+	 */
+	TFunction<bool(double X, double Y, float Height, FVoxelWaterSample& Out)> WaterSampler;
 
 	/**
 	 * The world (X, Y) of a cell's centre.
@@ -116,8 +124,10 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavParams
 	}
 
 	/**
-	 * Whether a cell's surface is deeper under the water than a walker wades (MaxWadeDepth): by Sea when it is enabled,
-	 * else by bHasWater and WaterLevel. On a plane both are Height < WaterLevel - MaxWadeDepth.
+	 * Whether a cell's surface is deeper under the water than a walker wades (MaxWadeDepth): by the world's sample at
+	 * the cell when it is set (WaterSampler: the sea, a lake or a river reach over the cell), else by the water levels'
+	 * sample when they have water, else by bHasWater and WaterLevel. Where levels are world Z all three are
+	 * Height < level - MaxWadeDepth.
 	 *
 	 * @param X World X of the cell's centre
 	 * @param Y World Y of the cell's centre
@@ -126,11 +136,21 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavParams
 	 */
 	bool IsUnderwater(double X, double Y, float Height) const
 	{
-		if (Sea.bEnabled)
+		if (WaterSampler)
 		{
-			return Sea.bRadial
-				? Sea.GetDepth(FVector(X, Y, Height)) > MaxWadeDepth
-				: Height < static_cast<float>(Sea.PlaneZ) - MaxWadeDepth;
+			FVoxelWaterSample Over;
+			return WaterSampler(X, Y, Height, Over) && Over.Depth > MaxWadeDepth;
+		}
+		if (Water.HasWater())
+		{
+			FVoxelWaterSample Over;
+			if (!Water.Sample(FVector(X, Y, Height), Over))
+			{
+				return false;
+			}
+			return Water.IsRadial()
+				? Over.Depth > MaxWadeDepth
+				: Height < static_cast<float>(Over.SurfaceLevel) - MaxWadeDepth;
 		}
 		return bHasWater && Height < WaterLevel - MaxWadeDepth;
 	}
@@ -160,6 +180,11 @@ struct VOXELNAVIGATION_API FVoxelSurfacePathStats
  * MaxStepRise (× √2 on diagonals); its cost grows with the slope. Routes are string-pulled so the walker
  * gets a few waypoints, not one per cell.
  *
+ * An optional cost query makes some cells dear without closing them (the hydrology plan's H5: a trail between POIs
+ * crosses a river reach at a cost): entering such a cell adds its cost to the route's, so a route goes round the cells
+ * when the way round is cheaper and crosses them by the fewest cells when it is not. The string-pulling never
+ * straightens a route through a cell with a cost, so the cells a route pays for are the ones the search chose.
+ *
  * Each cell is sampled and judged walkable once per search and kept with the search's bookkeeping in FCellGrid; ties
  * in the open list go to the node nearer the goal; a search that runs long checks whether the goal is in a small pocket
  * it cannot reach (PocketCheckNodes) and stops there (G73).
@@ -176,8 +201,20 @@ public:
 	using FHeightSampler = TFunction<float(double X, double Y)>;
 	/** True when a cell may not be entered (structures, temporary blocks). Optional. */
 	using FBlockedQuery = TFunction<bool(const FIntPoint& Cell)>;
+	/**
+	 * What entering a cell costs on top of the step into it, in world units of route length (0 or less: nothing).
+	 * Optional; asked for each step considered, so it should be cheap or keep its own answers.
+	 */
+	using FCostQuery = TFunction<float(const FIntPoint& Cell)>;
 
-	FVoxelSurfacePathfinder(const FVoxelSurfaceNavParams& InParams, FHeightSampler InSampler, FBlockedQuery InBlocked = nullptr);
+	/**
+	 * @param InParams  The search's tunables
+	 * @param InSampler Surface Z at a world (X, Y)
+	 * @param InBlocked Cells that may not be entered (optional)
+	 * @param InCost    Cells that cost more to enter (optional; unset, a search is what it was without it)
+	 */
+	FVoxelSurfacePathfinder(const FVoxelSurfaceNavParams& InParams, FHeightSampler InSampler, FBlockedQuery InBlocked = nullptr,
+		FCostQuery InCost = nullptr);
 
 	const FVoxelSurfaceNavParams& GetParams() const { return Params; }
 
@@ -210,7 +247,10 @@ public:
 	/** Drop intermediate cells wherever the straight run between the kept cells is walkable. */
 	void SimplifyPath(TArray<FIntPoint>& Cells) const;
 
-	/** Every cell on the straight line between two cells is walkable and each step is within the rise limit. */
+	/**
+	 * Every cell on the straight line between two cells is walkable and each step is within the rise limit; with a
+	 * cost query, no cell on it past the first has a cost, nor a cell beside a diagonal step of it.
+	 */
 	bool IsStraightRunWalkable(const FIntPoint& From, const FIntPoint& To) const;
 
 	/** Forget sampled heights (a new search starts with an empty cache anyway). */
@@ -267,6 +307,7 @@ private:
 	FVoxelSurfaceNavParams Params;
 	FHeightSampler Sampler;
 	FBlockedQuery Blocked;
+	FCostQuery Cost;
 
 	mutable FCellGrid Cells;
 	mutable int32 SampleCount = 0;

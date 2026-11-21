@@ -6,6 +6,8 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 
+class UVoxelChunkManager;
+
 // What the console commands in this folder share.
 
 namespace VoxelEditAuditHelpers

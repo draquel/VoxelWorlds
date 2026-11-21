@@ -132,6 +132,12 @@ Its roof is then the window's fade, not the noise:
   `MinDepth - DepthFadeWidth / 2` voxels under the terrain everywhere, parallel to it (flat under flat ground). The
   floor lies `MaxDepth + DepthFadeWidth / 2` down.
 - Under the sea, `UnderwaterMinDepth` replaces `MinDepth` per column, so the roof steps down along the coast.
+- Under a conditioning line with a minimum cave depth (`FVoxelConditioningLineSurface::MinCaveDepth`; `WORLD_MODES.md`,
+  "The surface under a line") every layer's minimum depth is at least the line's on its core, easing back to the
+  layer's own across the line's falloff, so a road has no hole in it. It only deepens: applied after the biome
+  override and the underwater depth, as the larger of the two (`CalculateCaveDensity`'s `MinDepthUnderLines`, the
+  shader's `GpuCaveCarve`), on the CPU, the GPU and in the single-voxel reader (`FVoxelSurfaceQuery::GenerateVoxelAt`).
+  Test `VoxelWorlds.Generation.ConditioningLine.CaveUnderLine`.
 
 `VoxelDemo`'s cave configuration was such a layer until 2026-10-20 (Spaghetti at 0.5, depths 20 to 45): the flat
 ceilings 1,350 uu under the ground were its roof, not an artefact (G34).

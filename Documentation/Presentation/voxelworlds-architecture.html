@@ -214,7 +214,7 @@
     text-align: right;
   }
   .tier-label b { color: var(--ink-dim); font-weight: 600; letter-spacing: 0.06em; }
-  .tier-cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  .tier-cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(164px, 1fr)); }
 
   .mod {
     position: relative;
@@ -401,6 +401,45 @@
     .tier, .editor-rail { grid-template-columns: 1fr; }
     .tier-label { border-right: none; border-bottom: 1px dashed var(--border); text-align: left; padding: 0 0 6px; flex-direction: row; gap: 8px; align-items: baseline; }
   }
+
+  /* ---------- additions 2026-11-05 ---------- */
+  .badge.cpu { color: var(--rock); background: var(--rock-bg); border-color: color-mix(in srgb, var(--rock) 40%, transparent); }
+  .stage.seam { border-color: color-mix(in srgb, var(--ore) 45%, var(--border)); background: color-mix(in srgb, var(--ore-bg) 55%, var(--surface-2)); }
+  .stage .cpu-tag, .stage .seam-tag {
+    align-self: flex-start;
+    font-family: var(--f-mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    border-radius: 5px; padding: 2px 6px; border: 1px solid transparent;
+  }
+  .stage .cpu-tag { color: var(--rock); background: var(--rock-bg); border-color: color-mix(in srgb, var(--rock) 40%, transparent); }
+  .stage .seam-tag { color: var(--ore); background: var(--ore-bg); border-color: color-mix(in srgb, var(--ore) 40%, transparent); }
+  .edits-band {
+    margin-top: 14px;
+    display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline;
+    border: 1px solid var(--border); border-left: 3px solid var(--rock); border-radius: 10px;
+    background: var(--surface-2); padding: 12px 15px;
+  }
+  .edits-band .k { font-family: var(--f-mono); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--rock); }
+  .edits-band .v { font-size: 13px; color: var(--ink-dim); line-height: 1.5; flex: 1 1 320px; }
+  .edits-band code, .mod-role code, .stage-desc code { font-family: var(--f-mono); font-size: 0.92em; color: var(--ink); }
+
+  .beyond { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); align-items: start; }
+  .xsec svg { width: 100%; height: auto; display: block; }
+  .xsec .cap { margin: 10px 0 0; font-size: 13px; color: var(--ink-dim); line-height: 1.5; }
+  .xsec .cap b { color: var(--ink); }
+  .modes { display: flex; flex-direction: column; gap: 10px; }
+  .wm { background: var(--surface-2); border: 1px solid var(--border); border-left: 3px solid var(--cat, var(--grass)); border-radius: 10px; padding: 11px 14px; display: flex; flex-direction: column; gap: 3px; }
+  .wm .h { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; }
+  .wm .h b { font-size: 14.5px; font-weight: 700; letter-spacing: -0.01em; }
+  .wm .h span { font-family: var(--f-mono); font-size: 10.5px; color: var(--ink-faint); }
+  .wm p { margin: 0; font-size: 13px; color: var(--ink-dim); line-height: 1.45; }
+
+  .dec-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); }
+  .dec { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 17px; display: flex; flex-direction: column; gap: 8px; }
+  .dec .n { font-family: var(--f-mono); font-size: 12px; color: var(--grass); letter-spacing: 0.08em; }
+  .dec h3 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
+  .dec p { margin: 0; font-size: 13.5px; color: var(--ink-dim); line-height: 1.5; }
+  .dec code { font-family: var(--f-mono); font-size: 0.9em; color: var(--ink); }
+  .dec .was { margin-top: auto; font-family: var(--f-mono); font-size: 11px; color: var(--ink-faint); }
 </style>
 
 <div class="page">
@@ -415,15 +454,16 @@
       </svg>
       <span class="brand-name">VoxelWorlds</span>
     </div>
-    <p class="eyebrow">Engine architecture · Unreal Engine 5.8 · C++ + compute shaders</p>
+    <p class="eyebrow">Engine architecture · Unreal Engine 5.8 · C++ + compute shaders · state 2026-11-05</p>
     <h1>Eleven modules that turn noise into <span class="accent">worlds</span>.</h1>
-    <p class="lead">A GPU-driven voxel terrain engine — procedural generation, three meshing algorithms, watertight LOD streaming, and hybrid rendering. Every capability lives in a small module that does one job and cooperates with the rest through interfaces, never direct coupling.</p>
+    <p class="lead">A voxel terrain engine: generated on the GPU, meshed on CPU workers, streamed around the viewer with LOD, collision and compression, drawn by one renderer on UE's local vertex factory, and carried past the voxel window by an analytic far field, out to the horizon and up to orbit. Each module does one job and works with the others through interfaces, not direct coupling.</p>
     <div class="chips">
       <span class="chip"><b>11</b>&nbsp;modules</span>
-      <span class="chip"><b>3</b>&nbsp;meshers · CPU + GPU</span>
-      <span class="chip"><b>3</b>&nbsp;world modes</span>
-      <span class="chip">GPU-first pipeline</span>
-      <span class="chip">watertight LOD seams</span>
+      <span class="chip"><b>3</b>&nbsp;world modes · plane, island, planet</span>
+      <span class="chip"><b>3</b>&nbsp;meshers · cubic, MC, DC</span>
+      <span class="chip">watertight seams by ownership</span>
+      <span class="chip">far field to the horizon</span>
+      <span class="chip">planets to <b>~1,000 km</b></span>
     </div>
   </header>
 
@@ -432,27 +472,33 @@
     <div class="fig-head">
       <span class="fig-tag">Fig. A — Dependency layers</span>
       <h2>The module map</h2>
-      <p>Eleven modules stacked like terrain strata: each tier is built only on the ones beneath it, and dependency arrows never point upward. The stripe on every card marks its layer; <code style="font-family:var(--f-mono);color:var(--ore)">HUB</code> is the coordinator that wires the domain systems together.</p>
+      <p>Ten runtime modules and one editor module, stacked like terrain strata. Each tier builds only on the tiers beneath it, and no dependency points upward. The stripe on each card marks its layer. <code style="font-family:var(--f-mono);color:var(--ore)">HUB</code> marks the chunk manager, which wires the domain systems together; the clients find it in the world and read through its queries and events.</p>
     </div>
 
     <div class="plate">
       <div class="strata">
 
-        <!-- Tier: integration -->
+        <!-- Tier: clients -->
         <div class="tier">
-          <div class="tier-label"><b>Surface</b><span>integration</span></div>
+          <div class="tier-label"><b>Clients</b><span>read the world</span></div>
           <div class="tier-cards">
             <div class="mod" style="--cat:var(--water)">
-              <div class="mod-top"><span class="mod-name">VoxelWorlds</span></div>
-              <div class="mod-role">Plugin entry / thin integration facade over the runtime modules.</div>
-              <div class="badges"><span class="badge phase">Default</span></div>
-              <div class="mod-dep">← Core</div>
+              <div class="mod-top"><span class="mod-name">VoxelMap</span></div>
+              <div class="mod-role">Map and minimap tiles from the analytic height, under a memory budget; the globe on a planet; edit overlays.</div>
+              <div class="badges"><span class="badge phase">PostEngineInit</span></div>
+              <div class="mod-dep">← Core · Gen · Streaming</div>
+            </div>
+            <div class="mod" style="--cat:var(--water)">
+              <div class="mod-top"><span class="mod-name">VoxelNavigation</span></div>
+              <div class="mod-role">A* over the generated and edit-merged surface without a navmesh; for surface NPCs.</div>
+              <div class="badges"><span class="badge phase">PostEngineInit</span></div>
+              <div class="mod-dep">← Core · Gen · Streaming</div>
             </div>
             <div class="mod" style="--cat:var(--water)">
               <div class="mod-top"><span class="mod-name">VoxelPCG</span></div>
-              <div class="mod-role">Runtime PCG decoration — biome-driven scatter through UE's PCG graph.</div>
+              <div class="mod-role">Runtime PCG: a voxel surface sampler and a dispatcher that runs one graph per biome.</div>
               <div class="badges"><span class="badge phase">PostEngineInit</span></div>
-              <div class="mod-dep">← Gen · Streaming · Map · <span style="color:var(--water)">PCG</span></div>
+              <div class="mod-dep">← Core · Gen · Streaming · <span style="color:var(--water)">PCG</span></div>
             </div>
           </div>
         </div>
@@ -463,15 +509,9 @@
           <div class="tier-cards">
             <div class="mod hub" style="--cat:var(--ore)">
               <div class="mod-top"><span class="mod-name">VoxelStreaming</span></div>
-              <div class="mod-role">Chunk manager — the coordinator. Load/unload queues, async Chaos collision, water propagation, benchmarking.</div>
+              <div class="mod-role"><code>UVoxelChunkManager</code>, the hub. It owns the world mode and generator, the edit manager, collision, scatter, water propagation, the seam registry, the snapshot cache, the far field and the viewer policy. <code>AVoxelWorldActor</code> puts a world in a level, and the console diagnostics and streaming bench live here.</div>
               <div class="badges"><span class="badge hub">Hub</span><span class="badge phase">PostEngineInit</span></div>
-              <div class="mod-dep">← LOD · Rendering · Gen · Meshing · Scatter</div>
-            </div>
-            <div class="mod" style="--cat:var(--ore)">
-              <div class="mod-top"><span class="mod-name">VoxelMap</span></div>
-              <div class="mod-role">Map / minimap subsystem — samples the world for a top-down view.</div>
-              <div class="badges"><span class="badge phase">PostEngineInit</span></div>
-              <div class="mod-dep">← Gen · Streaming</div>
+              <div class="mod-dep">← Core · LOD · Gen · Meshing · Rendering · Scatter</div>
             </div>
           </div>
         </div>
@@ -482,33 +522,33 @@
           <div class="tier-cards">
             <div class="mod" style="--cat:var(--grass)">
               <div class="mod-top"><span class="mod-name">VoxelGeneration</span></div>
-              <div class="mod-role">Noise, world modes, biomes, caves, ore, tree injection.</div>
+              <div class="mod-role">GPU and CPU noise generators, <code>IVoxelWorldMode</code> and its three modes, surface queries, conditioning zones, tree injection.</div>
               <div class="badges"><span class="badge gpu">GPU</span><span class="badge phase">PostConfigInit</span></div>
               <div class="mod-dep">← Core</div>
             </div>
             <div class="mod" style="--cat:var(--grass)">
               <div class="mod-top"><span class="mod-name">VoxelMeshing</span></div>
-              <div class="mod-role">Cubic / Marching Cubes / Dual Contouring meshers + water mesher.</div>
-              <div class="badges"><span class="badge gpu">GPU</span><span class="badge phase">PostConfigInit</span></div>
+              <div class="mod-role"><code>IVoxelMesher</code>: cubic, Marching Cubes and Dual Contouring meshers, plus the water mesher.</div>
+              <div class="badges"><span class="badge cpu">CPU</span><span class="badge phase">PostConfigInit</span></div>
               <div class="mod-dep">← Core</div>
             </div>
             <div class="mod" style="--cat:var(--grass)">
               <div class="mod-top"><span class="mod-name">VoxelRendering</span></div>
-              <div class="mod-role">Scene proxy, custom vertex-factory renderer + PMC fallback.</div>
-              <div class="badges"><span class="badge gpu">GPU</span><span class="badge phase">PostConfigInit</span></div>
+              <div class="mod-role">One renderer on <code>FLocalVertexFactory</code>: render regions, a primitive per chunk mesh, crossfades.</div>
+              <div class="badges"><span class="badge phase">PostConfigInit</span></div>
               <div class="mod-dep">← Core</div>
             </div>
             <div class="mod" style="--cat:var(--grass)">
               <div class="mod-top"><span class="mod-name">VoxelLOD</span></div>
-              <div class="mod-role">Pluggable LOD strategy — distance bands with hysteresis.</div>
+              <div class="mod-role"><code>IVoxelLODStrategy</code>: distance bands with hysteresis and 2:1 balance.</div>
               <div class="badges"><span class="badge phase">Default</span></div>
               <div class="mod-dep">← Core · Gen</div>
             </div>
             <div class="mod" style="--cat:var(--grass)">
               <div class="mod-top"><span class="mod-name">VoxelScatter</span></div>
-              <div class="mod-role">Foliage / scatter placement + HISM instanced rendering.</div>
+              <div class="mod-role">Scatter extracted from the voxels, placed per biome, drawn as HISM per scatter region.</div>
               <div class="badges"><span class="badge phase">PostEngineInit</span></div>
-              <div class="mod-dep">← Core · Gen · Meshing</div>
+              <div class="mod-dep">← Core · Gen</div>
             </div>
           </div>
         </div>
@@ -519,7 +559,7 @@
           <div class="tier-cards">
             <div class="mod" style="--cat:var(--rock)">
               <div class="mod-top"><span class="mod-name">VoxelCore</span></div>
-              <div class="mod-role">Shared data structures, world configuration, material + biome registries, and the edit-layer manager. Zero dependencies on other voxel modules — the whole engine rests on it.</div>
+              <div class="mod-role">The 4-byte <code>FVoxelData</code>, <code>FChunkDescriptor</code> and its residency, the world configuration and project settings, the material and biome registries and the atlas, the edit manager, the sea, the cube-sphere, render regions, the chunk codec. No dependencies on other voxel modules; the whole engine rests on it.</div>
               <div class="badges"><span class="badge phase">Default</span></div>
               <div class="mod-dep">← (no internal dependencies)</div>
             </div>
@@ -533,17 +573,17 @@
         <div class="tier-label"><b>Tooling</b><span>editor</span></div>
         <div class="editor-aside" style="--cat:var(--edit)">
           <span class="mod-name">VoxelWorldsEditor</span>
-          <span class="tag">EDITOR TARGET ONLY — stripped from shipping builds</span>
-          <span class="mod-role" style="flex:1 1 220px">Field-visualization panel &amp; preview actor; samples the runtime modules for authoring. Depends downward only — never the reverse.</span>
+          <span class="tag">EDITOR TARGET ONLY · stripped from shipping builds</span>
+          <span class="mod-role" style="flex:1 1 220px">The field preview panel and actor: 8 sampled fields over regions wider than the view distance, without PIE. ← Core · Gen</span>
         </div>
       </div>
 
       <!-- legend -->
       <div class="legend">
         <span class="lg"><span class="sw" style="--c:var(--rock)"></span>Foundation</span>
-        <span class="lg"><span class="sw" style="--c:var(--grass)"></span>Domain system&nbsp;·&nbsp;<span style="color:var(--compute)">GPU = compute</span></span>
+        <span class="lg"><span class="sw" style="--c:var(--grass)"></span>Domain system&nbsp;·&nbsp;<span style="color:var(--compute)">GPU = compute (generation only)</span></span>
         <span class="lg"><span class="sw" style="--c:var(--ore)"></span>Coordination</span>
-        <span class="lg"><span class="sw" style="--c:var(--water)"></span>Integration</span>
+        <span class="lg"><span class="sw" style="--c:var(--water)"></span>Client</span>
         <span class="lg"><span class="sw" style="--c:var(--edit)"></span>Editor-only</span>
       </div>
     </div>
@@ -554,7 +594,7 @@
     <div class="fig-head">
       <span class="fig-tag">Fig. B — Chunk lifecycle</span>
       <h2>From viewer to visible terrain</h2>
-      <p>The path a single chunk travels every time the camera moves far enough to change what's on screen. The coordinator (<span class="mono" style="color:var(--ore)">VoxelStreaming</span>) drives it; the three green stages run on the GPU, each with a CPU fallback.</p>
+      <p>The path one chunk takes, from entering the voxel window to leaving it. The chunk manager (<span class="mono" style="color:var(--ore)">VoxelStreaming</span>) drives every stage. Only generation runs on the GPU, with the CPU generator as its twin. Meshing runs on CPU workers in two independent kinds of job: a chunk's interior, and the seams it shares with its neighbours.</p>
     </div>
 
     <div class="plate">
@@ -562,87 +602,163 @@
 
         <div class="stage">
           <span class="stage-idx">01</span>
-          <span class="stage-title">Camera moves</span>
-          <span class="stage-desc">Viewer crosses a chunk boundary and the streaming tick wakes up.</span>
-          <span class="stage-mod"><span class="dot" style="--cat:var(--ore)"></span><span class="nm">VoxelStreaming</span></span>
-        </div>
-
-        <div class="stage">
-          <span class="stage-idx">02</span>
-          <span class="stage-title">Pick chunks</span>
-          <span class="stage-desc">Distance bands choose the load / unload set and a LOD level per chunk.</span>
+          <span class="stage-title">Window</span>
+          <span class="stage-desc">Each tick the LOD strategy turns the streaming viewer into the voxel window: which chunks to hold, and at which LOD.</span>
           <span class="stage-mod"><span class="dot" style="--cat:var(--grass)"></span><span class="nm">VoxelLOD</span></span>
         </div>
 
         <div class="stage gpu">
-          <span class="gpu-tag">GPU · CPU fallback</span>
-          <span class="stage-idx">03</span>
-          <span class="stage-title">Generate voxels</span>
-          <span class="stage-desc">Noise → world mode → biome → caves → ore → water flags, into a packed <code style="font-family:var(--f-mono)">FVoxelData</code> grid.</span>
+          <span class="gpu-tag">GPU · CPU twin</span>
+          <span class="stage-idx">02</span>
+          <span class="stage-title">Generate</span>
+          <span class="stage-desc">One compute pass (density, biome, caves, ore), then the water and underground post-passes, read back. A uniform chunk collapses to one value.</span>
           <span class="stage-mod"><span class="dot" style="--cat:var(--grass)"></span><span class="nm">VoxelGeneration</span></span>
         </div>
 
         <div class="stage">
-          <span class="stage-idx">04</span>
-          <span class="stage-title">Apply edits</span>
-          <span class="stage-desc">Sparse add / subtract / paint overlay is merged over the generated field.</span>
-          <span class="stage-mod"><span class="dot" style="--cat:var(--rock)"></span><span class="nm">VoxelCore · EditLayer</span></span>
-        </div>
-
-        <div class="stage gpu">
-          <span class="gpu-tag">GPU · CPU fallback</span>
-          <span class="stage-idx">05</span>
-          <span class="stage-title">Mesh</span>
-          <span class="stage-desc">Cubic, Marching Cubes, or Dual Contouring — plus a watertight LOD-seam weld at chunk borders.</span>
+          <span class="cpu-tag">CPU workers</span>
+          <span class="stage-idx">03</span>
+          <span class="stage-title">Mesh the interior</span>
+          <span class="stage-desc">A worker meshes the chunk from its own voxels alone: cubic, Marching Cubes or Dual Contouring.</span>
           <span class="stage-mod"><span class="dot" style="--cat:var(--grass)"></span><span class="nm">VoxelMeshing</span></span>
         </div>
 
-        <div class="stage gpu">
-          <span class="gpu-tag">GPU · CPU fallback</span>
+        <div class="stage seam">
+          <span class="seam-tag">Seam ownership</span>
+          <span class="stage-idx">04</span>
+          <span class="stage-title">Mesh the seams</span>
+          <span class="stage-desc">Each shared boundary is one seam job. Once every side has voxels, it reads their snapshots and meshes the boundary at both sides' LODs. Neither chunk waits on the other.</span>
+          <span class="stage-mod"><span class="dot" style="--cat:var(--ore)"></span><span class="nm">FVoxelSeamRegistry</span></span>
+        </div>
+
+        <div class="stage">
+          <span class="stage-idx">05</span>
+          <span class="stage-title">Draw</span>
+          <span class="stage-desc">Each mesh becomes a primitive in its render region, with no component per chunk. A dithered crossfade swaps it in for the mesh it replaces.</span>
+          <span class="stage-mod"><span class="dot" style="--cat:var(--grass)"></span><span class="nm">VoxelRendering</span></span>
+        </div>
+
+        <div class="stage">
           <span class="stage-idx">06</span>
-          <span class="stage-title">Render + collide</span>
-          <span class="stage-desc">GPU-driven custom vertex factory (or PMC), while collision cooks async on Chaos.</span>
-          <span class="stage-mod"><span class="dot" style="--cat:var(--grass)"></span><span class="nm">VoxelRendering + Streaming</span></span>
+          <span class="stage-title">Collide</span>
+          <span class="stage-desc">A Chaos trimesh is cooked near the player on the thread pool, reading neighbours as boundary shells. A neighbour that arrives later triggers a re-cook.</span>
+          <span class="stage-mod"><span class="dot" style="--cat:var(--ore)"></span><span class="nm">UVoxelCollisionManager</span></span>
         </div>
 
         <div class="stage">
           <span class="stage-idx">07</span>
           <span class="stage-title">Decorate</span>
-          <span class="stage-desc">Foliage &amp; trees, water tiles, minimap, and runtime PCG scatter fill the chunk in.</span>
-          <span class="stage-mod"><span class="dot" style="--cat:var(--water)"></span><span class="nm">Scatter · Map · PCG</span></span>
+          <span class="stage-desc">Inside the scatter horizon, surface points are extracted from the voxels, placed per biome and drawn as HISM. Water tiles are drawn as a second pass.</span>
+          <span class="stage-mod"><span class="dot" style="--cat:var(--grass)"></span><span class="nm">VoxelScatter · Rendering</span></span>
         </div>
 
-        <div class="pipe-end">
-          <span class="big">Visible world</span>
-          <span class="sm">on screen</span>
+        <div class="stage">
+          <span class="stage-idx">08</span>
+          <span class="stage-title">Compress · unload</span>
+          <span class="stage-desc">A settled far chunk is encoded on a worker and its array dropped; readers get decoded snapshots. Past the unload horizon the chunk leaves every system.</span>
+          <span class="stage-mod"><span class="dot" style="--cat:var(--rock)"></span><span class="nm">Core codec · Streaming</span></span>
         </div>
 
+      </div>
+
+      <div class="edits-band">
+        <span class="k">Edits</span>
+        <span class="v">A sparse overlay in <code>UVoxelEditManager</code> (add, subtract, set, paint; undo and redo for player edits, with system edits kept out of the history). For each chunk an edit changes, the chunk is re-meshed, its seams restaled, the collision cooks that read it re-cooked and its scatter re-extracted, and water floods whatever the edit opened under the sea.</span>
       </div>
     </div>
   </section>
 
-  <!-- ======================= FIG C — FEATURE MAP ======================= -->
+  <!-- ======================= FIG C — BEYOND THE WINDOW ======================= -->
   <section class="figure reveal">
     <div class="fig-head">
-      <span class="fig-tag">Fig. C — Capability map</span>
+      <span class="fig-tag">Fig. C — World modes and the far field</span>
+      <h2>Beyond the voxel window</h2>
+      <p>Every world mode shares one pipeline. Past the voxel window, <span class="mono" style="color:var(--water)">FVoxelFarField</span> draws the conditioned analytic surface to the horizon. Its patches are split by screen-space error and built on the thread pool.</p>
+    </div>
+
+    <div class="beyond">
+      <div class="plate xsec">
+        <svg viewBox="0 0 640 330" role="img" aria-label="Cross-section: LOD bands of voxel chunks near the viewer, far field patches beyond, the cut-over altitude above">
+          <line x1="20" y1="58" x2="620" y2="58" stroke="var(--ore)" stroke-width="1.4" stroke-dasharray="6 5"/>
+          <text x="620" y="48" text-anchor="end" font-family="ui-monospace, Consolas, monospace" font-size="11" fill="var(--ore)">cut-over altitude: the window suspends, the far field draws alone</text>
+          <g transform="translate(76,30)">
+            <rect x="-11" y="-7" width="22" height="14" rx="3" fill="none" stroke="var(--ink-dim)" stroke-width="1.4"/>
+            <circle cx="0" cy="0" r="3.6" fill="var(--ink-dim)"/>
+          </g>
+          <path d="M76 44 L76 118" stroke="var(--ink-faint)" stroke-width="1" stroke-dasharray="2 4"/>
+          <g transform="translate(76,136)">
+            <circle cx="0" cy="-12" r="6" fill="var(--grass)"/>
+            <path d="M-6 0 Q0 -6 6 0 L6 10 L-6 10 Z" fill="var(--grass)"/>
+          </g>
+          <g fill="var(--grass-bg)" stroke="var(--grass)" stroke-width="1">
+            <rect x="20" y="150" width="24" height="24"/><rect x="44" y="150" width="24" height="24"/><rect x="68" y="150" width="24" height="24"/><rect x="92" y="150" width="24" height="24"/><rect x="116" y="150" width="24" height="24"/>
+            <rect x="20" y="174" width="24" height="24"/><rect x="44" y="174" width="24" height="24"/><rect x="68" y="174" width="24" height="24"/><rect x="92" y="174" width="24" height="24"/><rect x="116" y="174" width="24" height="24"/>
+          </g>
+          <g fill="color-mix(in srgb, var(--grass-bg) 70%, transparent)" stroke="color-mix(in srgb, var(--grass) 75%, var(--border))" stroke-width="1">
+            <rect x="140" y="150" width="48" height="48"/><rect x="188" y="150" width="48" height="48"/><rect x="236" y="150" width="48" height="48"/>
+          </g>
+          <g fill="color-mix(in srgb, var(--grass-bg) 45%, transparent)" stroke="color-mix(in srgb, var(--grass) 50%, var(--border))" stroke-width="1">
+            <rect x="284" y="150" width="96" height="96"/>
+          </g>
+          <g stroke="var(--ore)" stroke-width="2.4">
+            <line x1="140" y1="150" x2="140" y2="198"/><line x1="284" y1="150" x2="284" y2="246"/>
+          </g>
+          <g fill="color-mix(in srgb, var(--water-bg) 70%, transparent)" stroke="var(--water)" stroke-width="1" stroke-dasharray="4 3">
+            <path d="M380 150 L470 154 L470 172 L380 168 Z"/>
+            <path d="M470 154 L560 162 L560 178 L470 172 Z"/>
+            <path d="M560 162 L620 170 L620 184 L560 178 Z"/>
+          </g>
+          <path d="M380 150 Q500 150 620 170" fill="none" stroke="var(--water)" stroke-width="1.6"/>
+          <g font-family="ui-monospace, Consolas, monospace" font-size="11">
+            <text x="80" y="222" text-anchor="middle" fill="var(--grass)">LOD 0</text>
+            <text x="212" y="222" text-anchor="middle" fill="var(--grass)">LOD 1</text>
+            <text x="332" y="268" text-anchor="middle" fill="var(--grass)">LOD 2 …</text>
+            <text x="500" y="204" text-anchor="middle" fill="var(--water)">far field patches</text>
+            <text x="500" y="219" text-anchor="middle" fill="var(--ink-faint)">analytic, split by screen error</text>
+            <text x="212" y="140" text-anchor="middle" fill="var(--ore)">seam jobs</text>
+          </g>
+          <path d="M20 292 L20 300 L380 300 L380 292" fill="none" stroke="var(--ink-faint)" stroke-width="1"/>
+          <text x="200" y="318" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="11" fill="var(--ink-dim)">voxel window: chunks, collision, edits</text>
+          <path d="M380 292 L380 300 L620 300 L620 292" fill="none" stroke="var(--water)" stroke-width="1" opacity="0.7"/>
+          <text x="500" y="318" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="11" fill="var(--water)">to the horizon</text>
+        </svg>
+        <p class="cap">A band patch hides once every chunk it covers is drawn, so the window and the far field <b>neither gap nor overlap</b>. Above the cut-over altitude every chunk unloads; coming down, the viewer policy's descent lead streams the window back in ahead of the camera.</p>
+      </div>
+
+      <div class="modes">
+        <div class="wm" style="--cat:var(--grass)">
+          <div class="h"><b>Infinite plane</b><span>FInfinitePlaneWorldMode</span></div>
+          <p>A heightmap without bounds. The window streams each column's surface slab plus the viewer's layers; the far field is root-tile quadtrees on the XY grid.</p>
+        </div>
+        <div class="wm" style="--cat:var(--water)">
+          <div class="h"><b>Island / bowl</b><span>EWorldMode::IslandBowl</span></div>
+          <p>A bounded heightmap with a seabed, and a far ocean of open sea past its edge.</p>
+        </div>
+        <div class="wm" style="--cat:var(--ore)">
+          <div class="h"><b>Spherical planet</b><span>FSphericalPlanetWorldMode</span></div>
+          <p>Radial terrain around a centre, up to ~1,000 km in radius, streamed by chunk along local up. The far field is six cube-face quadtrees; a small planet without a far-field sea draws a sea sphere.</p>
+        </div>
+        <div class="wm" style="--cat:var(--rock)">
+          <div class="h"><b>Block worlds</b><span>EMeshingMode::Cubic</span></div>
+          <p>Any heightmap mode can be meshed with cubic blocks. LOD is off; greedy meshing handles distance instead.</p>
+        </div>
+        <div class="wm" style="--cat:var(--edit)">
+          <div class="h"><b>Precision by regions</b><span>16³ chunks a region</span></div>
+          <p>Every primitive sits at its render region's double origin and stores float offsets from it, in every mode, so there is no world-origin shift.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= FIG D — FEATURE MAP ======================= -->
+  <section class="figure reveal">
+    <div class="fig-head">
+      <span class="fig-tag">Fig. D — Capability map</span>
       <h2>What the engine ships</h2>
-      <p>The shipping feature surface, grouped by system. Colour follows the same layer coding as the module map.</p>
+      <p>What the engine ships, grouped by system. Colours use the same layer coding as the module map. Each system's details are in its Features doc.</p>
     </div>
 
     <div class="feat-grid">
-
-      <div class="feat" style="--cat:var(--grass);--cat-bg:var(--grass-bg)">
-        <div class="feat-head">
-          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/></svg></span>
-          <h3>Meshing</h3>
-        </div>
-        <ul>
-          <li><b>Cubic</b> — greedy, face-culled, ambient occlusion</li>
-          <li><b>Marching Cubes</b> — smooth isosurface + geomorph seams</li>
-          <li><b>Dual Contouring</b> — sharp features via QEF solver</li>
-          <li>Each with a <b>CPU and GPU compute</b> path</li>
-        </ul>
-      </div>
 
       <div class="feat" style="--cat:var(--grass);--cat-bg:var(--grass-bg)">
         <div class="feat-head">
@@ -650,10 +766,10 @@
           <h3>Generation</h3>
         </div>
         <ul>
-          <li>CPU / GPU noise — Perlin, Simplex, Cellular, Voronoi</li>
-          <li>FBM fractals + domain warping</li>
-          <li>Caves — cheese, spaghetti, noodle layers</li>
-          <li>Ore veins &amp; column-scan water fill</li>
+          <li><b>GPU</b> compute; the CPU generator is its twin, held to it by the <code>GPUvsCPU*Parity</code> tests</li>
+          <li>Hashed, split-origin <code>FVoxelNoise</code>: FBM and domain warp</li>
+          <li>Biomes by temperature, moisture and continentalness</li>
+          <li>Caves (cheese, spaghetti, noodle) and ore veins</li>
         </ul>
       </div>
 
@@ -663,23 +779,48 @@
           <h3>World modes</h3>
         </div>
         <ul>
-          <li><b>Infinite plane</b> — heightfield, extends forever</li>
-          <li><b>Island / bowl</b> — radial falloff, ocean level</li>
-          <li><b>Spherical planet</b> — radius-based, curved</li>
+          <li><b>Infinite plane</b>, <b>island / bowl</b>, <b>spherical planet</b></li>
           <li>Swappable via <code>IVoxelWorldMode</code></li>
+          <li>Cubic block worlds on any heightmap mode</li>
+          <li>Surface queries along local up, the same call on a planet</li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--grass);--cat-bg:var(--grass-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/></svg></span>
+          <h3>Meshing &amp; seams</h3>
+        </div>
+        <ul>
+          <li><b>Cubic</b>: greedy, face-culled</li>
+          <li><b>Marching Cubes</b>: Transvoxel ribbon and geomorph at LOD seams</li>
+          <li><b>Dual Contouring</b>: QEF solve, fitted normals</li>
+          <li>One seam job per boundary, watertight across LOD</li>
         </ul>
       </div>
 
       <div class="feat" style="--cat:var(--grass);--cat-bg:var(--grass-bg)">
         <div class="feat-head">
           <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="14" y="6" width="6" height="6" rx="1"/><rect x="4" y="15" width="5" height="5" rx="1"/></svg></span>
-          <h3>LOD &amp; seams</h3>
+          <h3>LOD &amp; far field</h3>
         </div>
         <ul>
-          <li>Pluggable strategy via <code>IVoxelLODStrategy</code></li>
-          <li>Distance bands + refine/coarsen hysteresis</li>
-          <li>Vertex-shader LOD morphing</li>
-          <li><b>Watertight</b> seams (GPU ↔ CPU parity)</li>
+          <li>Distance bands, refine and coarsen hysteresis, 2:1 balance</li>
+          <li>Analytic far field in quadtree patches, to the horizon</li>
+          <li>The cut-over to orbit and back, with a descent lead</li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--ore);--cat-bg:var(--ore-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="1.6" fill="currentColor"/><circle cx="15" cy="12" r="1.6" fill="currentColor"/><circle cx="10" cy="18" r="1.6" fill="currentColor"/></svg></span>
+          <h3>Streaming &amp; memory</h3>
+        </div>
+        <ul>
+          <li>The 4-byte voxel: 64³ chunk = 1 MB resident</li>
+          <li>Immutable copy-on-write snapshots for workers</li>
+          <li>Uniform collapse and far compression: a ~1,100-chunk window settles near <b>130 MB</b></li>
+          <li>Async Chaos collision cooking near the player</li>
         </ul>
       </div>
 
@@ -689,36 +830,10 @@
           <h3>Rendering</h3>
         </div>
         <ul>
-          <li>GPU-driven custom vertex factory</li>
-          <li>ProceduralMeshComponent fallback for tools</li>
-          <li>Runtime Virtual Texture integration</li>
-          <li>Second-pass water tile rendering</li>
-        </ul>
-      </div>
-
-      <div class="feat" style="--cat:var(--ore);--cat-bg:var(--ore-bg)">
-        <div class="feat-head">
-          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="1.6" fill="currentColor"/><circle cx="15" cy="12" r="1.6" fill="currentColor"/><circle cx="10" cy="18" r="1.6" fill="currentColor"/></svg></span>
-          <h3>Streaming</h3>
-        </div>
-        <ul>
-          <li>Distance-based load / unload queues</li>
-          <li>Async mesh generation + stale-cull</li>
-          <li>Async Chaos collision cooking</li>
-          <li>Thrash instrumentation + benchmark</li>
-        </ul>
-      </div>
-
-      <div class="feat" style="--cat:var(--rock);--cat-bg:var(--rock-bg)">
-        <div class="feat-head">
-          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></span>
-          <h3>Editing</h3>
-        </div>
-        <ul>
-          <li>Sparse edit-layer overlay</li>
-          <li>Add / subtract / paint brushes</li>
-          <li>Discrete block editing + undo/redo</li>
-          <li>Binary persistence</li>
+          <li>One renderer on <code>FLocalVertexFactory</code></li>
+          <li>A primitive per chunk mesh, with no component per chunk</li>
+          <li>Dithered crossfades on every swap</li>
+          <li>Cached ray tracing, far shadow cascades, RVT output</li>
         </ul>
       </div>
 
@@ -728,10 +843,23 @@
           <h3>Materials</h3>
         </div>
         <ul>
-          <li>Material registry — up to 256 types</li>
-          <li>Texture-array atlas (triplanar / cubic)</li>
-          <li>Unified <code>M_VoxelMaster</code></li>
-          <li>Per-quad materials at borders</li>
+          <li>Registry of up to 256 types; hardness per material</li>
+          <li>Packed atlas (cubic), Texture2DArrays with triplanar (smooth)</li>
+          <li>One <code>M_VoxelMaster</code>: slope-aware rock, texture variation</li>
+          <li>Ships on DX11 / SM5</li>
+        </ul>
+      </div>
+
+      <div class="feat" style="--cat:var(--water);--cat-bg:var(--water-bg)">
+        <div class="feat-head">
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3s6 7 6 11a6 6 0 0 1-12 0c0-4 6-11 6-11z"/></svg></span>
+          <h3>Water</h3>
+        </div>
+        <ul>
+          <li>Water flags and a fill pass at generation</li>
+          <li>Cross-chunk pull; floods driven by edits</li>
+          <li>Water tiles per column, drawn as a second pass</li>
+          <li>The island's far ocean, the planet's sea</li>
         </ul>
       </div>
 
@@ -741,51 +869,100 @@
           <h3>Scatter &amp; foliage</h3>
         </div>
         <ul>
-          <li>Biome-driven placement</li>
-          <li>HISM / ISM instanced rendering</li>
-          <li>Deterministic cross-chunk tree injection</li>
-          <li>Edit-aware cleanup</li>
+          <li>Surface points from the voxels, never the mesh</li>
+          <li>Per-biome placement on the thread pool</li>
+          <li>Pooled HISM per scatter region, batched writes</li>
+          <li>Voxel trees; edit-aware re-extraction</li>
         </ul>
       </div>
 
-      <div class="feat" style="--cat:var(--ore);--cat-bg:var(--ore-bg)">
+      <div class="feat" style="--cat:var(--rock);--cat-bg:var(--rock-bg)">
         <div class="feat-head">
-          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 3 3 6v15l6-3 6 3 6-3V3l-6 3-6-3z"/><path d="M9 3v15M15 6v15"/></svg></span>
-          <h3>Map</h3>
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></span>
+          <h3>Editing</h3>
         </div>
         <ul>
-          <li>Map / minimap subsystem</li>
-          <li>Samples world height &amp; biome</li>
-          <li>Blueprint-exposed queries</li>
+          <li>Sparse overlay: add, subtract, set, paint</li>
+          <li>Undo and redo for player edits</li>
+          <li>System edits (POIs, dungeon stamps, floods) outside the history</li>
+          <li>Validated by the game through <code>IVoxelEditValidator</code></li>
         </ul>
       </div>
 
       <div class="feat" style="--cat:var(--water);--cat-bg:var(--water-bg)">
         <div class="feat-head">
-          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M9 6h6a3 3 0 0 1 3 3v6M6 9v6"/></svg></span>
-          <h3>PCG decoration</h3>
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 3 3 6v15l6-3 6 3 6-3V3l-6 3-6-3z"/><path d="M9 3v15M15 6v15"/></svg></span>
+          <h3>Map &amp; navigation</h3>
         </div>
         <ul>
-          <li>Runtime PCG scatter over voxel surface</li>
-          <li>Per-biome graph dispatcher</li>
-          <li>Edit-aware surface sampler</li>
-          <li>Isolated behind the PCG plugin</li>
+          <li>Async map tiles from the analytic height</li>
+          <li>Tile images under a fixed memory budget</li>
+          <li>The globe on a planet, edit overlays</li>
+          <li>Surface A* without a navmesh</li>
         </ul>
       </div>
 
       <div class="feat" style="--cat:var(--edit);--cat-bg:var(--edit-bg)">
         <div class="feat-head">
-          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 3h6v6H2zM16 3h6v6h-6zM9 15h6v6H9z"/><path d="M5 9v3h14V9M12 12v3"/></svg></span>
-          <h3>Editor tools</h3>
+          <span class="feat-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M9 6h6a3 3 0 0 1 3 3v6M6 9v6"/></svg></span>
+          <h3>PCG &amp; editor tools</h3>
         </div>
         <ul>
-          <li>Dockable field-visualization panel</li>
-          <li>8 built-in sampled fields</li>
-          <li>Field preview actor in-viewport</li>
-          <li>Stripped from shipping builds</li>
+          <li>Runtime PCG over the surface, one graph per biome</li>
+          <li>Edit-merged sampling near chunks, the generator beyond</li>
+          <li>Field preview panel and actor, 8 built-in fields</li>
+          <li>The editor module is stripped from shipping</li>
         </ul>
       </div>
 
+    </div>
+  </section>
+
+  <!-- ======================= FIG E — DESIGN DECISIONS ======================= -->
+  <section class="figure reveal">
+    <div class="fig-head">
+      <span class="fig-tag">Fig. E — Design decisions</span>
+      <h2>Why it is shaped this way</h2>
+      <p>Each choice was measured or forced by the engine, not assumed. The full list is in <span class="mono">ARCHITECTURE.md</span>.</p>
+    </div>
+
+    <div class="dec-grid">
+      <div class="dec">
+        <span class="n">01</span>
+        <h3>GPU generation, CPU meshing</h3>
+        <p>Generation is one thread per voxel and costs the GPU a fraction of a millisecond per chunk. A chunk's mesh and the seams it meets have to agree exactly, which the GPU meshers never managed, so meshing runs on CPU workers.</p>
+        <span class="was">the GPU meshers were deleted · the CPU generator stays as the GPU's twin and runs headless</span>
+      </div>
+      <div class="dec">
+        <span class="n">02</span>
+        <h3>Seams have one owner</h3>
+        <p>One seam job owns each chunk boundary and reads both sides, rather than each chunk reading its neighbours' faces. Seams are watertight across LOD by construction, no chunk waits on a neighbour, and an edit re-meshes only the chunks it changed.</p>
+        <span class="was">replaced the June LOD-boundary welds and the Transvoxel plan</span>
+      </div>
+      <div class="dec">
+        <span class="n">03</span>
+        <h3>One renderer, no Nanite</h3>
+        <p>Nanite is built at cook time, and terrain generated at runtime from a seed cannot be Nanite. Every chunk mesh is a primitive on <code>FLocalVertexFactory</code>, so the engine culls it per view and shadow cascade and caches its ray tracing.</p>
+        <span class="was">the custom vertex factory research and the PMC fallback were dropped</span>
+      </div>
+      <div class="dec">
+        <span class="n">04</span>
+        <h3>Precision by regions</h3>
+        <p>Primitives sit at double-precision region origins (16³ chunks) and store float offsets. Generation keeps its large values in double or in the chunk's frame, and the noise is split-origin. Heightmaps are exact to a double's range, planets to about 1,000 km.</p>
+        <span class="was">no world-origin rebasing, in any mode</span>
+      </div>
+      <div class="dec">
+        <span class="n">05</span>
+        <h3>Strategies behind interfaces</h3>
+        <p><code>IVoxelLODStrategy</code>, <code>IVoxelWorldMode</code>, <code>IVoxelMesher</code> and <code>IVoxelMeshRenderer</code> keep each piece swappable. One distance-band strategy has met every world mode, the planet included.</p>
+        <span class="was">cubic worlds turn LOD off rather than add a strategy</span>
+      </div>
+      <div class="dec">
+        <span class="n">06</span>
+        <h3>Mode-generic by default</h3>
+        <p>A feature built for one world mode moves to all of them once it applies: the far field, the cut-over, regions, the noise. Its name carries no mode. World Partition streams placed actors only; the terrain streams itself.</p>
+        <span class="was">FVoxelFarField · FVoxelNoise · VoxelCutoverAltitude</span>
+      </div>
     </div>
   </section>
 
@@ -793,51 +970,63 @@
   <section class="kit reveal">
     <div class="fig-head">
       <span class="fig-tag">Using this in a deck</span>
-      <h2>A five-slide arc</h2>
-      <p>One way to sequence these figures so the story lands: hook, structure, motion, breadth, payoff.</p>
+      <h2>A seven-slide arc</h2>
+      <p>The companion deck, <span class="mono">voxelworlds-slides.html</span> (16:9, prints to PDF), puts these figures in this order: hook, structure, motion, reach, breadth, reasons, payoff.</p>
     </div>
 
     <div class="through">
-      <p><span class="q">The through-line to say out loud:</span> "The architecture is layered like the terrain it generates — bedrock at the bottom, surface systems on top, and nothing ever reaches upward." It ties the diagram's shape to the product and gives every slide the same spine.</p>
+      <p><span class="q">The through-line to say out loud:</span> "The architecture is layered like the terrain it generates: bedrock at the bottom, surface systems on top, and nothing ever reaches upward." It ties the diagram's shape to the product and runs through every slide.</p>
     </div>
 
     <div class="slides">
       <div class="slide">
         <span class="slide-no">Slide 1</span>
         <h4>The hook</h4>
-        <p>One sentence + a live terrain shot: "eleven modules that turn noise into worlds." Set the scale before the structure.</p>
-        <span class="ref">use the hero line</span>
+        <p>"Eleven modules that turn noise into worlds." Show the scale before the structure: three world modes, out to the horizon.</p>
+        <span class="ref">the hero line</span>
       </div>
       <div class="slide">
         <span class="slide-no">Slide 2</span>
         <h4>The structure</h4>
-        <p>The strata map. Land the one idea: small modules, interface boundaries, one hub. Point at <span class="mono">VoxelStreaming</span>.</p>
+        <p>The strata. Land one idea: small modules, interface boundaries, one hub. Point at the chunk manager.</p>
         <span class="ref">Fig. A</span>
       </div>
       <div class="slide">
         <span class="slide-no">Slide 3</span>
         <h4>The motion</h4>
-        <p>The pipeline. Walk one chunk from camera-move to on-screen; pause on the two GPU compute stages.</p>
+        <p>Walk one chunk through its life. Stop on stage 04: seam ownership is the idea that keeps LOD watertight.</p>
         <span class="ref">Fig. B</span>
       </div>
       <div class="slide">
         <span class="slide-no">Slide 4</span>
-        <h4>The breadth</h4>
-        <p>The capability map. Don't read it — let it wash over the room as proof of surface area, then highlight two favourites.</p>
+        <h4>The reach</h4>
+        <p>Past the window: the far field, the cut-over to orbit, three world modes on one pipeline, precision by regions.</p>
         <span class="ref">Fig. C</span>
       </div>
       <div class="slide">
         <span class="slide-no">Slide 5</span>
+        <h4>The breadth</h4>
+        <p>The capability map. Don't read it out. Let it show how much there is, then pick two to talk about.</p>
+        <span class="ref">Fig. D</span>
+      </div>
+      <div class="slide">
+        <span class="slide-no">Slide 6</span>
+        <h4>The reasons</h4>
+        <p>Six decisions, each measured or forced: GPU generation with CPU meshing, seam ownership, no Nanite, regions.</p>
+        <span class="ref">Fig. E</span>
+      </div>
+      <div class="slide">
+        <span class="slide-no">Slide 7</span>
         <h4>The payoff</h4>
-        <p>Why the shape matters: swap a mesher or LOD strategy without touching the core; ship simple, optimise later.</p>
-        <span class="ref">design decisions</span>
+        <p>Where it sits: the game layer stands on the engine through one narrow API, and the engine knows none of the game.</p>
+        <span class="ref">the through-line</span>
       </div>
     </div>
   </section>
 
   <!-- ======================= FOOTER ======================= -->
   <footer class="foot reveal">
-    <p>Generated from the plugin's actual <span style="color:var(--ink-dim)">.uplugin</span> module table, every module's <span style="color:var(--ink-dim)">Build.cs</span> dependency list, and the <span style="color:var(--ink-dim)">Documentation/</span> set — not from memory. Dependency edges reflect the real build graph.</p>
+    <p>Built from the plugin's <span style="color:var(--ink-dim)">.uplugin</span> module table, each module's <span style="color:var(--ink-dim)">Build.cs</span> and <span style="color:var(--ink-dim)">Documentation/ARCHITECTURE.md</span> with the Features docs, as of 2026-11-05 (after code review CR5 and G116). The dependency edges come from the real build graph.</p>
     <p>VoxelWorlds · UE 5.8 · 11 modules</p>
   </footer>
 

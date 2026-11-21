@@ -266,4 +266,61 @@ bool FVoxelNavPocketTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// A cost query (the hydrology plan's H5: a trail crosses a river reach at a cost): a strip of cells that cost more to
+// enter is gone round when the way round is cheaper and crossed by the fewest cells when it is not; the string-pulling
+// never straightens a route through it; with no query a search is what it was.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNavCellCostTest, "VoxelWorlds.Navigation.CellCost", VOXEL_NAV_TEST_FLAGS)
+bool FVoxelNavCellCostTest::RunTest(const FString& Parameters)
+{
+	// Flat ground; a strip two cells wide (x cells 10 and 11) from far below up to y cell 14: it ends at y = 1500.
+	auto Flat = [](double, double) { return 0.f; };
+	auto InStrip = [](const FIntPoint& Cell) { return Cell.X >= 10 && Cell.X <= 11 && Cell.Y < 15; };
+	auto PointInStrip = [](const FVector& P) { return P.X >= 1000.0 && P.X < 1200.0 && P.Y < 1500.0; };
+	const FVoxelSurfaceNavParams P = VoxelNavTest::Params();
+	const FVector From(50, 50, 0), To(2550, 50, 0);
+	TArray<FVector> Points;
+	FVoxelSurfacePathStats Stats;
+
+	// Dear: 2,000 a cell, 4,000 to cross, against a way round the end some 1,700 longer.
+	int32 Asked = 0;
+	FVoxelSurfacePathfinder Dear(P, Flat, nullptr, [&](const FIntPoint& Cell) { ++Asked; return InStrip(Cell) ? 2000.f : 0.f; });
+	TestTrue(TEXT("Dear: a complete route"), Dear.FindPath(From, To, Points, &Stats) && !Stats.bPartial);
+	TestTrue(TEXT("Dear: the query was asked"), Asked > 0);
+	TestFalse(TEXT("Dear: never through the strip"), VoxelNavTest::PathTouches(Points, From, PointInStrip));
+	TestTrue(TEXT("Dear: round the strip's end"), VoxelNavTest::PathTouches(Points, From, [](const FVector& Pt) { return Pt.Y >= 1500.0; }));
+	TestTrue(TEXT("Dear: ends at the goal"), Points.Num() > 0 && FVector::Dist2D(Points.Last(), To) < 1.f);
+
+	// Cheap: 300 a cell, 600 to cross: the route crosses, by one cell a column, and enters the strip once.
+	FVoxelSurfacePathfinder Cheap(P, Flat, nullptr, [&](const FIntPoint& Cell) { return InStrip(Cell) ? 300.f : 0.f; });
+	TestTrue(TEXT("Cheap: a complete route"), Cheap.FindPath(From, To, Points, &Stats) && !Stats.bPartial);
+	int32 InStripPoints = 0, Entries = 0;
+	bool bWasIn = false, bBackBefore = false;
+	for (const FVector& Point : Points)
+	{
+		const bool bIn = PointInStrip(Point);
+		InStripPoints += bIn ? 1 : 0;
+		Entries += (bIn && !bWasIn) ? 1 : 0;
+		// Past the strip a route never comes back to its near side.
+		bBackBefore |= Entries > 0 && !bIn && Point.X < 1000.0;
+		bWasIn = bIn;
+	}
+	TestEqual(TEXT("Cheap: the strip is crossed by its two cells, each a waypoint the string-pulling kept"), InStripPoints, 2);
+	TestEqual(TEXT("Cheap: entered once"), Entries, 1);
+	TestFalse(TEXT("Cheap: no way back across"), bBackBefore);
+	TestTrue(TEXT("Cheap: ends at the goal"), Points.Num() > 0 && FVector::Dist2D(Points.Last(), To) < 1.f);
+	TestFalse(TEXT("Cheap: a straight run through the strip is not taken"), Cheap.IsStraightRunWalkable(FIntPoint(5, 0), FIntPoint(20, 0)));
+	TestTrue(TEXT("Cheap: a straight run beside it is"), Cheap.IsStraightRunWalkable(FIntPoint(5, 20), FIntPoint(20, 20)));
+
+	// A query that answers nothing, and none at all: the same route, point for point.
+	TArray<FVector> Free, None;
+	FVoxelSurfacePathfinder NoCost(P, Flat, nullptr, [](const FIntPoint&) { return 0.f; });
+	FVoxelSurfacePathfinder Plain(P, Flat);
+	TestTrue(TEXT("Free: found"), NoCost.FindPath(From, To, Free) && Plain.FindPath(From, To, None));
+	TestTrue(TEXT("Free: the route of a search with no query"), Free == None);
+	TestTrue(TEXT("Plain: a straight run anywhere"), Plain.IsStraightRunWalkable(FIntPoint(5, 0), FIntPoint(20, 0)));
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

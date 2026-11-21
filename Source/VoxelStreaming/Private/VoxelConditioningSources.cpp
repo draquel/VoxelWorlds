@@ -1,0 +1,66 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+#include "VoxelConditioningSources.h"
+
+void FVoxelConditioningSources::GatherOnSphere(const FVector& Direction, double AngularRadius, double PlanetRadius,
+	EVoxelConditioningGather Need, FVoxelConditioning& Out) const
+{
+	if (IsEmpty())
+	{
+		return;
+	}
+	for (const FVoxelConditioningZone& Zone : Zones)
+	{
+		if (Zone.MeetsCap(Direction, AngularRadius, PlanetRadius))
+		{
+			Out.Zones.Add(Zone);
+		}
+	}
+	for (const FVoxelConditioningLineRef& Line : Lines)
+	{
+		if (Line->MeetsCap(Direction, AngularRadius, PlanetRadius))
+		{
+			Out.Lines.Add(Line);
+		}
+	}
+	for (const IVoxelTerrainConditioner* Conditioner : Conditioners)
+	{
+		Conditioner->GatherConditioningZonesOnSphere(Direction, AngularRadius, Need, Out.Zones);
+		Conditioner->GatherConditioningLinesOnSphere(Direction, AngularRadius, Need, Out.Lines);
+	}
+	Out.SortLines();
+}
+
+void FVoxelConditioningSources::GatherForRegion(const FBox2D& Region, EVoxelConditioningGather Need, FVoxelConditioning& Out) const
+{
+	if (IsEmpty())
+	{
+		return;
+	}
+
+	// Static zones whose influence overlaps the region (heightmap zones: planet zones apply only on a planet).
+	for (const FVoxelConditioningZone& Zone : Zones)
+	{
+		if (!Zone.IsRadial() && Zone.GetBounds2D().Intersect(Region))
+		{
+			Out.Zones.Add(Zone);
+		}
+	}
+
+	// Static lines whose reach meets the region (heightmap lines, by the blocks of their segments).
+	for (const FVoxelConditioningLineRef& Line : Lines)
+	{
+		if (Line->MeetsRegion(Region))
+		{
+			Out.Lines.Add(Line);
+		}
+	}
+
+	// The dynamic conditioners' zones and lines for this region, in the order they were registered.
+	for (const IVoxelTerrainConditioner* Conditioner : Conditioners)
+	{
+		Conditioner->GatherConditioningZones(Region, Need, Out.Zones);
+		Conditioner->GatherConditioningLines(Region, Need, Out.Lines);
+	}
+	Out.SortLines();
+}

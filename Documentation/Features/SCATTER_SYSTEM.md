@@ -7,7 +7,7 @@
 
 ## Overview
 
-The scatter system places vegetation (trees, grass, rocks) on voxel terrain using CPU-based placement and Hierarchical Instanced Static Mesh (HISM) rendering. It extracts surface points from each chunk's voxels (never its mesh), applies placement rules, and manages HISM instances in pools whose writes are batched. Extraction and placement run on the thread pool.
+The scatter system places vegetation (trees, grass, rocks) on voxel terrain using CPU-based placement and Hierarchical Instanced Static Mesh (HISM) rendering, or instanced skinned meshes for a definition with a skeletal mesh (the Megaplants, [Skeletal definitions](#skeletal-definitions-the-foliage-and-bolt-plans-d68)). It extracts surface points from each chunk's voxels (never its mesh), applies placement rules, and manages HISM instances in pools whose writes are batched. Extraction and placement run on the thread pool.
 
 ## Architecture
 
@@ -129,7 +129,9 @@ struct FScatterDefinition
 
     // Mesh
     TSoftObjectPtr<UStaticMesh> Mesh;
+    TSoftObjectPtr<USkeletalMesh> SkeletalMesh; // set: drawn skinned instead of Mesh (Skeletal definitions); IsSkeletal()
     TArray<TSoftObjectPtr<UMaterialInterface>> OverrideMaterials;
+    bool bDynamicMaterials = false;          // the overrides drawn through published dynamic instances (Dynamic materials)
 
     // Cubic Scatter Settings
     EScatterMeshType MeshType = EScatterMeshType::StaticMesh;
@@ -181,7 +183,9 @@ struct FScatterDefinition
 
     // Rendering
     bool bCastShadows = true;
-    bool bEnableCollision = false;
+    bool bEnableCollision = false;            // static: the mesh's collision; skeletal: a capsule per instance (G149)
+    float SkeletalCollisionRadius = 0.0f;     // skeletal: the capsule's radius at scale 1; 0 = from the mesh's bounds
+    float SkeletalCollisionHeight = 0.0f;     // skeletal: the capsule's height from the base; 0 = the bounds' top
     bool bReceivesDecals = true;
 
     // Debug
@@ -250,9 +254,16 @@ layers, `SetEditLayerSource`). Tests can supply the neighbours' real voxels inst
 
 What that rule fixed:
 - **The generated surface, not the natural one** (G23). A buried chunk's test and the planet's outside voxels use the
-  ground generation makes, POI pads and their falloff rings included (`ConditioningZones`, gathered by the chunk manager,
+  ground generation makes, POI pads and their falloff rings included (`Conditioning`, gathered by the chunk manager,
   `SetConditioningGatherer`). Before, a pad cut below a chunk's top left its ground points underground, and the chunk
   under a raised pad read as open surface.
+- **A conditioning line's clear width** (the terrain lines plan's L3). `ExtractChunkSurfacePoints` drops the surface
+  points on the ground inside a line's clear half width (`FVoxelConditioning::IsClearedAt`, `IsClearedOnSphere` on a
+  planet, from the same `Conditioning`), in all three extractors, so no pass places anything on a road, a later pass
+  from the cached points included. A line is there for the world's life, as the chunk's generated voxels are, so the
+  points are dropped and not masked at placement as an exclusion volume's are; points under the ground (a cave's floor
+  under a road) are left. A set with no line pays one count test. Test
+  `VoxelWorlds.Scatter.ConditioningLine.ClearWidth`.
 - **The voxel over a heightmap chunk's top layer** (G26, G28). Solid, the chunk's top voxel is no surface (the chunk above
   extracts it) and the column below is covered; air, the crossing interpolates against it. Before G26 it was taken for
   air, which copied the surface onto the chunk's top face up to 1.5 voxels under the ground; before G28 it still was
@@ -526,11 +537,108 @@ before G42, for A/B runs): `VoxelWorlds.Scatter.HISMBatch.{SameInstances,InPlace
 `ScatBatchN` and `ScatCompactN` per sample, and the scatter section's steps (`ScatApplyMs`, `ScatLaunchMs`,
 `ScatDistMs`, `ScatFlushMs`).
 
+### Dynamic materials (the foliage and bolt plan's D67)
+
+A definition with `bDynamicMaterials` is drawn through one `UMaterialInstanceDynamic` per override slot: the renderer
+makes it from the slot's `OverrideMaterials` entry when the definition's first HISM is made
+(`UVoxelScatterRenderer::GetOrCreateDynamicMaterial`, outer the renderer, transient), and every HISM of the definition,
+in every region, gets that same instance, so one parameter write reaches every instance of the definition everywhere. A
+slot with no override keeps the mesh's own material; a definition without the flag sets its overrides as they are. The
+manager publishes the instances under the definition's `Name`: `GetDynamicMaterials(Name)`, `GetAllDynamicMaterials`
+(name, ScatterID, slot, instance) for a reader that comes late, `OnDynamicMaterialCreated(Name, Instance)` once per slot
+as it is made, and `OnDynamicMaterialReleased(Name, Instance)` for each at `Shutdown`, before the components go (the
+registry is empty when it fires). The scatter knows nothing of who writes them: in this project VoxelWorldPOI's
+`UPOIWeatherBridge` registers them with the weather's mirror table, which writes the Megascans foliage master's
+`Wind Intensity` from the front's wind every tick (the parent's `Scripts/setup_smooth_terrain.py` writes the wind
+material instances the overrides name). A definition replaced by `AddScatterDefinition` keeps the instance its first
+HISM made. Test `VoxelWorlds.Scatter.DynamicMaterials`.
+
+### Skeletal definitions (the foliage and bolt plan's D68)
+
+A definition whose `SkeletalMesh` is set (with `MeshType` StaticMesh; `FScatterDefinition::IsSkeletal`) is drawn through
+one `UInstancedSkinnedMeshComponent` per type and region instead of a HISM: a Megaplant's growth stage, a skeletal mesh
+whose needles and fronds are assembly parts on its bones, exported for the engine's Dynamic Wind. One stage per
+definition, as a static plant's variants are one mesh per definition. Everything before the renderer is a static
+definition's (extraction, placement, regions, claims, exclusion volumes, edits, the distance cleanup, harvesting); the
+renderer differs in four things:
+
+- **The component.** `CreateSkinnedComponent` makes it at the region's origin with the definition's
+  `LODStartDistance` and `CullDistance` as its per-instance start and end cull distances (the HISM's fade band and cull),
+  its shadows and decals, `ApplyOverrideMaterials` (the dynamic instances of [Dynamic materials](#dynamic-materials-the-foliage-and-bolt-plans-d67)
+  if the definition asks), no collision of its own (with `bEnableCollision`, [Collision](#collision-g149) below) and, when
+  the engine's Dynamic Wind plugin is loaded, a `UDynamicWindData` transform provider: the GPU animates each instance
+  from the plugin's wind simulation, which `UDynamicWindSubsystem::UpdateWindParameters` drives (in this project
+  VoxelWorldPOI's `UPOIWeatherBridge`, from the weather). VoxelWorlds finds the provider class by name
+  (`GetSkinnedTransformProviderClass`) and takes no dependency on the experimental plugin; without it the plants stand
+  at rest.
+- **No tick.** The component is made with no tick (`bCanEverTick` false): an instanced skinned mesh's tick
+  (`RefreshBoneTransforms`) recomputes its bounds over every instance and sends its render transform again every frame,
+  which a GPU-only provider needs neither of (F2 measured it as the whole game-thread premium of the skinned path). The
+  bounds are recomputed when the instances change, by the instance data manager's flush
+  (`SendRenderInstanceData_Concurrent`).
+- **Instances by id.** An instanced skinned mesh keeps its instances in the GPU scene's instance data by id, updated per
+  instance with no cluster tree to rebuild, so the renderer adds and removes them as they come (`FSkinnedInstanceSet`:
+  per region the ids per chunk): no pool, no held writes, no compaction. They go through the same add queue and
+  per-frame budget as the HISMs' (`FlushPendingInstanceAdds`); a release (`ReleaseChunkScatterType`, so an unload, the
+  distance cleanup, an edit, an exclusion volume) removes the chunk's ids at once. `GetChunkInstanceCount`,
+  `GetTotalInstanceCount`, `FindNearestInstance` (harvest: the ids of the chunks near the point) and the stats count them.
+- **Loaded ahead.** A stage pulls its assembly parts (25 skeletal meshes for the heather's four stages) and their
+  derived data; loaded synchronously at a region's first instance, as a static mesh is, that was a hitch of 1.3 s warm
+  and minutes cold (F2). The manager asks the renderer to load every skeletal definition's mesh and override materials
+  asynchronously as the definitions load (`PreloadDefinition`, from `Initialize` and `AddScatterDefinition`), and a
+  skeletal definition's queued instances wait in the queue, the entries behind them going on, until its load has
+  finished (`IsDefinitionLoaded`); the component then takes the loaded mesh (`Get`, never a load).
+
+#### Collision (G149)
+
+An instanced skinned mesh has no bodies per instance, and the Megaplants come with no physics asset, so the renderer
+gives a skeletal definition with `bEnableCollision` a second component per type and region: a collision-only
+`UInstancedStaticMeshComponent` (`GetOrCreateCollisionComponent`) beside the skinned one, at the same region origin,
+holding one capsule per skinned instance. `AddSkinnedInstances` adds a chunk's capsules with its instances and
+`RemoveSkinnedInstances` removes them with the instances (`FSkinnedInstanceSet`: the capsules' ids per chunk beside the
+instances'), so every path that adds or releases a skinned instance (the add queue, an unload, the distance cleanup, an
+edit, an exclusion volume, a harvest) moves its capsule too; `ClearAllInstances` and `Shutdown` clear and destroy the
+components.
+
+- **The shape.** Every component instances one transient mesh, a capsule of radius 50 and height 100 standing on its
+  origin (`GetCollisionCapsuleMesh`: a box for the render data the component needs, never drawn, and an `FKSphylElem`
+  used as simple and complex collision, nothing to cook). A capsule's radius scales with the larger of X and Y and its
+  height with Z, so a per-axis scale under the instance's transform gives each instance the definition's capsule
+  (`MakeSkinnedCollisionTransform`), tilting and scaling with the plant. The capsule is the trunk's:
+  `SkeletalCollisionRadius` and `SkeletalCollisionHeight`, or from the stage's imported bounds when zero
+  (`GetSkeletalCollisionCapsule`: a fifth of the smaller horizontal half extent, up to the bounds' top, the radius at
+  most half the height). The Utah Junipers' stages A, B, C come out at 59 x 464, 42 x 276 and 17 x 211 cm (a stage A's
+  trunk is about a metre across at its base); the canopy stays passable, as the old static bakes' was (they had no
+  simple collision at all, only their triangles for traces).
+- **Out of the render scene.** The component is hidden, casts nothing and is never added to the scene
+  (`UPrimitiveComponent::ShouldComponentAddToScene`), so it costs only its physics bodies; it blocks every channel as a
+  static definition's HISM does, does not tick and does not affect navigation.
+- **Why not a physics asset.** The alternative was a physics asset per stage for the skinned component's own bodies:
+  every stage of every species authored by hand, and bodies an instanced skinned mesh does not make per instance. One
+  capsule per instance is a shape the scatter can make for any skeletal definition from its numbers or bounds.
+- **What it costs** (measured 2026-11-09 in PIE on `SmoothTerrain_Island`): nothing per frame (static bodies; the game
+  thread 23.2, 24.8 and 24.0 ms with the capsules against 22.7 and 26.4 ms without, within the run-to-run noise); a
+  chunk's add 30 to 80 µs for one capsule, 55 to 106 µs for three, 140 to 330 µs for ten, about 10 to 15 µs each in
+  batches of a hundred, and a removal about a third of that, timed in the editor through Python (so an upper bound).
+
+A walk into a juniper is deflected around its trunk (the pawn's path keeps the capsule's and the pawn's radii, 88 uu,
+from the trunk's axis; with the collision components turned off the same walk passes through the trunk), a chop finds it
+through the aim trace as before and its harvest removes the capsule with the instance, and a trip away and back leaves
+no capsule behind and none twice (24 capsules for 24 junipers before, 0 and 0 away, 24 unique after). Test
+`VoxelWorlds.Scatter.SkeletalCollision`.
+
+A static definition never touches any of it. The diagnostics are `voxel.Scatter.Skinned` (the components, their
+instances, provider and ticking count, and the collision capsules with their radius and height), `voxel.Scatter.Skinned.TimeRefresh` (what the tick would cost) and
+`voxel.Scatter.Skinned.Sample` (stat unit's times over a few seconds); `voxel.Scatter.Stats hism` lists the skinned
+components per type. The costs and the decision (the skinned instances everywhere, no near range, the static bakes
+retired) are the foliage and bolt plan's F2 and F3 results (`Plugins/WorldWeatherPlugin/Documentation/WEATHER_SYSTEM.md`
+section 10). Test `VoxelWorlds.Scatter.Skeletal`.
+
 ### Debug Stats
 
 `GetDebugStats()` reports pool health:
 ```
-ScatterRenderer: 5 HISM, 12400 instances (Active: 8200, Pooled: 4200, Util: 66%), 42 chunks, Pending: 0 adds
+ScatterRenderer: 5 HISM, 12400 instances (Active: 8200, Pooled: 4200, Util: 66%), 2 skinned (480 instances, 60 capsules), 42 chunks, Pending: 0 adds
 ```
 
 - **Active**: Instances with real transforms (visible within CullDistance)
@@ -713,6 +821,11 @@ keeps the smooth three for the tests that ran on them).
 
 - Per-definition `SpawnDistance` allows different ranges per scatter type; a definition with `SpawnDistance` 0 spawns at
   the world configuration's `ScatterRadius`
+- Every one of these distances is a chunk's distance from the nearest viewer (`GetViewerDistance`): the streaming
+  viewer, and on a server each further viewer, the pawn of a player other than the first (`SetFurtherViewers`, set by
+  the chunk manager every tick; G217). So a server holds the scatter (its collision, the instance a player chops)
+  around each of its players, in the chunks of that player's ground window
+  ([STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md)); a client and a standalone game have the one viewer
 - Trees can have larger spawn distance to prevent pop-in
 - Grass can have smaller distance for performance
 - Out-of-range cleanup releases instances to pool via `ReleaseChunkScatterType()` (in place: no tree rebuild)
@@ -732,12 +845,15 @@ their fade band. Scatter looked as if it existed only on the finest LOD and popp
 Now such a chunk is remembered (`ChunksAwaitingFirstExtraction`; an unload or a regeneration drops it) and the
 distance pass hands it off again once it comes within the horizon, nearest first, `MaxDistanceSpawnChunksPerPass` a
 pass, through the chunk manager's requester (`SetChunkHandOffRequester`: `HandOffChunkScatter` from the chunk's
-edit-merged voxels, the far-compressed snapshot path included). Its first extraction then runs at the horizon with the
+edit-merged voxels, the far-compressed snapshot path included). A far-compressed chunk's snapshot is decoded on a worker
+first: the requester starts the decode and answers `EVoxelScatterHandOff::Pending`, the chunk keeps waiting and is asked
+for again on the next pass, when its snapshot is ready (G130; before, up to `MaxDistanceSpawnChunksPerPass` decodes ran
+on the game thread in one pass, 5-10 ms frames on `SmoothTerrain_Island`). Its first extraction then runs at the horizon with the
 types in range there, and the distance pass streams the rest in at their own distances; types with `SpawnDistance` 0
 stream at `ScatterRadius` like the others (and are released past it like the others, where before they stayed once
 spawned). A hand-off that finds a type in range takes the chunk out of the set, so a chunk whose next mesh comes first
 is handled as before. `voxel.Scatter.Stats` reports the chunks awaiting, the deferred hand-offs and the horizon. Tests:
-`Scatter.FirstExtraction.Horizon`, `Streaming.Plane.ScatterFirstExtractionAtHorizon`.
+`Scatter.FirstExtraction.Horizon`, `Scatter.FirstExtraction.Pending`, `Streaming.Plane.ScatterFirstExtractionAtHorizon`.
 
 With the horizon in place the distances a definition needs are only the ones `ValidateScatterDistances` already
 checks: `LODStartDistance < CullDistance` (a fade band) and `CullDistance` below the effective spawn distance (a
@@ -845,7 +961,12 @@ int32 BillboardAtlasRows = 4;    // Atlas grid rows
 #### Billboard Material
 
 `CreateBillboardMaterial()` creates a `UMaterialInstanceDynamic`:
-1. Tries to load user-provided `/VoxelWorlds/Materials/M_Billboard_Master`
+1. Tries to load `/VoxelWorlds/Materials/M_Billboard_Master`, which exists since the weather plan's P3 (2026-11-07; the
+   parent's `Scripts/setup_weather_materials.py` builds it): two-sided masked, `BaseTexture` to Base Color and Opacity
+   Mask, and a world position offset, **BillboardWind**, that leans the quad along `MPC_VoxelMaterial`'s `WindDirection`
+   by `WindIntensity` and `GustFactor`, by the square of the vertex's height over the instance (nothing moves at the
+   base; `ObjectOrientation` is the up, so a planet's billboards lean in their own frame), swaying by time with a
+   per-instance phase (`PerInstanceRandom`). The weather plugin fills the collection; without it the quads stand still.
 2. Falls back to runtime-generated `UMaterial` with proper settings:
    - `TwoSided = true`, `BlendMode = BLEND_Masked`, `bUsedWithInstancedStaticMeshes = true`
    - `TextureSampleParameter2D("BaseTexture")` connected to BaseColor + OpacityMask
@@ -925,7 +1046,21 @@ Stateless, thread-safe static class that stamps tree blocks into VoxelData durin
 2. For current chunk AND up to 26 neighbors, call `ComputeTreePositionsForChunk()`:
    - Deterministic seed from `HashCombine(WorldSeed, SourceChunkCoord)`
    - `floor(TreeDensity)` trees, plus one with the fractional part's probability
-   - Random X,Y within source chunk → the world mode's generated surface there (`GetSurfaceOnUpLine`) for Z
+   - Random X,Y within source chunk → the world mode's natural surface there (`GetSurfaceOnUpLine`) for Z
+   - The conditioning over the source chunk: a tree inside a line's clear half width is not planted (the terrain
+     lines plan's L3), and a tree stands on the ground generation makes at its column, the natural height with the
+     lines' blend and then the zones' (`FVoxelConditioning::IsClearedAt`, `ApplyToHeight`): beside a road on the
+     ground the road leaves, on a POI's pad on the pad (G206: with the natural height a tree on a pad cut into a
+     slope began in the air over it, and one on a raised pad under its ground). The height rule, the water check and
+     the surface material are judged at that height. The chunk manager gathers the lines and the zones over the
+     chunk and the chunks its trees may be planted in (`GatherTreeConditioning`, `GetSourceChunkRadius`) for the
+     injection and for the tree queries (`FindVoxelTreeAt`, `FindVoxelTreesNear`), so both compute the same trees. A
+     world with no conditioning there plants the trees of the natural ground. Nor is a tree planted inside a zone's
+     `ClearRadius` (`FVoxelConditioning::IsZoneClearedAt`): VoxelWorldPOI's conditioner gives a pad its inner radius
+     when the POI's claim keeps the pad bare of decoration (`Claim.Decoration.Suppress`, the type's
+     `bSuppressDecoration`), so the voxel trees keep off a village as the scatter and PCG do (G222: trees came up
+     through its houses on a block world). A tree is skipped after its draws, so the others are the ones planted
+     before. Test `VoxelWorlds.Cubic.VoxelTrees.OnAPad`
    - Filter by placement rules: material, biome, slope, elevation, water level
 3. For each tree position, if bounding box overlaps current chunk: call `StampTree()`
 

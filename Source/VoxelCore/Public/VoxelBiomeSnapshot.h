@@ -80,6 +80,20 @@ struct VOXELCORE_API FVoxelBiomeSnapshot
 	int32 MoistureSeedOffset = 5678;
 	float MoistureNoiseFrequency = 0.00007f;
 
+	// ==================== Climate shaping ====================
+
+	/** Mirrors UVoxelBiomeConfiguration::bEqualizeClimate (temperature and moisture through the fields' CDF). */
+	bool bEqualizeClimate = false;
+
+	/** Mirrors UVoxelBiomeConfiguration::bEqualizeContinentalness. */
+	bool bEqualizeContinentalness = false;
+
+	/** Mirrors UVoxelBiomeConfiguration::TemperatureLatitudeWeight (planets only). */
+	float TemperatureLatitudeWeight = 0.0f;
+
+	/** Mirrors UVoxelBiomeConfiguration::TemperatureLapseRate (temperature per 10,000 uu above the datum). */
+	float TemperatureLapseRate = 0.0f;
+
 	// ==================== Capture ====================
 
 	/**
@@ -89,6 +103,50 @@ struct VOXELCORE_API FVoxelBiomeSnapshot
 	 * Game-thread only (reads the UObject); the returned value is thread-safe to copy and share.
 	 */
 	static FVoxelBiomeSnapshot FromConfig(const UVoxelBiomeConfiguration* Config);
+
+	// ==================== Climate shaping ====================
+	// Every reader of the climate (generation on the CPU, the surface queries, the far field, the map, the editor's
+	// field viewer) samples the raw fields and passes them through these, as the GPU's ClimateShaping.ush does, so the
+	// paths cannot drift.
+
+	/**
+	 * A raw 2-octave field value remapped through the fields' fixed CDF (VOXELGEN_CLIMATE_CDF): uniform on [-1, 1].
+	 * @param RawValue The field's value, about [-1, 1]
+	 * @return The equalised value, in [-1, 1]
+	 */
+	static float EqualizeField(float RawValue);
+
+	/**
+	 * The temperature the biome blend reads: the raw field, equalised when bEqualizeClimate, leaned toward latitude
+	 * on a planet, less the lapse over the column's surface altitude. Not clamped (the blend clamps).
+	 * @param RawTemperature The temperature field's value at the column
+	 * @param SurfaceAltitude The column's terrain surface: world Z on a heightmap, the altitude over the datum on a planet
+	 * @param SinLatitude sin(latitude) of the column's direction from the planet's centre (its Z); ignored without latitude
+	 * @param bHasLatitude True on a planet
+	 * @return The shaped temperature
+	 */
+	float ShapeTemperature(float RawTemperature, float SurfaceAltitude, float SinLatitude, bool bHasLatitude) const;
+
+	/**
+	 * The moisture the biome blend reads: the raw field, equalised when bEqualizeClimate.
+	 * @param RawMoisture The moisture field's value at the column
+	 * @return The shaped moisture
+	 */
+	float ShapeMoisture(float RawMoisture) const
+	{
+		return bEqualizeClimate ? EqualizeField(RawMoisture) : RawMoisture;
+	}
+
+	/**
+	 * The continentalness the height curves and the biome gate read: the raw field, equalised when
+	 * bEqualizeContinentalness.
+	 * @param RawContinentalness The continentalness field's value at the column
+	 * @return The shaped continentalness
+	 */
+	float ShapeContinentalness(float RawContinentalness) const
+	{
+		return bEqualizeContinentalness ? EqualizeField(RawContinentalness) : RawContinentalness;
+	}
 
 	// ==================== Continentalness queries ====================
 

@@ -81,6 +81,9 @@ struct VOXELCORE_API FVoxelMaterialTextureConfig
 
     /** The material this one turns into on steep smooth terrain (VP2-O3); -1, its own ID or an unconfigured ID: never */
     int32 SlopeMaterialID = -1;
+
+    /** The ground underfoot (G247; Surface Class below); Unset keeps the default's class for the ID */
+    EVoxelSurfaceClass SurfaceClass = EVoxelSurfaceClass::Unset;
 };
 ```
 
@@ -257,6 +260,18 @@ The cubic path samples `PackedAlbedoAtlas` (and the normal and roughness atlases
 A-Channel Encoding" below). A config with `bUseFaceVariants` gives each face its own tile (`TopTile`, `SideTile`,
 `BottomTile`), else every face uses `AtlasColumn` / `AtlasRow`. `MF_CubicAtlasSample` reads the LUT by texel with the
 vertex's MaterialID (UV1.x) and face type (UV1.y) and samples the tile with UV0.
+
+The sample is the view's bilinear sampler (`View.MaterialTextureBilinearWrapedSampler`, whatever the atlas texture's own
+filter), so the in-tile UV, frac(UV0), is clamped to half a texel inside the tile, from each atlas's own size
+(`GetDimensions`). At a tile's edge an unclamped tap read half a texel of the neighbouring slot: a one-pixel line of the
+next tile's colour along block edges (G127, plain on an atlas without gutters). `Scripts/setup_cubic_atlas_inset.py`
+(parent repository; idempotent, run headless) writes the clamp into the two Custom nodes.
+
+The normal atlas is imported as plain linear RGB: compression `TC_Default`, sRGB off, not as a normal map.
+`MF_CubicAtlasSample` decodes the atlas's rgb as rgb x 2 - 1. A BC5 normal map stores only red and green, and its blue
+of 0 decodes to a normal lying in the face, which draws the top faces black. The Smooth Terrain block world's atlas
+(`T_SmoothTerrainCubic_*`) is generated from Megascans sources by `Tools/CubicAtlas/build_cubic_atlas.py` and imported
+by `Scripts/setup_smooth_terrain.py`. The parent's `Scripts/README.md` gives the order.
 
 ### Face Type on a Planet (spherical Phase 4, SP-D3)
 
@@ -442,7 +457,11 @@ reads) and `Load` that texel. The face rows are read by texel too (`MF_CubicAtla
 move them. An atlas whose arrays were built with a slice per MaterialID has empty slice tables, and its LUT gives every
 MaterialID the slice of its own index. `BuildTextureArrays()` rewrites an existing LUT in place, so materials already
 bound to it read the new slices with the new arrays (the editor rebuilds stale arrays when a world binds the atlas, after
-the LUT was built). The far field's `FarFieldMaterialPick` produces a MaterialID like every voxel vertex and needs
+the LUT was built). Each atlas's LUT is a transient texture under a name of its own (`<Atlas>_MaterialLUT`, made
+unique in the transient package): with one name for every atlas, a second atlas's build replaced the first atlas's LUT
+in place, and after a PIE on `VoxelWorldsTest` the demo atlas drew its materials 4 and 5 from the test atlas's slices
+until the editor restarted (G211; test `VoxelWorlds.Rendering.MaterialAtlas.TwoAtlasesInTurn`, which reads the slice
+row back from the GPU texture in the editor). The far field's `FarFieldMaterialPick` produces a MaterialID like every voxel vertex and needs
 nothing of its own. `Scripts/setup_texture_array_slices.py` (parent repository) made the material edits, headless.
 
 ### Footprint Sampling (visual polish VP2-O1)
@@ -503,7 +522,7 @@ the atlas has no config for: never), and `BuildMaterialLUT` writes it into the s
 (`UVoxelMaterialAtlas::GetSlopeMaterialID`; test `VoxelWorlds.MaterialAtlas.SlopeMaterial`). The voxels keep their
 material: digging, hardness and the map see grass where the shader draws rock; scatter counts it as the rock (G106,
 below). The project's atlases
-(`DemoMaterialAtlas`, `PluginTesting/Config/VoxelMaterialAtlas`) turn Grass and Frozen Dirt to Stone. Dirt stays dirt, so
+(`DemoMaterialAtlas`, `PluginTesting/Tests/Voxel/VoxelMaterialAtlas`) turn Grass and Frozen Dirt to Stone. Dirt stays dirt, so
 a dig's walls look like what was dug; Sand (dunes, beaches), Snow, Sandstone, Stone, the ores, Wood and Leaves never turn.
 
 Both triplanar functions include `Shaders/Private/VoxelSlopeRock.ush` and compute the same weight
@@ -530,7 +549,7 @@ local up at 1 km from the centre. Tests `VoxelWorlds.Rendering.SlopeRock.Assets`
 `Scripts/setup_slope_rock.py` (parent repository; idempotent, run headless) writes the nodes, the parameter and the
 atlases' slope materials, and resaves `M_VoxelMaster` and `M_VoxelMaster_Fade` with no node changed (their cached
 parameter list then holds `LocalUpCenter`, which a cooked game reads). Smooth terrain only: the cubic path
-(`MF_CubicAtlasSample`) is unchanged. Soft material borders (VP2-O4) wait for the user's look at this.
+(`MF_CubicAtlasSample`) is unchanged. Soft material borders (VP2-O4) are below.
 
 Result (2026-11-02, before and after at fixed poses): on `VoxelDemo` the steepest hill flanks take rock in patches with
 irregular borders and the gentle ground keeps its grass, at eye level and from 50-150 m up (the main build against the
@@ -542,6 +561,33 @@ be rock, so the radial up is in use. The explored maps are byte-identical to mai
 materials), and the meshes and the 111 GPU parity lines are unchanged. Ground scatter still grows on the rock (G106).
 
 ---
+
+### Weather Surface (the weather plan's P3, 2026-11-07)
+
+`MPC_VoxelMaterial` holds the weather's inputs beside `MacroVariation`: `WindDirection` (a vector, unit and tangent to
+the local up at the viewer), `WindSpeed`, `WindIntensity`, `GustFactor`, `Wetness`, `SnowCover`, `SnowFreezeLevel`,
+`LocalCold`, `RippleStrength`. The weather plugin fills them through its mirror table (the parent's `Config/DefaultGame.ini`);
+nothing in VoxelWorlds knows it exists, and with no weather they hold their defaults (dry, no snow, no wind). The
+parent's `Scripts/setup_weather_materials.py` adds the parameters and the nodes below (idempotent, headless).
+
+`M_VoxelMaster` and `M_VoxelMaster_Fade` end in a Custom node, **WeatherSurface**, between the albedo lerp and Base
+Color and between the roughness and Roughness. The ground darkens (albedo x 0.5) and smooths (roughness toward 0.2)
+with `Wetness`, and whitens (toward 0.86, 0.88, 0.92; roughness 0.75) with `SnowCover`, both scaled by a top-face mask
+(the vertex normal against the local up: `LocalUpCenter`'s radial up on a planet, +Z elsewhere; side faces get half the
+wetness and no snow). The snow is local by biome: the node reads the vertex's biome (vertex colour G) in the
+**BiomeLUT** texture parameter, one texel per biome ID with the ends of the biome's temperature range mapped from
+[-1, 1] to 0..1 (`FVoxelBiomeLookup`, `VoxelRendering`: built once per world from the configuration's biomes by
+`FVoxelMeshRenderer::Initialize`, a transient texture under a name of its own, since a PIE server and its clients
+build theirs in one process (G144), set on every region component's instance by `SetBiomeLookup`; B 0 marks an
+unused ID, which is never cold), and compares the range's middle with `SnowFreezeLevel`, the climate temperature at which the
+weather snows in the same units: a biome whose middle sits under the line (the band is 0.12 wide) takes the snow and no
+wetness, one above it the wetness and no snow. A wide biome, one spanning about half the climate or more (the smooth
+terrain's Alpine and Coast), says nothing about the cold, so for it the node takes `LocalCold` instead, the weather's
+cold factor at the viewer (1 at or under the snow temperature, 0 a sleet band above it). So one global front is snow on
+the tundra, the taiga and the cold alpine slopes around a player standing in the cold, and rain on the meadow, at every
+LOD and on the far field alike (both carry the biome byte). A Dual Contouring border vertex carries its third material
+in G instead of the biome and reads the wrong texel there: a texel-wide error on three-material borders, not visible.
+Test `VoxelWorlds.Rendering.BiomeLookup.Encode`.
 
 ## Material Assignment
 
@@ -571,6 +617,36 @@ The reserved slots, and materials an atlas adds past the registry's list, keep t
 number means: in VoxelCharacterPlugin a cubic world's block breaks after `Hardness / MiningSpeed` while the primary action
 is held (`UVCBlockInteractionComponent::GetBreakSeconds`; bare hands 1, the stone pickaxe 1.5, the iron pickaxe 2),
 decided on the server; smooth worlds dig at once (D32).
+
+---
+
+## Surface Class (G247)
+
+`FVoxelMaterialDefinition::SurfaceClass` (`EVoxelSurfaceClass`: Stone, Dirt, Grass, Sand, Snow, Ice, Mud, Wood, Metal, or
+Unset) is what kind of ground the material is underfoot. The voxel engine names the class and reads nothing from it; a
+game gives each class its meaning (VoxelCharacterPlugin: the friction, the hardness and the footsteps' surface,
+`UVCMovementComponent::SurfaceClassToSurfaceType`). Until G247 the character held its own table by material ID (code
+review CR2, VCP-14), so a material an atlas added, such as the demo's road and trail, had no surface.
+
+| Class | The registry's defaults |
+|-------|-------------------------|
+| Grass | Grass, Leaves |
+| Dirt | Dirt |
+| Stone | Stone, Coal, Diamond |
+| Sand | Sand, Sandstone |
+| Snow | Snow |
+| Ice | Frozen Dirt |
+| Metal | Iron, Gold, Copper |
+| Wood | Wood |
+| Unset | the reserved slots, and an ID past the defaults |
+
+Unlike the hardness, an atlas sets it: `FVoxelMaterialTextureConfig::SurfaceClass` replaces the default's class in the
+world's table (`FVoxelMaterialTable::FromAtlas`) where it names one and keeps it where it is Unset, so a material the
+atlas adds has its own ground. The demo's road (7) is Stone and its trail (8) Dirt in the three atlases with roads
+(`Scripts/setup_poi_roads.py`). A game reads the class from the world's table, `UVoxelChunkManager::GetMaterialTable`
+(the atlas's, or the defaults without one). A dedicated server binds the world actor's atlas as a client does and holds
+the same table, so both machines read one surface (a net walk on the demo's road and trail, G247). Tests
+`VoxelWorlds.MaterialRegistry.SurfaceClasses`, `VoxelWorlds.Streaming.Cubic.TwoWorldsOwnAtlases`.
 
 ---
 
@@ -669,27 +745,64 @@ every voxel vertex, vertex colour R its second, and vertex colour A 255 less the
 `MaterialID` named reroute, so everything that reads the reroute sees the picked material:
 
 ```hlsl
-// Inputs: MaterialID (MF_GetMaterialID), SecondaryR (VertexColor R), VertexAlpha (VertexColor A)
-#if PIXELSHADER
-float W = saturate(1.0 - VertexAlpha);
-if (W > 0.002)
+// Inputs: MaterialID (MF_GetMaterialID), SecondaryR, VertexAlpha, VertexG, VertexB (VertexColor R, A, G, B)
+#if PIXELSHADER || IS_NANITE_SHADING_PASS  // Nanite's shading pass picks too (the terrain on Nanite, D161)
+if (VertexAlpha < 254.5 / 255.0)                     // alpha below 255 marks a blend
 {
-    float2 P = Parameters.SvPosition.xy + 5.588238 * (float)View.StateFrameIndexMod8;
-    float Noise = frac(52.9829189 * frac(dot(P, float2(0.06711056, 0.00583715))));
-    if (Noise < W) { return floor(SecondaryR * 255.0 + 0.5); }
+    float W2 = saturate((254.0 / 255.0 - VertexAlpha) * (255.0 / 254.0));
+    float W3 = saturate(VertexB * (255.0 / 63.0));   // a Dual Contouring border's third material (0 elsewhere)
+    if (W2 + W3 > 0.002)
+    {
+        float2 P = Parameters.SvPosition.xy + 5.588238 * (float)View.StateFrameIndexMod8;
+        float Noise = frac(52.9829189 * frac(dot(P, float2(0.06711056, 0.00583715))));
+        if (Noise < W2) { return floor(SecondaryR * 255.0 + 0.5); }
+        if (Noise < W2 + W3) { return floor(VertexG * 255.0 + 0.5); }
+    }
 }
 #endif
 return MaterialID;
 ```
 
+The second's weight is (254 - alpha) / 254, so a far-field vertex's 255 less its weight reads 1/255 lower than it
+did before the third was added (2026-11-06); the far field has no third (its B is 0, its G the biome).
+
 Each pixel takes one of the two materials against interleaved gradient noise moved every frame, which TSR averages into a
 gradient across the quad: no texture sample is added. Before, a far-field quad drew one material, the most common of
 its corners' picks, so every material border was a staircase of quads (a few km a step at a planet's horizon) (tests
-`FarField.Planet.MaterialMix`, `.MaterialBlend`, `FarField.Plane.MaterialMix`). Every voxel chunk vertex has alpha 255 (weight 0) and keeps
-`MaterialID`. Vertex colour reaches the shader as UNORM (`VET_Color`, no sRGB decode), so R carries an ID exactly; IDs stay
+`FarField.Planet.MaterialMix`, `.MaterialBlend`, `FarField.Plane.MaterialMix`). The Dual Contouring chunk meshes blend
+their material borders through the same node ("Soft Material Borders" below); every other voxel chunk vertex has alpha
+255 (weight 0) and keeps `MaterialID`. Vertex colour reaches the shader as UNORM (`VET_Color`, no sRGB decode), so R carries an ID exactly; IDs stay
 out of interpolation because both are flat per triangle. The node is added by `Scripts/setup_farfield_material_blend.py`
 (parent repository; idempotent, run headless). The VertexColor node's default output is RGB only, so R and A go in as their own
 inputs: a `.a` on that output fails the material's compile and every mesh using it draws the default material.
+
+### Soft Material Borders (VP2-O4)
+
+The Dual Contouring meshers give each quad on a material border a second material, where three meet a third, and a
+weight for each per vertex ([DUAL_CONTOURING.md](DUAL_CONTOURING.md) "Materials and soft borders"). The vertex factory
+writes them as colour: R the second material and A its weight (254 at none, 0 at full: alpha below 255 marks a blend),
+G the third and B its weight (0-63). On a border vertex G and B therefore hold the third material, not the biome and
+the AO; no material reads either, and the Dual Contouring meshes compute no AO. `FarFieldMaterialPick` then picks per
+pixel. A border between two materials (grass and dirt, beach sand and rock, two biomes' ground) is a
+ramp one cell wide (75 cm at LOD 0), and the blend zone's mosaic (G39's dither, a lattice 4 voxels apart) has soft
+edges. The pick adds no texture sample. Up close each pixel shows one material, and TSR averages them over frames into
+the ramp; in PIE close-ups (2 m from the ground, SmoothTerrain_Island's forest and desert borders) no grain shows, so the
+two-sample blend the plan kept as a fallback was not needed. Marching Cubes and the cubic meshes keep hard borders:
+their vertices carry no blend.
+
+- **Three materials in one quad.** They blend too (2026-11-06). With two only, the third's corner showed the quad's
+  own material and an edge stayed hard: a few straight edges among the soft ones where a blend zone has three ground
+  materials close together, such as the island's desert, savanna and dune-flank sand. PIE at that border before and
+  after: the edges are gone. Only a fourth material in one quad still keeps a hard corner.
+- **The colour view (fixed with VP2-O4).** The chunk meshes' colour buffer is read through a typed view
+  (`CreateVoxelMeshBuffers_RenderThread`, `VoxelSceneProxy.cpp`). The local vertex factory's manual fetch swizzles
+  `.bgra` (`FMANUALFETCH_COLOR_COMPONENT_SWIZZLE`) and expects an `R8G8B8A8` view over `FColor`'s bytes, the engine's
+  `FColorVertexBuffer` view. The view was `B8G8R8A8`, which swapped R and B for every chunk vertex. Nothing read R
+  while alpha stayed 255, so it went unnoticed. With the blend, the second material read as AO (0): a band of
+  material 0 along every border.
+- **Vertices.** Border vertices are duplicated per blend as they are per material. The suite's mesh digests: the same
+  triangles, and 4% more vertices at LOD 0 and up to 24% at LOD 2 on the two-material test terrain (wider cells reach
+  more borders).
 
 ### Material Assets
 
@@ -718,7 +831,8 @@ Materials can be flagged as **masked** (alpha cutout) and/or **non-occluding** (
 
 ### LUT A-Channel Encoding
 
-The Material LUT texture (256 x 4: three face rows and the slice row, see "The Slice Row") uses the **A channel** of its
+The Material LUT texture (256 x 5: three face rows, the slice row, see "The Slice Row", and the height row, "The Terrain on
+Nanite") uses the **A channel** of its
 face rows to encode per-material flags:
 - **Bit 0**: `bIsMasked` (1 = masked blend, 0 = opaque)
 - **Bits 1-7**: Reserved for future flags
@@ -800,6 +914,38 @@ The master material (M_VoxelMaster) must:
 
 When the opaque MID overrides blend mode back to `BLEND_Opaque`, UE ignores the OpacityMask pin entirely — no performance cost for opaque chunks.
 
+### The Terrain on Nanite (D161, D162)
+
+A world whose terrain is drawn through Nanite (`UVoxelWorldConfiguration::NaniteTerrain`, ARCHITECTURE.md "Nanite as an
+option") draws each Nanite mesh in two material sections:
+
+- **Section 0, opaque:** `MI_VoxelMaster_Nanite`, an instance of `M_VoxelMaster` with its blend mode overridden to
+  Opaque (`voxel.Render.Nanite.Material`). It compiles the master's own graph, so nothing is kept in step by hand; the
+  region component gives it the terrain material's parameters at runtime (`SyncNaniteMaterialParameters`).
+- **Section 1, masked:** the triangles of the materials the atlas draws masked (`IsMaterialMasked`: the leaves), with the
+  world's own terrain material, which is Masked. The encoder puts them after the others and keeps each cluster in one
+  section, so only their clusters take Nanite's programmable raster. A mesh without them has one section.
+
+`M_VoxelMaster` is marked used with Nanite for both (`Scripts/setup_nanite_material.py` in the parent makes the instance
+and sets the flag). Two things in the master behave differently in Nanite's compute shading, where it is not a pixel
+shader: FarFieldMaterialPick picks only under `PIXELSHADER || IS_NANITE_SHADING_PASS` (with `PIXELSHADER` alone the soft
+borders drew hard on Nanite), and the triplanar functions take their texture derivatives analytically there (a Custom
+node's `ddx` does not compile in it). Before D161 the opaque section was drawn with a copy of the master, M_VoxelMaster_Nanite, removed since.
+
+**Tessellation (D163).** A world can have its terrain displaced: its `NaniteMaterial` names `MI_VoxelMaster_Tessellated`,
+the Opaque instance of `M_VoxelMaster_Tessellated`, a copy of the master with Nanite tessellation that
+`Scripts/setup_nanite_tessellation.py` (parent) makes again from the master each time it runs. A copy, not an instance:
+an instance cannot turn tessellation on, and the master with it on would put every Nanite terrain through Nanite's
+programmable raster, whatever the displacement. The displacement (its node, TerrainDisplacement) reads each material's
+height from the atlas's height array: `FVoxelMaterialTextureConfig::HeightTexture` and `HeightChannel` (a Megascans
+surface's ORDp texture, B; `Scripts/setup_terrain_heights.py`), built into `<Atlas>_HeightArray`, with the material LUT's
+height row (row 4: R the slice, G the channel, B whether the material has a height). It samples with the albedo's per-tile
+variation (so the relief follows the texture) and blends the materials by the soft-border weights, the data both copies
+of a duplicated border vertex share, so the borders do not crack (the border test, the parent's
+`Documentation/RUNTIME_NANITE_OPTIN_PLAN.md` section 2). A material without a height stays at the centre. 10 uu about a
+centre of 0.5 by default (an instance overrides it), fading out with the displacement's screen size. The cost is in
+RENDERING_SYSTEM.md ("The Terrain on Nanite"), the look and the gates in the plan's O4 results (frozen).
+
 See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed setup instructions.
 
 ---
@@ -821,6 +967,8 @@ See [MASTER_MATERIAL_SETUP.md](../Guides/MASTER_MATERIAL_SETUP.md) for detailed 
 **Material Assets (`/VoxelWorlds/Materials/`):**
 - `M_VoxelMaster` - Unified master material
 - `M_VoxelMaster_Fade` - The crossfade twin (Masked)
+- `MI_VoxelMaster_Nanite` - The terrain on Nanite's opaque section (D161, "The Terrain on Nanite")
+- `M_VoxelMaster_Tessellated`, `MI_VoxelMaster_Tessellated` - The tessellated variant a world can choose (D163)
 - `MI_VoxelDefault` - Default material instance
 - `MPC_VoxelMaterial` - `MacroVariation`, set by `voxel.Material.MacroVariation`
 - `Functions/MF_GetMaterialID` - MaterialID extraction

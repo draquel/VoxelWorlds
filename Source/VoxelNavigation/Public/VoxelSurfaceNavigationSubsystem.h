@@ -6,7 +6,7 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "VoxelSurfacePathfinder.h"
 #include "VoxelCubeSphere.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelSurfaceNavigationSubsystem.generated.h"
 
 class UVoxelChunkManager;
@@ -294,7 +294,7 @@ private:
 	/** Clear the cached cells a world box reaches, in every region (the box's corners in each frame). */
 	void InvalidateBox(const FBox& WorldBox, bool bOnlyAnalytic);
 
-	/** The pathfinder's parameters in a region's frame: a planet's sea as the altitude plane WaterRadius - PlanetRadius. */
+	/** The pathfinder's parameters in a region's frame: a planet's water over the region as the altitude plane level - PlanetRadius. */
 	FVoxelSurfaceNavParams ParamsIn(const FRegionCache& Region) const;
 
 	/** Whether a cell's surface is deeper under the water than a walker wades, in a region's frame. */
@@ -329,7 +329,11 @@ private:
 	bool bPlanet = false;
 	FVector PlanetCenter = FVector::ZeroVector;
 	double PlanetRadius = 0.0;
-	FVoxelSeaSurface PlanetSea;
+	/** The planet's water levels (the chunk manager's), read per region: the range over the region's bounds */
+	FVoxelWaterLevels PlanetWater;
+
+	/** The water levels' range over a planet region's bounds: the one level its frame's searches test. */
+	FVoxelWaterLevelRange RegionWater(const FRegionCache& Region) const;
 	FVoxelCubeSphereGrid RegionGrid;
 	TArray<FTempSphere> TempSpheres;
 

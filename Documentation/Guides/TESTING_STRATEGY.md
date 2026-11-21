@@ -10,7 +10,9 @@ met. Which gate a change needs is decided in `Scripts/qa/README.md`; this guide 
 
 Every test is an Unreal automation test (`IMPLEMENT_SIMPLE_AUTOMATION_TEST` and friends), compiled only in
 development builds (`WITH_DEV_AUTOMATION_TESTS`; ItemInventoryPlugin, EquipmentPlugin and some of VoxelCharacterPlugin's
-use `WITH_AUTOMATION_TESTS`). The project's test roots:
+use `WITH_AUTOMATION_TESTS`). A test file carries the guard itself, after its includes, even when the fixture header it
+includes is guarded: a file that uses a guarded fixture without it fails to compile in Shipping, where the fixture is gone
+(G234; the check is the parent's `Scripts/qa/build.ps1 -Shipping`). The project's test roots:
 
 | Root | Plugin |
 |---|---|
@@ -83,6 +85,7 @@ without running them:
 | `VoxelWorlds.Rendering.ChunkPrimitives.Lifecycle` | a render scene (the chunk primitives, G116) | yes |
 | `VoxelWorlds.Rendering.ChunkPrimitives.Crossfade` | a render scene | yes |
 | `VoxelWorlds.Rendering.ChunkPrimitives.RayTracing` | a render scene and ray tracing | yes |
+| `VoxelWorlds.Rendering.MaterialAtlas.TwoAtlasesInTurn` | a GPU texture to read back (its CPU half, two atlases' LUTs as separate textures, runs headless too; G211) | yes |
 | `VoxelWorlds.Streaming.EditReachesProxy.Smooth` | a scene proxy | yes |
 | `VoxelWorlds.Streaming.EditReachesProxy.Cubic` | a scene proxy | yes |
 | `VoxelWorlds.WorldModes.InfinitePlane.GPUConsistency` | GPU generation | no |
@@ -90,7 +93,7 @@ without running them:
 
 The skip sites are in `Source/VoxelGeneration/Tests/VoxelNoiseGeneratorTests.cpp`,
 `Source/VoxelGeneration/Tests/InfinitePlaneWorldModeTests.cpp`, `Source/VoxelRendering/Tests/VoxelCrossfadeProxyTests.cpp`,
-`Source/VoxelRendering/Tests/VoxelRayTracingProxyTests.cpp`, `Source/VoxelRendering/Tests/VoxelChunkPrimitiveTests.cpp`, `Source/VoxelStreaming/Tests/VoxelFarFieldRayTracingProxyTests.cpp` and `Source/VoxelStreaming/Tests/VoxelEditReachesProxyTests.cpp`. A new test that needs either belongs in the same
+`Source/VoxelRendering/Tests/VoxelRayTracingProxyTests.cpp`, `Source/VoxelRendering/Tests/VoxelChunkPrimitiveTests.cpp`, `Source/VoxelRendering/Tests/VoxelMaterialAtlasTwoAtlasesTests.cpp`, `Source/VoxelStreaming/Tests/VoxelFarFieldRayTracingProxyTests.cpp` and `Source/VoxelStreaming/Tests/VoxelEditReachesProxyTests.cpp`. A new test that needs either belongs in the same
 pattern and in the editor gate's filter. **A green headless suite says nothing about GPU generation or the renderer.**
 The chunk-manager tests stream on the CPU into a recording renderer (below), so they run headless.
 
@@ -128,16 +131,24 @@ GPU against the CPU:
 1. It waits for an editor on a Claudius port (`Scripts/qa/launch_gate_editor.ps1 -Port 8081` starts one beside the
    main checkout's editor on 8080) and turns off its background throttle (`disable_bg_throttle.py`: an unfocused
    editor pins itself to 3 FPS and a run stalls).
-2. It runs `Automation RunTests VoxelWorlds.Generation.GPUvsCPU+VoxelWorlds.Generation.GPUNoiseGeneratorAsync+VoxelWorlds.Rendering.Crossfade+VoxelWorlds.Rendering.RayTracing+VoxelWorlds.Rendering.ChunkPrimitives+VoxelWorlds.Streaming.EditReachesProxy+VoxelEngine.Replication.Framework`:
-   the 17 GPU and proxy tests, the six crossfade tests and G116's `Rendering.ChunkPrimitives.CardsFromBounds` and
-   `Rendering.ChunkPrimitives.FittedCards` that also run headless, and the replication test, **26 results**
-   (19 before F3.3's `Rendering.RayTracing.ChunkGeometry`, 20 before G121's `Rendering.RayTracing.FarFieldGeometry`, 21 before G116's three `Rendering.ChunkPrimitives` tests, 24 before step 4's, 25 before the fitted cards'),
+2. It runs `Automation RunTests VoxelWorlds.Generation.GPUvsCPU+VoxelWorlds.Generation.GPUNoiseGeneratorAsync+VoxelWorlds.Rendering.Crossfade+VoxelWorlds.Rendering.RayTracing+VoxelWorlds.Rendering.ChunkPrimitives+VoxelWorlds.Streaming.EditReachesProxy+VoxelEngine.Replication`:
+   the 20 GPU and proxy tests (VoxelWorlds#263's `Generation.GPUvsCPUClimateShapingParity` the 18th, the terrain lines plan's `Generation.GPUvsCPULineParity` the 19th, the hydrology plan's `Generation.GPUvsCPUWaterBodiesParity` the 20th), the six crossfade tests and G116's `Rendering.ChunkPrimitives.CardsFromBounds` and
+   `Rendering.ChunkPrimitives.FittedCards` that also run headless, and the game module's two replication tests (a
+   dedicated server and a client in PIE: `Replication.Framework`, the framework plugins' flows, and
+   `Replication.TerrainBase`, a pawn on voxel terrain on `VoxelDemo`, G215), **30 results**
+   (29 before the water bodies' parity test, 28 before `Replication.TerrainBase`, 27 before the conditioning lines' parity test, 19 before F3.3's `Rendering.RayTracing.ChunkGeometry`, 20 before G121's `Rendering.RayTracing.FarFieldGeometry`, 21 before G116's three `Rendering.ChunkPrimitives` tests, 24 before step 4's, 25 before the fitted cards', 26 before the climate shaping's),
    each expected to be a single `Success`.
 3. It extracts the **parity lines** (the parity tests' `[N voxels]: density~` lines, one per case and LOD: density,
-   material, biome and metadata agreement and the GPU's CRC) and compares all **111** with the record,
-   `Documentation/CodeReview/VW8/gpu_parity_lines_2026-11-02_generation.txt` (`parity_lines.py`; CR2's 114 less the
-   three `BlendDither off` cases, gone with `voxel.Biome.BlendDither` in VoxelWorlds 8, and 24 lines moved by the shader
-   cleanup of G97 and G88, `Features/GPU_PIPELINE.md`). A changed line is a finding to
+   material, biome and metadata agreement and the GPU's CRC) and compares all **210** with the record,
+   `Documentation/CodeReview/Baselines/gpu_parity_lines_2026-11-15_h2.txt` in the parent repository (`parity_lines.py`;
+   the 132 of `gpu_parity_lines_2026-11-06_g132.txt` unchanged, the conditioning lines' 39, `GPUvsCPULineParity`'s
+   13 chunks at three LODs, the 15 of the surface under a line, that test's five more chunks, and the water bodies' 24,
+   `GPUvsCPUWaterBodiesParity`'s 8 chunks; before that:
+   CR2's 114 less the three `BlendDither off` cases, gone with `voxel.Biome.BlendDither` in VoxelWorlds 8, 24 lines moved
+   by the shader cleanup of G97 and G88, `Features/GPU_PIPELINE.md`, the climate shaping's 15 since VoxelWorlds#263, and
+   G129's three: the water parity's chunk under the level, with the three `Caves under the sea` CRCs moved because that
+   chunk, wholly under its sea, now holds its own water; every agreement figure unchanged), and G132's three: the planet
+   parity's `Open sea`, a chunk wholly under the sea holding its seabed and water). A changed line is a finding to
    explain, not a tolerance to widen: a change that should not touch generation leaves every line identical.
 4. It copies the editor's log to `Saved/QA/editor/`.
 

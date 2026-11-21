@@ -8,6 +8,7 @@
 #include "VoxelCoreTypes.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelWorldModeTypes.h"
+#include "VoxelWaterLevels.h"
 
 class IVoxelWorldMode;
 class FSphericalPlanetWorldMode;
@@ -65,6 +66,22 @@ public:
 		const TSet<FIntVector>& LoadedChunks,
 		const FLODQueryContext& Context
 	) const override;
+
+	/**
+	 * The window of a viewer at Viewer.ViewerPosition within HorizonDistance of it, in any world mode, by the rules the
+	 * streaming viewer's window follows (ForEachWindowCandidateWithin: a heightmap column's slab and near layers, a
+	 * planet chunk's slab and near band; the island's footprint and the planet's shell and horizon), whatever the
+	 * cut-over and the last Update's viewer (G217).
+	 */
+	virtual void GetWindowChunksAround(
+		const FLODQueryContext& Viewer,
+		float HorizonDistance,
+		bool bKeep,
+		TArray<FIntVector>& OutChunks
+	) const override;
+
+	/** The band of the chunk centre's 3D distance from ViewerPosition (GetRawLODForDistance), with LOD on or off. */
+	virtual int32 GetDistanceBandLODAround(const FIntVector& ChunkCoord, const FVector& ViewerPosition) const override;
 
 	virtual void Initialize(const UVoxelWorldConfiguration* WorldConfig) override;
 
@@ -225,6 +242,17 @@ public:
 
 	/** IVoxelLODStrategy: the far-field gate between Updates (the chunk manager, when the far field is built or released). */
 	virtual void SetFarFieldActive(bool bActive) override { bCutoverAllowed = bActive; }
+	virtual void SetWaterRangeGather(TFunction<FVoxelWaterLevelRange(const FBox& Box, EVoxelConditioningGather Need)> InGather) override
+	{
+		WaterRangeGather = MoveTemp(InGather);
+		ColumnSurfaceCache.Reset();
+		NearWaterMemo = FNearWaterMemo();
+	}
+	virtual void NotifyWaterChanged() override
+	{
+		ColumnSurfaceCache.Reset();
+		NearWaterMemo = FNearWaterMemo();
+	}
 
 	/** The viewer's layer ± this many layers is streamed in columns near the viewer (heightmap worlds, D8). */
 	static constexpr int32 NearLayers = 2;
@@ -361,6 +389,9 @@ protected:
 	 */
 	bool IsChunkInWindow(const FIntVector& ChunkCoord, const FLODQueryContext& Context, EWindowUse Use) const;
 
+	/** GetPlanetSurfaceEnvelope's memo (defined below). */
+	struct FSurfaceEnvelopeMemo;
+
 	/**
 	 * Every chunk the window may load, in any world mode, within the streaming horizon (code review CR2, STREAM-21: the
 	 * one enumeration): on a heightmap world every column within the horizon and in each the layers of its window; on a
@@ -372,6 +403,21 @@ protected:
 	 * @param Visit Called per candidate with its coordinate and world centre
 	 */
 	void ForEachWindowCandidate(const FLODQueryContext& Context, TFunctionRef<void(const FIntVector&, const FVector&)> Visit) const;
+
+	/**
+	 * ForEachWindowCandidate's enumeration for any viewer and reach: every chunk of the context's viewer's window (Use)
+	 * within HorizonDistance of it, whatever the cut-over. ForEachWindowCandidate is this with the load window and the
+	 * view distance, for a window that is not suspended; GetWindowChunksAround is this for a further viewer (G217).
+	 *
+	 * @param Context The viewer's context
+	 * @param HorizonDistance The reach, in the streaming horizon's measure
+	 * @param Use Load or Keep
+	 * @param EnvelopeMemo A planet's memo of the surface envelope over the reach's disk (the streaming viewer's and a
+	 *        further viewer's are kept apart, so neither rebuilds the other's)
+	 * @param Visit Called per candidate with its coordinate and world centre
+	 */
+	void ForEachWindowCandidateWithin(const FLODQueryContext& Context, float HorizonDistance, EWindowUse Use,
+		FSurfaceEnvelopeMemo& EnvelopeMemo, TFunctionRef<void(const FIntVector&, const FVector&)> Visit) const;
 
 	/**
 	 * A planet column's crossing of the shell (SP-C1): the layers whose chunks meet the shell from ShellWindowInnerRadius
@@ -457,9 +503,12 @@ protected:
 	 * envelope steeply.
 	 * @param Context Query context (viewer position, world origin)
 	 * @param Use Load (stream in) or Keep (retain: the near window holds the shell within the unload distance)
+	 * @param HorizonDistance The horizon's reach along the ground (the view distance for the streaming viewer's window)
+	 * @param EnvelopeMemo The memo of the surface envelope over that reach's disk (LoadEnvelopeMemo for the streaming viewer)
 	 * @param Visit Called with each candidate's chunk coordinates (no repeats)
 	 */
-	void ForEachPlanetCandidate(const FLODQueryContext& Context, EWindowUse Use, TFunctionRef<void(const FIntVector&)> Visit) const;
+	void ForEachPlanetCandidate(const FLODQueryContext& Context, EWindowUse Use, double HorizonDistance,
+		FSurfaceEnvelopeMemo& EnvelopeMemo, TFunctionRef<void(const FIntVector&)> Visit) const;
 
 	/** GetPlanetSurfaceEnvelope's memo: the direction's cell and the angle it was built for, and the envelope. */
 	struct FSurfaceEnvelopeMemo
@@ -705,10 +754,25 @@ protected:
 	/** Noise params for the per-column analytic surface sample (TerrainWorldMode->GetSurfaceRange). */
 	FVoxelNoiseParams SlabNoiseParams;
 
-	/** Water plane: underwater columns extend their slab up to the water surface (the far ocean
-	 *  must keep the chunks that mesh its surface, not just its floor). */
-	bool bSlabHasWater = false;
-	float SlabWaterLevel = 0.0f;
+	/**
+	 * The world's water levels (the configuration's, from the one builder at Initialize; the water plan's W2). The
+	 * window reads them three ways: a column's slab reaches up to the water over that column (the far ocean must keep
+	 * the chunks that mesh its surface, not just its floor), a planet's near layers reach the water over the near disk,
+	 * and the cut-over is measured over the water under the viewer where it lies above the terrain.
+	 */
+	FVoxelWaterLevels Water;
+
+	/**
+	 * The world's gather of the water levels over a box (SetWaterRangeGather: the chunk manager's, which knows the
+	 * lakes and river reaches). Unset: the sea of Water, which a strategy used on its own (a test) reads.
+	 */
+	TFunction<FVoxelWaterLevelRange(const FBox& Box, EVoxelConditioningGather Need)> WaterRangeGather;
+
+	/** The water levels over a box: the gather's, or the sea's. */
+	FVoxelWaterLevelRange GetWaterRange(const FBox& Box, EVoxelConditioningGather Need) const
+	{
+		return WaterRangeGather ? WaterRangeGather(Box, Need) : Water.GetRange(Box);
+	}
 
 	/**
 	 * Column (chunk XY) -> [min, max] analytic surface height over the chunk footprint
@@ -796,6 +860,23 @@ protected:
 	mutable FSurfaceEnvelopeMemo NearEnvelopeMemo;
 
 	/**
+	 * The water's range over a planet's near disk, kept for the viewer's cell of the slab grid (GetPlanetNearLayersCeiling
+	 * asks several times an update, and in a world with generated ponds and brooks the gather is over thousands of
+	 * tiles). Gathered over the disk round the cell's middle, a cell wider each way, so it holds for any viewer in the
+	 * cell; dropped when the water changes (NotifyWaterChanged).
+	 */
+	struct FNearWaterMemo
+	{
+		FIntPoint Cell = FIntPoint(MIN_int32, MIN_int32);
+		double Angle = -1.0;
+		FVoxelWaterLevelRange Range;
+	};
+	mutable FNearWaterMemo NearWaterMemo;
+
+	/** GetWindowChunksAround's memo of the envelope over a further viewer's reach (apart from the streaming viewer's, G217). */
+	mutable FSurfaceEnvelopeMemo AroundEnvelopeMemo;
+
+	/**
 	 * The near disk's angular radius for GetPlanetNearLayersCeiling: GetNearLayersRadius along the ground at the shell's inner
 	 * radius (the lowest ground point, so the widest angle any viewer's near disk subtends), plus the angle half a chunk's
 	 * diagonal subtends there (a near chunk's slab reads the cells its corners span). Set in Initialize.
@@ -809,9 +890,6 @@ protected:
 	/** The configuration's cut-over altitude (VoxelCutoverAltitude, else DefaultCutoverViewDistances view distances); 0 off a planet. */
 	double CutoverConfigured = 0.0;
 
-	/** The sea's radius (0 without a sea): the cut-over is measured over the sea where it lies above the terrain. */
-	double PlanetSeaRadius = 0.0;
-
 	/** The cut-over state (IsWindowSuspended) and the altitude it was decided at (GetViewerSurfaceAltitude). */
 	bool bWindowSuspended = false;
 	double ViewerSurfaceAltitude = 0.0;
@@ -822,10 +900,9 @@ protected:
 
 	/**
 	 * The cut-over applies while the chunk manager has a far field (the last Update's context; WM-MP2, D38, every mode
-	 * since G78). Heightmap worlds: the sea's world Z (lowest double without a sea); the generated ground Z under the viewer the last Update sampled
+	 * since G78). Heightmap worlds: the generated ground Z under the viewer the last Update sampled
 	 */
 	bool bCutoverAllowed = false;
-	double HeightmapSeaZ = TNumericLimits<double>::Lowest();
 	mutable FVector HeightmapGroundViewer = FVector(TNumericLimits<double>::Max());
 	mutable double HeightmapGroundZ = 0.0;
 

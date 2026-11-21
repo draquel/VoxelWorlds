@@ -6,6 +6,7 @@
 #include "Components/PrimitiveComponent.h"
 #include "ChunkRenderData.h"
 #include "VoxelVertex.h"
+#include "VoxelCoreTypes.h"
 #include "VoxelFadeScheduler.h"
 #include "VoxelChunkMeshCards.h"
 #include "Materials/MaterialRelevance.h"
@@ -14,6 +15,7 @@
 
 class FVoxelSceneProxy;
 class FVoxelChunkSceneProxy;
+struct FPrimitiveSceneInfoData;
 class FVoxelChunkMesh;
 class FVoxelChunkPrimitiveInterface;
 class IPrimitiveComponent;
@@ -22,6 +24,7 @@ struct FVoxelChunkDrawInfo;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class UVoxelMaterialAtlas;
+class UTexture2D;
 
 /**
  * Primitive component for rendering voxel worlds.
@@ -410,6 +413,29 @@ public:
 	/** The planet centre the radial face up is measured from. */
 	FVector GetFaceUpCenter() const { return FaceUpCenter; }
 
+	/**
+	 * Whether this world's terrain is drawn through Nanite (D158; the renderer sets it from
+	 * UVoxelWorldConfiguration::NaniteTerrain). Auto reads the virtual shadow maps here, once; the meshes submitted after
+	 * the call follow it.
+	 *
+	 * @param Setting The world's setting
+	 */
+	void SetNaniteTerrain(EVoxelNaniteTerrain Setting);
+
+	/**
+	 * @return Whether new chunk meshes are encoded and drawn through Nanite: the world's setting under voxel.Render.Nanite,
+	 *         where Nanite can draw (ResolveVoxelNaniteTerrain)
+	 */
+	bool IsNaniteTerrain() const;
+
+	/**
+	 * The material this world's Nanite meshes draw their opaque section with (UVoxelWorldConfiguration::NaniteMaterial;
+	 * the renderer sets it). Null: voxel.Render.Nanite.Material's. Read when a Nanite primitive is created.
+	 *
+	 * @param Material The world's material, or a null path
+	 */
+	void SetNaniteMaterial(const FSoftObjectPath& Material) { NaniteMaterialPath = Material; }
+
 	// ==================== Material Atlas ====================
 
 	/**
@@ -441,6 +467,13 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Materials")
 	void UpdateMaterialAtlasParameters();
+
+	/**
+	 * The biome lookup the master materials read as BiomeLUT (FVoxelBiomeLookup: one texel per biome ID with its climate,
+	 * for the weather's snow and wetness; the weather plan's P3). Set on the instance at once and on every later one.
+	 * @param InLookup The world's lookup texture, or null to leave the material's default
+	 */
+	void SetBiomeLookup(UTexture2D* InLookup);
 
 	/** Get whether smooth meshing mode is enabled */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Materials")
@@ -532,6 +565,10 @@ private:
 	UPROPERTY(EditAnywhere, Category = "Voxel|Materials")
 	TObjectPtr<UVoxelMaterialAtlas> MaterialAtlas;
 
+	/** The world's biome lookup for the materials (SetBiomeLookup), or null. */
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> BiomeLookup;
+
 	/** Enable smooth meshing mode (triplanar projection with Texture2DArrays) vs cubic (packed atlas) */
 	UPROPERTY(EditAnywhere, Category = "Voxel|Materials")
 	bool bUseSmoothMeshing = false;
@@ -539,6 +576,11 @@ private:
 	/** Dynamic material instance created from the master material */
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> DynamicMaterialInstance;
+
+	/** The terrain material Nanite primitives draw with (runtime Nanite): an instance of voxel.Render.Nanite.Material
+	 *  with the terrain material's parameters, or null for the terrain material itself */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> NaniteMaterialInstance;
 
 	/** Voxel size in world units */
 	UPROPERTY(EditAnywhere, Category = "Voxel", meta = (ClampMin = "1"))
@@ -557,6 +599,19 @@ private:
 
 	/** The planet centre for the radial face up */
 	FVector FaceUpCenter = FVector::ZeroVector;
+
+	/** The world's Nanite material (SetNaniteMaterial); null for voxel.Render.Nanite.Material's */
+	FSoftObjectPath NaniteMaterialPath;
+
+	/** The world's Nanite setting (SetNaniteTerrain); Off until the renderer sets it */
+	EVoxelNaniteTerrain NaniteTerrain = EVoxelNaniteTerrain::Off;
+
+	/** Whether the project drew shadows with virtual shadow maps when the setting was applied (Auto's input) */
+	bool bNaniteAutoVirtualShadows = false;
+
+	/** The material IDs the atlas draws masked (the leaves), one bit each: their triangles go to the Nanite meshes' masked
+	 *  section (D162; SetMaterialAtlas) */
+	uint64 NaniteMaskedMaterials[4] = { 0, 0, 0, 0 };
 
 	/** Cached chunk data for game thread tracking */
 	struct FChunkInfo
@@ -758,7 +813,13 @@ private:
 	/** One chunk interior's or seam bucket's primitive and the game thread's reference to the mesh it draws */
 	struct FChunkPrimitive
 	{
-		FVoxelChunkSceneProxy* Proxy = nullptr;
+		/** An FVoxelChunkSceneProxy, or an FVoxelChunkNaniteSceneProxy when bNanite (runtime Nanite) */
+		FPrimitiveSceneProxy* Proxy = nullptr;
+		/** The proxy's scene record (FPrimitiveSceneDesc::PrimitiveSceneData) */
+		FPrimitiveSceneInfoData* SceneData = nullptr;
+		bool bNanite = false;
+		/** @return The proxy as an FVoxelChunkSceneProxy, null for none or a Nanite one (fades and draw info are its) */
+		FVoxelChunkSceneProxy* GetChunkProxy() const;
 		TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe> Mesh;
 		/** The mesh its crossfade dithers out (step 2), until the fade ends */
 		TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe> Previous;
@@ -772,7 +833,8 @@ private:
 	struct FPendingChunkPrimitive
 	{
 		FIntVector4 Key;
-		FVoxelChunkSceneProxy* Proxy = nullptr;
+		FPrimitiveSceneProxy* Proxy = nullptr;
+		FPrimitiveSceneInfoData* SceneData = nullptr;
 		FVector Origin = FVector::ZeroVector;
 		FBox LocalBox = FBox(ForceInit);
 	};
@@ -868,9 +930,28 @@ private:
 	void DestroyChunkPrimitiveRenderState(const FIntVector4& Key);
 	void CreateChunkPrimitiveRenderState(const FIntVector4& Key);
 
-	/** @return A new primitive drawing Mesh for Key, with Previous and Key's fade when bFading (game thread) */
-	FVoxelChunkSceneProxy* CreateChunkPrimitive(const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh,
+	/**
+	 * A new primitive drawing Mesh for Key, with Previous and Key's fade when bFading, into the slot (game thread): an
+	 * FVoxelChunkNaniteSceneProxy when the mesh has a Nanite resource and no fade runs (runtime Nanite, D154), an
+	 * FVoxelChunkSceneProxy otherwise
+	 */
+	void CreateChunkPrimitive(FChunkPrimitive& Primitive, const FIntVector4& Key, const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Mesh,
 		const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>& Previous, bool bFading);
+
+	/** @return The material Nanite primitives draw with (NaniteMaterialInstance, or the terrain material) */
+	UMaterialInterface* GetNaniteMaterial();
+
+	/** Copy every parameter of the terrain material, as it resolves them, onto NaniteMaterialInstance (when there is one) */
+	void SyncNaniteMaterialParameters();
+
+	/** Meshes whose Nanite encode runs on a task (runtime Nanite, voxel.Render.Nanite.Async), with their slot */
+	TArray<TPair<FIntVector4, TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe>>> PendingNaniteEncodes;
+
+	/**
+	 * Game thread, each tick while encodes run: take the finished ones and swap each slot still drawing that mesh, with no
+	 * fade running, to its Nanite primitive (a fade that ends later swaps then, D154)
+	 */
+	void ProcessNaniteEncodes();
 
 	/** Critical section for chunk info access */
 	mutable FCriticalSection ChunkInfoLock;

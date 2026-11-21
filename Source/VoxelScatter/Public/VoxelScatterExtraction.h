@@ -5,13 +5,13 @@
 #include "CoreMinimal.h"
 #include "VoxelData.h"
 #include "VoxelCoreTypes.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelEditTypes.h"
 
 class IVoxelWorldMode;
 class UVoxelCaveConfiguration;
 class FVoxelMaterialTable;
-struct FVoxelConditioningZone;
+struct FVoxelConditioning;
 
 /**
  * Global signals used to classify extracted surface points as underground / underwater — the things a
@@ -43,21 +43,23 @@ struct FScatterExtractionContext
 	/** Noise params for IVoxelWorldMode::GetTerrainHeightAt. */
 	FVoxelNoiseParams NoiseParams;
 	/**
-	 * The sea (generation's: FVoxelSeaSurface::FromConfig): points below it that are not underground are underwater.
-	 * The WaterLevel plane in heightmap modes, the sphere of WaterRadius on a planet (spherical SP-E1). Disabled (no
-	 * underwater class from it) when water is off.
+	 * The world's water levels (generation's): a point under the water's surface over it that is not underground is
+	 * underwater. The sea's plane in heightmap modes, its sphere on a planet (spherical SP-E1). No water: no
+	 * underwater class from it.
 	 */
-	FVoxelSeaSurface Sea;
+	FVoxelWaterLevels Water;
 	/**
-	 * The terrain conditioning zones over the chunk (POI pads and their falloff rings), so the analytic surface the
+	 * The terrain conditioning over the chunk (POI pads and their falloff rings), so the analytic surface the
 	 * extractors compare with is the generated ground, not the natural one. Heightmap worlds: the buried-chunk test
-	 * compares the chunk's top with the natural height plus these zones (FVoxelTerrainConditioning::ApplyToHeight;
+	 * compares the chunk's top with the natural height plus this conditioning (FVoxelConditioning::ApplyToHeight;
 	 * world modes review G23). Planets (spherical SP-B10): the voxels past a chunk's +X, +Y and +Z faces
 	 * (GetVoxelOutsideChunk) are generated on the flattened ground (ApplyToAltitude). Each kind of zone applies only
-	 * in its own kind of world.
+	 * in its own kind of world. A conditioning line's clear width (FVoxelConditioning::IsClearedAt, IsClearedOnSphere)
+	 * keeps the chunk's surface points on the ground out of it (UVoxelScatterManager::ExtractChunkSurfacePoints), so
+	 * nothing is placed there.
 	 * Null or empty: the world mode's natural surface.
 	 */
-	TSharedPtr<const TArray<FVoxelConditioningZone>> ConditioningZones;
+	TSharedPtr<const FVoxelConditioning> Conditioning;
 
 	/**
 	 * The world's cave configuration when its caves are on, so the voxels a chunk's extraction reads past its own data are
@@ -90,7 +92,7 @@ struct FScatterExtractionContext
 
 	/**
 	 * Heightmap worlds: the generated terrain height at a world X,Y, the world mode's natural height with
-	 * ConditioningZones layered on as the generator does. Requires a heightmap WorldMode.
+	 * Conditioning layered on as the generator does. Requires a heightmap WorldMode.
 	 * @param WorldX World X
 	 * @param WorldY World Y
 	 * @return The generated surface's world Z

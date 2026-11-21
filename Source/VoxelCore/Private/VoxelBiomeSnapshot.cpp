@@ -38,8 +38,40 @@ FVoxelBiomeSnapshot FVoxelBiomeSnapshot::FromConfig(const UVoxelBiomeConfigurati
 		Snapshot.TemperatureNoiseFrequency = Config->TemperatureNoiseFrequency;
 		Snapshot.MoistureSeedOffset = Config->MoistureSeedOffset;
 		Snapshot.MoistureNoiseFrequency = Config->MoistureNoiseFrequency;
+
+		// Climate shaping
+		Snapshot.bEqualizeClimate = Config->bEqualizeClimate;
+		Snapshot.bEqualizeContinentalness = Config->bEqualizeContinentalness;
+		Snapshot.TemperatureLatitudeWeight = Config->TemperatureLatitudeWeight;
+		Snapshot.TemperatureLapseRate = Config->TemperatureLapseRate;
 	}
 	return Snapshot;
+}
+
+float FVoxelBiomeSnapshot::EqualizeField(float RawValue)
+{
+	// The raw field's CDF at evenly spaced values over [-1, 1], linear between them (ClimateShaping.ush: the same).
+	static constexpr float Cdf[VOXELGEN_CLIMATE_CDF_COUNT] = VOXELGEN_CLIMATE_CDF;
+	const float Position = (FMath::Clamp(RawValue, -1.0f, 1.0f) + 1.0f) * 0.5f * static_cast<float>(VOXELGEN_CLIMATE_CDF_COUNT - 1);
+	const int32 Index = FMath::Min(static_cast<int32>(Position), VOXELGEN_CLIMATE_CDF_COUNT - 2);
+	const float Fraction = Position - static_cast<float>(Index);
+	const float Quantile = Cdf[Index] + (Cdf[Index + 1] - Cdf[Index]) * Fraction;
+	return Quantile * 2.0f - 1.0f;
+}
+
+float FVoxelBiomeSnapshot::ShapeTemperature(float RawTemperature, float SurfaceAltitude, float SinLatitude, bool bHasLatitude) const
+{
+	float Temperature = bEqualizeClimate ? EqualizeField(RawTemperature) : RawTemperature;
+	if (bHasLatitude && TemperatureLatitudeWeight > 0.0f)
+	{
+		const float LatitudeTemperature = 1.0f - 2.0f * FMath::Min(FMath::Abs(SinLatitude), 1.0f);
+		Temperature += (LatitudeTemperature - Temperature) * TemperatureLatitudeWeight;
+	}
+	if (TemperatureLapseRate > 0.0f)
+	{
+		Temperature -= TemperatureLapseRate * FMath::Max(SurfaceAltitude, 0.0f) * (1.0f / 10000.0f);
+	}
+	return Temperature;
 }
 
 void FVoxelBiomeSnapshot::EvalBakedCurves(

@@ -19,6 +19,11 @@ class UBodySetup;
  * Unlike hacking a UBoxComponent's FBodyInstance, this component properly
  * overrides GetBodySetup() so the physics engine always uses our trimesh
  * BodySetup for sweeps, traces, and overlap queries.
+ *
+ * Static: it is placed at its chunk's corner before it is registered and replaced, never moved, when the chunk is
+ * re-cooked. A character standing on it is therefore on a static movement base: it sends and receives world positions,
+ * which is what lets a client and a server agree about a pawn on terrain though each has its own copy of this
+ * component (the container actor is not replicated; G215).
  */
 UCLASS(MinimalAPI)
 class UVoxelCollisionComponent : public UPrimitiveComponent
@@ -162,6 +167,20 @@ struct FVoxelCollisionCoverSample
 	float Bias = 0.0f;
 };
 
+/**
+ * A further focus of the collision shell (G217): on a server, the pawn of a player other than the one the streaming
+ * follows. The chunk manager hands the manager this tick's (UVoxelCollisionManager::SetFurtherFoci); nothing is kept per
+ * player.
+ */
+struct FVoxelCollisionFocus
+{
+	/** The pawn's position */
+	FVector Position = FVector::ZeroVector;
+
+	/** The pawn's velocity: the shell's lead and the path coverage read it */
+	FVector Velocity = FVector::ZeroVector;
+};
+
 struct FAsyncCollisionResult
 {
 	FIntVector ChunkCoord;
@@ -242,6 +261,28 @@ public:
 	 * @param DeltaTime Time since last update
 	 */
 	void Update(const FVector& ViewerPosition, float DeltaTime);
+
+	/**
+	 * The shell's further foci for the next Update (G217): the pawns of a server's other players. A chunk gets collision
+	 * within the radius of any focus (the first player's pawn, as before, and each of these: GetFocusRadius), is cooked
+	 * in the order of its distance from the nearest one, and loses it once outside every one's. The chunk manager sets
+	 * them each tick from the players the world has then, so a player who leaves releases its shell at the next sweep.
+	 *
+	 * @param InFoci This tick's further foci (empty on a client and in a standalone game)
+	 */
+	void SetFurtherFoci(const TArray<FVoxelCollisionFocus>& InFoci) { FurtherFoci = InFoci; }
+
+	/** @return The further foci the last SetFurtherFoci gave */
+	const TArray<FVoxelCollisionFocus>& GetFurtherFoci() const { return FurtherFoci; }
+
+	/**
+	 * The radius of the shell around a further focus moving at a velocity: the configured radius plus the lead its
+	 * horizontal speed adds (voxel.Collision.LeadSeconds), as the first focus's (GetCurrentEffectiveRadius), unsmoothed.
+	 *
+	 * @param Velocity The focus's velocity
+	 * @return The radius (uu), never under GetCollisionRadius
+	 */
+	float GetFocusRadius(const FVector& Velocity) const;
 
 	// ==================== Dirty Marking ====================
 
@@ -465,6 +506,19 @@ public:
 	static void BuildPhysicsTriangles(const TArray<uint32>& RenderIndices, TArray<Chaos::TVector<int32, 3>>& OutTriangles);
 
 	/**
+	 * BuildPhysicsTriangles without the triangles of no area (and any naming a vertex past Positions): what the cook
+	 * builds the chunk's trimesh from. Such a triangle has no normal, so a query that hit it reported a normal of no
+	 * length (G230); the engine's cooker cleans them out of the meshes it cooks.
+	 *
+	 * @param RenderIndices Triangle list in render order (3 indices per triangle; a trailing partial triangle is ignored)
+	 * @param Positions     The mesh's vertex positions the indices name
+	 * @param OutTriangles  Receives the physics triangles of the render triangles that have an area (replaced, not appended)
+	 * @return How many triangles were dropped
+	 */
+	static int32 BuildPhysicsTriangles(const TArray<uint32>& RenderIndices, const TArray<FVector3f>& Positions,
+		TArray<Chaos::TVector<int32, 3>>& OutTriangles);
+
+	/**
 	 * Where the collision lead (ForcePathCoverage) looks, in the focus's local frame (spherical SP-C4): the focus itself,
 	 * half a chunk along -Up under it (standing on a seam between chunk layers), then LookAhead chunks along the
 	 * velocity's part across Up and, when the velocity along Up is below -1 (descending), the chunk one below each of
@@ -677,6 +731,20 @@ protected:
 
 	/** Speed (uu/s) at or below which the focus counts as stationary. */
 	static constexpr float StationarySpeedThreshold = 10.0f;
+
+	// ==================== Further foci (G217) ====================
+
+	/** This tick's further foci (SetFurtherFoci): a server's other players' pawns. */
+	TArray<FVoxelCollisionFocus> FurtherFoci;
+
+	/** Where the further foci were at the last decision sweep: a change of their number or a move past the threshold sweeps again. */
+	TArray<FVector> LastSweepFurtherFoci;
+
+	/**
+	 * A point's distance from the nearest focus: the first focus alone without further ones (the same arithmetic as
+	 * before them), else the least of them all.
+	 */
+	float GetNearestFocusDistance(const FVector& Point, const FVector& FirstFocus) const;
 
 	// ==================== Statistics ====================
 

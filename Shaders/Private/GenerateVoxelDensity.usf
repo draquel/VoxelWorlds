@@ -36,6 +36,7 @@ int NoiseOctaves;
 float NoiseFrequency;
 float NoiseLacunarity;
 float NoisePersistence;
+int NoiseRidged;    // FVoxelNoiseParams::bRidged (the terrain's fBm only)
 
 // World mode parameters
 int WorldMode;      // 0 = InfinitePlane, 1 = SphericalPlanet, 2 = IslandBowl
@@ -47,6 +48,7 @@ float BaseHeight;
 int ContinentalnessEnabled;
 int ContinentalnessSeed;
 float ContinentalnessFrequency;
+int ContinentalnessEqualize;    // UVoxelBiomeConfiguration::bEqualizeContinentalness (ClimateShaping.ush)
 int ContinentalnessCurveSamples;
 float4 ContinentalnessHeightCurve[8];    // 32 floats packed into 8 float4s
 float4 ContinentalnessHeightScaleCurve[8];
@@ -73,6 +75,18 @@ float4 CaveLayerVerticalScale;
 // Water level parameters
 int WaterLevelEnabled;
 float WaterLevelHeight;
+// The chunk's water columns (FVoxelChunkWaterColumns; the hydrology plan's section 5.4): where a lake or a river reach
+// may reach the chunk, the water level over each column in place of the one level above. On a heightmap world a row a
+// column, X + Y x ChunkSize. On a planet, which has no columns, a row a down-line (FVoxelDownLines, the lines the
+// post-passes walk): ChunkSize rows of the lines' shifts first, [shift on B, shift on C, 0, 0] per step, then the lines
+// by id. A row: [the level the column's terrain is compared with (world Z; a planet: an altitude over the datum), the
+// level a voxel is compared with (VoxelPostPasses.usf), the minimum cave depth in voxels (a lake's), 0]; -1e30 in both
+// levels where no body covers the column, which fails every comparison. WaterColumnsEnabled 0: the buffer is a
+// stand-in and nothing reads it.
+int WaterColumnsEnabled;
+uint WaterLineAxisA;      // a planet's down-lines: the axis nearest to local down (FVoxelDownLines::AxisA)
+uint WaterLineForward;    // ... and 1 when down points along +WaterLineAxisA
+StructuredBuffer<float4> WaterColumnData;
 
 // Biome / material parameters (Phase B) — see BiomeMaterial.ush + UVoxelBiomeConfiguration::BuildGpuData.
 // BiomeCount == 0 falls back to the legacy depth-based material.
@@ -82,6 +96,10 @@ int TemperatureSeed;
 float TemperatureFrequency;
 int MoistureSeed;
 float MoistureFrequency;
+// Climate shaping (ClimateShaping.ush, UVoxelBiomeConfiguration's Climate category)
+int ClimateEqualize;
+float TemperatureLatitudeWeight;
+float TemperatureLapseRate;
 int EnableUnderwaterMaterials;
 uint DefaultUnderwaterMaterial;
 StructuredBuffer<float4> BiomeData;
@@ -98,6 +116,9 @@ uint CaveWallMaterialID;
 float CaveWallMaterialMinDepth;
 int ConditioningZoneCount;
 StructuredBuffer<float4> ConditioningZoneData;
+// The chunk's conditioning line segments (FVoxelChunkLineSegments), 5 float4s a segment; layout in ConditioningLines.ush.
+int ConditioningLineSegmentCount;
+StructuredBuffer<float4> ConditioningLineData;
 
 // IslandBowl world-mode params (Phase C) — see IslandFalloff.ush.
 int IslandShape;
@@ -155,11 +176,14 @@ RWStructuredBuffer<uint> OutputVoxelData;
 
 // Per-voxel biome selection + material pipeline (references the biome globals declared above).
 #include "/Plugin/VoxelWorlds/Private/BiomeMaterial.ush"
+#include "/Plugin/VoxelWorlds/Private/ConditioningLines.ush"
 // The planet noise (references NoiseOrigins) and the chunk frame.
 #include "/Plugin/VoxelWorlds/Private/VoxelNoise.ush"
 #include "/Plugin/VoxelWorlds/Private/PlanetFrame.ush"
 // IslandBowl edge falloff (references the IslandBowl globals declared above).
 #include "/Plugin/VoxelWorlds/Private/IslandFalloff.ush"
+// The climate the blend reads, shaped as on the CPU (references the climate-shaping globals declared above).
+#include "/Plugin/VoxelWorlds/Private/ClimateShaping.ush"
 
 // ==================== Helpers shared by the world-mode branches ====================
 
@@ -167,6 +191,26 @@ RWStructuredBuffer<uint> OutputVoxelData;
 PlanetVoxelFrame MakePlanetVoxelFrame(uint3 VoxelCoord, float InVoxelSize)
 {
     return MakePlanetFrameAt(float3(VoxelCoord) * InVoxelSize - PlanetAnchorLocal, PlanetAnchorDir, PlanetAnchorDist);
+}
+
+/**
+ * A planet voxel's row of the chunk's water columns: the row of the down-line the voxel is on
+ * (FVoxelDownLines::LineOf: with K the step along the lines' axis from the chunk's upper side, the line of voxel
+ * (a, b, c) is (b - shift B at K, c - shift C at K), the shifts being the list's first ChunkSize rows).
+ *
+ * @param VoxelCoord Voxel index in the chunk
+ * @return The row: [the level as an altitude, the level over the anchor's distance, the minimum cave depth, 0]
+ */
+float4 PlanetWaterColumn(uint3 VoxelCoord)
+{
+    const uint A = (WaterLineAxisA == 0u) ? VoxelCoord.x : ((WaterLineAxisA == 1u) ? VoxelCoord.y : VoxelCoord.z);
+    const uint B = (WaterLineAxisA == 0u) ? VoxelCoord.y : ((WaterLineAxisA == 1u) ? VoxelCoord.z : VoxelCoord.x);
+    const uint C = (WaterLineAxisA == 0u) ? VoxelCoord.z : ((WaterLineAxisA == 1u) ? VoxelCoord.x : VoxelCoord.y);
+    const uint K = (WaterLineForward != 0u) ? A : ChunkSize - 1u - A;
+    const float4 Shift = WaterColumnData[K];
+    const int LineB = (int)B - (int)Shift.x + (int)ChunkSize;
+    const int LineC = (int)C - (int)Shift.y + (int)ChunkSize;
+    return WaterColumnData[ChunkSize + (uint)LineB + (uint)LineC * 3u * ChunkSize];
 }
 
 /**
@@ -178,8 +222,10 @@ PlanetVoxelFrame MakePlanetVoxelFrame(uint3 VoxelCoord, float InVoxelSize)
  * @param InOutHeightScale Height scale, multiplied by the curve's multiplier
  * @return The continentalness value (the biome blend reuses it)
  */
-float GpuContinentalnessCurves(float ContinentalnessNoise, inout float InOutBaseHeight, inout float InOutHeightScale)
+float GpuContinentalnessCurves(float RawContinentalnessNoise, inout float InOutBaseHeight, inout float InOutHeightScale)
 {
+    // Equalised first when the configuration asks (FVoxelBiomeSnapshot::ShapeContinentalness): the curves and the blend read it
+    const float ContinentalnessNoise = GpuShapeContinentalness(RawContinentalnessNoise);
     // Curve-based height offset lookup from baked samples (packed as float4[8])
     float FIdx = (ContinentalnessNoise + 1.0) * 0.5 * float(ContinentalnessCurveSamples - 1);
     int Idx0 = clamp(int(floor(FIdx)), 0, ContinentalnessCurveSamples - 2);
@@ -298,9 +344,12 @@ void GpuCaveBiomeOverride(uint BiomeID, out float OutCaveScale, out float OutMin
  * @param bUnderwater The column's terrain is under the sea (and water is on)
  * @param bPlanetFrame A literal at each call: true in the planet branch, false in the heightmap one. A runtime
  *        WorldMode test inlined (and, on FXC, ran) both layer samplers at every call (F2.13)
+ * @param MinDepthUnderLines The shallowest depth (voxels) the conditioning lines over the column let a cave open at
+ *        (ConditioningLineSurface.MinCaveDepth): each layer's minimum depth is at least this; 0: the layers' own
  * @return Carve density [0, 1]
  */
-float GpuCaveCarve(float3 VoxelOffset, PlanetVoxelFrame Planet, float DepthBelowSurface, uint BiomeID, bool bUnderwater, bool bPlanetFrame)
+float GpuCaveCarve(float3 VoxelOffset, PlanetVoxelFrame Planet, float DepthBelowSurface, uint BiomeID, bool bUnderwater, bool bPlanetFrame,
+    float MinDepthUnderLines)
 {
     float BiomeCaveScale;
     float MinDepthOverride;
@@ -322,7 +371,12 @@ float GpuCaveCarve(float3 VoxelOffset, PlanetVoxelFrame Planet, float DepthBelow
     {
         const float FadeWidth = CaveLayerDepthFadeWidth[ci];
         const float MaxDepth = CaveLayerMaxDepth[ci];
-        const float EffectiveMinDepth = (MinDepthOverride >= 0.0f) ? MinDepthOverride : CaveLayerMinDepth[ci];
+        float EffectiveMinDepth = (MinDepthOverride >= 0.0f) ? MinDepthOverride : CaveLayerMinDepth[ci];
+        // Under a conditioning line no cave opens above the line's minimum depth: it only ever deepens the layer's.
+        if (MinDepthUnderLines > 0.0f)
+        {
+            EffectiveMinDepth = max(EffectiveMinDepth, MinDepthUnderLines);
+        }
 
         if (DepthBelowSurface < EffectiveMinDepth - FadeWidth)
         {
@@ -438,13 +492,23 @@ void MainCS(
         // order: SampleTerrainNoise2D -> NoiseToTerrainHeight -> ApplyToHeight -> CalculateSignedDistance -> density.
         // The terrain noise at the chunk's terrain origin + the voxel's offset in the plane (MP4: FVoxelNoise's
         // hashed lattice, split origin and continuous Simplex kernel, as FVoxelCPUNoiseGenerator::FBM3D).
-        float TerrainNoise = NoiseFBM3D(TerrainNoiseOrigin, Offset2D,
-            NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseLacunarity, NoisePersistence);
+        float TerrainNoise = NoiseFBM3DRidged(TerrainNoiseOrigin, Offset2D,
+            NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseLacunarity, NoisePersistence, NoiseRidged);
         float TerrainHeight = NoiseToTerrainHeight(TerrainNoise, SeaLevel, EffectiveHeightScale, EffectiveBaseHeight);
         // IslandBowl: fade the (continentalness-modulated) height toward EdgeHeight at the world edge.
         if (WorldMode == VOXELGEN_WORLD_MODE_ISLAND_BOWL)
         {
             TerrainHeight = ApplyIslandFalloffToHeight(WorldPos.x, WorldPos.y, TerrainHeight);
+        }
+        // Terrain conditioning: the lines (the chunk's segment list, in the chunk's frame), then the zones, as on the CPU.
+        // The lines also leave a surface at this column: the band's material and depth, the caves' minimum depth.
+        ConditioningLineSurface LineSurface;
+        LineSurface.BandMaterial = -1;
+        LineSurface.BandDepth = 0.0f;
+        LineSurface.MinCaveDepth = 0.0f;
+        if (ConditioningLineSegmentCount > 0)
+        {
+            TerrainHeight = GpuApplyConditioningLines(Offset2D, TerrainHeight, 0.0f, LineSurface);
         }
         if (ConditioningZoneCount > 0)
         {
@@ -463,8 +527,12 @@ void MainCS(
         if (BiomeCount > 0)
         {
             // Temperature and moisture at (X, Y, 0): the chunk's climate origins + the voxel's offset in the plane
-            const float Temperature = NoiseFBM3D(TemperatureNoiseOrigin, Offset2D, VOXELGEN_NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 2.0f, 0.5f);
-            const float Moisture = NoiseFBM3D(MoistureNoiseOrigin, Offset2D, VOXELGEN_NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 2.0f, 0.5f);
+            // shaped as on the CPU: equalised, the lapse over the column's height (FVoxelBiomeSnapshot::ShapeTemperature)
+            const float Temperature = GpuShapeTemperature(
+                NoiseFBM3D(TemperatureNoiseOrigin, Offset2D, VOXELGEN_NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 2.0f, 0.5f),
+                TerrainHeight, 0.0f, 0);
+            const float Moisture = GpuShapeMoisture(
+                NoiseFBM3D(MoistureNoiseOrigin, Offset2D, VOXELGEN_NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 2.0f, 0.5f));
             Blend = SampleGpuBiomeBlend(Temperature, Moisture, ContinentalnessValue);
             const GpuBiome Dominant = LoadGpuBiome(Blend.Indices[0]);
             BiomeID = Dominant.BiomeID;
@@ -472,15 +540,30 @@ void MainCS(
             OreCount = Dominant.OreCount;
         }
 
+        // The water over this column: the request's one level, or with a lake or a river reach near the column's own row
+        // of the chunk's water columns (its level, and over a lake's footprint the lake's minimum cave depth, which
+        // deepens the caves' as a line's does). A row no body covers holds -1e30, under every terrain height.
+        bool bColumnWater = (WaterLevelEnabled != 0);
+        float ColumnWaterLevel = WaterLevelHeight;
+        float ColumnMinCaveDepth = LineSurface.MinCaveDepth;
+        [branch]
+        if (WaterColumnsEnabled != 0)
+        {
+            const float4 WaterRow = WaterColumnData[VoxelCoord.x + VoxelCoord.y * ChunkSize];
+            bColumnWater = true;
+            ColumnWaterLevel = WaterRow.x;
+            ColumnMinCaveDepth = max(ColumnMinCaveDepth, WaterRow.z);
+        }
+
         // Cave carving BEFORE material selection (matches CPU order), with the biome's overrides and, where the column's
-        // terrain is under the sea, the underwater minimum depth. Keep the carve for the cave-wall material override and
+        // terrain is under the water, the underwater minimum depth. Keep the carve for the cave-wall material override and
         // the solid->air transition flag.
-        const bool bUnderwaterColumn = (WaterLevelEnabled != 0) && (TerrainHeight < WaterLevelHeight);
+        const bool bUnderwaterColumn = bColumnWater && (TerrainHeight < ColumnWaterLevel);
         uint PreCaveDensity = Density;
         float CaveCarve = 0.0f;
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            CaveCarve = GpuCaveCarve(VoxelOffset, (PlanetVoxelFrame)0, DepthBelowSurface, BiomeID, bUnderwaterColumn, false);
+            CaveCarve = GpuCaveCarve(VoxelOffset, (PlanetVoxelFrame)0, DepthBelowSurface, BiomeID, bUnderwaterColumn, false, ColumnMinCaveDepth);
             Density = ApplyCaveCarve(Density, CaveCarve);
         }
 
@@ -493,6 +576,13 @@ void MainCS(
 
             // Height-based material overrides (snow at peaks, rock at altitude, etc.)
             MaterialID = ApplyGpuHeightRules(MaterialID, WorldPos.z, DepthBelowSurface);
+
+            // A conditioning line's band: its material to the band's depth, after the height rules and before the cave
+            // walls and the ores (FVoxelChunkLineSurface::HasBandAt)
+            if (LineSurface.BandMaterial >= 0 && DepthBelowSurface < LineSurface.BandDepth)
+            {
+                MaterialID = (uint)LineSurface.BandMaterial;
+            }
 
             // Cave-wall material override (still-solid voxels partially carved near a cave boundary)
             if (CaveWallOverrideEnabled != 0 && CaveCarve > 0.0f && CaveCarve < 1.0f
@@ -518,6 +608,10 @@ void MainCS(
         else
         {
             MaterialID = GetMaterialForInfinitePlane(WorldPos.z, TerrainHeight, EffectiveVoxelSize);
+            if (LineSurface.BandMaterial >= 0 && DepthBelowSurface < LineSurface.BandDepth)
+            {
+                MaterialID = (uint)LineSurface.BandMaterial;
+            }
         }
 
         // Per-voxel cave/underground flag when cave carving turned solid -> air (matches CPU). The CPU

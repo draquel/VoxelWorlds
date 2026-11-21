@@ -24,6 +24,10 @@
 
 #define LOCTEXT_NAMESPACE "SVoxelFieldPreviewPanel"
 
+SVoxelFieldPreviewPanel::SVoxelFieldPreviewPanel() = default;
+
+SVoxelFieldPreviewPanel::~SVoxelFieldPreviewPanel() = default;
+
 void SVoxelFieldPreviewPanel::Construct(const FArguments& InArgs)
 {
 	BakeParams.Center = FVector2D::ZeroVector;

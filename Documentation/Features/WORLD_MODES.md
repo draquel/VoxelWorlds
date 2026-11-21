@@ -61,11 +61,269 @@ world-mode params are built from a `UVoxelWorldConfiguration`: `MakeIslandParams
 GPU), the chunk manager, the LOD strategy, the map, the editor field viewer and POI placement all use it (WM-A1).
 `MakeFingerprint` and `GenerationVersion` describe the world for saves (`DATA_STRUCTURES.md`, "Version fingerprints").
 
-**The surface ladder.** Game code asks the chunk manager: `GetGeneratedSurfacePoint` (the generated surface, conditioning
-zones applied, block tops on a block world), `QueryEditMergedSurfacePoint` (the loaded voxels with edits) and
+**The surface ladder.** Game code asks the chunk manager: `GetGeneratedSurfacePoint` (the generated surface, the
+conditioning lines and zones applied, block tops on a block world), `QueryEditMergedSurfacePoint` (the loaded voxels with edits) and
 `QuerySurfacePoint` with an `EVoxelSurfaceLayer` (`Natural`, `Generated`, `EditMerged`) for any rung; all work along
 local up in every mode. `FVoxelSurfaceQuery` answers the same without a chunk manager (`SampleSurfacePoint`, the
 conditions at the surface).
+
+**The conditioning at a place.** What turns the natural surface into the generated one travels as one value,
+`FVoxelConditioning` (`VoxelGeneration/Public/VoxelTerrainConditioning.h`): the conditioning lines there (`Lines`,
+shared references, in id order) and the conditioning zones there (`Zones`, in the order they are applied). A generation
+request carries it (`FVoxelNoiseGenerationRequest::Conditioning`), and every reader of the generated surface takes it
+and asks it for the height on a heightmap world (`ApplyToHeight`) or the altitude on a planet (`ApplyToAltitude`); none
+takes a list of zones, so a new shape adds no parameter anywhere. Both apply the lines first, then the zones, so a POI's
+pad wins where a road arrives at it. The chunk manager fills it: `GatherConditioning` for an XY region or a world box,
+`GatherConditioningOnSphere` for a cap, from its sources (`FVoxelConditioningSources`: the zones added with
+`AddConditioningZone`, the lines added with `AddConditioningLine` and the game's `IVoxelTerrainConditioner`); a gather
+ends with the lines in id order, each once (`SortLines`). Each gather states what it is for
+(`EVoxelConditioningGather`): `Complete` for a chunk's generation request, a point query, a chunk's scatter and the PCG
+sampler, which must agree with the generated voxels and so take every line (a conditioner may compute one then and
+there); `Ready` for the far field and the map, whose regions are too wide to wait for a line, and which draw again
+when the conditioning changes (`OnTerrainConditioningChanged`). Zones are always complete. A conditioner supplies zones
+through `GatherConditioning` and `GatherConditioningOnSphere` and lines through `GatherConditioningLines` and
+`GatherConditioningLinesOnSphere`, which default to none. A conditioner that works a line out after a `Ready` gather
+calls `NotifyTerrainConditioningChanged` with the line's region (`NotifyTerrainConditioningChangedOnSphere` with a cap):
+the far field rebuilds the patches there that take conditioning (`FVoxelFarField::InvalidateRegion`) and
+`OnTerrainConditioningChanged` fires, with `OnTerrainConditioningChangedIn` beside it, which says where
+(`FVoxelConditioningRegion`: a box on a heightmap world, a cap on a planet, or everywhere when a conditioner is set or
+cleared). The map binds the second and makes stale only the tiles the region reaches (`MAP_SYSTEM.md`): a
+conditioner's lines arrive one by one (the game's roads, worked out by a worker after the far field asked for them),
+and each made every tile stale while the map heard only that something had changed (found by the terrain lines plan's
+R1: 107 whole-map redraws in the first seconds of `VoxelDemo`). Adding a zone or a line does the same for its own
+region. Chunks generated before keep their terrain: lines and zones are added before streaming starts. Test
+`VoxelWorlds.Streaming.Conditioning.ChangedRegion`.
+
+The set also answers for the surface under its lines ("The surface under a line" below): `GetBandAt` and
+`GetBandOnSphere` (the band's material and depth there), `GetMinCaveDepthAt` and `GetMinCaveDepthOnSphere`,
+`IsClearedAt` and `IsClearedOnSphere`, each a count test on a set with no line. And it carries one value of the reader
+that gathered it, `LeastHalfWidth`: a reader that samples the surface every S units (a far-field patch, a map tile above
+level 0) sets it to 0.71 S (`FVoxelConditioningLine::CoarseHalfWidthPerSpacing`) and gathers over its region grown by as
+much, and `ApplyToHeight`, `ApplyToAltitude` and the band then take every line as at least that wide. A generation
+request, and every reader that must agree with the voxels, leaves it 0.
+
+**Conditioning lines.** A conditioning line (`FVoxelConditioningLine`, `VoxelGeneration/Public/VoxelConditioningLine.h`;
+`Documentation/TERRAIN_LINES_PLAN.md` at the project root, section 4.1 and phase L2) is a polyline that levels, lowers
+or raises the generated terrain along it: the second conditioning shape beside the zone's disc, in every world mode. A
+vertex has a position (world X and Y on a heightmap world, a direction from the centre on a planet), a target height (a
+world Z, or an altitude over the datum) and a half width; the line has a falloff width, a strength, a blend, an id and
+its bounds. It is made once from those values (`FVoxelConditioningLine::Make` from `FVoxelConditioningLineParams`) and
+is immutable and shared from then on.
+
+- **At a point** the nearest segment alone answers: the target and the half width are interpolated between its two
+  vertices at the nearest place on it, and the weight is the zone's profile over the distance (the strength inside the
+  half width, a smoothstep to zero across the falloff). One blend per line, never one per segment:
+  `Level` (toward the target), `LowerOnly` (toward the lower of the target and the ground: a cutting, a river bed) or
+  `RaiseOnly` (toward the higher: an embankment). Lines blend in id order (`FVoxelConditioningLineParams::Id`), then
+  the zones. A strength of 0 leaves the height alone.
+- **On a planet** a segment is the chord between its two vertices' points on the datum sphere, and the distance is
+  the arc under the chord from the point to the segment (2 R asin(chord / 2R), as a planet zone's). A segment a few
+  voxels long sags a hundredth of a unit under the sphere; `GetWarnings` names one that sags a tenth of a voxel.
+- **Bounds.** A line's reach is its largest half width plus its falloff (or its clear half width where that is
+  wider; `GetHeightReach` is the first alone), and every bounds test grows by it. The
+  segments are grouped in blocks of 16 with their own bounds (a box on a heightmap world, a ball of chords on a
+  planet), so a point far from a long line costs a test per block, and a gather (`MeetsRegion`, `MeetsCap`) takes a
+  line only where a block of it comes within reach.
+- **A chunk's segment list.** Generation does not read the line: one function, `FVoxelChunkLineSegments::Build`
+  (`VoxelChunkLineSegments.h`), turns the lines on a chunk's request into the chunk's segment list: the segments
+  whose box, grown by the line's reach, meets the chunk, in the chunk's frame (relative to the chunk's origin corner
+  on a heightmap world, to the point of the chunk anchor on the datum sphere on a planet), in floats, the lines in
+  order and each line's segments in order along it. The CPU generators evaluate that list and the GPU uploads the
+  same floats (`GPU_PIPELINE.md`), so both read the same numbers. The heightmap generator evaluates it once per XY
+  column before its voxel loop (`EvaluateColumns`); the planet generator has no columns and tests the list's bounds
+  per voxel first. A chunk no line reaches pays one count test. A world with no line generates byte for byte what it
+  did, so `GenerationVersion` and `PlanetGenerationVersion` did not move.
+- **The readers** (the surface query, the planet world mode's conditioned functions, the far field's samples, the
+  map's altitude, scatter's generated height, the PCG sampler, the chunk manager's own surface functions) evaluate
+  the line itself, in double, through `ApplyToHeight` and `ApplyToAltitude`. The two evaluations agree: the nearest
+  segment of a point the line reaches is always in the chunk's list, since the list takes every segment within the
+  line's reach of the chunk.
+- **The limits** a line must respect are checked where it is made and logged as warnings, not enforced
+  (`FVoxelConditioningLine::GetWarnings`; `AddConditioningLine` logs them): the target within the cut and fill cap
+  of the natural surface (half a chunk, a third of the 1.5 chunks the LOD strategy's surface slab allows
+  conditioning; the slab does not look at lines); a levelled core and a falloff of two voxels or more each; the bend
+  bound; no part of the line within twice its reach of another part of it, neighbouring segments aside; on a block
+  world a target no steeper than one block a column. The bend bound: the nearest segment changes across the bisector
+  on the inside of a bend, and with it the target, by 2 x grade x d x tan(turn / 2) at a distance d from the line, so
+  at each vertex that step times the weight, at its peak, stays under a tenth of a voxel, and the turn stays small
+  enough for the bisectors of neighbouring vertices to meet outside the reach. For a line 6 voxels wide with a
+  falloff of 4 and a vertex every 2 voxels that is 16 degrees a vertex up to a grade of 10 % and 6.7 at 25 %.
+- **Block worlds** generate from the same height, so a line needs nothing of its own there: the block tops along a
+  levelled line are the target's block tops.
+- **From a polyline to a line** (`FVoxelConditioningLineShape`, `VoxelGeneration/Public/VoxelConditioningLineShape.h`;
+  the plan's R1 and D134). Static functions on plain positions and heights, with nothing of who makes the line, for
+  a caller that has a drawn or routed polyline and wants a line within the bend bound. `RoundCorners` samples the
+  polyline evenly and, while a vertex turns by more than a bound (`GetMaxTurnForReach`: the bisectors meet outside
+  the reach; `GetMaxTurnForGrade`: the step at a grade), spreads the corners along the line (`SpreadCorners`: each
+  point the mean of the points within a distance each way, twice over), wider each try. It averages the whole line,
+  keeps the two ends, moves no point further than twice the distance it spread over, and reports the worst turn
+  left, whether that is within the bound, and the farthest move; a line that comes back on itself is reported as
+  outside the bound. `FitCornerArcs` (G225) rounds only the corners, each with an arc of a radius (`GetCornerRadius`:
+  the one whose vertices turn by the margin times a bound), which turns evenly where an average turns most at a
+  corner's middle: a corner (a run of vertices that turn the same way by more than the arc does) is widened a vertex
+  at a time until the arc tangent to the line before it and the line after it fits between them, its tangent points
+  at the radius times tan(turn / 2) from where the two lines meet; a corner too near an end keeps the end and lets its
+  direction go (the arc through the end, tangent to the other side's line, or through both ends of a short line). It
+  hands back each vertex's place along the polyline given, the corners rounded and left (over 160 degrees, two that
+  come within an arc of each other, a short line whose ends are over two radii apart) and the farthest move, both
+  ways. `MakeProfile` makes a levelled line's targets: the ground averaged along the line (the window
+  narrowing toward the ends), held from the start to a grade and, at each vertex that turns, to the grade the bend
+  bound leaves there (`GetMaxGradeForTurn`, with a margin of a tenth), the start at a given height or the ground's, the end at a given height or where the grades bring it.
+  A line made from those targets steps by less than a tenth of a voxel across every bisector whatever its turns: a
+  tight bend on a slope is levelled, with more cut and fill, which the caller judges against its cap. The roads
+  between POIs are made with it (VoxelWorldPOI's `FPOIRoads`: `RoundCorners`, whose corners are 45 and 90 degrees),
+  and so is a hand-placed line whose spline breaks the bend bound (`FitCornerArcs`; "The hand-placed line", below;
+  the plan's L5). `MakeRiverProfile` is its lower-only twin for a river
+  (the hydrology plan's H4; `WATER_SYSTEM.md`, "The river and the lake placed by hand"): a surface that is only ever
+  lowered (never rising downstream, a margin under both banks, a tuck under the water it meets), a bed a depth under
+  it that starts from nothing at a head, and the bed deepened, by up to the depth again, where its grade at a vertex
+  that turns is over what the bend bound leaves there.
+- **Roads between POIs** are VoxelWorldPOI's, in every world mode (the plan's R1 and R2; `POI_SYSTEM.md` section
+  5.1): heightmap lines on the plane, the island and block worlds, radial lines on a planet, gathered through
+  `IVoxelTerrainConditioner::GatherConditioningLines` and `GatherConditioningLinesOnSphere`.
+
+**The hand-placed line** (the plan's section 4.5 and phases L4 and L5; the how-to is `Guides/TERRAIN_LINES.md`). A
+hand-placed river's bed is such a line, sampled from its spline by the same function
+(`UVoxelTerrainLineComponent::BuildLineParamsFromSpline`, which takes any spline and a line's values:
+`FVoxelTerrainLineSettings`), with the river's own profile for its targets (`UVoxelRiverComponent`).
+`UVoxelTerrainLineComponent` (`VoxelStreaming/Public/VoxelTerrainLineComponent.h`) turns a `USplineComponent` on its
+actor into a conditioning line of the level's voxel world; `AVoxelTerrainLineActor` ("Voxel Terrain Line" in the Place
+Actors panel) is a spline with the component, to drop into a level. When the world starts the component samples the
+spline to a polyline and adds it to the chunk manager (`AddConditioningLine`):
+
+- **The vertices:** one every `VertexSpacingVoxels` voxels (2) along the spline's length, the last on its end. On a
+  heightmap world a vertex is the sampled point's world X and Y; on a planet it is the point's direction from the
+  planet centre, so the spline may hang at any height over the ground.
+- **The targets,** by `HeightMode`. `FollowTerrain` (the default: nothing draws the voxel terrain in the editor) takes
+  the natural terrain along the line (`IVoxelWorldMode::GetSurfaceOnUpLine`, a planet's `GetTerrainAltitude`),
+  averages it over `SmoothingDistance` each way along the line, holds it to `MaxGrade` from both ends, and adds
+  `TerrainOffset`; the average reaches as far back as forward, so it narrows toward each end and the line meets the
+  ground there (an average of what lies ahead alone starts a road on a rise with a mound). `SplineHeight` takes the
+  spline's own height: its world Z, or its altitude over the datum on a planet.
+- **The half width** is `HalfWidth` times the spline's scale Y at the vertex (1 by default), so a line widens where a
+  spline point is scaled up. The falloff, the strength, the blend and the surface (`FVoxelConditioningLineSurface`:
+  the band, the cave depth, the clear width) are the line's own, as `FVoxelConditioningLineParams` has them. A line
+  that only paints is a strength of 0 with a band.
+- **The id** is `Order` in its high half and a hash of the actor's and the component's names in its low half
+  (`GetLineId`): stable for the same level, the same on every machine (a PIE world's package is renamed, its actors
+  are not; a client's copy of a level actor carries the server's name), and where lines meet the higher order is
+  applied later and wins on its core. Lines of order 0 have ids from 0 to 2^32 - 1.
+- **The bends** (D134, the plan's L5; the corners' arcs G225). A hand-drawn spline breaks the bend bound easily: a tight curve on a grade, or
+  a corner. The line above is judged first as sampled, by the bound's two checks as one number
+  (`FVoxelTerrainLineBends::DrawnBendRatio`: the worst vertex's turn over the turn the bound allows there; the
+  arithmetic of `FVoxelConditioningLine::GetWarnings` on the same vertices). At 1 or under, the sampled line is the
+  line, vertex for vertex, and nothing below runs. Over 1 the component makes the line again with
+  `FVoxelConditioningLineShape`:
+  - **The corners.** The sampled points (world X and Y; on a planet the points on the datum sphere, before they become
+    directions again) are rounded with `FitCornerArcs` to the radius the reach asks for (`GetCornerRadius` of the
+    reach's bound: the reach over 0.9, a little more) and sampled evenly; the two ends stay. A corner moves by the
+    radius times (1 / cos(turn / 2) - 1), and the rest of the line stays on the spline (a 6-voxel road, reach 525 uu,
+    radius 587: a 60 degree corner moves 91 uu, a right angle 243, 120 degrees 587, about a reach, 150 degrees
+    1,682). A line that follows the terrain is then within the bound. At the spline's height a try still outside the
+    bound (its grade asks for a wider radius) takes one wider by as much as it was outside, up to three times the
+    reach's radius. A line the arcs cannot bring within the bound (a hairpin of over 160 degrees, two corners closer
+    than an arc each needs, a corner at the spline's height on a steep grade) takes the try that came nearest it (the
+    sampled points, when no arc helped) and keeps the warning. A try is judged as a line: following the terrain by
+    its turns alone (its profile comes after), at the spline's height with the spline's heights on it. Before G225
+    the corners were spread with `SpreadCorners` (the mean of the points around each, twice over), whose window a
+    corner needs grows fast with its turn: within twice the reach it rounded a corner of up to about 100 degrees, and
+    a corner near an end got a kink.
+  - **Along the spline.** `FitCornerArcs` hands back each vertex's place along the sampled points (an arc's vertices
+    spread evenly between its two tangent points' places), which is its place along the spline: there it reads its
+    half width (the scale Y) and, at the spline's height, its target. The rounded line is shorter through a corner
+    than the spline, so it climbs the same rise there on a steeper grade (a 60 degree corner on 15 %: 17.3 % at its
+    middle), which is why a corner at the spline's height takes a wider radius than one that follows the terrain.
+  - **The profile,** following the terrain: `MakeProfile` on the rounded vertices with the natural ground under them,
+    the component's `SmoothingDistance` and `MaxGrade` and the widest half width. It is the profile above with the
+    grade held, at each vertex that turns, to what the bend bound leaves there, so the target steps by less than a
+    tenth of a voxel across every bisector whatever turn is left. A line whose turns are within the bound as sampled
+    and that only stepped on its grade keeps its vertices and gets this profile alone.
+  - **What is said.** `GetLineBends` has the numbers (`FVoxelTerrainLineBends`: the ratio as sampled and as made, the
+    corners' radius, the farthest the line runs from the spline or the spline from it, measured against the spline
+    read every eighth of a step around each vertex's place: a rounded corner's move, whether the profile was made
+    again), and the first sentence of `GetLineWarnings` says them: "the spline breaks the bend bound (its sharpest
+    bend turns 14.3 times what the bound allows there): the line's corners are rounded to arcs of 587 uu radius, so the
+    line runs up to 592 uu from its spline, and its profile is flatter through the bends".
+- **The limits** are checked on the line as made when it is registered (`UVoxelChunkManager::GetConditioningLineWarnings`)
+  and logged as warnings with the actor's name; the component keeps them after the sentence about its bends
+  (`GetLineWarnings`) and adds the line whatever they say. A bend the rounding could not bring within the bound is
+  named there.
+- **Multiplayer.** The actor is in the level on every machine and is not replicated: the server and each client sample
+  the same spline in the same world, round the same corners and generate the same terrain. A line spawned at runtime is not supported: it is
+  added, with the chunk manager's warning, and the chunks generated before it keep their terrain.
+- There is no editor preview: the terrain shows the line in PIE.
+
+**Registering conditioning: before the first generation request.** A chunk whose generation request is built before a
+conditioning source is registered generates without it, and nothing generates it again (it keeps the natural terrain
+until it unloads and loads; the surface queries, the map and the far field meanwhile read the conditioned surface). So
+every source registers before the chunk manager's first tick. The chunk manager announces the moment:
+`UVoxelChunkManager::OnInitialized`, a static delegate fired at the end of every manager's `Initialize` with the
+manager, before it has built a request. A source binds to it and checks the manager's world against its own:
+`UVoxelTerrainLineComponent` does (or registers at its own `BeginPlay` when the voxel world started first: every level
+actor begins play before the world's first tick), and the game's POI conditioner does (`POI_SYSTEM.md`). Until
+2026-11-13 the POI conditioner registered on its subsystem's first tick, after the chunk manager's: 8 requests were
+built first in every start (G187). The chunk manager counts the requests it builds (`GetNumGenerationRequestsBuilt`)
+and a source registered after the first (`AddTerrainConditioner`, `AddConditioningLine`, `AddConditioningZone`) is
+warned about in the log and counted (`GetNumLateConditioningSources`); `voxel.World.Stats`' conditioning line ends
+"every source registered before the first generation request" or names the late ones. `Scripts/qa/startup_order.py`
+at the project root starts a map in PIE, or with a dedicated server and a client, and reports those lines.
+
+**The surface under a line** (the plan's section 4.3 and phase L3). A line carries what the ground is along it,
+`FVoxelConditioningLineSurface` (`FVoxelConditioningLineParams::Surface`): a band of material, a minimum depth for
+caves and a width kept clear. Each part is off at its default, and a line of strength 0 has a surface and no height
+(a trail: it paints and clears).
+
+- **The band:** a material id (`BandMaterialID`, -1 for none), a half width (`BandHalfWidth`: the band reaches to the
+  lesser of it and the core's half width at the place; 0 is the core's width) and a depth in voxels (`BandDepth`, 4).
+  Generation writes the band's material on every voxel of a band column down to that depth under the generated
+  surface, and in the air over it, after the height rules and before the cave-wall override and the ores, in the
+  biome pipeline and in the two pipelines without one. Where the bands of two lines overlap the later line's (the
+  higher id's) is written. The depth is four voxels because Dual Contouring at stride 4 reads a quad's material from
+  the solid voxel on its lattice, up to three voxels under the surface; `GetWarnings` names a band under four voxels
+  deep or under two voxels wide.
+- **Caves:** `MinCaveDepth` (voxels). No cave opens above that depth on the line's core, and across the falloff the
+  depth eases back by the weight's profile to the caves' own. It is applied where the cave configuration's
+  `UnderwaterMinDepth` is (`FVoxelCPUNoiseGenerator::CalculateCaveDensity`'s `MinDepthUnderLines`, the shader's
+  `GpuCaveCarve`): each layer's minimum depth is at least it, so it never makes a cave shallower
+  (`CAVE_SYSTEM.md`).
+- **Cleared ground:** `ClearHalfWidth` (world units; it may exceed the core, a verge, and the reach then holds it).
+  Inside it no scatter is placed (a chunk's extraction drops its surface points on the ground there,
+  `SCATTER_SYSTEM.md`), the PCG surface sampler emits no point, and no voxel tree is planted
+  (`FVoxelTreeInjector::ComputeTreePositionsForChunk`, which also stands a tree beside a line on the ground the line
+  leaves). The test is against the line (`IsClearedAt`), not an exclusion volume or a claim.
+- **In generation** the surface travels in the chunk's segment list: two more float4s a segment (five in all:
+  `[line index, blend, band material or -1, band depth] [band half width, minimum cave depth, 0, 0]`), and the walk
+  that finds a line's nearest segment hands on, with the blend, whether the point is on the band and the cave depth
+  times the profile (`FVoxelChunkLineSample`, `FVoxelChunkLineSurface`; the heightmap generator keeps a column's
+  surface with its blends, `FVoxelChunkLineColumns::Surfaces`). The GPU walks the same floats
+  (`GpuApplyConditioningLines`, `ConditioningLineSurface`).
+- **The analytic readers** name the band where generation writes it: `FVoxelSurfaceQuery::QuerySurfaceConditions`,
+  `QuerySurfaceMaterialMix`, their planet twins and `QueryMapSurfaceMaterial` take the conditioning and return the
+  band's material after the height rules (a mix on a band is the band's material alone), with or without a valid biome
+  snapshot; `GenerateVoxelAt` keeps caves under the lines' depth. So the voxels, the map (`MAP_SYSTEM.md`), the far
+  field (`LOD_SYSTEM.md`), the PCG points and `QuerySurfacePoint`'s generated rung agree on where the band is.
+- **Readers that sample coarsely** take a line as at least 0.71 of their spacing wide (`LeastHalfWidth`, above), for
+  the height and for the band: a band narrower than the spacing would fall between the samples and draw as dashes. The
+  voxels cannot do this, which is why the band's width matters: a band W voxels wide is sampled by a lattice of
+  spacing s, whatever its direction, when W is at least 1.42 s. On both smooth meshers a band 6 voxels wide is
+  unbroken at strides 1, 2 and 4 (one to two cells wide at stride 4), and a band 3 voxels wide is whole at stride 1,
+  unbroken at stride 2 and breaks at stride 4 into dashes, or is not drawn where it runs along the lattice between
+  its rows (the shots: `Documentation/TerrainLines/L3/` at the project root, `bands_*`).
+- **Readers that cover a large area take no lines:** a far-field patch wider than `ZoneGatherMax`, a map tile above
+  the level whose tile is `FVoxelConditioningLine::GatherLimitChunks` (64) chunks wide (level 6), and the PCG sampler
+  over bounds wider than that asks only for the lines at hand (`Ready`).
+
+In the heightmap modes `QueryEditMergedSurfacePoint` reads the edit-merged voxels on the voxel grid: voxel g holds the
+density at `WorldOrigin + g * VoxelSize`, where the generator samples it and the meshers place it. The query takes the
+four grid columns around (X, Y), one chunk under the generated estimate to one above, finds each column's top crossing
+(`FVoxelSurfaceQuery::ExtractSurfaceFromColumn`) and blends them bilinearly; the nearest column names the material and
+the biome, and the normal is the blend's slope (the density gradient where a column has no surface in its window). The
+height is then on the mesh and the collision: on a hilly plane of 75 uu voxels 3.4 uu off on average and 26 at worst,
+the slope 3 to 5 degrees off the collision triangle's (G165, 2026-11-09: one column read from an off-grid Z and (X, Y) had
+put it 42 uu above on average and up to 266 on a steep slope; `VoxelWorlds.Streaming.SurfaceQuery.MatchesCollision`). The
+nearest column is read over the whole window and the other three over a few voxels about its crossing (the whole window
+when their top crossing is not there): about 3.2 us a query, a cold path search on `VoxelDemo` 3.2 ms against 2.7 before. A block world's query is the block tops instead
+(`QueryEditMergedBlockSurface`), a planet's a digital line along local up.
 
 **Reaching it from game code and Blueprint.** The chunk manager (a component of the world actor) exposes the configured
 mode's bounds and frame as `BlueprintPure` functions in the `Voxel|World` category: `IsInsideWorld`, `GetWorldBounds`,
@@ -92,7 +350,7 @@ float BaseHeight = 0.0f;         // additional offset
 The terrain noise at (X, Y, 0) gives the height, `SeaLevel + BaseHeight + Noise * HeightScale`
 (`NoiseToTerrainHeight`, unclamped, as the GPU's `WorldModeSDF.ush`), with continentalness's offset and scale
 multiplier when the biome configuration enables it (`ComputeEffectiveTerrainParams`, `BIOME_SYSTEM.md`), then the
-conditioning zones. The density is the signed distance to that height:
+conditioning lines and zones. The density is the signed distance to that height:
 
 ```cpp
 float FInfinitePlaneWorldMode::GetDensityAt(const FVector& WorldPos, int32 LODLevel, float NoiseValue) const
@@ -221,7 +479,7 @@ Radial terrain on a sphere, on the same Cartesian chunk grid as the other modes,
 generated on the GPU or the CPU (the same voxels), walkable with gravity toward its centre, carries every game system
 (scatter, PCG, map, navigation, NPCs, POIs, dungeons, campsites, saves, the clock) in its local frame, is precise up to
 a radius of about 1,000 km, and can be left for orbit and landed on again. Test content in the parent project:
-`/Game/PluginTesting/Planet` (`PlanetTest`) and `/Game/PluginTesting/Review/` (`Review_Planet`, `Review_Planet_M` 50 km,
+`/Game/PluginTesting/Demo` (`PlanetTest`) and `/Game/PluginTesting/Tests/Review/` (`Review_Planet`, `Review_Planet_M` 50 km,
 `Review_Planet_L` 1,000 km).
 
 ### Configuration (UVoxelWorldConfiguration)
@@ -297,7 +555,8 @@ Voxel tree injection never runs on a planet (cubic only).
 
 | System | On a planet | Where |
 |--------|-------------|-------|
-| Conditioning zones | A planet zone is a cap on the datum sphere: `FVoxelConditioningZone::Direction` (zero = a heightmap zone), `InnerRadius` and `FalloffWidth` as great-circle distances, `TargetHeight` an altitude, weighted with the heightmap's smoothstep (`GetWeightAtDirection`) and blended into the terrain's altitude along each direction (`FVoxelTerrainConditioning::ApplyToAltitude`) on the CPU and the GPU (`PlanetApplyConditioning`). The chunk manager gathers a chunk's zones by the cap its box subtends (`GatherConditioningZones` with a box, `GetPlanetCapOfBox`); conditioners answer `IVoxelTerrainConditioner::GatherConditioningOnSphere`. A zone of the other kind does nothing (with a warning) | `VoxelGeneration/VoxelTerrainConditioning.h`, `SphericalPlanet.ush` |
+| Conditioning lines | A planet line's vertices are directions and its targets altitudes; a segment is the chord between two vertices' datum points, the distance the arc under the chord (`EvaluateOnSphere`; "Conditioning lines" above). A chunk's segments are stored relative to its anchor's datum point and walked by `GpuApplyConditioningLines` before the zones. The surface under a line is measured the same way: the band, the caves' minimum depth and the clear width along the surface (`GetBandOnSphere`, `GetMinCaveDepthOnSphere`, `IsClearedOnSphere`), the band's depth and the cave depth radial | `VoxelGeneration/VoxelConditioningLine.h`, `VoxelChunkLineSegments.h`, `ConditioningLines.ush` |
+| Conditioning zones | A planet zone is a cap on the datum sphere: `FVoxelConditioningZone::Direction` (zero = a heightmap zone), `InnerRadius` and `FalloffWidth` as great-circle distances, `TargetHeight` an altitude, weighted with the heightmap's smoothstep (`GetWeightAtDirection`) and blended into the terrain's altitude along each direction (`FVoxelConditioning::ApplyToAltitude`) on the CPU and the GPU (`PlanetApplyConditioning`). The chunk manager gathers a chunk's conditioning by the cap its box subtends (`GatherConditioning` with a box, `GetPlanetCapOfBox`); conditioners answer `IVoxelTerrainConditioner::GatherConditioningOnSphere`. A zone of the other kind does nothing (with a warning) | `VoxelGeneration/VoxelTerrainConditioning.h`, `SphericalPlanet.ush` |
 | The generated surface | The natural surface plus the zones: `UVoxelChunkManager::GetGeneratedSurfacePoint`, the start of `QueryEditMergedSurfacePoint`'s walk, the spawn, the map's planet tiles, scatter's ray tops, PCG's far points; `GetSurfacePointAt` stays the natural surface | `VoxelChunkManager` |
 | POIs | Placed on the cube-sphere grid's cells (`FPOIPlacement::GeneratePlanetPOIs`: the site survey on the tangent plane in altitudes, the sea's altitude as the water line); each POI has a pad space, the tangent frame at its centre (x east, y north, z local up), in which its claims, structures and dungeon are composed with the plane's arithmetic; structures are draped onto the pad's cap; streaming, `poi.Find` and the map markers by 3D distance | `VoxelWorldPOI` |
 | Campsites | Generated campsites stand on the draped pad and respawn the player along their own up | `VoxelWorldPOI` |
@@ -427,7 +686,7 @@ local solar clock.
 `Shaders/Private/GenerateVoxelDensity.usf` mirrors the CPU generator for every mode (`GPU_PIPELINE.md`):
 
 - **InfinitePlane:** the terrain noise at the chunk's noise origin plus the voxel's offset, continentalness,
-  `NoiseToTerrainHeight` (`WorldModeSDF.ush`), the conditioning zones, then the signed distance to that height. Then, in
+  `NoiseToTerrainHeight` (`WorldModeSDF.ush`), the conditioning lines and zones, then the signed distance to that height. Then, in
   the CPU's order, the biome blend, the caves (`GpuCaveCarve`), materials, height rules, the cave-wall override and
   ores.
 - **IslandBowl:** the same height, then `ApplyIslandFalloffToHeight` (`IslandFalloff.ush`, the port of

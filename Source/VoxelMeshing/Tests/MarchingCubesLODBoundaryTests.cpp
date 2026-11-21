@@ -26,6 +26,8 @@
 #include "ChunkRenderData.h"
 #include "TransvoxelTables.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 namespace MarchingCubesLODBoundaryTestHelpers
 {
 	using namespace VoxelMeshingTestFixtures;
@@ -1439,3 +1441,4 @@ bool FMCLODBoundaryT13BoundaryMorphTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+#endif // WITH_DEV_AUTOMATION_TESTS

@@ -16,7 +16,7 @@
 // Spherical Phase 5: conditioning on a planet's chunk manager (WORLD_MODES_REVIEW_PLAN.md §19, WM-PL1; SP-B10).
 //
 // - ConditioningGather: a planet chunk's zones are gathered by the cap its box subtends from the centre
-//   (GetPlanetCapOfBox + GatherConditioningZonesOnSphere, what the generation request does). Against a brute force over
+//   (GetPlanetCapOfBox + GatherConditioningOnSphere, what the generation request does). Against a brute force over
 //   the chunk's voxels, no zone that weighs on any of them is missed; heightmap zones never come back on a planet.
 // ---------------------------------------------------------------------------
 
@@ -71,8 +71,8 @@ bool FVoxelPlanetConditioningGatherTest::RunTest(const FString& Parameters)
 					{
 						continue;
 					}
-					TArray<FVoxelConditioningZone> Gathered;
-					W.Manager->GatherConditioningZonesOnSphere(CapDirection, CapAngle, Gathered);
+					FVoxelConditioning Gathered;
+					W.Manager->GatherConditioningOnSphere(CapDirection, CapAngle, EVoxelConditioningGather::Complete, Gathered);
 					++Chunks;
 
 					// Brute force over the chunk's voxels (every other one, and the far corner) for each planet zone.
@@ -90,7 +90,7 @@ bool FVoxelPlanetConditioningGatherTest::RunTest(const FString& Parameters)
 								}
 							}
 						}
-						const bool bGathered = Gathered.ContainsByPredicate([&Candidate](const FVoxelConditioningZone& G)
+						const bool bGathered = Gathered.Zones.ContainsByPredicate([&Candidate](const FVoxelConditioningZone& G)
 						{
 							return G.IsRadial() && G.Direction.Equals(Candidate.Direction, 1e-12);
 						});
@@ -98,7 +98,7 @@ bool FVoxelPlanetConditioningGatherTest::RunTest(const FString& Parameters)
 						Missed += (bWeighs && !bGathered) ? 1 : 0;
 						Extra += (!bWeighs && bGathered) ? 1 : 0;
 					}
-					Heightmap += Gathered.FilterByPredicate([](const FVoxelConditioningZone& G) { return !G.IsRadial(); }).Num();
+					Heightmap += Gathered.Zones.FilterByPredicate([](const FVoxelConditioningZone& G) { return !G.IsRadial(); }).Num();
 				}
 			}
 		}
@@ -112,9 +112,9 @@ bool FVoxelPlanetConditioningGatherTest::RunTest(const FString& Parameters)
 
 	// A point query: the zones at a direction, and only those.
 	{
-		TArray<FVoxelConditioningZone> AtSite;
-		W.Manager->GatherConditioningZonesOnSphere(Zones[0].Direction, 0.0, AtSite);
-		TestEqual(TEXT("A point query at the 45-degree zone's centre gathers it alone"), AtSite.Num(), 1);
+		FVoxelConditioning AtSite;
+		W.Manager->GatherConditioningOnSphere(Zones[0].Direction, 0.0, EVoxelConditioningGather::Complete, AtSite);
+		TestEqual(TEXT("A point query at the 45-degree zone's centre gathers it alone"), AtSite.Zones.Num(), 1);
 	}
 
 	// The generated altitude takes the zone: the target at its centre, the natural altitude far from every zone.
@@ -177,7 +177,7 @@ bool FVoxelPlanetConditionedSurfaceTest::RunTest(const FString& Parameters)
 			const FVector Tangent = East * FMath::Cos(Bearing) + North * FMath::Sin(Bearing);
 			return (Site * FMath::Cos(Distance / Radius) + Tangent * FMath::Sin(Distance / Radius)).GetSafeNormal();
 		};
-		const TArray<FVoxelConditioningZone> Zones = { FVoxelConditioningZone::MakeRadial(Site, Inner, Falloff, Target) };
+		const FVoxelConditioning Zones = FVoxelConditioning::OfZones({ FVoxelConditioningZone::MakeRadial(Site, Inner, Falloff, Target) });
 		const FVoxelSeaSurface Sea = W.Manager->GetSeaSurface();
 		int32 Points = 0, Found = 0, OffGenerated = 0, OffSample = 0, OnPad = 0;
 		double Worst = 0.0;

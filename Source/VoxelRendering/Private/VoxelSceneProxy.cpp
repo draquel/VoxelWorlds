@@ -482,7 +482,10 @@ void CreateVoxelMeshBuffers_RenderThread(FRHICommandListBase& RHICmdList, const 
 	FMemory::Memcpy(ColorBufferData, ColorData.GetData(), ColorBufferSize);
 	RHICmdList.UnlockBuffer(NewRenderData.ColorBufferRHI);
 
-	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_B8G8R8A8));
+	// R8G8B8A8 over FColor's BGRA bytes, as the engine's FColorVertexBuffer: the local vertex factory's manual fetch
+	// swizzles .bgra (FMANUALFETCH_COLOR_COMPONENT_SWIZZLE). A B8G8R8A8 view swizzled again and swapped R and B, so the
+	// material read AO as vertex colour R, the soft border's second material (VP2-O4)
+	NewRenderData.ColorSRV = RHICmdList.CreateShaderResourceView(NewRenderData.ColorBufferRHI, FRHIViewDesc::CreateBufferSRV().SetType(FRHIViewDesc::EBufferType::Typed).SetFormat(PF_R8G8B8A8));
 
 	// Create tangent buffer for SRV
 	const uint32 TangentBufferSize = VertexCount * sizeof(FVoxelPackedTangentPair);
@@ -1108,7 +1111,7 @@ void FVoxelSceneProxy::GetDynamicMeshElements(
 					MeshBatch.DepthPriorityGroup = SDPG_World;
 					MeshBatch.bCanApplyViewModeOverrides = true;
 					MeshBatch.bUseWireframeSelectionColoring = IsSelected();
-					MeshBatch.bUseAsOccluder = false;  // Water is translucent
+					MeshBatch.bUseAsOccluder = false;  // Water is seen through (Single Layer Water since the water plan's W1)
 					MeshBatch.bWireframe = bWireframe;
 					MeshBatch.CastShadow = false;       // Water doesn't cast shadows
 					MeshBatch.bUseForMaterial = true;

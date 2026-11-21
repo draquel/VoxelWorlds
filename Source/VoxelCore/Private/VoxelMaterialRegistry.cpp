@@ -158,6 +158,21 @@ static TArray<FVoxelMaterialDefinition> BuildDefaultMaterials()
 		Materials[Entry.Key].Hardness = Entry.Value;
 	}
 
+	// The ground each is underfoot (G247): what the character's surface table held by ID before the class was data
+	// (CR2 VCP-14). The reserved slots have none.
+	const TPair<uint8, EVoxelSurfaceClass> SurfaceClasses[] = {
+		{ EVoxelMaterial::Grass, EVoxelSurfaceClass::Grass }, { EVoxelMaterial::Dirt, EVoxelSurfaceClass::Dirt },
+		{ EVoxelMaterial::Stone, EVoxelSurfaceClass::Stone }, { EVoxelMaterial::Sand, EVoxelSurfaceClass::Sand },
+		{ EVoxelMaterial::Snow, EVoxelSurfaceClass::Snow }, { EVoxelMaterial::Sandstone, EVoxelSurfaceClass::Sand },
+		{ EVoxelMaterial::FrozenDirt, EVoxelSurfaceClass::Ice }, { EVoxelMaterial::Coal, EVoxelSurfaceClass::Stone },
+		{ EVoxelMaterial::Iron, EVoxelSurfaceClass::Metal }, { EVoxelMaterial::Gold, EVoxelSurfaceClass::Metal },
+		{ EVoxelMaterial::Copper, EVoxelSurfaceClass::Metal }, { EVoxelMaterial::Diamond, EVoxelSurfaceClass::Stone },
+		{ EVoxelMaterial::Wood, EVoxelSurfaceClass::Wood }, { EVoxelMaterial::Leaves, EVoxelSurfaceClass::Grass } };
+	for (const TPair<uint8, EVoxelSurfaceClass>& Entry : SurfaceClasses)
+	{
+		Materials[Entry.Key].SurfaceClass = Entry.Value;
+	}
+
 	return Materials;
 }
 
@@ -203,6 +218,11 @@ TSharedRef<const FVoxelMaterialTable> FVoxelMaterialTable::FromAtlas(const TArra
 		// Atlas config is authoritative — overrides registry defaults
 		Mat.bIsMasked = Config.bIsMasked;
 		Mat.bNonOccluding = Config.bNonOccluding;
+		// The ground underfoot: the config's class where it names one, else the table's (a default's, or none) (G247)
+		if (Config.SurfaceClass != EVoxelSurfaceClass::Unset)
+		{
+			Mat.SurfaceClass = Config.SurfaceClass;
+		}
 	}
 
 	// The slope materials, by UVoxelMaterialAtlas::GetSlopeMaterialID's rule: -1, the material's own ID, past 254 or an ID

@@ -7,6 +7,17 @@
 #include "VoxelBiomeSnapshot.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelSurfaceQuery.h"
+#include "VoxelTerrainConditioning.h"
+
+int32 FVoxelTreeInjector::GetSourceChunkRadius(const TArray<FVoxelTreeTemplate>& Templates, int32 ChunkSize)
+{
+	int32 MaxExtent = 0;
+	for (const FVoxelTreeTemplate& Tmpl : Templates)
+	{
+		MaxExtent = FMath::Max(MaxExtent, Tmpl.GetMaxHorizontalExtent());
+	}
+	return FMath::Max(1, FMath::CeilToInt(static_cast<float>(MaxExtent) / FMath::Max(ChunkSize, 1)));
+}
 
 void FVoxelTreeInjector::InjectTrees(
 	const FIntVector& ChunkCoord,
@@ -18,22 +29,17 @@ void FVoxelTreeInjector::InjectTrees(
 	float TreeDensity,
 	const UVoxelBiomeConfiguration* BiomeConfig,
 	bool bEnableWaterLevel, float WaterLevel,
-	TArray<FVoxelData>& InOutVoxelData)
+	TArray<FVoxelData>& InOutVoxelData,
+	const FVoxelConditioning* Conditioning,
+	const FVoxelWaterLevels* WaterOver)
 {
 	if (Templates.Num() == 0 || TreeDensity <= 0.0f)
 	{
 		return;
 	}
 
-	// Compute max tree horizontal extent to determine XY neighbor search radius
-	int32 MaxExtent = 0;
-	for (const FVoxelTreeTemplate& Tmpl : Templates)
-	{
-		MaxExtent = FMath::Max(MaxExtent, Tmpl.GetMaxHorizontalExtent());
-	}
-
 	// Neighbor search radius in chunks (how far a tree from a neighbor could reach into this chunk)
-	const int32 SearchRadiusChunks = FMath::Max(1, FMath::CeilToInt(static_cast<float>(MaxExtent) / ChunkSize));
+	const int32 SearchRadiusChunks = GetSourceChunkRadius(Templates, ChunkSize);
 
 	// Iterate over this chunk and XY neighbor chunks
 	// Tree placement is 2D (terrain height determines Z), so no DZ loop needed
@@ -58,7 +64,7 @@ void FVoxelTreeInjector::InjectTrees(
 				NoiseParams, WorldMode,
 				TreeDensity, Templates,
 				BiomeConfig, bEnableWaterLevel, WaterLevel,
-				TreePositions, TemplateIDs, TreeSeeds);
+				TreePositions, TemplateIDs, TreeSeeds, Conditioning, WaterOver);
 
 			// Stamp each tree that could overlap this chunk
 			for (int32 i = 0; i < TreePositions.Num(); ++i)
@@ -144,12 +150,17 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 	bool bEnableWaterLevel, float WaterLevel,
 	TArray<FIntVector>& OutGlobalVoxelPositions,
 	TArray<int32>& OutTemplateIDs,
-	TArray<uint32>& OutSeeds)
+	TArray<uint32>& OutSeeds,
+	const FVoxelConditioning* Conditioning,
+	const FVoxelWaterLevels* WaterOver)
 {
 	if (Templates.Num() == 0 || TreeDensity <= 0.0f)
 	{
 		return;
 	}
+	// A world with no conditioning here plants exactly the trees it planted before conditioning was read (G206).
+	const bool bConditioned = Conditioning && !Conditioning->IsEmpty();
+	const bool bLines = bConditioned && Conditioning->Lines.Num() > 0;
 
 	uint32 ChunkSeed = ComputeTreeChunkSeed(SourceChunkCoord, WorldSeed);
 
@@ -191,16 +202,40 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 		const float WorldX = WorldOrigin.X + (ChunkVoxelOrigin.X + LocalX) * VoxelSize;
 		const float WorldY = WorldOrigin.Y + (ChunkVoxelOrigin.Y + LocalY) * VoxelSize;
 
-		const float TerrainHeight = static_cast<float>(WorldMode.GetSurfaceOnUpLine(FVector(WorldX, WorldY, 0.0), NoiseParams).Position.Z);
+		float TerrainHeight = static_cast<float>(WorldMode.GetSurfaceOnUpLine(FVector(WorldX, WorldY, 0.0), NoiseParams).Position.Z);
 
 		// Advance seed state to maintain determinism (must happen before any continue)
 		RandomFromSeed(ChunkSeed);
 
+		// The conditioning: no tree inside a line's clear width, and where a line or a zone moves the ground (a road, a
+		// POI's pad and its ring) the tree stands on the ground generation makes there, the lines' blend and then the
+		// zones' (G206: with the natural height a tree on a pad cut into a slope began in the air over it, and one on a
+		// raised pad under its ground). Nor inside a zone's clear radius: a POI that keeps its pad bare (G222).
+		if (bConditioned)
+		{
+			if ((bLines && Conditioning->IsClearedAt(WorldX, WorldY)) || Conditioning->IsZoneClearedAt(WorldX, WorldY))
+			{
+				continue;
+			}
+			TerrainHeight = Conditioning->ApplyToHeight(WorldX, WorldY, TerrainHeight);
+		}
+
 		// ==================== Placement Filtering ====================
 		const FVoxelTreeTemplate& Tmpl = Templates[TemplateIdx];
 
+		// The water over the tree's own column where a lake or a river reach is gathered (the hydrology plan's section
+		// 5.4): a pond's level holds over its footprint and nowhere else. With the sea alone it is the chunk's scalar.
+		bool bTreeWater = bEnableWaterLevel;
+		float TreeWaterLevel = WaterLevel;
+		if (WaterOver && !WaterOver->IsSeaAlone())
+		{
+			FVoxelWaterSample Over;
+			bTreeWater = WaterOver->Sample(FVector(WorldX, WorldY, TerrainHeight), Over);
+			TreeWaterLevel = static_cast<float>(Over.SurfaceLevel);
+		}
+
 		// Water level check: skip trees below water
-		if (bEnableWaterLevel && TerrainHeight < WaterLevel)
+		if (bTreeWater && TerrainHeight < TreeWaterLevel)
 		{
 			continue;
 		}
@@ -212,7 +247,7 @@ void FVoxelTreeInjector::ComputeTreePositionsForChunk(
 		uint8 SurfaceMaterial = 0;
 		uint8 BiomeID = 0;
 		FVoxelSurfaceQuery::QuerySurfaceConditions(WorldX, WorldY, TerrainHeight, VoxelSize,
-			BiomeSnapshot, WorldSeed, bEnableWaterLevel, WaterLevel,
+			BiomeSnapshot, WorldSeed, bTreeWater, TreeWaterLevel,
 			SurfaceMaterial, BiomeID);
 
 		// Check per-template placement rules
@@ -400,7 +435,9 @@ void FVoxelTreeInjector::FindTreesWithTrunkAt(
 	float TreeDensity,
 	const UVoxelBiomeConfiguration* BiomeConfig,
 	bool bEnableWaterLevel, float WaterLevel,
-	TArray<FVoxelTreeInstance>& OutTrees)
+	TArray<FVoxelTreeInstance>& OutTrees,
+	const FVoxelConditioning* Conditioning,
+	const FVoxelWaterLevels* WaterOver)
 {
 	if (Templates.Num() == 0 || TreeDensity <= 0.0f || ChunkSize <= 0)
 	{
@@ -430,7 +467,7 @@ void FVoxelTreeInjector::FindTreesWithTrunkAt(
 			TArray<uint32> TreeSeeds;
 			ComputeTreePositionsForChunk(FIntVector(Chunk.X + DX, Chunk.Y + DY, Chunk.Z), ChunkSize, VoxelSize, WorldOrigin, WorldSeed,
 				NoiseParams, WorldMode, TreeDensity, Templates, BiomeConfig, bEnableWaterLevel, WaterLevel,
-				TreePositions, TemplateIDs, TreeSeeds);
+				TreePositions, TemplateIDs, TreeSeeds, Conditioning, WaterOver);
 
 			for (int32 i = 0; i < TreePositions.Num(); ++i)
 			{

@@ -47,6 +47,7 @@ public:
 		SHADER_PARAMETER(float, NoiseFrequency)
 		SHADER_PARAMETER(float, NoiseLacunarity)
 		SHADER_PARAMETER(float, NoisePersistence)
+		SHADER_PARAMETER(int32, NoiseRidged)
 		SHADER_PARAMETER(int32, WorldMode)
 		SHADER_PARAMETER(float, SeaLevel)
 		SHADER_PARAMETER(float, HeightScale)
@@ -73,12 +74,19 @@ public:
 		SHADER_PARAMETER(int32, ContinentalnessEnabled)
 		SHADER_PARAMETER(int32, ContinentalnessSeed)
 		SHADER_PARAMETER(float, ContinentalnessFrequency)
+		SHADER_PARAMETER(int32, ContinentalnessEqualize)
 		SHADER_PARAMETER(int32, ContinentalnessCurveSamples)
 		SHADER_PARAMETER_SCALAR_ARRAY(float, ContinentalnessHeightCurve, [32])
 		SHADER_PARAMETER_SCALAR_ARRAY(float, ContinentalnessHeightScaleCurve, [32])
 		// Water level parameters
 		SHADER_PARAMETER(int32, WaterLevelEnabled)
 		SHADER_PARAMETER(float, WaterLevelHeight)
+		// The chunk's water columns (FVoxelChunkWaterColumns): a level per column, or per down-line on a planet, in
+		// place of the one level, where a lake or a river reach may reach the chunk. 0: the buffer is a stand-in.
+		SHADER_PARAMETER(int32, WaterColumnsEnabled)
+		SHADER_PARAMETER(uint32, WaterLineAxisA)
+		SHADER_PARAMETER(uint32, WaterLineForward)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, WaterColumnData)
 		// Biome / material parameters (Phase B). BiomeData: StructuredBuffer<float4>, GPU_BIOME_FLOAT4_STRIDE(4)
 		// float4s per biome; layout mirrors UVoxelBiomeConfiguration::BuildGpuData. BiomeCount==0 → shader
 		// falls back to the legacy depth-based material.
@@ -88,6 +96,10 @@ public:
 		SHADER_PARAMETER(float, TemperatureFrequency)
 		SHADER_PARAMETER(int32, MoistureSeed)
 		SHADER_PARAMETER(float, MoistureFrequency)
+		// Climate shaping (ClimateShaping.ush; FVoxelBiomeSnapshot's Shape* functions on the CPU)
+		SHADER_PARAMETER(int32, ClimateEqualize)
+		SHADER_PARAMETER(float, TemperatureLatitudeWeight)
+		SHADER_PARAMETER(float, TemperatureLapseRate)
 		SHADER_PARAMETER(int32, EnableUnderwaterMaterials)
 		SHADER_PARAMETER(uint32, DefaultUnderwaterMaterial)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, BiomeData)
@@ -109,6 +121,9 @@ public:
 		// [CenterX,CenterY,InnerRadius,FalloffWidth][TargetHeight,Strength,0,0]
 		SHADER_PARAMETER(int32, ConditioningZoneCount)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ConditioningZoneData)
+		// The chunk's conditioning line segments (FVoxelChunkLineSegments): 4 float4s a segment, 0 for most chunks
+		SHADER_PARAMETER(int32, ConditioningLineSegmentCount)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ConditioningLineData)
 		// IslandBowl world-mode params (Phase C) — applied when WorldMode == ISLAND_BOWL (2): edge falloff
 		// on the continentalness-modulated height. IslandShape 0=circular/1=rectangle;
 		// IslandFalloffType 0=Linear/1=Smooth/2=Squared/3=Exponential.
@@ -183,6 +198,108 @@ public:
 		SHADER_PARAMETER(float, VoxelSize)
 		SHADER_PARAMETER(float, ChunkWorldZ)
 		SHADER_PARAMETER(float, WaterLevel)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+// The fill with a level per column (the hydrology plan's section 5.4; FVoxelChunkWaterColumns): the kernels below read
+// the chunk's water columns in place of the one level, dispatched for a chunk a lake or a river reach may reach. The
+// kernels of a chunk with one level, and their parameters, are as they were.
+
+/** The plane's column seed with a level per column: each column seeds from its own level. */
+class FVoxelWaterColumnSeedColumnsCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVoxelWaterColumnSeedColumnsCS);
+	SHADER_USE_PARAMETER_STRUCT(FVoxelWaterColumnSeedColumnsCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ChunkSize)
+		SHADER_PARAMETER(float, VoxelSize)
+		SHADER_PARAMETER(float, ChunkWorldZ)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, WaterColumns)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+/** The plane's flood sweep with a level per column: a voxel takes water at or under its own column's level. */
+class FVoxelWaterFloodSweepColumnsCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVoxelWaterFloodSweepColumnsCS);
+	SHADER_USE_PARAMETER_STRUCT(FVoxelWaterFloodSweepColumnsCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ChunkSize)
+		SHADER_PARAMETER(float, VoxelSize)
+		SHADER_PARAMETER(float, ChunkWorldZ)
+		SHADER_PARAMETER(uint32, SweepAxis)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, WaterColumns)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+/** The planet's line seed with a level per down-line: each line flags air at or under its own level. */
+class FVoxelWaterLineSeedColumnsCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVoxelWaterLineSeedColumnsCS);
+	SHADER_USE_PARAMETER_STRUCT(FVoxelWaterLineSeedColumnsCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ChunkSize)
+		SHADER_PARAMETER(float, VoxelSize)
+		SHADER_PARAMETER(uint32, LineAxisA)
+		SHADER_PARAMETER(uint32, LineForward)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int2>, LineShifts)
+		SHADER_PARAMETER(FVector3f, PlanetAnchorLocal)
+		SHADER_PARAMETER(FVector3f, PlanetAnchorDir)
+		SHADER_PARAMETER(float, PlanetAnchorDist)
+		SHADER_PARAMETER(uint32, WaterColumnBase)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, WaterColumns)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+	}
+};
+
+/** The planet's flood sweep with a level per down-line: a voxel takes water at or under its own line's level. */
+class FVoxelWaterFloodSweepRadialColumnsCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FVoxelWaterFloodSweepRadialColumnsCS);
+	SHADER_USE_PARAMETER_STRUCT(FVoxelWaterFloodSweepRadialColumnsCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ChunkSize)
+		SHADER_PARAMETER(float, VoxelSize)
+		SHADER_PARAMETER(uint32, SweepAxis)
+		SHADER_PARAMETER(uint32, LineAxisA)
+		SHADER_PARAMETER(uint32, LineForward)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int2>, LineShifts)
+		SHADER_PARAMETER(FVector3f, PlanetAnchorLocal)
+		SHADER_PARAMETER(FVector3f, PlanetAnchorDir)
+		SHADER_PARAMETER(float, PlanetAnchorDist)
+		SHADER_PARAMETER(uint32, WaterColumnBase)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, WaterColumns)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, VoxelData)
 	END_SHADER_PARAMETER_STRUCT()
 

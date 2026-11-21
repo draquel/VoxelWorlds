@@ -219,15 +219,21 @@ FVoxelAtlasTile UVoxelMaterialAtlas::GetTileForFace(uint8 MaterialID, EVoxelFace
 
 void UVoxelMaterialAtlas::BuildMaterialLUT()
 {
-	// LUT dimensions: 256 materials x (3 face types + the texture array slices)
+	// LUT dimensions: 256 materials x (3 face types + the texture array slices + the height)
 	const int32 LUTWidth = 256;
-	const int32 LUTHeight = 4;
+	const int32 LUTHeight = 5;
 	const int32 SliceRow = 3;
+	const int32 HeightRow = 4;
 
-	// Create or recreate the LUT texture
+	// Create or recreate the LUT texture. Every atlas's LUT lives in the transient package, so each gets a name of its own:
+	// CreateTransient with a name an object there already has reconstructs that object in place, and under one shared
+	// name a second atlas's build (a PIE on a map with another atlas) rewrote the first atlas's LUT, which the first atlas
+	// kept and bound on every later PIE, its materials sampling the other atlas's slices until the editor restarted (G211)
 	if (!MaterialLUT || MaterialLUT->GetSizeX() != LUTWidth || MaterialLUT->GetSizeY() != LUTHeight)
 	{
-		MaterialLUT = UTexture2D::CreateTransient(LUTWidth, LUTHeight, PF_B8G8R8A8, TEXT("VoxelMaterialLUT"));
+		const FName LUTName = MakeUniqueObjectName(GetTransientPackage(), UTexture2D::StaticClass(),
+			FName(*FString::Printf(TEXT("%s_MaterialLUT"), *GetName())));
+		MaterialLUT = UTexture2D::CreateTransient(LUTWidth, LUTHeight, PF_B8G8R8A8, LUTName);
 		if (!MaterialLUT)
 		{
 			UE_LOG(LogVoxelMaterialAtlas, Error, TEXT("UVoxelMaterialAtlas: Failed to create LUT texture"));
@@ -307,14 +313,27 @@ void UVoxelMaterialAtlas::BuildMaterialLUT()
 		PixelData[PixelIndex + 3] = static_cast<uint8>(GetSlopeMaterialID(static_cast<uint8>(MaterialID)) + 1);  // A
 	}
 
+	// The height row (D163): each material's slice in the height array, the channel holding its height, and whether it
+	// has one (a tessellated material leaves a material without one where it is)
+	for (int32 MaterialID = 0; MaterialID < 256; ++MaterialID)
+	{
+		const int32 PixelIndex = (HeightRow * LUTWidth + MaterialID) * 4;
+		const FVoxelMaterialTextureConfig* Config = GetMaterialConfig(static_cast<uint8>(MaterialID));
+		const bool bHasHeight = Config && !Config->HeightTexture.IsNull() && HeightArray;
+		PixelData[PixelIndex + 0] = bHasHeight ? 255 : 0;                                                   // B
+		PixelData[PixelIndex + 1] = bHasHeight ? static_cast<uint8>(Config->HeightChannel) : 0;           // G
+		PixelData[PixelIndex + 2] = GetArraySlice(HeightArraySlices, static_cast<uint8>(MaterialID));    // R
+		PixelData[PixelIndex + 3] = 0;                                                                    // A
+	}
+
 	// Unlock and update
 	Mip.BulkData.Unlock();
 	MaterialLUT->UpdateResource();
 
 	bLUTDirty = false;
 
-	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("Built material LUT (%d x %d) with %d material configs"),
-		LUTWidth, LUTHeight, MaterialConfigs.Num());
+	UE_LOG(LogVoxelMaterialAtlas, Log, TEXT("Built material LUT %s (%d x %d) for %s with %d material configs"),
+		*MaterialLUT->GetName(), LUTWidth, LUTHeight, *GetName(), MaterialConfigs.Num());
 }
 
 bool UVoxelMaterialAtlas::AreTextureArraysDirty() const
@@ -398,6 +417,19 @@ void UVoxelMaterialAtlas::BuildTextureArrays()
 		FColor(128, 128, 128, 255), // 0.5 roughness
 		TEXT("Roughness")
 	);
+
+	// Build Height array (D163): only when a config has a height map; the shader reads the config's channel
+	bool bHeightSuccess = BuildSingleTextureArray(
+		HeightArray,
+		HeightArraySlices,
+		[](const FVoxelMaterialTextureConfig& Config) { return Config.HeightTexture; },
+		FColor(128, 128, 128, 128), // mid height in every channel
+		TEXT("Height")
+	);
+	if (!bHeightSuccess)
+	{
+		HeightArraySlices.Reset();
+	}
 
 	// The inputs these arrays were built from, saved with the atlas (the textures are loaded and unmodified now, so
 	// their parts are their saved packages' hashes, as when nothing is loaded)

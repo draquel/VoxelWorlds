@@ -34,6 +34,9 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		return;
 	}
 
+	// The water levels, from the one builder (the water plan's W2).
+	Water = FVoxelWaterLevels::FromConfig(*WorldConfig);
+
 	// Cache configuration values
 	VoxelSize = WorldConfig->VoxelSize;
 	BaseChunkSize = WorldConfig->ChunkSize;
@@ -129,10 +132,8 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	if (bSurfaceSlabCulling)
 	{
 		SlabNoiseParams = WorldConfig->GetNoiseParams();
-		bSlabHasWater = WorldConfig->bEnableWaterLevel;
-		SlabWaterLevel = WorldConfig->WaterLevel; // world Z, as the terrain's heights and generation's water are (G19)
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Surface slab ENABLED: every column keeps its surface ±%.1f chunks%s at every distance"),
-			SlabSlackChunks, bSlabHasWater ? TEXT(" (up to the water plane)") : TEXT(""));
+			SlabSlackChunks, Water.HasWater() ? TEXT(" (up to the water plane)") : TEXT(""));
 	}
 
 	// Cache Island mode parameters for boundary culling, from the builder generation uses (WM-A1): the centre is
@@ -159,16 +160,15 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 	PlanetChunkSlabCache.Reset();
 	LoadEnvelopeMemo = FSurfaceEnvelopeMemo();
 	NearEnvelopeMemo = FSurfaceEnvelopeMemo();
+	NearWaterMemo = FNearWaterMemo();
 	PlanetNearBandAngle = 0.0;
 	GroundRadiusViewer = FVector(TNumericLimits<double>::Max());
 	CutoverConfigured = 0.0;
-	PlanetSeaRadius = 0.0;
 	bWindowSuspended = false;
 	ViewerSurfaceAltitude = 0.0;
 	CameraSurfaceAltitude = 0.0;
 	bCutoverResumeHeld = false;
 	bCutoverAllowed = false;
-	HeightmapSeaZ = TNumericLimits<double>::Lowest();
 	HeightmapGroundViewer = FVector(TNumericLimits<double>::Max());
 	HeightmapGroundZ = 0.0;
 	if (IsHeightmapWorld())
@@ -178,7 +178,6 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		// world beyond the window (FLODQueryContext::bFarFieldActive, read in Update; the same gate on a planet since G78).
 		CutoverConfigured = WorldConfig->VoxelCutoverAltitude > 0.0f ? WorldConfig->VoxelCutoverAltitude
 			: DefaultCutoverViewDistances * MaxViewDistance;
-		HeightmapSeaZ = WorldConfig->bEnableWaterLevel ? static_cast<double>(WorldConfig->WaterLevel) : TNumericLimits<double>::Lowest();
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Voxel cut-over (with a far field): %.0f uu over the surface under the viewer (resumes below %.0f)%s"),
 			CutoverConfigured, CutoverConfigured * CutoverResumeFraction,
 			CVarVoxelCutover.GetValueOnAnyThread() >= 0.0f ? TEXT(" (voxel.Stream.VoxelCutover)") : TEXT(""));
@@ -223,7 +222,6 @@ void FDistanceBandLODStrategy::Initialize(const UVoxelWorldConfiguration* WorldC
 		// The voxel cut-over (WM-BP10): over the surface under the viewer, the sea where it lies above the terrain.
 		CutoverConfigured = WorldConfig->VoxelCutoverAltitude > 0.0f ? WorldConfig->VoxelCutoverAltitude
 			: DefaultCutoverViewDistances * MaxViewDistance;
-		PlanetSeaRadius = WorldConfig->bEnableWaterLevel ? static_cast<double>(WorldConfig->WaterRadius) : 0.0;
 		UE_LOG(LogVoxelLOD, Log, TEXT("  Voxel cut-over (with a far field): %.0f uu over the surface under the viewer (resumes below %.0f)%s"),
 			GetConfiguredCutoverAltitude(), GetConfiguredCutoverAltitude() * CutoverResumeFraction,
 			CVarVoxelCutover.GetValueOnAnyThread() >= 0.0f ? TEXT(" (voxel.Stream.VoxelCutover)") : TEXT(""));
@@ -391,6 +389,11 @@ int32 FDistanceBandLODStrategy::GetDistanceBandLOD(
 	return GetRawLODForDistance(GetDistanceToViewer(ChunkCoordToWorldCenter(ChunkCoord), Context));
 }
 
+int32 FDistanceBandLODStrategy::GetDistanceBandLODAround(const FIntVector& ChunkCoord, const FVector& ViewerPosition) const
+{
+	return GetRawLODForDistance(static_cast<float>(FVector::Distance(ChunkCoordToWorldCenter(ChunkCoord), ViewerPosition)));
+}
+
 TArray<FChunkLODRequest> FDistanceBandLODStrategy::GetVisibleChunks(
 	const FLODQueryContext& Context) const
 {
@@ -466,16 +469,41 @@ void FDistanceBandLODStrategy::ForEachWindowCandidate(const FLODQueryContext& Co
 	{
 		return;
 	}
+	ForEachWindowCandidateWithin(Context, MaxViewDistance, EWindowUse::Load, LoadEnvelopeMemo, Visit);
+}
+
+void FDistanceBandLODStrategy::GetWindowChunksAround(const FLODQueryContext& Viewer, float HorizonDistance, bool bKeep,
+	TArray<FIntVector>& OutChunks) const
+{
+	if (!bIsInitialized || LODBands.Num() == 0 || HorizonDistance <= 0.0f)
+	{
+		return;
+	}
+	// The window's own enumeration for that viewer and reach, then the world-mode culls GetVisibleChunks applies. The
+	// cut-over (the streaming viewer's altitude) says nothing of a viewer standing somewhere else.
+	ForEachWindowCandidateWithin(Viewer, HorizonDistance, bKeep ? EWindowUse::Keep : EWindowUse::Load, AroundEnvelopeMemo,
+		[&](const FIntVector& ChunkCoord, const FVector& /*ChunkCenter*/)
+	{
+		if (!ShouldCullIslandBoundary(ChunkCoord, Viewer) && !ShouldCullBeyondHorizon(ChunkCoord, Viewer))
+		{
+			OutChunks.Add(ChunkCoord);
+		}
+	});
+}
+
+void FDistanceBandLODStrategy::ForEachWindowCandidateWithin(const FLODQueryContext& Context, float HorizonDistance, EWindowUse Use,
+	FSurfaceEnvelopeMemo& EnvelopeMemo, TFunctionRef<void(const FIntVector&, const FVector&)> Visit) const
+{
 	if (!IsHeightmapWorld())
 	{
 		// A planet (WM-BP8): the chunks of its window by chunk (IsInPlanetWindow) within the horizon's cone, measured along
 		// the ground from the viewer's ground point.
 		const double GroundRadius = GetPlanetGroundRadius(Context.ViewerPosition);
-		ForEachPlanetCandidate(Context, EWindowUse::Load, [&](const FIntVector& ChunkCoord)
+		ForEachPlanetCandidate(Context, Use, HorizonDistance, EnvelopeMemo, [&](const FIntVector& ChunkCoord)
 		{
 			const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
-			if (GetPlanetGroundDistance(PlanetCenter, GroundRadius, Context.ViewerPosition, ChunkCenter) > MaxViewDistance
-				|| !IsInPlanetWindow(ChunkCoord, Context, EWindowUse::Load))
+			if (GetPlanetGroundDistance(PlanetCenter, GroundRadius, Context.ViewerPosition, ChunkCenter) > HorizonDistance
+				|| !IsInPlanetWindow(ChunkCoord, Context, Use))
 			{
 				return;
 			}
@@ -488,7 +516,7 @@ void FDistanceBandLODStrategy::ForEachWindowCandidate(const FLODQueryContext& Co
 	// terrain's).
 	const FIntVector ViewerChunk = WorldPosToChunkCoord(Context.ViewerPosition);
 	const float ChunkWorldSize = BaseChunkSize * VoxelSize;
-	const int32 MaxChunkRadius = FMath::CeilToInt(MaxViewDistance / ChunkWorldSize) + 1;
+	const int32 MaxChunkRadius = FMath::CeilToInt(HorizonDistance / ChunkWorldSize) + 1;
 	for (int32 X = -MaxChunkRadius; X <= MaxChunkRadius; ++X)
 	{
 		for (int32 Y = -MaxChunkRadius; Y <= MaxChunkRadius; ++Y)
@@ -497,12 +525,12 @@ void FDistanceBandLODStrategy::ForEachWindowCandidate(const FLODQueryContext& Co
 			const int32 ColumnY = ViewerChunk.Y + Y;
 
 			// The horizon is horizontal, so a whole column is in range or not.
-			if (GetStreamingHorizon(ChunkCoordToWorldCenter(FIntVector(ColumnX, ColumnY, 0)), Context.ViewerPosition) > MaxViewDistance)
+			if (GetStreamingHorizon(ChunkCoordToWorldCenter(FIntVector(ColumnX, ColumnY, 0)), Context.ViewerPosition) > HorizonDistance)
 			{
 				continue;
 			}
 
-			const FColumnLayerRange Window = GetColumnLayerRange(ColumnX, ColumnY, Context, EWindowUse::Load);
+			const FColumnLayerRange Window = GetColumnLayerRange(ColumnX, ColumnY, Context, Use);
 			Window.ForEachLayer([&](int32 Z)
 			{
 				const FIntVector ChunkCoord(ColumnX, ColumnY, Z);
@@ -791,9 +819,12 @@ bool FDistanceBandLODStrategy::ComputeCutoverState(bool bWasSuspended, double Al
 
 double FDistanceBandLODStrategy::ComputeSurfaceAltitude(const FVector& Position) const
 {
+	// The water over the position's column (its level: the distance from the centre on a planet, world Z otherwise).
+	FVoxelWaterSample Over;
+	const bool bWater = Water.Sample(Position, Over);
 	if (PlanetWorldMode)
 	{
-		const double SurfaceRadius = FMath::Max(GetPlanetGroundRadius(Position), PlanetSeaRadius);
+		const double SurfaceRadius = FMath::Max(GetPlanetGroundRadius(Position), bWater ? Over.SurfaceLevel : 0.0);
 		return FVector::Dist(Position, PlanetCenter) - SurfaceRadius;
 	}
 	// One terrain sample when the position moves (as the planet's ground point).
@@ -802,7 +833,8 @@ double FDistanceBandLODStrategy::ComputeSurfaceAltitude(const FVector& Position)
 		HeightmapGroundZ = static_cast<float>(TerrainWorldMode->GetSurfaceOnUpLine(Position, SlabNoiseParams).Position.Z);
 		HeightmapGroundViewer = Position;
 	}
-	return Position.Z - FMath::Max(HeightmapGroundZ, HeightmapSeaZ);
+	const double WaterZ = (bWater && IsHeightmapWorld()) ? Over.SurfaceLevel : TNumericLimits<double>::Lowest();
+	return Position.Z - FMath::Max(HeightmapGroundZ, WaterZ);
 }
 
 double FDistanceBandLODStrategy::GetConfiguredCutoverAltitude() const
@@ -945,7 +977,7 @@ void FDistanceBandLODStrategy::RebuildBalancedLODCache(const FLODQueryContext& C
 	{
 		// A planet (WM-BP8): every chunk of the keep window within the load horizon (none above the voxel cut-over, WM-BP10).
 		const double GroundRadius = GetPlanetGroundRadius(Context.ViewerPosition);
-		ForEachPlanetCandidate(Context, EWindowUse::Keep, [&](const FIntVector& ChunkCoord)
+		ForEachPlanetCandidate(Context, EWindowUse::Keep, MaxViewDistance, LoadEnvelopeMemo, [&](const FIntVector& ChunkCoord)
 		{
 			const FVector ChunkCenter = ChunkCoordToWorldCenter(ChunkCoord);
 			if (GetPlanetGroundDistance(PlanetCenter, GroundRadius, Context.ViewerPosition, ChunkCenter) <= MaxViewDistance
@@ -1414,9 +1446,24 @@ double FDistanceBandLODStrategy::GetPlanetNearLayersCeiling(const FVector& Viewe
 	const FVector Relative = ViewerPosition - PlanetCenter;
 	const FVector Up = Relative.IsNearlyZero() ? FVector::UpVector : Relative.GetUnsafeNormal();
 	double Top = GetPlanetSurfaceEnvelope(Up, PlanetNearBandAngle, NearEnvelopeMemo).Max;
-	if (PlanetSeaRadius > 0.0)
+	// The water's surface over the near disk, where it is higher: the levels' range over the disk's box, with the
+	// bodies at hand (the disk is wide and asked every update; a body worked out later drops the caches).
+	// Kept for the viewer's cell of the slab grid: the disk round the cell's middle at the viewer's distance from the
+	// centre, two cells wider, holds the disk round any viewer in the cell.
+	const FIntPoint WaterCell = PlanetSlabGrid.CellOfDirection(Up);
+	if (WaterCell != NearWaterMemo.Cell || PlanetNearBandAngle != NearWaterMemo.Angle)
 	{
-		Top = FMath::Max(Top, PlanetSeaRadius - PlanetRadius);
+		const double CellAngle = UE_DOUBLE_PI / FMath::Max(1, PlanetSlabGrid.GetCellsPerEdge());
+		const FVector Middle = PlanetCenter + PlanetSlabGrid.CellCentreDirection(WaterCell) * FMath::Max(Relative.Size(), 1.0);
+		NearWaterMemo.Cell = WaterCell;
+		NearWaterMemo.Angle = PlanetNearBandAngle;
+		NearWaterMemo.Range = GetWaterRange(FBox::BuildAABB(Middle, FVector((PlanetNearBandAngle + 2.0 * CellAngle) * ShellWindowOuterRadius)),
+			EVoxelConditioningGather::Ready);
+	}
+	const FVoxelWaterLevelRange& NearWater = NearWaterMemo.Range;
+	if (NearWater.bAny && NearWater.MaxLevel > 0.0)
+	{
+		Top = FMath::Max(Top, NearWater.MaxLevel - PlanetRadius);
 	}
 	return Top + SlabSlackChunks * static_cast<double>(BaseChunkSize) * VoxelSize;
 }
@@ -1426,8 +1473,8 @@ bool FDistanceBandLODStrategy::IsPlanetNearBandActive(const FVector& ViewerPosit
 	return FVector::Dist(ViewerPosition, PlanetCenter) - PlanetRadius <= GetPlanetNearLayersCeiling(ViewerPosition);
 }
 
-void FDistanceBandLODStrategy::ForEachPlanetCandidate(const FLODQueryContext& Context, EWindowUse Use,
-	TFunctionRef<void(const FIntVector&)> Visit) const
+void FDistanceBandLODStrategy::ForEachPlanetCandidate(const FLODQueryContext& Context, EWindowUse Use, double HorizonDistance,
+	FSurfaceEnvelopeMemo& EnvelopeMemo, TFunctionRef<void(const FIntVector&)> Visit) const
 {
 	if (PlanetRadius <= 0.0)
 	{
@@ -1445,7 +1492,7 @@ void FDistanceBandLODStrategy::ForEachPlanetCandidate(const FLODQueryContext& Co
 	// diagonal of the centre: the angle that subtends at the shell's inner radius widens every cone below.
 	const double HalfDiagonal = 0.5 * ChunkWorldSize * UE_DOUBLE_SQRT_3;
 	const double ChunkAngle = FMath::Asin(FMath::Min(1.0, HalfDiagonal / FMath::Max(ShellWindowInnerRadius, HalfDiagonal)));
-	const double LoadAngle = FMath::Min(UE_DOUBLE_PI, MaxViewDistance / GroundRadius + ChunkAngle);
+	const double LoadAngle = FMath::Min(UE_DOUBLE_PI, HorizonDistance / GroundRadius + ChunkAngle);
 
 	TSet<FIntVector> Seen;
 	Seen.Reserve(4096);
@@ -1512,7 +1559,7 @@ void FDistanceBandLODStrategy::ForEachPlanetCandidate(const FLODQueryContext& Co
 	double EnvelopeHi = ShellHi;
 	if (bPlanetSlab && PlanetWorldMode)
 	{
-		const FFloatInterval Surface = GetPlanetSurfaceEnvelope(Up, LoadAngle, LoadEnvelopeMemo);
+		const FFloatInterval Surface = GetPlanetSurfaceEnvelope(Up, LoadAngle, EnvelopeMemo);
 		const double Slack = SlabSlackChunks * ChunkWorldSize;
 		EnvelopeLo = FMath::Max(ShellLo, Surface.Min - Slack);
 		EnvelopeHi = FMath::Min(ShellHi, Surface.Max + Slack);
@@ -1574,11 +1621,19 @@ void FDistanceBandLODStrategy::GetColumnSurfaceRange(int32 ChunkX, int32 ChunkY,
 	float SurfMin = Surface.Min;
 	float SurfMax = Surface.Max;
 
-	// Underwater columns reach up to the water plane: the far ocean's SURFACE (and the water
-	// volume above its floor) must stay loaded, not just the seabed.
-	if (bSlabHasWater)
+	// Underwater columns reach up to the water's surface: the far ocean's SURFACE (and the water
+	// volume above its floor) must stay loaded, not just the seabed. The highest level over the column's footprint (the
+	// levels' range over the column; world Z, as the terrain's heights and generation's water are, G19); the cache
+	// above holds it per column.
+	if (bSurfaceSlabCulling)
 	{
-		SurfMax = FMath::Max(SurfMax, SlabWaterLevel);
+		// Complete: the column's chunks are requested with every body over them, and the slab is cached.
+		const FVoxelWaterLevelRange ColumnWater = GetWaterRange(
+			FBox(FVector(MinXY.X, MinXY.Y, -UE_LARGE_WORLD_MAX), FVector(MaxXY.X, MaxXY.Y, UE_LARGE_WORLD_MAX)), EVoxelConditioningGather::Complete);
+		if (ColumnWater.bAny)
+		{
+			SurfMax = FMath::Max(SurfMax, static_cast<float>(ColumnWater.MaxLevel));
+		}
 	}
 
 	ColumnSurfaceCache.Add(Key, FFloatInterval(SurfMin, SurfMax));

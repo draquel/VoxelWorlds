@@ -83,10 +83,12 @@ void FVoxelSurfacePathfinder::FCellGrid::Reset()
 // Pathfinder
 // ---------------------------------------------------------------------------
 
-FVoxelSurfacePathfinder::FVoxelSurfacePathfinder(const FVoxelSurfaceNavParams& InParams, FHeightSampler InSampler, FBlockedQuery InBlocked)
+FVoxelSurfacePathfinder::FVoxelSurfacePathfinder(const FVoxelSurfaceNavParams& InParams, FHeightSampler InSampler, FBlockedQuery InBlocked,
+	FCostQuery InCost)
 	: Params(InParams)
 	, Sampler(MoveTemp(InSampler))
 	, Blocked(MoveTemp(InBlocked))
+	, Cost(MoveTemp(InCost))
 {
 	Params.CellSize = FMath::Max(Params.CellSize, 1.f);
 }
@@ -271,8 +273,19 @@ bool FVoxelSurfacePathfinder::IsStraightRunWalkable(const FIntPoint& From, const
 			{
 				return false;
 			}
+			// ... and neither may have a cost: the straight run between the two centres passes through one of them.
+			if (Cost && (Cost(FIntPoint(Cell.X, Prev.Y)) > 0.f || Cost(FIntPoint(Prev.X, Cell.Y)) > 0.f))
+			{
+				return false;
+			}
 		}
 		if (!CanStep(Prev, Cell))
+		{
+			return false;
+		}
+		// A cell with a cost is entered only where the search chose to: a straightened run would pay for cells the
+		// search went round, or cross a strip of them at a slant.
+		if (Cost && Cost(Cell) > 0.f)
 		{
 			return false;
 		}
@@ -431,7 +444,12 @@ bool FVoxelSurfacePathfinder::FindPath(const FVector& From, const FVector& To, T
 			}
 			// Cost = run x (1 + SlopeCostScale x rise / run).
 			const float Run = Params.CellSize * (k >= 4 ? UE_SQRT_2 : 1.f);
-			const float NewG = G + Run + Params.SlopeCostScale * FMath::Abs(Rec.Height - Around[k]->Height);
+			float NewG = G + Run + Params.SlopeCostScale * FMath::Abs(Rec.Height - Around[k]->Height);
+			if (Cost)
+			{
+				// What the cell itself costs to enter. Never negative, so the heuristic stays admissible.
+				NewG += FMath::Max(Cost(Next), 0.f);
+			}
 			FCell& NextRec = const_cast<FCell&>(*Around[k]);
 			if (NewG < NextRec.G)
 			{

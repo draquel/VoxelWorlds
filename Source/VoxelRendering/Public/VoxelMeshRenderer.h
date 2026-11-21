@@ -10,6 +10,7 @@
 class UVoxelRegionComponent;
 class UMaterialInterface;
 class UVoxelMaterialAtlas;
+class UTexture2D;
 class UWorld;
 class UVoxelWorldConfiguration;
 
@@ -182,6 +183,9 @@ private:
 	/** Whether renderer has been initialized */
 	bool bIsInitialized = false;
 
+	/** Whether this world holds the shadow method it asked for (D164, FVoxelShadowMethodOverride): released at Shutdown */
+	bool bHoldsShadowMethod = false;
+
 	/** Owning world */
 	TWeakObjectPtr<UWorld> CachedWorld;
 
@@ -199,6 +203,9 @@ private:
 
 	/** Settings replayed on a new region component */
 	TWeakObjectPtr<UVoxelMaterialAtlas> CurrentAtlas;
+
+	/** The world's biome lookup for the materials (FVoxelBiomeLookup, built at Initialize from the configuration's biomes; P3) */
+	TStrongObjectPtr<UTexture2D> BiomeLookup;
 	bool bHasViewerPosition = false;
 	FVector CurrentViewerPosition = FVector::ZeroVector;
 

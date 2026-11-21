@@ -377,6 +377,13 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 	UE_LOG(LogVoxelScatter, Log, TEXT("Scatter HISM regions: %d chunks along an edge (0 = one region)"), ScatterRegions.RegionChunks);
 	ScatterRenderer->Initialize(this, World);
 
+	// The skeletal definitions' meshes and assembly parts start loading now, asynchronously (the foliage and bolt plan's
+	// D68): a region's first instance never loads them on the game thread
+	for (const FScatterDefinition& Def : ScatterDefinitions)
+	{
+		ScatterRenderer->PreloadDefinition(Def);
+	}
+
 	bIsInitialized = true;
 
 	// Register with the world's exclusion subsystem, which replays any volumes registered before
@@ -496,6 +503,16 @@ void UVoxelScatterManager::Shutdown()
 
 // ==================== Per-Frame Update ====================
 
+float UVoxelScatterManager::GetViewerDistance(const FVector& Point) const
+{
+	float Distance = FVector::Dist(Point, LastViewerPosition);
+	for (const FVector& Viewer : FurtherViewers)
+	{
+		Distance = FMath::Min(Distance, static_cast<float>(FVector::Dist(Point, Viewer)));
+	}
+	return Distance;
+}
+
 void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime)
 {
 	if (!bIsInitialized)
@@ -569,6 +586,7 @@ void UVoxelScatterManager::AddScatterDefinition(const FScatterDefinition& Defini
 			ScatterDefinitions[i] = Definition;
 			UE_LOG(LogVoxelScatter, Log, TEXT("Replaced scatter definition: %s (ID=%d)"),
 				*Definition.Name, Definition.ScatterID);
+			PreloadDefinitionAssets(Definition);
 			return;
 		}
 	}
@@ -577,6 +595,15 @@ void UVoxelScatterManager::AddScatterDefinition(const FScatterDefinition& Defini
 	ScatterDefinitions.Add(Definition);
 	UE_LOG(LogVoxelScatter, Log, TEXT("Added scatter definition: %s (ID=%d)"),
 		*Definition.Name, Definition.ScatterID);
+	PreloadDefinitionAssets(Definition);
+}
+
+void UVoxelScatterManager::PreloadDefinitionAssets(const FScatterDefinition& Definition)
+{
+	if (ScatterRenderer && ScatterRenderer->IsInitialized())
+	{
+		ScatterRenderer->PreloadDefinition(Definition);
+	}
 }
 
 const FScatterDefinition* UVoxelScatterManager::GetScatterDefinition(int32 ScatterID) const
@@ -608,6 +635,30 @@ const UVoxelScatterRenderer* UVoxelScatterManager::GetScatterRenderer() const
 	return ScatterRenderer;
 }
 
+TArray<UMaterialInstanceDynamic*> UVoxelScatterManager::GetDynamicMaterials(const FString& DefinitionName) const
+{
+	TArray<FVoxelScatterDynamicMaterial> All;
+	GetAllDynamicMaterials(All);
+	TArray<UMaterialInstanceDynamic*> Out;
+	for (const FVoxelScatterDynamicMaterial& Entry : All)
+	{
+		if (Entry.DefinitionName == DefinitionName)
+		{
+			Out.Add(Entry.Material);
+		}
+	}
+	return Out;
+}
+
+void UVoxelScatterManager::GetAllDynamicMaterials(TArray<FVoxelScatterDynamicMaterial>& OutMaterials) const
+{
+	OutMaterials.Reset();
+	if (ScatterRenderer)
+	{
+		ScatterRenderer->GetDynamicMaterials(OutMaterials);
+	}
+}
+
 bool UVoxelScatterManager::HasScatterData(const FIntVector& ChunkCoord) const
 {
 	const FChunkScatterData* Data = SpawnCache.Find(ChunkCoord);
@@ -635,7 +686,7 @@ void UVoxelScatterManager::HandOffChunkVoxels(const FIntVector& ChunkCoord, cons
 
 	const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
 		FVector(Configuration->GetChunkWorldSize() * 0.5f);
-	const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+	const float ChunkDistance = GetViewerDistance(ChunkCenter);
 
 	// Get the set of scatter types already generated for this chunk (never regenerated)
 	const TSet<int32>* CompletedTypes = CompletedScatterTypes.Find(ChunkCoord);
@@ -1217,7 +1268,7 @@ void UVoxelScatterManager::ProcessPendingExclusionRegrow()
 		}
 
 		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) + FVector(Configuration->GetChunkWorldSize() * 0.5f);
-		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+		const float ChunkDistance = GetViewerDistance(ChunkCenter);
 		TArray<FScatterDefinition> Definitions = BuildEligibleDefinitionsForDistance(ChunkDistance);
 		if (Definitions.Num() == 0)
 		{
@@ -1649,7 +1700,7 @@ void UVoxelScatterManager::ProcessDeferredFirstExtractions()
 	for (const FIntVector& ChunkCoord : ChunksAwaitingFirstExtraction)
 	{
 		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) + FVector(ChunkWorldSize * 0.5f);
-		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+		const float ChunkDistance = GetViewerDistance(ChunkCenter);
 		if (ChunkDistance <= Horizon)
 		{
 			Candidates.Add({ ChunkCoord, ChunkDistance });
@@ -1669,10 +1720,16 @@ void UVoxelScatterManager::ProcessDeferredFirstExtractions()
 			break;
 		}
 		// The hand-off runs HandOffChunkVoxels, which queues the extraction and takes the chunk out of the set; a chunk
-		// without voxel data any more is dropped.
+		// without voxel data any more is dropped, and one whose voxels are still being made ready (a far-compressed chunk's
+		// snapshot decoding on a worker, G130) waits for the next pass.
 		ChunksAwaitingFirstExtraction.Remove(Candidate.ChunkCoord);
 		++TotalDeferredFirstExtractions;
-		if (ChunkHandOffRequester(Candidate.ChunkCoord))
+		const EVoxelScatterHandOff HandOff = ChunkHandOffRequester(Candidate.ChunkCoord);
+		if (HandOff == EVoxelScatterHandOff::Pending)
+		{
+			ChunksAwaitingFirstExtraction.Add(Candidate.ChunkCoord);
+		}
+		if (HandOff != EVoxelScatterHandOff::Gone)
 		{
 			++Launched;
 		}
@@ -1747,7 +1804,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 
 		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
 			FVector(ChunkWorldSize * 0.5f);
-		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+		const float ChunkDistance = GetViewerDistance(ChunkCenter);
 
 		TArray<int32> TypesToRemove;
 		for (const FDistanceLimitedDef& Limited : DistanceLimitedDefs)
@@ -1799,12 +1856,14 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 		return;
 	}
 
-	// Collect candidates: chunks with cached surface data that need new scatter types
+	// Collect candidates: chunks with cached surface data that need new scatter types. A candidate points at the
+	// definitions (ScatterDefinitions does not change during the pass); only the launched ones copy them for their task, as
+	// most candidates wait for a later pass (a world with a hundred definitions copied thousands a pass).
 	struct FSpawnCandidate
 	{
 		FIntVector ChunkCoord;
 		float Distance;
-		TArray<FScatterDefinition> Definitions;
+		TArray<const FScatterDefinition*> Definitions;
 	};
 	TArray<FSpawnCandidate> Candidates;
 
@@ -1835,13 +1894,13 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 
 		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
 			FVector(ChunkWorldSize * 0.5f);
-		const float ChunkDistance = FVector::Dist(ChunkCenter, LastViewerPosition);
+		const float ChunkDistance = GetViewerDistance(ChunkCenter);
 
 		// Get completed types for this chunk
 		const TSet<int32>* CompletedTypes = CompletedScatterTypes.Find(ChunkCoord);
 
 		// Find definitions that are now in range but haven't been generated
-		TArray<FScatterDefinition> NewlyInRangeDefs;
+		TArray<const FScatterDefinition*> NewlyInRangeDefs;
 		for (const FDistanceLimitedDef& Limited : DistanceLimitedDefs)
 		{
 			if (CompletedTypes && CompletedTypes->Contains(Limited.Def->ScatterID))
@@ -1855,7 +1914,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 
 			if (ChunkDistance <= Limited.SpawnDistance)
 			{
-				NewlyInRangeDefs.Add(*Limited.Def);
+				NewlyInRangeDefs.Add(Limited.Def);
 			}
 		}
 
@@ -1905,17 +1964,19 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 		// Pre-mark types as completed to prevent duplicate launches on next pass
 		TSet<int32>& Completed = CompletedScatterTypes.FindOrAdd(Candidate.ChunkCoord);
 		TArray<int32> TypeIDs;
-		for (const FScatterDefinition& Def : Candidate.Definitions)
+		TArray<FScatterDefinition> DefsToGenerate;
+		DefsToGenerate.Reserve(Candidate.Definitions.Num());
+		for (const FScatterDefinition* Def : Candidate.Definitions)
 		{
-			Completed.Add(Def.ScatterID);
-			TypeIDs.Add(Def.ScatterID);
+			Completed.Add(Def->ScatterID);
+			TypeIDs.Add(Def->ScatterID);
+			DefsToGenerate.Add(*Def);
 		}
 
 		// Capture data for thread pool — copy surface data, move definitions
 		TWeakObjectPtr<UVoxelScatterManager> WeakThis(this);
 		const FIntVector ChunkCoord = Candidate.ChunkCoord;
 		FChunkSurfaceData CapturedSurface = *SurfaceData;
-		TArray<FScatterDefinition> DefsToGenerate = Candidate.Definitions;
 
 		Async(EAsyncExecution::ThreadPool,
 			[WeakThis, ChunkCoord, ChunkSeed,
@@ -2566,7 +2627,7 @@ void UVoxelScatterManager::ExtractSurfacePointsByColumn(
 				// Submerged: open water above it (water flag on the air voxel above) OR the point is below
 				// the world water level. The water-level test catches submerged seabeds even where the
 				// per-voxel water flag did not propagate. Underground takes precedence.
-				const bool bBelowWater = Context.Sea.bEnabled && Context.Sea.GetDepth(WorldPos) > 0.0;
+				const bool bBelowWater = Context.Water.GetDepth(WorldPos) > 0.0;
 				Point.bIsUnderwater = (bAirAboveIsWater || bBelowWater) && !Point.bIsUnderground;
 
 				OutSurfaceData.SurfacePoints.Add(Point);
@@ -2608,7 +2669,7 @@ float FScatterExtractionContext::GetGeneratedTerrainHeight(double WorldX, double
 	// The ladder's generated rung (code review CR2, SCAT-19): the natural height with the zones layered on as generation does.
 	check(WorldMode != nullptr);
 	return static_cast<float>(FVoxelSurfaceQuery::GetGeneratedSurface(*WorldMode, FVector(WorldX, WorldY, 0.0), NoiseParams,
-		ConditioningZones.IsValid() ? ConditioningZones.Get() : nullptr).Position.Z);
+		Conditioning.IsValid() ? Conditioning.Get() : nullptr).Position.Z);
 }
 
 FVoxelData FScatterExtractionContext::GetVoxelOutsideChunk(const FIntVector& LocalCoord, const FVector& WorldPos, float VoxelSize, int32 BiomeHint,
@@ -2625,7 +2686,7 @@ FVoxelData FScatterExtractionContext::GetVoxelOutsideChunk(const FIntVector& Loc
 		Surface = &ColumnSurface;
 	}
 	const FVoxelData Generated = FVoxelSurfaceQuery::GenerateVoxelAt(*WorldMode, WorldPos, VoxelSize, NoiseParams,
-		ConditioningZones.IsValid() ? ConditioningZones.Get() : nullptr, CaveConfiguration, Sea, bEnableBiomes, BiomeHint, Surface);
+		Conditioning.IsValid() ? Conditioning.Get() : nullptr, CaveConfiguration, Water, bEnableBiomes, BiomeHint, Surface);
 	if (OutsideEdits.IsValid())
 	{
 		if (const FVoxelEdit* Edit = OutsideEdits->Find(LocalCoord))
@@ -2674,6 +2735,31 @@ void UVoxelScatterManager::ExtractChunkSurfacePoints(
 		{
 			Point.MaterialID = Context.Materials->GetDrawnMaterial(Point.MaterialID,
 				static_cast<float>(FVector::DotProduct(Point.Normal, Point.LocalUp)));
+		}
+	}
+
+	// A conditioning line's clear width (the terrain lines plan's L3): no surface point on the ground inside it, so no
+	// pass places anything there, a later one from the cached points included. A line is there for the world's life, as
+	// the chunk's generated voxels are, so the points are dropped here and not masked at placement, as an exclusion
+	// volume's are. Points under the ground (a cave's floor far under a road) are left.
+	if (Context.Conditioning.IsValid() && Context.Conditioning->Lines.Num() > 0 && Context.Conditioning->HasLineSurfaces())
+	{
+		const FVoxelConditioning& Conditioning = *Context.Conditioning;
+		if (Context.WorldMode && Context.WorldMode->GetWorldModeType() == EWorldMode::SphericalPlanet)
+		{
+			const FSphericalPlanetParams& Planet = static_cast<const FSphericalPlanetWorldMode&>(*Context.WorldMode).GetPlanetParams();
+			OutSurfaceData.SurfacePoints.RemoveAll([&Conditioning, &Planet](const FVoxelSurfacePoint& Point)
+			{
+				return !Point.bIsUnderground && Conditioning.IsClearedOnSphere(
+					FSphericalPlanetWorldMode::GetDirectionFromCenter(Point.Position, Planet.PlanetCenter), Planet.PlanetRadius);
+			});
+		}
+		else
+		{
+			OutSurfaceData.SurfacePoints.RemoveAll([&Conditioning](const FVoxelSurfacePoint& Point)
+			{
+				return !Point.bIsUnderground && Conditioning.IsClearedAt(Point.Position.X, Point.Position.Y);
+			});
 		}
 	}
 }
@@ -2876,7 +2962,7 @@ void UVoxelScatterManager::ExtractSurfacePointsByRay(
 			// column scan's on any part of the grid.
 			Point.SpawnWeight = static_cast<float>(Omega * Radius * Radius / (CellSize * CellSize));
 			Point.bIsUnderground = bUnder || (bAirIsAir && AirVoxel.HasUndergroundFlag()) || SolidVoxel.HasUndergroundFlag();
-			const bool bBelowWater = Context.Sea.bEnabled && Context.Sea.GetDepth(WorldPos) > 0.0;
+			const bool bBelowWater = Context.Water.GetDepth(WorldPos) > 0.0;
 			Point.bIsUnderwater = ((bAirIsAir && AirVoxel.HasWaterFlag()) || bBelowWater) && !Point.bIsUnderground;
 			OutSurfaceData.SurfacePoints.Add(Point);
 		};
@@ -3086,7 +3172,7 @@ void UVoxelScatterManager::ExtractSurfacePointsByBlockTop(
 
 				// Submerged: open water above (water flag) OR below the world water level (catches
 				// seabeds the water flag missed). Underground takes precedence.
-				const bool bBelowWater = Context.Sea.bEnabled && Context.Sea.GetDepth(WorldPos) > 0.0;
+				const bool bBelowWater = Context.Water.GetDepth(WorldPos) > 0.0;
 				Point.bIsUnderwater = (bAirAboveIsWater || bBelowWater) && !Point.bIsUnderground;
 
 				OutSurfaceData.SurfacePoints.Add(Point);
@@ -3222,20 +3308,30 @@ FScatterExtractionContext UVoxelScatterManager::MakeExtractionContext(const FInt
 	if (Configuration)
 	{
 		Context.NoiseParams = Configuration->GetNoiseParams();
-		Context.Sea = FVoxelSeaSurface::FromConfig(*Configuration); // bEnabled follows bEnableWaterLevel
+		// The water levels over the chunk: the chunk manager's gather (the sea, and the lakes and river reaches there),
+		// or without one the configuration's sea, from the one builder.
+		if (WaterGatherer)
+		{
+			const FVector ChunkMin = GetChunkWorldOrigin(ChunkCoord);
+			Context.Water = WaterGatherer(FBox(ChunkMin, ChunkMin + FVector(Configuration->GetChunkWorldSize())));
+		}
+		else
+		{
+			Context.Water = FVoxelWaterLevels::FromConfig(*Configuration);
+		}
 		// The voxels a chunk's extraction reads past its own data are carved as generation carves them (G28, G72).
 		Context.CaveConfiguration = Configuration->bEnableCaves ? Configuration->CaveConfiguration.Get() : nullptr;
 		Context.bEnableBiomes = Configuration->bEnableBiomes;
-		// The conditioning zones over the chunk, so the analytic surface is the generated one: the buried-chunk test's
+		// The conditioning over the chunk, so the analytic surface is the generated one: the buried-chunk test's
 		// height on a heightmap (G23), the voxels past a planet chunk's faces (spherical SP-B10).
 		if (ConditioningGatherer)
 		{
 			const FVector Min = GetChunkWorldOrigin(ChunkCoord);
-			TArray<FVoxelConditioningZone> Zones;
-			ConditioningGatherer(FBox(Min, Min + FVector(Configuration->GetChunkWorldSize())), Zones);
-			if (Zones.Num() > 0)
+			FVoxelConditioning Conditioning;
+			ConditioningGatherer(FBox(Min, Min + FVector(Configuration->GetChunkWorldSize())), Conditioning);
+			if (!Conditioning.IsEmpty())
 			{
-				Context.ConditioningZones = MakeShared<const TArray<FVoxelConditioningZone>>(MoveTemp(Zones));
+				Context.Conditioning = MakeShared<const FVoxelConditioning>(MoveTemp(Conditioning));
 			}
 		}
 		// The edits in the voxels the extraction reads past the chunk: on a heightmap world the face neighbours' layers facing

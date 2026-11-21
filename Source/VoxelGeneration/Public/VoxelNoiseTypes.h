@@ -11,6 +11,7 @@
 
 class UVoxelBiomeConfiguration;
 class UVoxelCaveConfiguration;
+class FVoxelWaterLevels;
 
 // Re-export EVoxelNoiseType and FVoxelNoiseParams from VoxelCoreTypes.h
 // These are defined in VoxelCore to avoid circular dependencies with VoxelWorldConfiguration
@@ -107,27 +108,41 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 
 	// ==================== Water Level Parameters ====================
 
-	/** Whether water level is enabled for this request */
+	// The water over the chunk, as one level: what the chunk manager copies from the water levels' range over the
+	// chunk's bounds (FVoxelWaterLevels::GetRange, UVoxelChunkManager::BuildChunkGenerationRequest; the water plan's
+	// W2). A request is for one chunk, so the level it carries holds over that chunk and nowhere else.
+
+	/** Whether water lies over this chunk's columns */
 	bool bEnableWaterLevel = false;
 
-	/** Water level height for InfinitePlane/IslandBowl modes (world units) */
+	/** The water's level for InfinitePlane/IslandBowl modes (world Z) */
 	float WaterLevel = 0.0f;
 
 	/**
-	 * Water radius for SphericalPlanet mode (world units from planet center). Double (WM-BP4): it meets R-sized values;
-	 * generation compares the sea as the altitude WaterRadius - PlanetRadius, formed in double.
+	 * The water's level for SphericalPlanet mode (world units from the planet centre). Double (WM-BP4): it meets R-sized
+	 * values; generation compares the sea as the altitude WaterRadius - PlanetRadius, formed in double.
 	 */
 	double WaterRadius = 0.0;
+
+	/**
+	 * The water levels gathered over this chunk where a lake or a river reach may reach it (the hydrology plan's
+	 * section 5.4; UVoxelChunkManager::GatherWaterLevelsForChunk), so one level does not hold over the chunk: the
+	 * generators build the chunk's water columns from it (FVoxelChunkWaterColumns::Build), a level per column or per
+	 * down-line, and read those in place of the three fields above. Null for every other chunk, which generates from
+	 * the one level as it always did. Shared and immutable: a copy of the request shares it.
+	 */
+	TSharedPtr<const FVoxelWaterLevels> WaterBodies;
 
 	// ==================== Terrain Conditioning (Phase 6c) ====================
 
 	/**
-	 * Terrain conditioning zones overlapping this chunk — gen-time height flattening under POIs /
-	 * claims. Gathered (game thread) by VoxelChunkManager when the request is built; applied by the
-	 * heightmap generator. Empty for most chunks (no per-chunk cost when there's no conditioning).
+	 * The terrain conditioning over this chunk (its lines and zones) — gen-time height flattening under POIs /
+	 * claims and along roads. Gathered (game thread) by VoxelChunkManager when the request is built; applied by the
+	 * generators: the lines from the chunk's segment list (FVoxelChunkLineSegments::Build), then the zones. Empty for
+	 * most chunks (no per-chunk cost when there's no conditioning).
 	 */
 	UPROPERTY()
-	TArray<FVoxelConditioningZone> ConditioningZones;
+	FVoxelConditioning Conditioning;
 
 	FVoxelNoiseGenerationRequest() = default;
 
@@ -138,6 +153,18 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 		// LOD only affects voxel resolution within the chunk, not chunk position
 		float ChunkWorldSize = ChunkSize * VoxelSize;
 		return WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize;
+	}
+
+	/**
+	 * A planet chunk's anchor relative to the planet centre, in double (spherical Phase 6, WM-BP5 / WM-BP6): the chunk's
+	 * centre, (ChunkSize / 2) x VoxelSize in on each axis. The planet shaders work in its frame (PlanetFrame.ush), and
+	 * the chunk's conditioning (zones and line segments) is stored relative to its point on the datum sphere. A centre,
+	 * not a corner, so it is never the planet centre itself (chunk corners lie on the grid through it).
+	 */
+	FVector GetPlanetAnchorRelative() const
+	{
+		const float Half = static_cast<float>(ChunkSize / 2) * VoxelSize;
+		return (GetChunkWorldPosition() - SphericalPlanetParams.PlanetCenter) + FVector(FVector3f(Half, Half, Half));
 	}
 
 	/** Get the effective voxel size at this LOD level */

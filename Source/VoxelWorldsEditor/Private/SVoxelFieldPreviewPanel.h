@@ -28,6 +28,13 @@ public:
 	SLATE_BEGIN_ARGS(SVoxelFieldPreviewPanel) {}
 	SLATE_END_ARGS()
 
+	/**
+	 * Defined in the .cpp: constructing and destroying the strong pointers below needs their
+	 * classes complete, which this header only forward-declares (G128).
+	 */
+	SVoxelFieldPreviewPanel();
+	virtual ~SVoxelFieldPreviewPanel() override;
+
 	void Construct(const FArguments& InArgs);
 
 private:

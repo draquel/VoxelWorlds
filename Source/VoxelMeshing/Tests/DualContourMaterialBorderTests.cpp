@@ -13,6 +13,12 @@
 //
 //   MB1  LOD0 two-material split  -> every triangle uniform, only source IDs emitted
 //   MB2  LOD1 (stride 2) split    -> same invariants under LOD striding
+//   MB5  LOD0 soft border (VP2-O4) -> the blend is flat per triangle, only at the border, and every vertex at one
+//        position shows one material (the border fades across quads without a step)
+//   MB6  LOD1 soft border          -> the same at stride 2
+//   MB7  one material              -> no vertex blends
+//   MB8  LOD0 three materials meet -> the same invariants with a third material: no hard edge where three meet
+//   MB9  LOD1 three materials meet -> the same at stride 2
 //
 // MB3/MB4, the same invariants on the GPU Dual Contouring mesher, went with that mesher
 // (code review CR1, MESH-01/16).
@@ -23,6 +29,9 @@
 #include "VoxelMeshingTestFixtures.h"
 #include "VoxelMeshingTypes.h"
 #include "VoxelData.h"
+#include "ChunkRenderData.h"
+
+#if WITH_DEV_AUTOMATION_TESTS
 
 namespace DualContourMaterialBorderTestHelpers
 {
@@ -34,6 +43,10 @@ namespace DualContourMaterialBorderTestHelpers
 	constexpr uint8 MaterialLeft = 2;
 	constexpr uint8 MaterialRight = 7;
 	constexpr int32 MaterialSplitX = TestChunkSize / 2;
+
+	// MB8/MB9's third material, on the +X side's half with Y >= MaterialSplitY
+	constexpr uint8 MaterialThird = 11;
+	constexpr int32 MaterialSplitY = TestChunkSize / 2;
 
 	/** Gently sloped surface so the isosurface crosses cells at varying heights. */
 	FVoxelData SampleLocal(int32 X, int32 Y, int32 Z)
@@ -172,6 +185,132 @@ namespace DualContourMaterialBorderTestHelpers
 
 		return true;
 	}
+
+	/** The material a vertex shows: its blend's second or third material where it has that weight, else its own (UV1.x) */
+	uint8 ShownMaterial(const FChunkMeshData& MeshData, int32 Vertex)
+	{
+		const uint32 Code = MeshData.MaterialBlends[Vertex];
+		if (VoxelMaterialBlend::IsBlend(Code) && VoxelMaterialBlend::ShowsSecondary(Code))
+		{
+			return VoxelMaterialBlend::Secondary(Code);
+		}
+		if (VoxelMaterialBlend::IsBlend(Code) && VoxelMaterialBlend::HasThird(Code) && VoxelMaterialBlend::ShowsThird(Code))
+		{
+			return VoxelMaterialBlend::Third(Code);
+		}
+		return static_cast<uint8>(FMath::RoundToInt(MeshData.UV1s[Vertex].X));
+	}
+
+	/** The two-material request with a third material on the +X side where Y >= MaterialSplitY (MB8/MB9) */
+	FVoxelMeshingRequest MakeThreeMaterialRequest(int32 LODLevel)
+	{
+		FVoxelMeshingRequest Request = MakeRequest(LODLevel);
+		for (int32 Z = 0; Z < TestChunkSize; ++Z)
+		{
+			for (int32 Y = MaterialSplitY; Y < TestChunkSize; ++Y)
+			{
+				for (int32 X = MaterialSplitX; X < TestChunkSize; ++X)
+				{
+					Request.VoxelData[X + Y * TestChunkSize + Z * TestChunkSize * TestChunkSize].MaterialID = MaterialThird;
+				}
+			}
+		}
+		return Request;
+	}
+
+	/** Mesh a chunk with a material border and check the soft border's blend (VP2-O4); with bThree, three materials meet. */
+	bool RunSoftBorderInvariants(FAutomationTestBase& Test, int32 LODLevel, bool bThree = false)
+	{
+		const FVoxelMeshingRequest Request = bThree ? MakeThreeMaterialRequest(LODLevel) : MakeRequest(LODLevel);
+		FChunkMeshData MeshData;
+		const bool bSuccess = MeshChunkCPU(Request, MeshData);
+		Test.TestTrue(TEXT("Meshing succeeded"), bSuccess);
+		Test.TestEqual(TEXT("A blend code per vertex"), MeshData.MaterialBlends.Num(), MeshData.Positions.Num());
+		if (!bSuccess || MeshData.Positions.Num() == 0 || MeshData.MaterialBlends.Num() != MeshData.Positions.Num())
+		{
+			return false;
+		}
+
+		// 1. The blend is flat per triangle: all three corners in it or none, with one second (and third) material, which
+		//    differs from the triangle's own. Only the weights may differ between the corners (they interpolate).
+		int32 MixedBlendTriangles = 0;
+		int32 SelfBlendTriangles = 0;
+		int32 BlendTriangles = 0;
+		int32 RampTriangles = 0;
+		int32 ThirdTriangles = 0;
+		const int32 NumTriangles = MeshData.Indices.Num() / 3;
+		for (int32 Tri = 0; Tri < NumTriangles; ++Tri)
+		{
+			const uint32 C0 = MeshData.MaterialBlends[MeshData.Indices[Tri * 3 + 0]];
+			const uint32 C1 = MeshData.MaterialBlends[MeshData.Indices[Tri * 3 + 1]];
+			const uint32 C2 = MeshData.MaterialBlends[MeshData.Indices[Tri * 3 + 2]];
+			using VoxelMaterialBlend::WithoutWeights;
+			if (WithoutWeights(C0) != WithoutWeights(C1) || WithoutWeights(C1) != WithoutWeights(C2))
+			{
+				MixedBlendTriangles++;
+				continue;
+			}
+			if (VoxelMaterialBlend::IsBlend(C0))
+			{
+				BlendTriangles++;
+				const uint8 Own = static_cast<uint8>(FMath::RoundToInt(MeshData.UV1s[MeshData.Indices[Tri * 3]].X));
+				SelfBlendTriangles += VoxelMaterialBlend::Secondary(C0) == Own ? 1 : 0;
+				SelfBlendTriangles += (VoxelMaterialBlend::HasThird(C0)
+					&& (VoxelMaterialBlend::Third(C0) == Own || VoxelMaterialBlend::Third(C0) == VoxelMaterialBlend::Secondary(C0))) ? 1 : 0;
+				RampTriangles += (C0 != C1 || C1 != C2) ? 1 : 0;
+				ThirdTriangles += VoxelMaterialBlend::HasThird(C0) ? 1 : 0;
+			}
+		}
+		Test.TestEqual(TEXT("Every triangle's blend is flat (one second material, all corners or none)"), MixedBlendTriangles, 0);
+		Test.TestEqual(TEXT("No triangle blends toward its own material"), SelfBlendTriangles, 0);
+		Test.TestTrue(TEXT("The border has blended triangles"), BlendTriangles > 0);
+		Test.TestTrue(TEXT("Some blended triangles ramp (their corners' weights differ)"), RampTriangles > 0);
+		if (bThree)
+		{
+			Test.TestTrue(TEXT("Where three materials meet, triangles blend a third"), ThirdTriangles > 0);
+		}
+		else
+		{
+			Test.TestEqual(TEXT("Two materials: no triangle blends a third"), ThirdTriangles, 0);
+		}
+
+		// 2. Blends only near a border: a vertex's cell is within one cell of a split plane (the Y split only on the +X side)
+		const int32 Stride = 1 << LODLevel;
+		int32 FarBlendVertices = 0;
+		for (int32 i = 0; i < MeshData.Positions.Num(); ++i)
+		{
+			const float XVoxels = MeshData.Positions[i].X / TestVoxelSize;
+			const float YVoxels = MeshData.Positions[i].Y / TestVoxelSize;
+			const float Reach = 2.0f * static_cast<float>(Stride);
+			const bool bNearX = FMath::Abs(XVoxels - static_cast<float>(MaterialSplitX)) <= Reach;
+			const bool bNearY = bThree && XVoxels >= static_cast<float>(MaterialSplitX) - Reach
+				&& FMath::Abs(YVoxels - static_cast<float>(MaterialSplitY)) <= Reach;
+			if (VoxelMaterialBlend::IsBlend(MeshData.MaterialBlends[i]) && !bNearX && !bNearY)
+			{
+				FarBlendVertices++;
+			}
+		}
+		Test.TestEqual(TEXT("No vertex blends away from the border"), FarBlendVertices, 0);
+
+		// 3. Every vertex at one position shows one material, whichever quad emitted it: the material changes from cell
+		//    to cell, never at a quad's edge
+		TMap<FVector3f, uint8> ShownAt;
+		int32 Disagreements = 0;
+		for (int32 i = 0; i < MeshData.Positions.Num(); ++i)
+		{
+			const uint8 Shown = ShownMaterial(MeshData, i);
+			if (const uint8* Seen = ShownAt.Find(MeshData.Positions[i]))
+			{
+				Disagreements += *Seen != Shown ? 1 : 0;
+			}
+			else
+			{
+				ShownAt.Add(MeshData.Positions[i], Shown);
+			}
+		}
+		Test.TestEqual(TEXT("Vertices at one position show one material"), Disagreements, 0);
+		return true;
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB1LOD0Test, "VoxelWorlds.Meshing.DualContour.MaterialBorder.MB1_LOD0_UniformTriangles",
@@ -193,3 +332,68 @@ bool FDCMaterialBorderMB2LOD1Test::RunTest(const FString& Parameters)
 	RunMaterialBorderInvariants(*this, 1, &MeshChunkCPU);
 	return true;
 }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB5SoftLOD0Test, "VoxelWorlds.Meshing.DualContour.MaterialBorder.MB5_LOD0_SoftBorder",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDCMaterialBorderMB5SoftLOD0Test::RunTest(const FString& Parameters)
+{
+	using namespace DualContourMaterialBorderTestHelpers;
+	RunSoftBorderInvariants(*this, 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB6SoftLOD1Test, "VoxelWorlds.Meshing.DualContour.MaterialBorder.MB6_LOD1_SoftBorder",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDCMaterialBorderMB6SoftLOD1Test::RunTest(const FString& Parameters)
+{
+	using namespace DualContourMaterialBorderTestHelpers;
+	RunSoftBorderInvariants(*this, 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB7UniformTest, "VoxelWorlds.Meshing.DualContour.MaterialBorder.MB7_OneMaterialNoBlend",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDCMaterialBorderMB7UniformTest::RunTest(const FString& Parameters)
+{
+	using namespace DualContourMaterialBorderTestHelpers;
+	FVoxelMeshingRequest Request = MakeRequest(0);
+	for (FVoxelData& Voxel : Request.VoxelData)
+	{
+		Voxel.MaterialID = MaterialLeft;
+	}
+	FChunkMeshData MeshData;
+	TestTrue(TEXT("Meshing succeeded"), MeshChunkCPU(Request, MeshData));
+	TestEqual(TEXT("A blend code per vertex"), MeshData.MaterialBlends.Num(), MeshData.Positions.Num());
+	int32 Blended = 0;
+	for (const uint32 Code : MeshData.MaterialBlends)
+	{
+		Blended += VoxelMaterialBlend::IsBlend(Code) ? 1 : 0;
+	}
+	TestEqual(TEXT("No vertex blends in a one-material chunk"), Blended, 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB8ThreeLOD0Test, "VoxelWorlds.Meshing.DualContour.MaterialBorder.MB8_LOD0_ThreeMaterials",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDCMaterialBorderMB8ThreeLOD0Test::RunTest(const FString& Parameters)
+{
+	using namespace DualContourMaterialBorderTestHelpers;
+	RunSoftBorderInvariants(*this, 0, true);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDCMaterialBorderMB9ThreeLOD1Test, "VoxelWorlds.Meshing.DualContour.MaterialBorder.MB9_LOD1_ThreeMaterials",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDCMaterialBorderMB9ThreeLOD1Test::RunTest(const FString& Parameters)
+{
+	using namespace DualContourMaterialBorderTestHelpers;
+	RunSoftBorderInvariants(*this, 1, true);
+	return true;
+}
+
+#endif // WITH_DEV_AUTOMATION_TESTS

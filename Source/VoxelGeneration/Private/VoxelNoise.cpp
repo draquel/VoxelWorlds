@@ -293,12 +293,13 @@ float FVoxelNoise::FBM3D(const FVector& Position, const FVoxelNoiseParams& Param
 	for (int32 i = 0; i < Count; ++i)
 	{
 		const FVoxelNoiseSplit Point = Split(Position * static_cast<double>(Frequencies[i]), Params.NoiseType);
-		Total += Sample(Point, FVector3f::ZeroVector, Params.NoiseType, Params.Seed) * Amplitude;
+		const float Value = Sample(Point, FVector3f::ZeroVector, Params.NoiseType, Params.Seed);
+		Total += (Params.bRidged ? RidgedOctave(Value) : Value) * Amplitude;
 		MaxValue += Amplitude;
 		Amplitude *= Params.Persistence;
 	}
 	// The first octave weighs 1, so the weights sum to 0 only with a negative Persistence; 0 then, not 0 / 0 (G88).
-	return MaxValue > 0.0f ? Total / MaxValue : 0.0f;
+	return MaxValue > 0.0f ? FinishFBM(Total / MaxValue, Params.bRidged) : 0.0f;
 }
 
 float FVoxelNoise::FBM3D(const FVector& Origin, const FVector3f& Offset, const FVoxelNoiseParams& Params)
@@ -312,11 +313,12 @@ float FVoxelNoise::FBM3D(const FVector& Origin, const FVector3f& Offset, const F
 	float MaxValue = 0.0f;
 	for (int32 i = 0; i < Count; ++i)
 	{
-		Total += Sample(Splits[i], Offset * Frequencies[i], Params.NoiseType, Params.Seed) * Amplitude;
+		const float Value = Sample(Splits[i], Offset * Frequencies[i], Params.NoiseType, Params.Seed);
+		Total += (Params.bRidged ? RidgedOctave(Value) : Value) * Amplitude;
 		MaxValue += Amplitude;
 		Amplitude *= Params.Persistence;
 	}
-	return MaxValue > 0.0f ? Total / MaxValue : 0.0f;
+	return MaxValue > 0.0f ? FinishFBM(Total / MaxValue, Params.bRidged) : 0.0f;
 }
 
 int32 FVoxelNoise::SplitOctaves(const FVector& Origin, const FVoxelNoiseParams& Params, FVoxelNoiseSplit* OutSplits)
@@ -410,9 +412,15 @@ double FVoxelNoise::ReferenceFBM3D(const FVector& Position, const FVoxelNoisePar
 	double MaxValue = 0.0;
 	for (int32 i = 0; i < Count; ++i)
 	{
-		Total += ReferenceSample(Position * static_cast<double>(Frequencies[i]), Params.NoiseType, Params.Seed) * Amplitude;
+		const double Value = ReferenceSample(Position * static_cast<double>(Frequencies[i]), Params.NoiseType, Params.Seed);
+		const double Ridge = 1.0 - FMath::Abs(Value);
+		Total += (Params.bRidged ? Ridge * Ridge : Value) * Amplitude;
 		MaxValue += Amplitude;
 		Amplitude *= Params.Persistence;
 	}
-	return MaxValue > 0.0 ? Total / MaxValue : 0.0;
+	if (MaxValue <= 0.0)
+	{
+		return 0.0;
+	}
+	return Params.bRidged ? Total / MaxValue * 2.0 - 1.0 : Total / MaxValue;
 }

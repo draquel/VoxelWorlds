@@ -21,7 +21,10 @@ Voxel Surface Sampler  →  Voxel Biome Dispatcher  →  (graph Output)
 
 - **Voxel Surface Sampler** (`VoxelPCG`) reads the runtime voxel terrain — edit-merged voxel data near
   loaded chunks (honors digging/building, hugs the exact surface), the procedural generator farther out —
-  and emits PCG points carrying `BiomeID`, `MaterialID`, `Slope`, `Normal`.
+  and emits PCG points carrying `BiomeID`, `MaterialID`, `Slope`, `Normal`. Along a conditioning line (a road) it
+  emits no point inside the line's clear width, and a point on the line's band carries the band's `MaterialID`
+  (`FPCGVoxelSurfaceSamplerElement::IsInClearWidth`; `WORLD_MODES.md`, "The surface under a line"). Bounds wider than
+  64 chunks take only the lines already worked out (`GetConditioningNeed`).
 - **Voxel Biome Dispatcher** (`VoxelPCG`) routes those points to per-biome decoration subgraphs using a
   data-driven `UVoxelPCGBiomeDecorationMapping`. Adding a biome is a data edit on the mapping, not a graph
   edit. Biome *selection* stays voxel-authoritative; this only maps the result to decoration.

@@ -16,6 +16,7 @@
 #include "VoxelMaterialRegistry.h"
 #include "VoxelSeaSurface.h"
 #include "VoxelDownLines.h"
+#include "VoxelChunkWaterColumns.h"
 #include "VoxelNoise.h"
 #include "Async/Async.h"
 
@@ -27,21 +28,28 @@ void FVoxelCPUNoiseGenerator::ApplyPostReadbackPasses(
 {
 	// Same order as GenerateChunkCPU: water fill first (uses the per-voxel cave flags as barriers and
 	// clears them), then underground classification.
-	ApplyWaterFillPass(Request, OutVoxelData);
+	FVoxelChunkWaterColumns WaterColumns;
+	FVoxelChunkWaterColumns::Build(Request, WaterColumns);
+	ApplyWaterFillPass(Request, WaterColumns, OutVoxelData);
 	ApplyUndergroundClassificationPass(Request, OutVoxelData);
 }
 
 void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
 	const FVoxelNoiseGenerationRequest& Request,
+	const FVoxelChunkWaterColumns& WaterColumns,
 	TArray<FVoxelData>& OutVoxelData)
 {
-	if (!Request.bEnableWaterLevel)
+	// One level over the chunk (the request's), or with a lake or a river reach near a level per column
+	// (FVoxelChunkWaterColumns): each column then seeds from its own level and the flood passes a voxel at or under its
+	// own column's level, so a lake holds its water over its footprint and nowhere else.
+	const bool bColumns = !WaterColumns.IsEmpty();
+	if (!Request.bEnableWaterLevel && !bColumns)
 		return;
 
 	// A planet's sea is the sphere of WaterRadius (SP-B8): the same three phases with the radius in place of the plane.
 	if (Request.WorldMode == EWorldMode::SphericalPlanet)
 	{
-		ApplyRadialWaterFillPass(Request, OutVoxelData);
+		ApplyRadialWaterFillPass(Request, WaterColumns, OutVoxelData);
 		return;
 	}
 
@@ -55,10 +63,45 @@ void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
 	// === Phase 1: Column scan — seed water in open ocean ===
 	// Cave-flagged voxels are treated as solid barriers so the column scan
 	// doesn't flood through cave openings in the seabed.
-	const float ChunkTopZ = ChunkWorldPos.Z + ChunkSize * VoxelSize;
-	const bool bChunkContainsWaterLevel = (WaterLevel >= ChunkWorldPos.Z && WaterLevel < ChunkTopZ);
+	// A chunk the water level passes through scans each column from the level down. A chunk wholly under it scans from its
+	// top layer (WaterZ clamps to ChunkSize - 1, so no openness check): a heightmap column is solid below its surface and
+	// air above it but for caves, which are barriers here, so air at the top of the column is open sea. Until G129 such a
+	// chunk had no water of its own and the chunk manager flooded it on the game thread when its mesh landed
+	// (PropagateWaterFromNeighbors: a flood over the whole chunk, up to 17 ms a chunk under SmoothTerrain_Island's lakes).
+	const bool bChunkAtOrUnderWaterLevel = !bColumns && WaterLevel >= ChunkWorldPos.Z;
 
-	if (bChunkContainsWaterLevel)
+	// One column's seed, from the voxel layer its level lies in.
+	auto SeedColumn = [&OutVoxelData, ChunkSize, SliceSize](int32 X, int32 Y, int32 WaterZ)
+	{
+		// When WaterZ < ChunkSize - 1, verify the column is open from
+		// the chunk top down to the water level. Solid or cave-flagged
+		// voxels above water level mean this column is underground.
+		if (WaterZ < ChunkSize - 1)
+		{
+			for (int32 Z = ChunkSize - 1; Z > WaterZ; --Z)
+			{
+				int32 Index = X + Y * ChunkSize + Z * SliceSize;
+				if (OutVoxelData[Index].IsSolid() || OutVoxelData[Index].HasCaveFlag())
+				{
+					return;
+				}
+			}
+		}
+
+		// Scan from water level downward: flag air, stop at solid or cave barrier
+		for (int32 Z = WaterZ; Z >= 0; --Z)
+		{
+			int32 Index = X + Y * ChunkSize + Z * SliceSize;
+			FVoxelData& Voxel = OutVoxelData[Index];
+
+			if (Voxel.IsSolid() || Voxel.HasCaveFlag())
+				break;
+
+			Voxel.SetWaterFlag(true);
+		}
+	};
+
+	if (bChunkAtOrUnderWaterLevel)
 	{
 		const int32 WaterZ = FMath::Clamp(
 			FMath::FloorToInt32((WaterLevel - ChunkWorldPos.Z) / VoxelSize),
@@ -68,35 +111,22 @@ void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
 		{
 			for (int32 X = 0; X < ChunkSize; ++X)
 			{
-				// When WaterZ < ChunkSize - 1, verify the column is open from
-				// the chunk top down to the water level. Solid or cave-flagged
-				// voxels above water level mean this column is underground.
-				if (WaterZ < ChunkSize - 1)
+				SeedColumn(X, Y, WaterZ);
+			}
+		}
+	}
+	else if (bColumns)
+	{
+		// A level per column: the chunk's own test, column by column. A column no body covers (NoWater) and one whose
+		// level lies under the chunk seed nothing. The GPU's WaterColumnSeedColumnsCS does the same.
+		for (int32 Y = 0; Y < ChunkSize; ++Y)
+		{
+			for (int32 X = 0; X < ChunkSize; ++X)
+			{
+				const float ColumnLevel = WaterColumns.GetRow(X + Y * ChunkSize).Y;
+				if (ColumnLevel >= ChunkWorldPos.Z)
 				{
-					bool bColumnOpen = true;
-					for (int32 Z = ChunkSize - 1; Z > WaterZ; --Z)
-					{
-						int32 Index = X + Y * ChunkSize + Z * SliceSize;
-						if (OutVoxelData[Index].IsSolid() || OutVoxelData[Index].HasCaveFlag())
-						{
-							bColumnOpen = false;
-							break;
-						}
-					}
-					if (!bColumnOpen)
-						continue;
-				}
-
-				// Scan from water level downward: flag air, stop at solid or cave barrier
-				for (int32 Z = WaterZ; Z >= 0; --Z)
-				{
-					int32 Index = X + Y * ChunkSize + Z * SliceSize;
-					FVoxelData& Voxel = OutVoxelData[Index];
-
-					if (Voxel.IsSolid() || Voxel.HasCaveFlag())
-						break;
-
-					Voxel.SetWaterFlag(true);
+					SeedColumn(X, Y, FMath::Clamp(FMath::FloorToInt32((ColumnLevel - ChunkWorldPos.Z) / VoxelSize), 0, ChunkSize - 1));
 				}
 			}
 		}
@@ -148,9 +178,18 @@ void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
 			if (Neighbor.IsSolid() || Neighbor.HasWaterFlag() || Neighbor.HasCaveFlag())
 				continue;
 
-			const float NeighborWorldZ = ChunkWorldPos.Z + NZ * VoxelSize;
-			if (NeighborWorldZ > WaterLevel)
-				continue;
+			if (bColumns)
+			{
+				// At or under the level over the voxel's own column
+				if (!WaterColumns.IsVoxelUnder(FIntVector(NX, NY, NZ)))
+					continue;
+			}
+			else
+			{
+				const float NeighborWorldZ = ChunkWorldPos.Z + NZ * VoxelSize;
+				if (NeighborWorldZ > WaterLevel)
+					continue;
+			}
 
 			Neighbor.SetWaterFlag(true);
 			BFSQueue.Add(NeighborIdx);
@@ -174,8 +213,12 @@ void FVoxelCPUNoiseGenerator::ApplyWaterFillPass(
 
 void FVoxelCPUNoiseGenerator::ApplyRadialWaterFillPass(
 	const FVoxelNoiseGenerationRequest& Request,
+	const FVoxelChunkWaterColumns& WaterColumns,
 	TArray<FVoxelData>& OutVoxelData)
 {
+	// One sea sphere over the chunk, or with a lake or a river reach near a level per down-line (FVoxelChunkWaterColumns:
+	// a planet chunk has no columns): a voxel is under the water when it is at or under its own line's level.
+	const bool bColumns = !WaterColumns.IsEmpty();
 	const int32 ChunkSize = Request.ChunkSize;
 	const float VoxelSize = Request.VoxelSize;
 	const FVector ChunkWorldPos = Request.GetChunkWorldPosition();
@@ -187,15 +230,18 @@ void FVoxelCPUNoiseGenerator::ApplyRadialWaterFillPass(
 		return ChunkWorldPos + FVector(Local) * VoxelSize;
 	};
 
-	// === Phase 1: seed the open sea, in a chunk the sea surface passes through ===
+	// === Phase 1: seed the open sea, in a chunk the sea surface passes through or one wholly under it ===
 	// As the plane's column scan: along each line in local down (FVoxelDownLines, the chunk centre's down), the part above
 	// the sea must be clear of solid and cave voxels from where the line enters the chunk (the column is open from the
 	// chunk top); from the sea surface down, air takes the water flag until the first solid or cave voxel. A line that
 	// enters the chunk already below the sea counts as open, as a column does when the water plane is the chunk's top
-	// layer. Chunks wholly under the sea fill from their neighbours (UVoxelChunkManager::PropagateWaterFromNeighbors). The
-	// GPU's WaterLineSeedCS walks the same lines.
+	// layer: a planet's terrain is solid under its surface and air above it along local down, caves aside, and caves are
+	// barriers here. So a chunk wholly under the sea seeds every line from where it enters (G132; until then such a chunk
+	// had no water of its own and UVoxelChunkManager::PropagateWaterFromNeighbors flooded it on the game thread when its
+	// mesh landed, as heightmap chunks did before G129). The GPU's WaterLineSeedCS walks the same lines.
+	// With a level per line every line is walked: one no body covers, or whose level lies under the chunk, flags nothing.
 	const FBox VoxelBox(ChunkWorldPos, ChunkWorldPos + FVector((ChunkSize - 1) * VoxelSize));
-	if (Sea.Crosses(VoxelBox))
+	if (bColumns || !Sea.IsAbove(VoxelBox))
 	{
 		struct FSeaLine
 		{
@@ -217,7 +263,7 @@ void FVoxelCPUNoiseGenerator::ApplyRadialWaterFillPass(
 				Line.bBlocked = true;
 				return;
 			}
-			if (Sea.IsBelow(VoxelWorldPos(Local)))
+			if (bColumns ? WaterColumns.IsVoxelUnderLevel(Local, WaterColumns.GetRow(LineId).Y) : Sea.IsBelow(VoxelWorldPos(Local)))
 			{
 				Voxel.SetWaterFlag(true);
 			}
@@ -257,7 +303,8 @@ void FVoxelCPUNoiseGenerator::ApplyRadialWaterFillPass(
 
 			const int32 NeighborIdx = N.X + N.Y * ChunkSize + N.Z * SliceSize;
 			FVoxelData& Neighbor = OutVoxelData[NeighborIdx];
-			if (Neighbor.IsSolid() || Neighbor.HasWaterFlag() || Neighbor.HasCaveFlag() || !Sea.IsBelow(VoxelWorldPos(N)))
+			if (Neighbor.IsSolid() || Neighbor.HasWaterFlag() || Neighbor.HasCaveFlag()
+				|| !(bColumns ? WaterColumns.IsVoxelUnder(N) : Sea.IsBelow(VoxelWorldPos(N))))
 			{
 				continue;
 			}

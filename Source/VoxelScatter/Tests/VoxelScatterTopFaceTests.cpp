@@ -575,7 +575,7 @@ namespace VoxelScatterBuriedTopFaceTestUtils
 			FScatterExtractionContext Context;
 			Context.WorldMode = Mode.Get();
 			Context.NoiseParams = Config->NoiseParams;
-			Context.Sea = FVoxelSeaSurface::FromConfig(*Config);
+			Context.Water = FVoxelSeaSurface::FromConfig(*Config);
 			Context.CaveConfiguration = Caves;
 			Context.OutsideEdits = AboveEdits;
 			return Context;

@@ -55,16 +55,16 @@ namespace VoxelPlanetConditioningTestUtils
 		return Config;
 	}
 
-	/** CPU-generated planet chunks (with the given zones on every request), read by trilinear density. */
+	/** CPU-generated planet chunks (with the given conditioning on every request), read by trilinear density. */
 	struct FConditionedPlanetVoxels
 	{
 		const UVoxelWorldConfiguration* Config = nullptr;
-		TArray<FVoxelConditioningZone> Zones;
+		FVoxelConditioning Conditioning;
 		FVoxelCPUNoiseGenerator Generator;
 		TMap<FIntVector, TArray<FVoxelData>> Chunks;
 
-		FConditionedPlanetVoxels(const UVoxelWorldConfiguration* InConfig, const TArray<FVoxelConditioningZone>& InZones)
-			: Config(InConfig), Zones(InZones)
+		FConditionedPlanetVoxels(const UVoxelWorldConfiguration* InConfig, const FVoxelConditioning& InConditioning)
+			: Config(InConfig), Conditioning(InConditioning)
 		{
 		}
 
@@ -83,7 +83,7 @@ namespace VoxelPlanetConditioningTestUtils
 				Request.LODLevel = 0;
 				Request.NoiseParams = Config->NoiseParams;
 				FVoxelWorldModeFactory::FillGenerationRequest(*Config, Request);
-				Request.ConditioningZones = Zones;
+				Request.Conditioning = Conditioning;
 				Data = &Chunks.Add(ChunkCoord);
 				Generator.GenerateChunkCPU(Request, *Data);
 			}
@@ -152,7 +152,7 @@ bool FVoxelConditioningRadialTest::RunTest(const FString& Parameters)
 		const FVoxelConditioningZone Zone = FVoxelConditioningZone::MakeRadial(Site.Value * 3.0, Inner, Falloff, Target);
 		TestTrue(*FString::Printf(TEXT("%s: a planet zone"), Site.Key), Zone.IsRadial());
 		TestTrue(*FString::Printf(TEXT("%s: the direction is normalized"), Site.Key), FMath::IsNearlyEqual(Zone.Direction.Size(), 1.0, 1e-9));
-		const TArray<FVoxelConditioningZone> Zones = { Zone };
+		const FVoxelConditioning Zones = FVoxelConditioning::OfZones({ Zone });
 
 		// Distances along the surface are what the weight reads, toward any bearing.
 		const FVector Bearings[] = { FVector(1, 0, 0), FVector(0, 1, 0), FVector(0, 0, 1), FVector(1, -1, 0.3) };
@@ -171,13 +171,13 @@ bool FVoxelConditioningRadialTest::RunTest(const FString& Parameters)
 			const FVector Beyond = DirectionAtDistance(Site.Value, Bearing, Inner + Falloff + 10.0, Radius);
 
 			TestEqual(*FString::Printf(TEXT("%s: the centre reaches the target"), Site.Key),
-				FVoxelTerrainConditioning::ApplyToAltitude(AtCentre, Radius, -900.0f, Zones), Target);
+				Zones.ApplyToAltitude(AtCentre, Radius, -900.0f), Target);
 			TestEqual(*FString::Printf(TEXT("%s: inside the inner radius too"), Site.Key),
-				FVoxelTerrainConditioning::ApplyToAltitude(Inside, Radius, -900.0f, Zones), Target);
+				Zones.ApplyToAltitude(Inside, Radius, -900.0f), Target);
 			TestEqual(*FString::Printf(TEXT("%s: the ring's middle is the smoothstep's half"), Site.Key),
 				Zone.GetWeightAtDirection(Mid, Radius), 0.5f, 1e-4f);
 			TestEqual(*FString::Printf(TEXT("%s: beyond the ring, untouched"), Site.Key),
-				FVoxelTerrainConditioning::ApplyToAltitude(Beyond, Radius, -900.0f, Zones), -900.0f);
+				Zones.ApplyToAltitude(Beyond, Radius, -900.0f), -900.0f);
 
 			// The great-circle distance against the construction.
 			TestEqual(*FString::Printf(TEXT("%s: the great-circle distance"), Site.Key),
@@ -200,11 +200,11 @@ bool FVoxelConditioningRadialTest::RunTest(const FString& Parameters)
 	// Layering in order, and Strength, as on the plane.
 	{
 		const FVector D(0, 0, 1);
-		const TArray<FVoxelConditioningZone> Zones = {
+		const FVoxelConditioning Zones = FVoxelConditioning::OfZones({
 			FVoxelConditioningZone::MakeRadial(D, 1000.0f, 500.0f, 100.0f),
 			FVoxelConditioningZone::MakeRadial(D, 1000.0f, 500.0f, 300.0f, 0.5f),
-		};
-		TestEqual(TEXT("Later zones blend on top of earlier ones"), FVoxelTerrainConditioning::ApplyToAltitude(D, Radius, 0.0f, Zones), 200.0f);
+		});
+		TestEqual(TEXT("Later zones blend on top of earlier ones"), Zones.ApplyToAltitude(D, Radius, 0.0f), 200.0f);
 	}
 
 	// Each kind ignores the other: a planet zone in ApplyToHeight and a heightmap zone in ApplyToAltitude contribute nothing.
@@ -212,10 +212,10 @@ bool FVoxelConditioningRadialTest::RunTest(const FString& Parameters)
 		const FVoxelConditioningZone Planet = FVoxelConditioningZone::MakeRadial(FVector(0, 0, 1), 1.0e6f, 0.0f, 999.0f);
 		const FVoxelConditioningZone Plane(FVector2D::ZeroVector, 1.0e6f, 0.0f, 999.0f);
 		TestFalse(TEXT("A heightmap zone is not radial"), Plane.IsRadial());
-		TestEqual(TEXT("ApplyToHeight skips a planet zone"), FVoxelTerrainConditioning::ApplyToHeight(0.0, 0.0, 12.0f, { Planet }), 12.0f);
-		TestEqual(TEXT("ApplyToAltitude skips a heightmap zone"), FVoxelTerrainConditioning::ApplyToAltitude(FVector(0, 0, 1), Radius, 12.0f, { Plane }), 12.0f);
+		TestEqual(TEXT("ApplyToHeight skips a planet zone"), FVoxelConditioning::OfZones({ Planet }).ApplyToHeight(0.0, 0.0, 12.0f), 12.0f);
+		TestEqual(TEXT("ApplyToAltitude skips a heightmap zone"), FVoxelConditioning::OfZones({ Plane }).ApplyToAltitude(FVector(0, 0, 1), Radius, 12.0f), 12.0f);
 		TestFalse(TEXT("A heightmap zone meets no cap"), Plane.MeetsCap(FVector(0, 0, 1), UE_DOUBLE_PI, Radius));
-		TestEqual(TEXT("ApplyToHeight still applies a heightmap zone"), FVoxelTerrainConditioning::ApplyToHeight(0.0, 0.0, 12.0f, { Plane }), 999.0f);
+		TestEqual(TEXT("ApplyToHeight still applies a heightmap zone"), FVoxelConditioning::OfZones({ Plane }).ApplyToHeight(0.0, 0.0, 12.0f), 999.0f);
 	}
 	return true;
 }
@@ -255,7 +255,7 @@ bool FVoxelConditioningFlattensPlanetTest::RunTest(const FString& Parameters)
 		for (const float Shift : { 400.0f, -400.0f })
 		{
 			const float Target = Planet.GetTerrainAltitude(Site.Value, Config->NoiseParams) + Shift;
-			FConditionedPlanetVoxels Conditioned(Config, { FVoxelConditioningZone::MakeRadial(Site.Value, Inner, Falloff, Target) });
+			FConditionedPlanetVoxels Conditioned(Config, FVoxelConditioning::OfZones({ FVoxelConditioningZone::MakeRadial(Site.Value, Inner, Falloff, Target) }));
 			const FVector Bearings[] = { FVector(0, 1, 0), FVector(-1, 0.4, 0.2), FVector(0.2, -1, 0.5) };
 			for (const FVector& Bearing : Bearings)
 			{

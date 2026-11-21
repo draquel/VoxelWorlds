@@ -20,7 +20,7 @@
 #include "VoxelNoiseTypes.h"
 #include "IVoxelWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "PCGVoxelPlanetSurfaceGrid.h"
 
 #include "EngineUtils.h"
@@ -60,10 +60,9 @@ namespace
 		const UVoxelBiomeConfiguration* BiomeConfig = nullptr;
 		int32 WorldSeed = 0;
 		float VoxelSize = 100.0f;
-		bool bWaterEnabled = false;
-		float WaterLevel = 0.0f;
-		// The sea as generation sees it (a planet's sphere of WaterRadius; the WaterLevel plane otherwise).
-		FVoxelSeaSurface Sea;
+		// The sea's water levels (UVoxelChunkManager::GetWaterLevels); a run gathers the levels over its own bounds,
+		// which know the lakes and river reaches (GatherWaterLevels).
+		FVoxelWaterLevels Water;
 		// Live chunk manager for the edit-aware near band (edit-merged voxel surface query).
 		const UVoxelChunkManager* ChunkManager = nullptr;
 		bool bValid = false;
@@ -103,9 +102,7 @@ namespace
 		Out.NoiseParams = Config->GetNoiseParams();
 		Out.WorldSeed = Config->WorldSeed;
 		Out.VoxelSize = Config->VoxelSize;
-		Out.bWaterEnabled = Config->bEnableWaterLevel;
-		Out.WaterLevel = Config->WaterLevel;
-		Out.Sea = FVoxelSeaSurface::FromConfig(*Config);
+		Out.Water = ChunkMgr->GetWaterLevels();
 		Out.BiomeConfig = Config->bEnableBiomes ? Config->BiomeConfiguration : nullptr;
 		Out.ChunkManager = ChunkMgr;
 		Out.bValid = true;
@@ -286,13 +283,27 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 			Sites.Num(), MinX, MaxX, MinY, MaxY));
 	}
 
-	// The conditioning zones over the bounds (POI pads and their falloff rings, SP-B10): the far points stand on the
-	// generated ground, as the near band's loaded voxels do (world modes review G23).
-	TArray<FVoxelConditioningZone> Zones;
+	// The conditioning over the bounds (POI pads and their falloff rings, SP-B10; conditioning lines): the far points
+	// stand on the generated ground, as the near band's loaded voxels do (world modes review G23). Complete: the points
+	// must agree with the voxels generated there, and nothing runs the sampler again when a line arrives later. Bounds
+	// wider than the lines' gather limit take only the lines at hand: a complete gather there would have a conditioner
+	// work out every line over many placement cells on the game thread.
+	FVoxelConditioning Conditioning;
+	// The water over the bounds, gathered with the same need: the sea, and the lakes and river reaches there, which
+	// decide each point's surface material (a lake's bed is an underwater bed).
+	FVoxelWaterLevels WaterOver = VoxelCtx.Water;
 	if (VoxelCtx.ChunkManager)
 	{
-		VoxelCtx.ChunkManager->GatherConditioningZones(Bounds, Zones);
+		const UVoxelWorldConfiguration* Configuration = VoxelCtx.ChunkManager->GetConfiguration();
+		const EVoxelConditioningGather Need = GetConditioningNeed(Bounds, Configuration ? static_cast<double>(Configuration->GetChunkWorldSize()) : 0.0);
+		VoxelCtx.ChunkManager->GatherConditioning(Bounds, Need, Conditioning);
+		if (VoxelCtx.ChunkManager->HasWaterBodies())
+		{
+			WaterOver = VoxelCtx.ChunkManager->GatherWaterLevels(Bounds, Need);
+		}
 	}
+	// A conditioning line's clear width takes no point.
+	const bool bLineSurfaces = Conditioning.Lines.Num() > 0 && Conditioning.HasLineSurfaces();
 
 	Transforms.Reserve(Sites.Num());
 	Samples.Reserve(Sites.Num());
@@ -307,9 +318,13 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 		if (!bNear)
 		{
 			Sample = FVoxelSurfaceQuery::SampleSurfacePoint(*VoxelCtx.WorldMode, Site.Query, VoxelCtx.VoxelSize, VoxelCtx.NoiseParams,
-				BiomeSnapshot, VoxelCtx.Sea, &Zones);
+				BiomeSnapshot, WaterOver, &Conditioning);
 		}
 		if (bClipToBounds && !Bounds.IsInsideOrOn(Sample.Position))
+		{
+			continue;
+		}
+		if (bLineSurfaces && IsInClearWidth(Conditioning, *VoxelCtx.WorldMode, Sample.Position))
 		{
 			continue;
 		}
@@ -373,6 +388,23 @@ bool FPCGVoxelSurfaceSamplerElement::ExecuteInternal(FPCGContext* Context) const
 	Output.Pin = PCGPinConstants::DefaultOutputLabel;
 
 	return true;
+}
+
+EVoxelConditioningGather FPCGVoxelSurfaceSamplerElement::GetConditioningNeed(const FBox& Bounds, double ChunkWorldSize)
+{
+	const double Limit = FVoxelConditioningLine::GatherLimitChunks * ChunkWorldSize;
+	const FVector Size = Bounds.GetSize();
+	return (Limit > 0.0 && FMath::Max(Size.X, Size.Y) > Limit) ? EVoxelConditioningGather::Ready : EVoxelConditioningGather::Complete;
+}
+
+bool FPCGVoxelSurfaceSamplerElement::IsInClearWidth(const FVoxelConditioning& Conditioning, const IVoxelWorldMode& WorldMode, const FVector& Position)
+{
+	if (WorldMode.GetWorldModeType() == EWorldMode::SphericalPlanet)
+	{
+		const FSphericalPlanetParams& Planet = static_cast<const FSphericalPlanetWorldMode&>(WorldMode).GetPlanetParams();
+		return Conditioning.IsClearedOnSphere(FSphericalPlanetWorldMode::GetDirectionFromCenter(Position, Planet.PlanetCenter), Planet.PlanetRadius);
+	}
+	return Conditioning.IsClearedAt(Position.X, Position.Y);
 }
 
 #undef LOCTEXT_NAMESPACE

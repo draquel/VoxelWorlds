@@ -12,8 +12,8 @@
 
 /**
  * Visual polish VP2-O2 (VISUAL_POLISH_PLAN.md): the texture variation's wiring in the assets (Scripts/setup_texture_variation.py).
- * MPC_VoxelMaterial holds MacroVariation (0.3) alone (VoxelWorlds 8 retired GradientSampling, TileVariation and
- * ConstantRoughness: the graphs take them as constants); each triplanar function's Custom node includes
+ * MPC_VoxelMaterial holds MacroVariation (0.3) and none of the three VoxelWorlds 8 retired (GradientSampling, TileVariation
+ * and ConstantRoughness: the graphs take them as constants; its other scalars are the weather's); each triplanar function's Custom node includes
  * VoxelTextureVariation.ush and has the inputs the variation reads, GradientSampling and TileVariation a constant 1; and
  * every collection parameter node in the two functions carries the id of the collection scalar it names. A node whose id
  * does not resolve reads another scalar without any error (VoxelWorlds 8's first graph edit drew brighter, flatter sand
@@ -33,7 +33,12 @@ bool FVoxelTextureVariationAssetTest::RunTest(const FString& Parameters)
 	}
 	const FCollectionScalarParameter* Macro = Collection->ScalarParameters.FindByPredicate(
 		[](const FCollectionScalarParameter& P) { return P.ParameterName == TEXT("MacroVariation"); });
-	TestEqual(TEXT("The collection holds one scalar"), Collection->ScalarParameters.Num(), 1);
+	// The collection's other scalars are the weather's (WorldWeatherPlugin's P3); the variation's retired three stay out (G142).
+	for (const TCHAR* Retired : { TEXT("GradientSampling"), TEXT("TileVariation"), TEXT("ConstantRoughness") })
+	{
+		TestFalse(*FString::Printf(TEXT("%s is retired from the collection"), Retired), Collection->ScalarParameters.ContainsByPredicate(
+			[Retired](const FCollectionScalarParameter& P) { return P.ParameterName == FName(Retired); }));
+	}
 	if (TestNotNull(TEXT("MacroVariation in the collection"), Macro))
 	{
 		TestEqual(TEXT("MacroVariation defaults to 0.3"), Macro->DefaultValue, 0.3f, 1e-6f);

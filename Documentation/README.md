@@ -35,7 +35,7 @@ system you work on. The project root holds the vocabulary (`Documentation/GLOSSA
 | [WATER_SYSTEM.md](Features/WATER_SYSTEM.md) | Water flags, the fill pass, the cross-chunk pull, edit-driven floods, water tiles and their mesher, the seas |
 | [DUAL_CONTOURING.md](Features/DUAL_CONTOURING.md) | The Dual Contouring mesher: QEF, fitted normals, LOD crossings, seams |
 | [MARCHING_CUBES_MESHING.md](Features/MARCHING_CUBES_MESHING.md) | The Marching Cubes mesher: LOD stride, geomorph, the transition ribbon, seams |
-| [RENDERING_SYSTEM.md](Features/RENDERING_SYSTEM.md) | `FVoxelMeshRenderer`, render regions, the scene proxy, crossfades, water tiles |
+| [RENDERING_SYSTEM.md](Features/RENDERING_SYSTEM.md) | `FVoxelMeshRenderer`, render regions, the scene proxy, the terrain on Nanite (a world's option), a world's shadow method, crossfades, water tiles |
 | [MATERIAL_SYSTEM.md](Features/MATERIAL_SYSTEM.md) | The material registry and atlas, saved texture arrays, the master material, hardness, the far field's material blend |
 | [EDIT_LAYER.md](Features/EDIT_LAYER.md) | Edits, brushes, undo and redo, system edits outside the history, persistence |
 | [SCATTER_SYSTEM.md](Features/SCATTER_SYSTEM.md) | Scatter extraction from the voxels, placement, the scatter horizon, HISM regions, voxel trees, edit readers |
@@ -52,6 +52,7 @@ system you work on. The project root holds the vocabulary (`Documentation/GLOSSA
 | [CODING_STANDARDS.md](Guides/CODING_STANDARDS.md) | Conventions: Blueprint types, deprecated engine APIs, naming |
 | [MASTER_MATERIAL_SETUP.md](Guides/MASTER_MATERIAL_SETUP.md) | Building `M_VoxelMaster` and its material functions |
 | [PCG_BIOME_DECORATION_SETUP.md](Guides/PCG_BIOME_DECORATION_SETUP.md) | Setting up biome-keyed runtime PCG decoration (sampler, dispatcher, per-biome graphs) |
+| [TERRAIN_LINES.md](Guides/TERRAIN_LINES.md) | A road, a cutting or a trail from a spline in a level: the Voxel Terrain Line actor, its values, what its warnings mean. A river and a lake placed the same way: the Voxel River and Voxel Lake actors |
 
 ## Research
 
@@ -64,6 +65,7 @@ system you work on. The project root holds the vocabulary (`Documentation/GLOSSA
 | [DC_MATERIAL_BLEND_PLAN.md](Research/DC_MATERIAL_BLEND_PLAN.md) | Open: soft material borders on Dual Contouring meshes, scoped and deferred |
 | [LUMEN_OFFSCREEN_TERRAIN_SPIKE.md](Research/LUMEN_OFFSCREEN_TERRAIN_SPIKE.md) | The D-VP4 spike (2026-11-03): ray tracing geometry and distance fields for Lumen off screen (F3.3), measured; the recommended path and its plan |
 | [LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md](Research/LUMEN_TERRAIN_SURFACE_CACHE_PLAN.md) | Frozen (G116, closed 2026-11-05 as an engine limit): Lumen's surface cache for the terrain; why the static draw path needs a primitive per chunk mesh, the steps to it and to the cards |
+| [RUNTIME_NANITE_RESEARCH.md](Research/RUNTIME_NANITE_RESEARCH.md) | Closed (2026-11-16, the spike dropped 2026-11-18): runtime Nanite for the terrain, as Voxel Plugin 2 does it; what UE 5.8 allows, what it would buy (VSM, the render thread, tessellation), the costs; the spike's results and why it was dropped are in `Documentation/RUNTIME_NANITE_SPIKE_PLAN.md` in the parent |
 | `Research/Bench/` | JSON bench reports cited by the world modes review (D7, G6, KI12, M1, M4-M6, reviews A and B, SP1-SP2, the vertical window) |
 | [Research/Archive/](Research/Archive/) | Finished or superseded: the build phases, the start-here package, the edit layer's February spec, engine integration, geomorph, the LOD seam investigation, the map accuracy plan, the scatter review and claim suppression, seam ownership, Transvoxel, the voxel QA follow-ups (R22-R24), the custom vertex factory research and plan |
 
@@ -78,4 +80,4 @@ system you work on. The project root holds the vocabulary (`Documentation/GLOSSA
 ## Other
 
 - `Images/R22`, `Images/R23`, `Images/R24`: before and after shots for the voxel QA follow-ups.
-- `Presentation/`: two HTML pages (an architecture explainer and slides) from 2026-07, before the world modes review.
+- `Presentation/`: two HTML pages, an architecture explainer and a seven-slide 16:9 deck (it prints to PDF through headless Edge), brought up to date 2026-11-05.

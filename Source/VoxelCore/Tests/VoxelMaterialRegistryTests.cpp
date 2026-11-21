@@ -23,6 +23,10 @@
 // - MaterialRegistry.SlopeMaterials: an atlas's table names each material's slope material as the atlas's material LUT
 //   does (UVoxelMaterialAtlas::GetSlopeMaterialID), which scatter reads for the material drawn on steep ground (G106).
 //
+// - MaterialRegistry.SurfaceClasses: each default material has the ground class the character's table held by ID, the
+//   reserved slots none; an atlas's config sets a class (a material it adds, the demo's road and trail at 7 and 8) or
+//   keeps the default's with Unset (G247). The character's reading of it: VoxelCharacter.Movement.SurfaceClass.
+//
 // The chunk managers holding their atlases' tables: VoxelWorlds.Streaming.Cubic.TwoWorldsOwnAtlases.
 // ---------------------------------------------------------------------------
 
@@ -238,6 +242,64 @@ bool FVoxelMaterialRegistrySlopeMaterialsTest::RunTest(const FString& Parameters
 	TestEqual(TEXT("Grass past the middle is stone"), Table->GetDrawnMaterial(EVoxelMaterial::Grass, Middle - 0.01f), EVoxelMaterial::Stone);
 	TestEqual(TEXT("Steep sand stays sand"), Table->GetDrawnMaterial(EVoxelMaterial::Sand, 0.0f), EVoxelMaterial::Sand);
 	TestEqual(TEXT("An unknown ID stays itself"), Table->GetDrawnMaterial(200, 0.0f), static_cast<uint8>(200));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelMaterialRegistrySurfaceClassesTest,
+	"VoxelWorlds.MaterialRegistry.SurfaceClasses",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelMaterialRegistrySurfaceClassesTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelMaterialRegistryTestUtils;
+
+	// The defaults: every named material has its class, the reserved slots none.
+	const FVoxelMaterialTable& Defaults = FVoxelMaterialTable::Defaults();
+	const TPair<uint8, EVoxelSurfaceClass> Expected[] = {
+		{ EVoxelMaterial::Grass, EVoxelSurfaceClass::Grass }, { EVoxelMaterial::Dirt, EVoxelSurfaceClass::Dirt },
+		{ EVoxelMaterial::Stone, EVoxelSurfaceClass::Stone }, { EVoxelMaterial::Sand, EVoxelSurfaceClass::Sand },
+		{ EVoxelMaterial::Snow, EVoxelSurfaceClass::Snow }, { EVoxelMaterial::Sandstone, EVoxelSurfaceClass::Sand },
+		{ EVoxelMaterial::FrozenDirt, EVoxelSurfaceClass::Ice }, { EVoxelMaterial::Coal, EVoxelSurfaceClass::Stone },
+		{ EVoxelMaterial::Iron, EVoxelSurfaceClass::Metal }, { EVoxelMaterial::Gold, EVoxelSurfaceClass::Metal },
+		{ EVoxelMaterial::Copper, EVoxelSurfaceClass::Metal }, { EVoxelMaterial::Diamond, EVoxelSurfaceClass::Stone },
+		{ EVoxelMaterial::Wood, EVoxelSurfaceClass::Wood }, { EVoxelMaterial::Leaves, EVoxelSurfaceClass::Grass } };
+	TSet<uint8> Named;
+	for (const TPair<uint8, EVoxelSurfaceClass>& Entry : Expected)
+	{
+		Named.Add(Entry.Key);
+		TestEqual(FString::Printf(TEXT("Default %s's class"), *Defaults.GetMaterial(Entry.Key)->Name), int32(Defaults.GetMaterial(Entry.Key)->SurfaceClass), int32(Entry.Value));
+	}
+	for (const FVoxelMaterialDefinition& Mat : Defaults.GetAll())
+	{
+		if (!Named.Contains(Mat.MaterialID))
+		{
+			TestEqual(FString::Printf(TEXT("Reserved %s has no class"), *Mat.Name), int32(Mat.SurfaceClass), int32(EVoxelSurfaceClass::Unset));
+		}
+	}
+
+	// An atlas: the defaults' configs (classes Unset: kept), Sand made Stone, the road (7) Stone and the trail (8) Dirt over
+	// reserved slots, and an added material (30) with no class.
+	TArray<FVoxelMaterialTextureConfig> Configs = ConfigsOf(Defaults.GetAll());
+	Configs[EVoxelMaterial::Sand].SurfaceClass = EVoxelSurfaceClass::Stone;
+	Configs[7].MaterialName = TEXT("Road");
+	Configs[7].SurfaceClass = EVoxelSurfaceClass::Stone;
+	Configs[8].MaterialName = TEXT("Trail");
+	Configs[8].SurfaceClass = EVoxelSurfaceClass::Dirt;
+	FVoxelMaterialTextureConfig& Added = Configs.AddDefaulted_GetRef();
+	Added.MaterialID = 30;
+	Added.MaterialName = TEXT("Added");
+	const TSharedRef<const FVoxelMaterialTable> Table = FVoxelMaterialTable::FromAtlas(Configs, 4, 8);
+
+	TestEqual(TEXT("A config left Unset keeps the default's class (Grass)"), int32(Table->GetMaterial(EVoxelMaterial::Grass)->SurfaceClass), int32(EVoxelSurfaceClass::Grass));
+	TestEqual(TEXT("and Iron's"), int32(Table->GetMaterial(EVoxelMaterial::Iron)->SurfaceClass), int32(EVoxelSurfaceClass::Metal));
+	TestEqual(TEXT("A config's class replaces the default's (Sand as Stone)"), int32(Table->GetMaterial(EVoxelMaterial::Sand)->SurfaceClass), int32(EVoxelSurfaceClass::Stone));
+	TestEqual(TEXT("The road over a reserved slot is Stone"), int32(Table->GetMaterial(7)->SurfaceClass), int32(EVoxelSurfaceClass::Stone));
+	TestEqual(TEXT("The trail over a reserved slot is Dirt"), int32(Table->GetMaterial(8)->SurfaceClass), int32(EVoxelSurfaceClass::Dirt));
+	TestEqual(TEXT("A reserved slot the atlas does not class has none"), int32(Table->GetMaterial(9)->SurfaceClass), int32(EVoxelSurfaceClass::Unset));
+	TestEqual(TEXT("An added material with no class has none"), int32(Table->GetMaterial(30)->SurfaceClass), int32(EVoxelSurfaceClass::Unset));
+	TestEqual(TEXT("A placeholder in the gap has none"), int32(Table->GetMaterial(25)->SurfaceClass), int32(EVoxelSurfaceClass::Unset));
+	TestEqual(TEXT("The defaults keep Sand's class"), int32(Defaults.GetMaterial(EVoxelMaterial::Sand)->SurfaceClass), int32(EVoxelSurfaceClass::Sand));
+	TestTrue(TEXT("the registry is still the defaults"), RegistryIsDefaults());
 	return true;
 }
 

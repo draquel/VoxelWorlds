@@ -8,9 +8,10 @@ class UVoxelWorldConfiguration;
 
 /**
  * The sea's surface as the voxel water rules see it: the Z plane at WaterLevel in heightmap modes, the sphere of
- * WaterRadius around the planet centre on a planet (spherical requirement SP-B8). Generation's water fill, the chunk
- * manager's cross-chunk propagation and the edit-time propagation (UVoxelWaterPropagation) all test "below the sea"
- * with it, so the three agree in every world mode.
+ * WaterRadius around the planet centre on a planet (spherical requirement SP-B8). The one body of the world's water
+ * levels (FVoxelWaterLevels, the water plan's W2), through which generation's water fill, the chunk manager's
+ * cross-chunk propagation and the edit-time propagation (UVoxelWaterPropagation) all test "below the water", so the
+ * three agree in every world mode.
  *
  * Plain data, cheap to copy; safe on any thread.
  */
@@ -39,9 +40,12 @@ struct VOXELCORE_API FVoxelSeaSurface
 
 	/**
 	 * The sea of a world configuration: WaterLevel's plane, or on a planet the sphere of WaterRadius around WorldOrigin
-	 * (the planet centre, FVoxelWorldModeFactory::MakePlanetParams). bEnabled follows bEnableWaterLevel. The one sea
-	 * every consumer reads: the plane is world Z, as the terrain's heights are (WorldOrigin moves the chunk grid, not the
-	 * ground), so it is where generation floods and the water tiles draw, wherever WorldOrigin is (review plan G19).
+	 * (the planet centre, FVoxelWorldModeFactory::MakePlanetParams). bEnabled follows bEnableWaterLevel. The plane is
+	 * world Z, as the terrain's heights are (WorldOrigin moves the chunk grid, not the ground), so it is where
+	 * generation floods and the water tiles draw, wherever WorldOrigin is (review plan G19).
+	 *
+	 * Called by FVoxelWaterLevels::FromConfig alone (the water plan's W2): a reader of the water asks the water levels
+	 * (UVoxelChunkManager::GetWaterLevels), whose one body this sea is.
 	 *
 	 * @param Config World configuration
 	 * @return The sea surface

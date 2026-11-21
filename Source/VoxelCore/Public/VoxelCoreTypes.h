@@ -45,6 +45,45 @@ enum class EMeshingMode : uint8
 };
 
 /**
+ * Whether a world's terrain (chunk interiors and seam buckets) is drawn through Nanite (D158): the meshes encoded as Nanite
+ * resources at runtime, for a world built around Nanite content or virtual shadow maps. Without it the terrain is drawn as
+ * it always was, with no encode and no cost.
+ */
+UENUM(BlueprintType)
+enum class EVoxelNaniteTerrain : uint8
+{
+	/** Never: the terrain's own renderer */
+	Off,
+
+	/** Always, where the platform supports Nanite */
+	On,
+
+	/** When the project draws its shadows with virtual shadow maps (r.Shadow.Virtual.Enable when the world starts), which
+	 *  need the terrain on Nanite to cache its shadow; otherwise as Off */
+	Auto
+};
+
+/**
+ * The shadow method a world asks for while it runs (D164): the project's, or virtual shadow maps or shadow maps for this
+ * world alone. A planet seen from altitude draws the terrain's distant cast shadows only with virtual shadow maps, at
+ * about the GPU time of shadow maps (with its terrain on Nanite, which EVoxelNaniteTerrain::Auto then gives it); a plane
+ * world pays more for them. The shadow method is a project-wide setting (r.Shadow.Virtual.Enable), so a world's choice
+ * holds from its renderer's start to its end.
+ */
+UENUM(BlueprintType)
+enum class EVoxelShadowMethod : uint8
+{
+	/** The project's setting, untouched */
+	Project,
+
+	/** Virtual shadow maps while the world runs */
+	VirtualShadowMaps,
+
+	/** Shadow maps (cascades) while the world runs */
+	ShadowMaps
+};
+
+/**
  * Edit operation mode for terrain modifications.
  */
 UENUM(BlueprintType)
@@ -234,6 +273,14 @@ struct VOXELCORE_API FVoxelNoiseParams
 	/** Amplitude multiplier per octave (typically 0.5) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Persistence = 0.5f;
+
+	/**
+	 * Ridged fBm: each octave's sample n becomes (1 - |n|)^2, so its zero crossings turn into sharp crests, and the
+	 * normalised sum [0, 1] is mapped back to [-1, 1] (the terrain's mountain ranges). Off for every field but the
+	 * terrain's, which a world opts into; the noise type and the lattice are unchanged.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Noise")
+	bool bRidged = false;
 
 	FVoxelNoiseParams() = default;
 };

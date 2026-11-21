@@ -4,10 +4,11 @@
 
 #include "CoreMinimal.h"
 #include "VoxelCubeSphere.h"
-#include "VoxelSeaSurface.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelWorldModeTypes.h"
 #include "VoxelCoreTypes.h"
 #include "VoxelTerrainConditioning.h"
+#include "VoxelMapTypes.h"
 
 class IVoxelWorldMode;
 class UVoxelChunkManager;
@@ -51,16 +52,25 @@ struct VOXELMAP_API FVoxelMapTileFrame
 	/** Heightmap worlds: the world's bounds (exploration stops at an island's edge, WM-I2) */
 	FVoxelWorldBounds Bounds;
 
-	/** The world's sea (FVoxelSeaSurface::FromConfig): the heightmap's WaterLevel plane, the planet's water sphere */
-	FVoxelSeaSurface Sea;
+	/** The world's water levels (UVoxelChunkManager::GetWaterLevels): each tile draws its water at the range over its own bounds */
+	FVoxelWaterLevels Water;
 
 	/** The terrain's extent for the elevation and depth shading: a heightmap's height bounds, a planet's altitude bounds */
 	float MinAltitude = 0.0f;
 	float MaxAltitude = 0.0f;
 
-	/** Whether the frame draws water, and the water's altitude (the WaterLevel; the sea radius less the datum radius) */
-	bool HasWater() const;
-	float GetWaterAltitude() const;
+	/**
+	 * A tile's world bounds, from its grid's corner samples at the terrain's lowest and highest altitude: what a tile
+	 * asks the water levels' range over (GetTileWater).
+	 */
+	FBox GetTileBounds(const FVoxelMapTileId& Id) const;
+
+	/** The water levels' range over a tile: the one level the tile's water is drawn and tested at. */
+	FVoxelWaterLevelRange GetTileWater(const FVoxelMapTileId& Id) const { return Water.GetRange(GetTileBounds(Id)); }
+
+	/** Whether a tile with that range draws water, and the water's altitude (the level; on a planet the level less the datum radius) */
+	bool HasWater(const FVoxelWaterLevelRange& TileWater) const;
+	float GetWaterAltitude(const FVoxelWaterLevelRange& TileWater) const;
 
 	// ---- The grid ----
 
@@ -112,20 +122,20 @@ struct VOXELMAP_API FVoxelMapTileFrame
 	FVoxelMapTileSample SampleAt(FIntPoint Tile, int32 GX, int32 GY) const;
 
 	/**
-	 * The generated surface's altitude at a sample, conditioning zones applied: the generated height (its world Z) on a
+	 * The generated surface's altitude at a sample, conditioning applied: the generated height (its world Z) on a
 	 * heightmap world, the conditioned terrain altitude along the direction on a planet.
 	 */
 	float Altitude(const IVoxelWorldMode& WorldMode, const FVoxelMapTileSample& Sample, const FVoxelNoiseParams& NoiseParams,
-		const TArray<FVoxelConditioningZone>& Zones) const;
+		const FVoxelConditioning& Conditioning) const;
 
 	/** The world point of a sample at an altitude: (X, Y, altitude); centre + direction x (radius + altitude). */
 	FVector PositionAt(const FVoxelMapTileSample& Sample, float InAltitude) const;
 
-	/** Whether the surface at an altitude is under water (the WaterLevel; the sea radius). */
-	bool IsWater(float InAltitude) const;
+	/** Whether the surface at an altitude is under a tile's water (its range's level). */
+	bool IsWater(const FVoxelWaterLevelRange& TileWater, float InAltitude) const;
 
-	/** The shading ranges: land from the water (or the lowest terrain) to the highest, water depth from the water down to the lowest. */
-	void GetShadingSpans(float& OutLandBase, float& OutLandSpan, float& OutDepthSpan) const;
+	/** A tile's shading ranges: land from its water (or the lowest terrain) to the highest, water depth from the water down to the lowest. */
+	void GetShadingSpans(const FVoxelWaterLevelRange& TileWater, float& OutLandBase, float& OutLandSpan, float& OutDepthSpan) const;
 
 	/**
 	 * The hillshade at a grid point: the surface normal from its four neighbours' altitudes (central differences on a
@@ -136,9 +146,10 @@ struct VOXELMAP_API FVoxelMapTileFrame
 	 * @param GridSize The grid's edge (ChunkSize + 2)
 	 * @param Altitudes The grid's altitudes
 	 * @param Samples The grid's samples
+	 * @param Level The tile's pyramid level (a heightmap's grid points are 2^Level voxels apart)
 	 * @return The brightness factor
 	 */
-	float ShadeAt(int32 G, int32 GridSize, TConstArrayView<float> Altitudes, TConstArrayView<FVoxelMapTileSample> Samples) const;
+	float ShadeAt(int32 G, int32 GridSize, TConstArrayView<float> Altitudes, TConstArrayView<FVoxelMapTileSample> Samples, int32 Level = 0) const;
 
 	/**
 	 * The tile and pixel an apron grid point of a tile belongs to (a neighbouring tile's border pixel; the tile's own
@@ -148,8 +159,103 @@ struct VOXELMAP_API FVoxelMapTileFrame
 	void ApronPixel(FIntPoint Tile, int32 GX, int32 GY, const FVoxelMapTileSample& Sample, FIntPoint& OutTile, int32& OutPX, int32& OutPY) const;
 
 	/**
-	 * The conditioning zones over a tile and its apron (POI pads, campsites), gathered on the game thread: generation
-	 * layers them onto the base height, so the map must too (QA W-05).
+	 * The conditioning over a tile and its apron (POI pads, campsites), gathered on the game thread: generation
+	 * layers it onto the base height, so the map must too (QA W-05). What is ready (EVoxelConditioningGather::Ready): a
+	 * tile does not wait for a line; it is drawn again when the conditioning changes.
 	 */
-	void GatherZones(const UVoxelChunkManager& ChunkManager, FIntPoint Tile, TArray<FVoxelConditioningZone>& OutZones) const;
+	void GatherConditioning(const UVoxelChunkManager& ChunkManager, FIntPoint Tile, FVoxelConditioning& Out) const;
+
+	// ---- The tile pyramid (MAP_PYRAMID_PLAN.md P1, D84) ----
+
+	/** A plane's coarsest level (its pyramid has no top; the world map's zoom-out limit asks for far less). */
+	static constexpr int32 MaxPlaneLevel = 16;
+
+	/** The coarsest level: on a planet the one whose tile holds a whole face (ceil(log2 N)); on a plane MaxPlaneLevel. */
+	int32 GetMaxLevel() const;
+
+	/** Planets: tiles along a face edge at a level, ceil(N / 2^Level) (the face's last tile partly empty). */
+	int32 TilesPerFaceEdgeAt(int32 Level) const;
+
+	/** The world size of a level-0 pixel (a voxel column on a heightmap world; about one on a planet). */
+	double GetPixelWorldSize() const { return GetTileWorldSize() / FMath::Max(1, ChunkSize); }
+
+	/**
+	 * The level whose pixels match a texel: the coarsest whose pixel spacing (2^L level-0 pixels) is at most the texel, so
+	 * a view composed from it is as sharp as its texels allow and reads about one pixel a texel.
+	 * @param TexelWorldSize The texel's size (uu)
+	 * @return The level, 0 to GetMaxLevel()
+	 */
+	int32 LevelForTexel(double TexelWorldSize) const;
+
+	/** The tile at a level holding a level-0 tile (X >> L, Y >> L on a plane; per face on a planet). */
+	FVoxelMapTileId LevelTileOf(const FIntPoint& Tile0, int32 Level) const;
+
+	/** The tile a level up holding a tile. */
+	FVoxelMapTileId ParentOf(const FVoxelMapTileId& Id) const;
+
+	/** The level-0 tile at a tile's minimum corner (on a planet always a cell of the atlas, for a valid tile). */
+	FIntPoint FirstLevel0Tile(const FVoxelMapTileId& Id) const;
+
+	/** Whether a tile at any level is one of the world's: inside the bounds on a heightmap world, in the level's atlas on a planet. */
+	bool IsValidTile(const FVoxelMapTileId& Id) const;
+
+	/** Whether the drawer can draw a tile at any level: any on a heightmap world, one in the level's atlas on a planet. */
+	bool CanDrawTile(const FVoxelMapTileId& Id) const;
+
+	/**
+	 * Whether a level-0 tile lies under a tile or within Ring level-0 tiles of it (on a planet, on the same face): the edit
+	 * overlays a coarse tile's pixels and apron read.
+	 */
+	bool CoversLevel0Tile(const FVoxelMapTileId& Id, const FIntPoint& Tile0, int32 Ring) const;
+
+	/** The level-0 tiles under a tile and Ring around it (on a planet, those on its face). */
+	void Level0TilesOf(const FVoxelMapTileId& Id, int32 Ring, TArray<FIntPoint>& OutTiles) const;
+
+	/**
+	 * The sample at a tile's grid point at any level: SampleAt's, with the pixels 2^Level level-0 pixels apart (a heightmap
+	 * tile's pixel corners, a planet tile's pixel centres along its face from its first level-0 cell). Level 0 is SampleAt.
+	 */
+	FVoxelMapTileSample SampleAt(const FVoxelMapTileId& Id, int32 GX, int32 GY) const;
+
+	/**
+	 * The level-0 tile and pixel a grid point of a tile at any level falls in (the edit overlay drawn there): ApronPixel at
+	 * level 0; on a heightmap world the level-0 pixel at the point's corner; on a planet the level-0 pixel the point's
+	 * direction falls in.
+	 */
+	void SourcePixel(const FVoxelMapTileId& Id, int32 GX, int32 GY, const FVoxelMapTileSample& Sample, FIntPoint& OutTile0, int32& OutPX, int32& OutPY) const;
+
+	/**
+	 * GatherConditioning for a tile at any level: the conditioning over its area and apron. Above level 0 the set takes
+	 * every line as at least 0.71 of a pixel wide (FVoxelConditioning::LeastHalfWidth: a pixel is a point sample every
+	 * 2^Level voxels), and a tile at a level that takes no lines (TakesLines) gets the zones alone.
+	 */
+	void GatherConditioning(const UVoxelChunkManager& ChunkManager, const FVoxelMapTileId& Id, FVoxelConditioning& Out) const;
+
+	/**
+	 * Whether a tile at a level draws conditioning lines: up to the level whose tile is
+	 * FVoxelConditioningLine::GatherLimitChunks chunks wide (level 6). Above it a road is far under a pixel.
+	 */
+	static bool TakesLines(int32 Level);
+
+	/**
+	 * The region a tile gathers its conditioning over (GatherConditioning): the tile and its apron, grown by the least
+	 * half width its level takes lines with; a box on a heightmap world, a cap on a planet.
+	 * @param Id The tile
+	 * @param OutLeastHalfWidth The least half width a line is taken to have at the tile's level (0 at level 0 and at a
+	 *                          level that takes no lines)
+	 * @return The region
+	 */
+	FVoxelConditioningRegion GetConditioningRegion(const FVoxelMapTileId& Id, double& OutLeastHalfWidth) const;
+
+	/**
+	 * Whether a change of conditioning reaches a tile's image: the changed region meets the region the tile gathers its
+	 * conditioning over (everywhere reaches every tile; a region of the other kind of world reaches none).
+	 * @param Id The tile
+	 * @param Region Where the conditioning changed
+	 */
+	bool MeetsConditioningRegion(const FVoxelMapTileId& Id, const FVoxelConditioningRegion& Region) const;
+
+private:
+	/** Planets: a tile's face and its indices along the face at its level. @return False outside the level's atlas */
+	bool FaceIndicesAt(const FVoxelMapTileId& Id, int32& OutFace, int32& OutU, int32& OutV) const;
 };

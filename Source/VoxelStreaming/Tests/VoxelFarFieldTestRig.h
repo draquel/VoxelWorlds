@@ -14,6 +14,8 @@
 #include "ChunkRenderData.h"
 #include "DistanceBandLODStrategy.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 /**
  * The far-field suites' one rig (code review CR2, STREAM-22): a far field over a world configuration with synchronous
  * builds, its view, convergence and window for the sphere and the plane alike through the far field's frame
@@ -32,7 +34,7 @@ namespace VoxelFarFieldTestRig
 		TSharedPtr<const FVoxelFarFieldSurface> Surface;
 		FVoxelFarFieldSettings Settings;
 		FVoxelFarField FarField;
-		const TArray<FVoxelConditioningZone> NoZones;
+		const FVoxelConditioning NoZones;
 
 		/** The voxel window the views describe: its load and unload distances */
 		double ViewDistance = 0.0;
@@ -43,7 +45,7 @@ namespace VoxelFarFieldTestRig
 			: Config(InConfig), ViewDistance(InViewDistance), UnloadDistance(InUnloadDistance)
 		{
 			Mode = FVoxelWorldModeFactory::Create(*Config);
-			Surface = FVoxelFarFieldSurface::Make(*Config, Mode);
+			Surface = FVoxelFarFieldSurface::Make(*Config, Mode, FVoxelWaterLevels::FromConfig(*Config));
 			Settings = MakeSettings(*Config, *Mode, *Surface);
 			FarField.Initialize(Settings, Surface);
 			FarField.SetSynchronousBuilds(true);
@@ -117,3 +119,5 @@ namespace VoxelFarFieldTestRig
 		}
 	};
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS

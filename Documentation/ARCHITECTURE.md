@@ -18,12 +18,12 @@ Ten runtime modules and one editor module, in `Source/` (the empty `VoxelWorlds`
 | Module | Loading phase | Depends on (voxel modules) | Holds |
 |--------|---------------|----------------------------|-------|
 | `VoxelCore` | Default | none | `FVoxelData`, `FChunkDescriptor` and its residency, `UVoxelWorldConfiguration`, `UVoxelWorldsSettings`, the material and biome registries and `UVoxelMaterialAtlas`, `UVoxelEditManager`, `FVoxelSeaSurface`, `FVoxelCubeSphere`, `FVoxelRenderRegions`, the chunk codec |
-| `VoxelGeneration` | PostConfigInit (global shaders) | Core | `FVoxelGPUNoiseGenerator` / `FVoxelCPUNoiseGenerator`, `FVoxelNoise`, `IVoxelWorldMode` and the three modes, `FVoxelWorldModeFactory`, `FVoxelSurfaceQuery`, `FVoxelBlockSurface`, conditioning zones, `FVoxelTreeInjector` |
+| `VoxelGeneration` | PostConfigInit (global shaders) | Core | `FVoxelGPUNoiseGenerator` / `FVoxelCPUNoiseGenerator`, `FVoxelNoise`, `IVoxelWorldMode` and the three modes, `FVoxelWorldModeFactory`, `FVoxelSurfaceQuery`, `FVoxelBlockSurface`, conditioning zones and lines, `FVoxelTreeInjector` |
 | `VoxelLOD` | Default | Core, Generation | `IVoxelLODStrategy`, `FDistanceBandLODStrategy` |
 | `VoxelMeshing` | PostConfigInit | Core | `IVoxelMesher`: `FVoxelCPUCubicMesher`, `FVoxelCPUMarchingCubesMesher`, `FVoxelCPUDualContourMesher`; `FVoxelWaterMesher` |
 | `VoxelRendering` | PostConfigInit (vertex factory, shader directory) | Core | `IVoxelMeshRenderer`, `FVoxelMeshRenderer`, `UVoxelRegionComponent`, `FVoxelSceneProxy`, `FVoxelFadeScheduler` |
 | `VoxelScatter` | PostEngineInit | Core, Generation | `UVoxelScatterManager`, `UVoxelScatterRenderer`, `UVoxelScatterExclusionSubsystem` |
-| `VoxelStreaming` | PostEngineInit | Core, LOD, Rendering, Generation, Meshing, Scatter | `UVoxelChunkManager` and its owners, `UVoxelCollisionManager`, `UVoxelWaterPropagation`, `FVoxelFarField`, `AVoxelWorldActor`, `FVoxelStreamingBenchmark`, the console commands (`Private/Diagnostics/`) |
+| `VoxelStreaming` | PostEngineInit | Core, LOD, Rendering, Generation, Meshing, Scatter | `UVoxelChunkManager` and its owners, `UVoxelCollisionManager`, `UVoxelWaterPropagation`, `FVoxelFarField`, `AVoxelWorldActor`, `UVoxelTerrainLineComponent` (a spline in a level as a conditioning line), `FVoxelStreamingBenchmark`, the console commands (`Private/Diagnostics/`) |
 | `VoxelMap` | PostEngineInit | Core, Generation, Streaming | `UVoxelMapSubsystem`, `FVoxelMapTileStore`, the edit overlay |
 | `VoxelNavigation` | PostEngineInit | Core, Streaming, Generation | `UVoxelSurfaceNavigationSubsystem`, `FVoxelSurfacePathfinder` |
 | `VoxelPCG` | PostEngineInit | Core, Generation, Streaming (+ the PCG plugin) | the voxel surface sampler and biome dispatcher nodes, `UVoxelPCGBiomeDecorationMapping` |
@@ -93,7 +93,7 @@ made it).
 ### Surfaces
 
 One ladder of surfaces serves every consumer (`UVoxelChunkManager::QuerySurfacePoint`, `EVoxelSurfaceLayer`): the
-natural surface of the world mode, the generated surface (conditioning zones applied; block tops in a cubic world), and
+natural surface of the world mode, the generated surface (conditioning lines and zones applied; block tops in a cubic world), and
 the edit-merged surface of the loaded voxels. Every query runs along local up, so the same call works on a planet.
 
 ### Beyond the voxel window
@@ -150,8 +150,24 @@ and stores float offsets from it, in every world mode; generation keeps size-R v
 and the noise is split-origin. Heightmap worlds are exact to the range of a double position and planets to about
 1,000 km, with no world-origin shift ([TRAVERSAL_LIMITS.md](Research/TRAVERSAL_LIMITS.md)).
 
-**No Nanite.** Nanite geometry is built at cook time; terrain generated at runtime from a seed cannot be Nanite. The
-hand-built renderer and LOD are the engine's best option for runtime geometry, not a stand-in for Nanite.
+**Nanite as an option, not the default.** The engine builds Nanite resources in the editor only, but its renderer
+takes a resource encoded at runtime, as Voxel Plugin 2 does ([RUNTIME_NANITE_RESEARCH.md](Research/RUNTIME_NANITE_RESEARCH.md)).
+A spike encoded the chunk meshes on a task and drew them through a Nanite proxy of its own (2026-11-16 to 11-18; the
+parent's `Documentation/RUNTIME_NANITE_SPIKE_PLAN.md`): it works, and as a default it was dropped. On a world with no
+other Nanite content it costs about 1 ms of GPU and 1.5 ms of render thread, Nanite's fixed per-frame cost; on one that
+already draws Nanite content it costs nothing measurable. The terrain on Nanite is therefore a world's choice (D158,
+the parent's `Documentation/RUNTIME_NANITE_OPTIN_PLAN.md`): `UVoxelWorldConfiguration::NaniteTerrain` is Off, On, or
+Auto (the default: on when the project draws its shadows with virtual shadow maps, which need the terrain on Nanite),
+and `voxel.Render.Nanite` overrides it. A world that does not choose it encodes nothing and draws as before. A world
+can also ask for virtual shadow maps while it runs (`ShadowMethod`, D164: a planet seen from altitude), which the
+project otherwise leaves off; Auto then puts its terrain on Nanite. Chunk LOD,
+seams and crossfades stay ours: Nanite rasterizes each mesh (clusters in index order, every page a root page, no
+simplification), `FVoxelChunkNaniteSceneProxy` draws it, and a fading mesh draws through `FVoxelChunkSceneProxy` until
+its fade ends. The far field and the water stay on the hand-built renderer. A world on Nanite can also have its terrain
+tessellated (`NaniteMaterial`, D163): the displacement blends the materials' heights by the soft-border weights, so
+material borders do not crack. How it draws, what it costs and what is not known:
+[RENDERING_SYSTEM.md](Features/RENDERING_SYSTEM.md), "The Terrain on Nanite"; the material,
+[MATERIAL_SYSTEM.md](Features/MATERIAL_SYSTEM.md), "The Terrain on Nanite". The plan is frozen history.
 
 **Runtime Virtual Textures.** The scene proxy emits RVT mesh batches when the configuration lists
 `RuntimeVirtualTextures` (copied onto each region component before it registers), and `M_VoxelMaster` has a Runtime

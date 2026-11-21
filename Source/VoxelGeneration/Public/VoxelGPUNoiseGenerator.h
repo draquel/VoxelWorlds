@@ -124,15 +124,11 @@ private:
 		 * this result alive and this destructor then runs on the render thread after it completes —
 		 * so ReleaseHandle needs no FlushRenderingCommands. Shutdown still flushes before dropping
 		 * all references at once.
+		 *
+		 * Defined in the .cpp: destroying the buffers and the readback needs FRDGPooledBuffer and
+		 * FRHIGPUBufferReadback complete, which this header only forward-declares (G128).
 		 */
-		~FGenerationResult()
-		{
-			if (DensityReadback)
-			{
-				delete DensityReadback;
-				DensityReadback = nullptr;
-			}
-		}
+		~FGenerationResult();
 	};
 
 	TMap<uint64, TSharedPtr<FGenerationResult>> GenerationResults;

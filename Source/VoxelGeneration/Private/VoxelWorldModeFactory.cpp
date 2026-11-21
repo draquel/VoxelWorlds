@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelWorldModeFactory.h"
+#include "VoxelHydrology.h"
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelNoiseTypes.h"
 #include "VoxelWorldConfiguration.h"
@@ -137,6 +138,13 @@ FVoxelWorldFingerprint FVoxelWorldModeFactory::MakeFingerprint(const UVoxelWorld
 	// (WorldSeed when the noise seed is 0; code review CR2, D-CR19 / D-CR20).
 	Params.Add(TEXT("MeshingMode=") + StaticEnum<EMeshingMode>()->GetNameStringByValue(static_cast<int64>(Config.MeshingMode)));
 	Params.Add(FString::Printf(TEXT("NoiseSeed=%d"), Config.GetNoiseParams().Seed));
+	// Generated hydrology (the hydrology plan's D146): a world that names a hydrology configuration has beds in its
+	// terrain and other POIs and roads, so a save made without it, or with other settings, is refused. A world that
+	// names none has no term: its fingerprint is what it was.
+	if (const FString Hydrology = FVoxelHydrology::GetFingerprintTerm(Config); !Hydrology.IsEmpty())
+	{
+		Params.Add(Hydrology);
+	}
 
 	FVoxelWorldFingerprint Fingerprint;
 	Fingerprint.WorldMode = Config.WorldMode;

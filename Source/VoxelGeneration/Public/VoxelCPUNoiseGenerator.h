@@ -10,6 +10,7 @@ class FInfinitePlaneWorldMode;
 class FIslandBowlWorldMode;
 class FSphericalPlanetWorldMode;
 struct FSphericalPlanetParams;
+struct FVoxelChunkWaterColumns;
 class UVoxelCaveConfiguration;
 struct FCaveLayerConfig;
 
@@ -96,18 +97,26 @@ private:
 	 * Generate a chunk of a heightmap world mode (InfinitePlane, IslandBowl): 2D noise to a height, the island's edge
 	 * falloff composed on it, biomes, caves and ores by the column's depth. One body for both modes (code review CR2,
 	 * CORE-23); the GPU has one heightmap branch too.
+	 *
+	 * @param WaterColumns The chunk's water columns (FVoxelChunkWaterColumns::Build from the request), empty for a
+	 *        chunk with one level: with them the underwater materials and the caves' minimum depth read each
+	 *        column's own level in place of the request's
 	 */
 	void GenerateChunkHeightmap(
 		const FVoxelNoiseGenerationRequest& Request,
 		const IVoxelWorldMode& WorldMode,
+		const FVoxelChunkWaterColumns& WaterColumns,
 		TArray<FVoxelData>& OutVoxelData);
 
 	/**
 	 * Generate chunk using Spherical Planet world mode (radial terrain on sphere).
+	 *
+	 * @param WaterColumns The chunk's water columns, as GenerateChunkHeightmap takes them: a level per down-line
 	 */
 	void GenerateChunkSphericalPlanet(
 		const FVoxelNoiseGenerationRequest& Request,
 		const FSphericalPlanetWorldMode& WorldMode,
+		const FVoxelChunkWaterColumns& WaterColumns,
 		TArray<FVoxelData>& OutVoxelData);
 
 	// ==================== Cave Generation Helpers ====================
@@ -143,6 +152,9 @@ public:
 	 * @param WorldSeed Base world seed
 	 * @param bIsUnderwater The terrain surface above is under the water (caves keep UnderwaterMinDepth below it)
 	 * @param Planet On a planet, the layers' VerticalScale acts along local up (SP-B6); null in heightmap modes
+	 * @param MinDepthUnderLines The shallowest depth (voxels) the conditioning lines over the column let a cave open at
+	 *        (FVoxelChunkLineSurface::MinCaveDepth, FVoxelConditioning::GetMinCaveDepthAt): each layer's minimum depth is
+	 *        at least this. 0: the layers' own
 	 * @return Carve density in range [0, 1]
 	 */
 	static float CalculateCaveDensity(
@@ -152,7 +164,8 @@ public:
 		const UVoxelCaveConfiguration* CaveConfig,
 		int32 WorldSeed,
 		bool bIsUnderwater = false,
-		const FSphericalPlanetParams* Planet = nullptr);
+		const FSphericalPlanetParams* Planet = nullptr,
+		float MinDepthUnderLines = 0.0f);
 
 private:
 	// ==================== Ore Vein Helpers ====================
@@ -229,9 +242,16 @@ private:
 
 	// ==================== Water Fill Pass ====================
 
-	/** Post-generation: mark air voxels below water level as water via column scan. */
+	/**
+	 * Post-generation: mark air voxels below water level as water via column scan.
+	 *
+	 * @param WaterColumns The chunk's water columns, empty for a chunk with one level (the request's). With them each
+	 *        column seeds from its own level and the flood passes a voxel at or under its own column's level (the
+	 *        hydrology plan's section 5.4); on a planet, each down-line's
+	 */
 	static void ApplyWaterFillPass(
 		const FVoxelNoiseGenerationRequest& Request,
+		const FVoxelChunkWaterColumns& WaterColumns,
 		TArray<FVoxelData>& OutVoxelData);
 
 	/**
@@ -240,6 +260,7 @@ private:
 	 */
 	static void ApplyRadialWaterFillPass(
 		const FVoxelNoiseGenerationRequest& Request,
+		const FVoxelChunkWaterColumns& WaterColumns,
 		TArray<FVoxelData>& OutVoxelData);
 
 	/** Post-generation: mark air voxels below terrain surface as underground (caves, enclosed voids). */

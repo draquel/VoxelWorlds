@@ -64,6 +64,9 @@ bool FVoxelConfigTreeTemplateMaterialsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Against an atlas defining 22 and 23, one warning (200)"), WorldWarnings.Num(), 1);
 	TestTrue(TEXT("Names the allowed ground id 200"), AnyWarningContains(WorldWarnings, TEXT("200")));
 	TestEqual(TEXT("The asset's own check still uses the built-in ids"), Config->GetSettingsWarnings().Num(), 3);
+
+	// G223: the asset's load cannot know its world's atlas, so it logs no tree material warning.
+	TestEqual(TEXT("The load's warnings leave the trees' materials to the world"), Config->GetLoadWarnings().Num(), 0);
 	return true;
 }
 
@@ -89,6 +92,8 @@ bool FVoxelConfigPlanetSettingsTest::RunTest(const FString& Parameters)
 	TArray<FString> Warnings = Config->GetSettingsWarnings();
 	TestEqual(TEXT("Defaults: one warning"), Warnings.Num(), 1);
 	TestTrue(TEXT("Defaults: the depth does not cover the valleys"), AnyWarningContains(Warnings, TEXT("PlanetMaxTerrainDepth")));
+	TestTrue(TEXT("The load logs the shell's warning too (it needs no material table, G223)"),
+		AnyWarningContains(Config->GetLoadWarnings(), TEXT("PlanetMaxTerrainDepth")));
 
 	Config->PlanetMaxTerrainDepth = 2500.0f;
 	TestEqual(TEXT("A shell that covers the amplitude raises nothing"), Config->GetSettingsWarnings().Num(), 0);

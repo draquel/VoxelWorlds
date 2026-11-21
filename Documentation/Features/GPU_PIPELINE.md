@@ -1,6 +1,7 @@
 # GPU Compute Pipeline
 
-> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-15 (the hydrology plan's H2: the water over a column, the column kernels; the rest as of code
+> review CR5, 2026-11-02). Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelGeneration
 **Dependencies**: VoxelCore
@@ -42,6 +43,10 @@ To avoid static initialisation problems in GPU modules:
 2. Include `RenderGraphBuilder.h`, `RenderGraphResources.h` and the like in `.cpp` files (or private headers such as
    `VoxelGenerationShaders.h`).
 3. Use `RHIFwd.h` for RHI forward declarations in headers.
+4. A header type that holds a forward-declared one in a `TRefCountPtr` (or deletes a raw pointer to it) declares its
+   destructor there and defines it in the `.cpp`: an inline destructor needs the complete type in every file that
+   includes the header, which a unity build supplies by accident and a `-DisableUnity` build does not
+   (`FVoxelGPUNoiseGenerator::FGenerationResult`, G128).
 
 ## Shaders
 
@@ -68,13 +73,52 @@ the CPU). Per voxel, in the CPU generator's order:
 
 1. **Terrain.** On a heightmap world (InfinitePlane, IslandBowl, cubic on either) the terrain noise at the chunk's
    noise origin plus the voxel's offset (`NoiseOrigins`, MP4), continentalness, the island falloff, the conditioning
-   zones, then the signed distance to the surface. On a planet the radial height along the voxel's direction
-   (`SphericalPlanet.ush`).
+   lines and zones, then the signed distance to the surface. On a planet the radial height along the voxel's direction
+   (`SphericalPlanet.ush`), with the planet's lines and zones.
+
+   **Conditioning lines** (`ConditioningLines.ush`; `WORLD_MODES.md`, "Conditioning lines"). The upload builds the
+   chunk's segment list with the function the CPU generator uses (`FVoxelChunkLineSegments::Build`) and sends it as
+   `ConditioningLineSegmentCount` and `ConditioningLineData`, a `StructuredBuffer<float4>` of 5 float4s a segment
+   (`VOXELGEN_LINE_SEGMENT_STRIDE`, `FVoxelConditioningLine::SegmentStride`), as the height rules and ores travel:
+   `[A.xyz, target at A] [B.xyz, target at B] [half width at A, half width at B, falloff, strength] [line index,
+   blend, band material or -1, band depth] [band half width, minimum cave depth, 0, 0]`, positions relative to the
+   chunk's origin corner on a heightmap world and to the anchor's point on the datum sphere on a planet. `GpuApplyConditioningLines` walks it in one flat loop
+   with no attribute: per segment the nearest place on it and the squared distance, the nearest of a line's segments
+   kept; when the line index changes, and after the last segment, the line before blends
+   (`GpuBlendConditioningLine`: the distance, on a planet the arc under the chord with `asin` by its series as the
+   planet zones take it, the half width and target interpolated along the segment, the zone's weight profile, the
+   blend). The heightmap branch passes the voxel's offset in the plane, the planet branch `SurfaceOffset`. A chunk
+   with no segment skips the call on one count test. `VoxelWorlds.Generation.GPUvsCPULineParity` holds the two sides
+   to each other.
+
+   The same walk leaves the surface under the lines at the voxel's column (`ConditioningLineSurface`, the CPU's
+   `FVoxelChunkLineSurface`; `WORLD_MODES.md`, "The surface under a line"): the band's material and depth where the
+   voxel's column lies on a line's band (the later line's where two overlap) and the largest of the lines' minimum
+   cave depths, each times its line's profile there. A line of strength 0 has a profile and no weight, so it paints
+   and moves no height. The cave carve takes the depth (`GpuCaveCarve`'s `MinDepthUnderLines`: every layer's minimum
+   depth is at least it), and the material step writes the band's material down to its depth after the height rules
+   and before the cave-wall override and the ores, in the biome pipeline and in the depth-only one.
 2. **Biome blend** from temperature, moisture and continentalness, before the caves (the caves read the leading
    biome's cave overrides).
 3. **Caves**: `GpuCaveCarve` with the biome's overrides and the sea's minimum depth.
 4. **Material**: the blended biome material (dithered in blend zones, G39), underwater materials, height rules, the
    cave-wall override and ore veins.
+
+   **The water over a column** (the hydrology plan's H2; `WATER_SYSTEM.md`, "A chunk's water columns"). Steps 3 and
+   4 compare the column's terrain with the water over it: one level for the chunk (`WaterLevelEnabled`,
+   `WaterLevelHeight`, on a planet `PlanetWaterAltitude`), or, where a lake or a river reach may reach the chunk, the
+   chunk's water columns. The dispatch builds them with the function the CPU generator uses
+   (`FVoxelChunkWaterColumns::Build`, from the bodies the request carries) and uploads them once as
+   `WaterColumnData`, a `StructuredBuffer<float4>` with `WaterColumnsEnabled` set: a row a column on a heightmap world
+   (X + Y x the chunk size), and on a planet, which has no columns, the chunk size's rows of the down-lines' shifts and
+   then a row a down-line (`FVoxelDownLines`, the lines stage 2 walks; `PlanetWaterColumn` finds a voxel's line from the
+   shift rows, `WaterLineAxisA` and `WaterLineForward`). A row is `[the level the terrain is compared with, the level
+   a voxel is compared with, the minimum cave depth in voxels, 0]`: world Z on a heightmap world; on a planet the
+   level as an altitude over the datum and the level less the anchor's distance from the centre, both formed in
+   double; -1e30 where no body covers the column, which fails every comparison. The third value is a lake's minimum
+   cave depth over its footprint and deepens the caves' as a line's does. A chunk with one level uploads nothing: the
+   parameter stands on the line data's buffer and nothing reads it.
+   `VoxelWorlds.Generation.GPUvsCPUWaterBodiesParity` holds the two sides to each other.
 5. Pack density, material, biome and flags into one `uint` per voxel.
 
 ### Stage 2: Post-passes
@@ -85,6 +129,13 @@ thread does per-voxel work after it. Heightmap modes scan world-Z columns (`Wate
 `UndergroundColumnCS`, `UndergroundMarkCS`, `UndergroundApplyCS`); a planet scans digital lines along each chunk's local
 down (`WaterLineSeedCS`, `UndergroundLinesCS`, one thread per line, on the lines `FVoxelDownLines` computes for the CPU
 passes) and floods inside the sea sphere (`WaterFloodSweepRadialCS`).
+
+A chunk with water columns (a lake or a river reach may reach it) runs four other kernels for the water fill, which
+read the same buffer as `WaterColumns` in place of the one level: `WaterColumnSeedColumnsCS` (each column seeds from
+its own level, when that level is not under the chunk), `WaterFloodSweepColumnsCS` (a voxel takes water at or under
+its own column's level), and on a planet `WaterLineSeedColumnsCS` and `WaterFloodSweepRadialColumnsCS` (each
+down-line's own level; `DownLineOf` finds a voxel's line, and every line is walked). The kernels of a chunk with one
+level and their parameters are as they were, so a world with no lake and no river reach dispatches what it did.
 
 ### Stage 3: Readback
 
@@ -97,7 +148,8 @@ value (all air, all rock, open sea) so the chunk can be stored collapsed (G67). 
 ## Parity tests
 
 Generation on the GPU must equal the CPU's within float rounding. The `VoxelWorlds.Generation.GPUvsCPU*Parity` tests
-(`Material`, `BlendDither`, `IslandBowl`, `Caves`, `NoiseType`, `Water`, `OreVariant`, `Spherical`) and
+(`Material`, `BlendDither`, `IslandBowl`, `Caves`, `NoiseType`, `Water`, `OreVariant`, `Spherical`, `ClimateShaping`,
+`Line`, `WaterBodies`) and
 `Generation.GPUNoiseGeneratorAsync` compare whole chunks and log a CRC per case. They need a real RHI: under
 `-nullrhi` they skip themselves, so run them in the editor (the project `CLAUDE.md`, "Running correctness tests").
 

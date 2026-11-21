@@ -176,8 +176,20 @@ float NoiseSample(uint3 Cell, float3 Frac, float3 Offset, int NoiseType, int See
  * The octave loop is the classic FBM3D's: frequencies multiplied in float, amplitudes from 1, normalisation (no
  * amplitude parameter: it divided out, G88).
  */
-float NoiseFBM3D(int OriginBase, float3 OffsetUU, int NoiseType, int Seed, int Octaves, float Frequency, float Lacunarity,
-    float Persistence)
+// FVoxelNoise::RidgedOctave: (1 - |n|)^2, a crest where the sample crosses 0.
+float NoiseRidgedOctave(float Value)
+{
+    const float Ridge = 1.0f - abs(Value);
+    return Ridge * Ridge;
+}
+
+/**
+ * NoiseFBM3D with FVoxelNoiseParams::bRidged: Ridged != 0 sums ridged octaves and maps the normalised [0, 1] back to
+ * [-1, 1] (FVoxelNoise::FinishFBM). Only the terrain's fBm passes a Ridged from its parameters; every other field calls
+ * NoiseFBM3D, which is this with Ridged 0.
+ */
+float NoiseFBM3DRidged(int OriginBase, float3 OffsetUU, int NoiseType, int Seed, int Octaves, float Frequency, float Lacunarity,
+    float Persistence, int Ridged)
 {
     float Total = 0.0f;
     float CurrentFrequency = Frequency;
@@ -189,11 +201,23 @@ float NoiseFBM3D(int OriginBase, float3 OffsetUU, int NoiseType, int Seed, int O
         const int Index = (OriginBase + i) * 2;
         const uint3 Cell = asuint(NoiseOrigins[Index].xyz);
         const float3 Frac = NoiseOrigins[Index + 1].xyz;
-        Total += NoiseSample(Cell, Frac, OffsetUU * CurrentFrequency, NoiseType, Seed) * CurrentAmplitude;
+        const float Value = NoiseSample(Cell, Frac, OffsetUU * CurrentFrequency, NoiseType, Seed);
+        Total += (Ridged != 0 ? NoiseRidgedOctave(Value) : Value) * CurrentAmplitude;
         MaxValue += CurrentAmplitude;
         CurrentAmplitude *= Persistence;
         CurrentFrequency *= Lacunarity;
     }
     // The weights sum to 0 only with a negative Persistence: 0 then, as the CPU (G88)
-    return MaxValue > 0.0f ? Total / MaxValue : 0.0f;
+    if (MaxValue <= 0.0f)
+    {
+        return 0.0f;
+    }
+    const float Normalised = Total / MaxValue;
+    return Ridged != 0 ? Normalised * 2.0f - 1.0f : Normalised;
+}
+
+float NoiseFBM3D(int OriginBase, float3 OffsetUU, int NoiseType, int Seed, int Octaves, float Frequency, float Lacunarity,
+    float Persistence)
+{
+    return NoiseFBM3DRidged(OriginBase, OffsetUU, NoiseType, Seed, Octaves, Frequency, Lacunarity, Persistence, 0);
 }

@@ -1,7 +1,15 @@
 # DC Material Blend Plan
 
-> State as of 2026-11-02 (code review CR5). Open research: scoped, not started. The voxel meshes keep crisp material
-> borders; only the far field blends materials (G45, below).
+> **Frozen 2026-11-06: done as VP2-O4.** The result is in `Features/DUAL_CONTOURING.md` ("Materials and soft borders")
+> and `Features/MATERIAL_SYSTEM.md` ("Soft Material Borders"). What changed from this plan:
+> - The shader side is the far field's `FarFieldMaterialPick` (the dither, no second sample). No material graph changed.
+> - The transport is not UV1.y and colour A from the mesher. It is a per-vertex array of its own,
+>   `FChunkMeshData::MaterialBlends`, then `FVoxelVertex` bits 16-23 and flag bits 24-25.
+> - The weight is one bit per vertex: the cell has the second material or not.
+> - A cell's material is a vote of its crossings' solid endpoints, which makes a vertex show its cell's material in every
+>   quad.
+> - The seams share the interior pass's emission (`VoxelDCMaterialBlend::EmitQuadCells`).
+> - The GPU Dual Contouring mesher this plan names was retired in code review CR1.
 
 Soft cross-fade transitions at Dual Contouring material borders. Follow-up to the
 material-border striping fix (per-quad materials + border vertex duplication,

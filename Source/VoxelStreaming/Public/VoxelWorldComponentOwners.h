@@ -6,6 +6,7 @@
 #include "VoxelWorldModeTypes.h"
 #include "VoxelFarOcean.h"
 #include "VoxelPlanetOcean.h"
+#include "VoxelWaterLevels.h"
 #include "VoxelWorldComponentOwners.generated.h"
 
 class AActor;
@@ -160,6 +161,86 @@ private:
 
 	/** Whether the underside (section 1) is shown: only while the viewer is inside the sea radius */
 	bool bUndersideShown = false;
+};
+
+/**
+ * The drawn lakes and river reaches (the hydrology plan's section 5.6, D147): one procedural mesh component a body at
+ * the body's own origin, section 0 its surface and section 1 its underside (FVoxelWaterBodyMesh), in every world mode,
+ * inside the voxel window and beyond it. The chunk manager hands it the bodies to draw whenever they change; a body
+ * already drawn is kept, a new one built, one no longer handed over destroyed. A lake draws with the sea's material, a
+ * river reach with the river's (the same master, its ripples moving downstream). A dedicated server builds none.
+ */
+USTRUCT()
+struct VOXELSTREAMING_API FVoxelWaterBodyMeshOwner
+{
+	GENERATED_BODY()
+
+	/** What one Update did */
+	struct FUpdateResult
+	{
+		int32 Built = 0;
+		int32 Removed = 0;
+		int32 Kept = 0;
+	};
+
+	/**
+	 * Draw exactly these bodies: build the ones not drawn yet, keep the ones that are (a body is the same while its id,
+	 * its level and its footprint's own data are), destroy the rest.
+	 * @param Owner          The actor the components are added to
+	 * @param Bodies         The lakes and river reaches to draw (a sea record is skipped)
+	 * @param Frame          The world's frame
+	 * @param VoxelSize      The voxel size (the meshes' UVs count voxels)
+	 * @param LakeMaterial   The water's material (a lake's)
+	 * @param RiverMaterial  A river reach's material (null: the lake's)
+	 * @param bVisible       Whether the meshes are shown (voxel.Water.BodyMeshes)
+	 * @param ViewerPosition The viewer: decides each underside's first state
+	 * @return What was built, kept and removed
+	 */
+	FUpdateResult Update(AActor* Owner, TConstArrayView<FVoxelWaterBody> Bodies, const FVoxelWaterFrame& Frame, double VoxelSize,
+		UMaterialInterface* LakeMaterial, UMaterialInterface* RiverMaterial, bool bVisible, const FVector& ViewerPosition);
+
+	/** Destroy every component. */
+	void Destroy();
+
+	/** Show each body's underside while the viewer is under that body's surface, in its footprint; hide it otherwise. */
+	void UpdateUndersides(const FVector& ViewerPosition);
+
+	/** Show or hide every body's mesh (voxel.Water.BodyMeshes). */
+	void SetVisible(bool bVisible);
+
+	/** @return How many bodies are drawn */
+	int32 Num() const { return Entries.Num(); }
+
+	/** @return The component that draws a body (section 0 its surface, 1 its underside), or null */
+	UProceduralMeshComponent* Find(uint32 BodyId) const;
+
+	/** @return Whether a body's underside is shown now (false for a body not drawn) */
+	bool IsUndersideShown(uint32 BodyId) const;
+
+	/** @return The quads drawn over all bodies */
+	int32 GetNumQuads() const;
+
+private:
+	/** One drawn body */
+	struct FEntry
+	{
+		/** The record the mesh was built from */
+		FVoxelWaterBody Body;
+		/** The body alone as water levels: what the underside's test samples */
+		FVoxelWaterLevels Levels;
+		int32 Quads = 0;
+		bool bUndersideShown = false;
+	};
+
+	/** One component per drawn body, in the entries' order (owned by the chunk manager's actor) */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UProceduralMeshComponent>> Components;
+
+	/** The drawn bodies, parallel to Components */
+	TArray<FEntry> Entries;
+
+	/** Counts the components made, for their names */
+	int32 Serial = 0;
 };
 
 /**

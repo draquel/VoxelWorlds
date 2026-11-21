@@ -3,8 +3,13 @@
 #include "VoxelMeshRenderer.h"
 #include "VoxelRendering.h"
 #include "VoxelRegionComponent.h"
+#include "VoxelChunkNaniteSceneProxy.h"
+#include "VoxelShadowMethod.h"
+#include "Misc/App.h"
 #include "VoxelWorldConfiguration.h"
 #include "VoxelMaterialAtlas.h"
+#include "VoxelBiomeLookup.h"
+#include "Engine/Texture2D.h"
 #include "VoxelVertex.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -50,6 +55,9 @@ void FVoxelMeshRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguratio
 	// Render regions (WM-BP7): a planet splits into regions of voxel.Render.RegionChunks^3 chunks, heightmaps keep one
 	Regions = FVoxelRenderRegions::FromConfig(*WorldConfig);
 
+	// The biome lookup the materials read for the weather's snow and wetness (P3): one per world, from the configuration's biomes
+	BiomeLookup.Reset(FVoxelBiomeLookup::Build(WorldConfig->bEnableBiomes ? WorldConfig->BiomeConfiguration.Get() : nullptr));
+
 	// Spawn container actor (no fixed Name — multiple renderers may coexist)
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.ObjectFlags |= RF_Transient;
@@ -67,12 +75,24 @@ void FVoxelMeshRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguratio
 	Actor->SetActorLabel(TEXT("VoxelCustomVFContainer"));
 #endif
 
+	// The world's shadow method (D164), before the first region component reads the virtual shadow maps for its Nanite
+	// setting's Auto; nothing to draw on a dedicated server
+	if (FApp::CanEverRender() && World->GetNetMode() != NM_DedicatedServer)
+	{
+		bHoldsShadowMethod = FVoxelShadowMethodOverride::Acquire(WorldConfig->ShadowMethod, World->GetName());
+	}
+
 	// The primary world component: the only one on a heightmap world (at the world origin), region (0, 0, 0) on a planet.
 	// It lives as long as the renderer; region components come and go with their content.
 	OriginRegionComponent = CreateRegionComponent(FIntVector::ZeroValue);
 	if (!OriginRegionComponent)
 	{
 		UE_LOG(LogVoxelRendering, Error, TEXT("FVoxelMeshRenderer: Failed to create world component"));
+		if (bHoldsShadowMethod)
+		{
+			FVoxelShadowMethodOverride::Release();
+			bHoldsShadowMethod = false;
+		}
 		Actor->Destroy();
 		ContainerActor.Reset();
 		return;
@@ -83,6 +103,11 @@ void FVoxelMeshRenderer::Initialize(UWorld* World, const UVoxelWorldConfiguratio
 		bIsSmooth ? TEXT("Triplanar") : TEXT("Cubic"),
 		bIsSmooth ? TEXT("true") : TEXT("false"),
 		Regions.IsSplit() ? *FString::Printf(TEXT("of %d^3 chunks"), Regions.RegionChunks) : TEXT("off (one primitive at the origin)"));
+	// The terrain on Nanite or not, and why (D158): the world's setting, the override, and where Nanite can draw
+	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelMeshRenderer: the terrain on Nanite %s (setting %s, voxel.Render.Nanite %d, virtual shadows %d, shadow method %s, net mode %d)"),
+		OriginRegionComponent->IsNaniteTerrain() ? TEXT("on") : TEXT("off"), *UEnum::GetValueAsString(WorldConfig->NaniteTerrain),
+		GetVoxelNaniteOverride(), IsVoxelVirtualShadowMapEnabled() ? 1 : 0, *UEnum::GetValueAsString(WorldConfig->ShadowMethod),
+		int32(World->GetNetMode()));
 
 	bIsInitialized = true;
 	UE_LOG(LogVoxelRendering, Log, TEXT("FVoxelMeshRenderer initialized"));
@@ -110,10 +135,14 @@ UVoxelRegionComponent* FVoxelMeshRenderer::CreateRegionComponent(const FIntVecto
 	Component->SetWorldOrigin(WorldConfig->WorldOrigin);
 	// A planet's face types (top, side, bottom) go by the radial up (spherical SP-D3); its centre is WorldOrigin.
 	Component->SetRadialFaceUp(WorldConfig->WorldMode == EWorldMode::SphericalPlanet, WorldConfig->WorldOrigin);
+	// The terrain on Nanite or not (D158): the world's choice, under voxel.Render.Nanite
+	Component->SetNaniteTerrain(WorldConfig->NaniteTerrain);
+	Component->SetNaniteMaterial(WorldConfig->NaniteMaterial.ToSoftObjectPath());
 
 	// Sync material mode with configuration's meshing mode
 	// Both MarchingCubes and DualContouring use triplanar texturing instead of atlas faces
 	Component->SetUseSmoothMeshing(WorldConfig->MeshingMode != EMeshingMode::Cubic);
+	Component->SetBiomeLookup(BiomeLookup.Get());
 
 	// The region's origin (WM-BP7): the proxy stores its vertices relative to the component's location. The world origin
 	// (0, 0, 0) when not split, as the single component always was.
@@ -233,6 +262,13 @@ void FVoxelMeshRenderer::Shutdown()
 	// Clear all chunks and water tiles first
 	ClearAllChunks();
 	ClearAllWaterTiles();
+
+	// The world's shadow method ends with it (D164)
+	if (bHoldsShadowMethod)
+	{
+		FVoxelShadowMethodOverride::Release();
+		bHoldsShadowMethod = false;
+	}
 
 	// Destroy the components (the primary one is among them)
 	for (const TPair<FIntVector, TObjectPtr<UVoxelRegionComponent>>& Pair : RegionComponents)
@@ -913,6 +949,7 @@ void FVoxelMeshRenderer::ConvertToVoxelVertices(
 	const bool bHasNormals = MeshData.Normals.Num() >= VertexCount;
 	const bool bHasUVs = MeshData.UVs.Num() >= VertexCount;
 	const bool bHasColors = MeshData.Colors.Num() >= VertexCount;
+	const bool bHasBlends = MeshData.MaterialBlends.Num() >= VertexCount;
 
 	FVector3f BoundsMin(FLT_MAX, FLT_MAX, FLT_MAX);
 	FVector3f BoundsMax(-FLT_MAX, -FLT_MAX, -FLT_MAX);
@@ -944,6 +981,9 @@ void FVoxelMeshRenderer::ConvertToVoxelVertices(
 			Vertex.SetBiomeID(0);
 			Vertex.SetAO(0);
 		}
+		// The soft material border's blend (VP2-O4; 0 = none). Set on every vertex: the array is uninitialized, and
+		// the setters above leave these bits alone
+		Vertex.SetMaterialBlend(bHasBlends ? MeshData.MaterialBlends[i] : 0);
 	}
 
 	if (VertexCount > 0)

@@ -5,7 +5,7 @@
 // per-voxel pipeline of FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet, in the same order, so GPU and CPU planets
 // match (VoxelWorlds.Generation.GPUvsCPUSphericalParity). Any change here must be mirrored there.
 //
-// Include AFTER the generation globals (GenerateVoxelDensity.usf), BiomeMaterial.ush, VoxelNoise.ush and the shared
+// Include AFTER the generation globals (GenerateVoxelDensity.usf), BiomeMaterial.ush, ConditioningLines.ush, VoxelNoise.ush and the shared
 // helpers MakePlanetVoxelFrame / GpuContinentalnessCurves / GpuCaveCarve (caves along local up): this file reads the
 // Planet*, Cave*, biome, ore and water globals.
 //
@@ -192,11 +192,21 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
             NoiseFBM3D(ContinentNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, ContinentalnessSeed, 2, ContinentalnessFrequency, 2.0f, 0.5f),
             EffectiveBaseHeight, EffectiveHeightScale);
     }
-    const float TerrainNoise = NoiseFBM3D(TerrainNoiseOrigin, SurfaceOffset,
-        NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseLacunarity, NoisePersistence);
+    const float TerrainNoise = NoiseFBM3DRidged(TerrainNoiseOrigin, SurfaceOffset,
+        NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseLacunarity, NoisePersistence, NoiseRidged);
     float TerrainAltitude = EffectiveBaseHeight + TerrainNoise * EffectiveHeightScale * 0.5f;
 
-    // Terrain conditioning (SP-B10): the planet zones blend the altitude along this direction before the SDF, as on the CPU.
+    // Terrain conditioning (SP-B10): the planet lines (the chunk's segment list, relative to the anchor's datum point),
+    // then the planet zones, blend the altitude along this direction before the SDF, as on the CPU. The lines also
+    // leave a surface along this direction: the band's material and depth, the caves' minimum depth.
+    ConditioningLineSurface LineSurface;
+    LineSurface.BandMaterial = -1;
+    LineSurface.BandDepth = 0.0f;
+    LineSurface.MinCaveDepth = 0.0f;
+    if (ConditioningLineSegmentCount > 0)
+    {
+        TerrainAltitude = GpuApplyConditioningLines(SurfaceOffset, TerrainAltitude, PlanetRadius, LineSurface);
+    }
     if (ConditioningZoneCount > 0)
     {
         TerrainAltitude = PlanetApplyConditioning(SurfaceOffset, TerrainAltitude);
@@ -207,8 +217,19 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     const float DepthBelowSurface = (TerrainAltitude - Altitude) / VoxelSize;
 
     // Height rules read the altitude above the datum (SP-B2); caves under the sea keep the underwater minimum depth (SP-B6).
-    // The sea is an altitude too.
-    const bool bUnderwaterColumn = (WaterLevelEnabled != 0) && (TerrainAltitude < PlanetWaterAltitude);
+    // The sea is an altitude too. With a lake or a river reach near, the water over the voxel is its down-line's row of
+    // the chunk's water columns (PlanetWaterColumn): the level as an altitude, and a lake's minimum cave depth.
+    bool bLineWater = (WaterLevelEnabled != 0);
+    float LineWaterAltitude = PlanetWaterAltitude;
+    [branch]
+    if (WaterColumnsEnabled != 0)
+    {
+        const float4 WaterRow = PlanetWaterColumn(VoxelCoord);
+        bLineWater = true;
+        LineWaterAltitude = WaterRow.x;
+        LineSurface.MinCaveDepth = max(LineSurface.MinCaveDepth, WaterRow.z);
+    }
+    const bool bUnderwaterColumn = bLineWater && (TerrainAltitude < LineWaterAltitude);
 
     const uint PreCaveDensity = Density;
     uint MaterialID;
@@ -216,8 +237,12 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     if (BiomeCount > 0)
     {
         // Temperature and moisture on the datum sphere, like the terrain (SP-B1)
-        const float Temperature = NoiseFBM3D(TemperatureNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 2.0f, 0.5f);
-        const float Moisture = NoiseFBM3D(MoistureNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 2.0f, 0.5f);
+        // shaped as on the CPU: equalised, toward latitude (the column direction's Z), the lapse over its altitude
+        const float Temperature = GpuShapeTemperature(
+            NoiseFBM3D(TemperatureNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, TemperatureSeed, 2, TemperatureFrequency, 2.0f, 0.5f),
+            TerrainAltitude, Frame.Dir.z, 1);
+        const float Moisture = GpuShapeMoisture(
+            NoiseFBM3D(MoistureNoiseOrigin, SurfaceOffset, VOXELGEN_NOISE_TYPE_SIMPLEX, MoistureSeed, 2, MoistureFrequency, 2.0f, 0.5f));
         const BiomeBlendResult Blend = SampleGpuBiomeBlend(Temperature, Moisture, Continentalness);
         const GpuBiome Dominant = LoadGpuBiome(Blend.Indices[0]);
         OutBiomeID = Dominant.BiomeID;
@@ -226,15 +251,21 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         float CaveCarve = 0.0f;
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            CaveCarve = GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, OutBiomeID, bUnderwaterColumn, true);
+            CaveCarve = GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, OutBiomeID, bUnderwaterColumn, true, LineSurface.MinCaveDepth);
             Density = ApplyCaveCarve(Density, CaveCarve);
         }
 
         // Underwater materials when the column's terrain is under the sea (GetBlendedMaterialWithWater by altitude)
-        const bool bUnderwaterMaterial = (WaterLevelEnabled != 0) && (EnableUnderwaterMaterials != 0) && (TerrainAltitude < PlanetWaterAltitude);
+        const bool bUnderwaterMaterial = bUnderwaterColumn && (EnableUnderwaterMaterials != 0);
         MaterialID = GpuBlendedMaterial(Blend, DepthBelowSurface, bUnderwaterMaterial, BlendDitherBase + int3(VoxelCoord));
 
         MaterialID = ApplyGpuHeightRules(MaterialID, Altitude, DepthBelowSurface);
+
+        // A conditioning line's band, as in the heightmap branch: after the height rules, before the cave walls and ores
+        if (LineSurface.BandMaterial >= 0 && DepthBelowSurface < LineSurface.BandDepth)
+        {
+            MaterialID = (uint)LineSurface.BandMaterial;
+        }
 
         if (CaveWallOverrideEnabled != 0 && CaveCarve > 0.0f && CaveCarve < 1.0f
             && Density >= 127u && DepthBelowSurface >= CaveWallMaterialMinDepth)
@@ -258,9 +289,13 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
     else
     {
         MaterialID = GetMaterialForPlanet(DepthBelowSurface * VoxelSize);
+        if (LineSurface.BandMaterial >= 0 && DepthBelowSurface < LineSurface.BandDepth)
+        {
+            MaterialID = (uint)LineSurface.BandMaterial;
+        }
         if (CaveEnabled != 0 && Density >= 127u && DepthBelowSurface > 0.0f)
         {
-            Density = ApplyCaveCarve(Density, GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, 0u, bUnderwaterColumn, true));
+            Density = ApplyCaveCarve(Density, GpuCaveCarve(WorldPos, Frame, DepthBelowSurface, 0u, bUnderwaterColumn, true, LineSurface.MinCaveDepth));
         }
     }
 

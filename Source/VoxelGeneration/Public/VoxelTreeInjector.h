@@ -75,6 +75,10 @@ public:
 	 * @param bEnableWaterLevel Whether water level is active
 	 * @param WaterLevel Water level height (trees below this are skipped)
 	 * @param InOutVoxelData Voxel data to modify (must be ChunkSize^3 elements)
+	 * @param Conditioning The conditioning over the chunk and the source chunks around it (GetSourceChunkRadius of them
+	 *        each way), or null: its lines and its zones (ComputeTreePositionsForChunk)
+	 * @param WaterOver The water levels gathered over the same chunks where a lake or a river reach lies there, or null:
+	 *        each tree is then tested against the level over its own column (ComputeTreePositionsForChunk)
 	 */
 	static void InjectTrees(
 		const FIntVector& ChunkCoord,
@@ -86,7 +90,19 @@ public:
 		float TreeDensity,
 		const UVoxelBiomeConfiguration* BiomeConfig,
 		bool bEnableWaterLevel, float WaterLevel,
-		TArray<FVoxelData>& InOutVoxelData);
+		TArray<FVoxelData>& InOutVoxelData,
+		const struct FVoxelConditioning* Conditioning = nullptr,
+		const class FVoxelWaterLevels* WaterOver = nullptr);
+
+	/**
+	 * How many chunks each way in X and Y a chunk's trees may be planted in: a tree in a neighbouring chunk reaches into
+	 * this one by its canopy. InjectTrees and FindTreesWithTrunkAt compute the source chunks' trees this far out, so the
+	 * conditioning they are given covers the chunk grown by as many chunks.
+	 * @param Templates The world's tree templates
+	 * @param ChunkSize Voxels per chunk edge
+	 * @return The radius in chunks, at least 1
+	 */
+	static int32 GetSourceChunkRadius(const TArray<FVoxelTreeTemplate>& Templates, int32 ChunkSize);
 
 	/**
 	 * Compute deterministic tree positions for a specific source chunk.
@@ -107,6 +123,17 @@ public:
 	 * @param OutGlobalVoxelPositions Global voxel coordinates of tree base positions
 	 * @param OutTemplateIDs Template ID for each tree
 	 * @param OutSeeds Per-tree random seed
+	 * @param Conditioning The conditioning over the source chunk, or null. No tree is planted inside a line's clear width
+	 *        (the terrain lines plan's L3), and a tree stands on the ground generation makes at its column: the natural
+	 *        height with the lines' blend and then the zones' (FVoxelConditioning::ApplyToHeight; G206), so a tree beside
+	 *        a road stands on the ground the road leaves and a tree on a POI's pad on the pad. Its height rule, its water
+	 *        check and its surface material are judged at that height. With no conditioning (null, or a set with no line
+	 *        and no zone) the trees are the natural ground's. Every caller passes the same conditioning for a place (a
+	 *        complete gather), so the trees are the same ones
+	 * @param WaterOver The water levels gathered over the source chunk (a complete gather), or null. With a lake or a
+	 *        river reach in them a tree is tested against the level over its own column in place of bEnableWaterLevel
+	 *        and WaterLevel (the hydrology plan's section 5.4): no tree stands in a pond, and one beside it does. Null,
+	 *        or the sea alone: the scalar, as before
 	 */
 	static void ComputeTreePositionsForChunk(
 		const FIntVector& SourceChunkCoord,
@@ -120,7 +147,9 @@ public:
 		bool bEnableWaterLevel, float WaterLevel,
 		TArray<FIntVector>& OutGlobalVoxelPositions,
 		TArray<int32>& OutTemplateIDs,
-		TArray<uint32>& OutSeeds);
+		TArray<uint32>& OutSeeds,
+		const struct FVoxelConditioning* Conditioning = nullptr,
+		const class FVoxelWaterLevels* WaterOver = nullptr);
 
 	/**
 	 * Every voxel one tree's stamp writes, in the order the stamp writes them (canopy, then trunk), the trunk's base block
@@ -142,6 +171,8 @@ public:
 	 *
 	 * @param GlobalVoxel The voxel (global voxel coordinate)
 	 * @param OutTrees Receives the trees (appended); usually one, two only where trunks touch
+	 * @param Conditioning The conditioning over the voxel's chunk and the source chunks around it, as InjectTrees takes it
+	 * @param WaterOver The water levels over the same chunks, as InjectTrees takes them
 	 */
 	static void FindTreesWithTrunkAt(
 		const FIntVector& GlobalVoxel,
@@ -153,7 +184,9 @@ public:
 		float TreeDensity,
 		const UVoxelBiomeConfiguration* BiomeConfig,
 		bool bEnableWaterLevel, float WaterLevel,
-		TArray<FVoxelTreeInstance>& OutTrees);
+		TArray<FVoxelTreeInstance>& OutTrees,
+		const struct FVoxelConditioning* Conditioning = nullptr,
+		const class FVoxelWaterLevels* WaterOver = nullptr);
 
 private:
 	/**

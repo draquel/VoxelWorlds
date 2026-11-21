@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Testing/VoxelTestChunkWorld.h"
+#include "Testing/VoxelTestScopedCVar.h"
 #include "Misc/AutomationTest.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -125,6 +126,11 @@ bool FVoxelPlanetCutoverDescentTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Lead: none under the clearance"), UVoxelChunkManager::ComputeDescentLead(-40000.0, 600.0, 3.0, 1500.0, 1000.0), 0.0);
 	}
 
+	// The configuration's cut-over and the default lead for the run, whatever the console set, and the sets below over
+	// them: each at the variable's own priority, at least code's, since a code set under a console one is ignored (G249).
+	const VoxelTesting::FScopedCVar ConfiguredCutover(TEXT("voxel.Stream.VoxelCutover"), -1.0f);
+	const VoxelTesting::FScopedCVar DefaultLead(TEXT("voxel.Stream.DescentLead"), 3.0f);
+
 	FOrbitWorld W;
 	W.Start(TEXT("VoxelPlanetCutoverTestWorld"));
 	const FVector Up = FVector(0.3, -0.2, 1.0).GetSafeNormal();
@@ -172,25 +178,19 @@ bool FVoxelPlanetCutoverDescentTest::RunTest(const FString& Parameters)
 
 	// Between the resume altitude and the cut-over: still suspended (hysteresis). The bench view jumps there (a descent of
 	// thousands of uu in a frame), which the descent prefetch would lead: off for the jumps, on again for the descent.
-	IConsoleVariable* LeadVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.DescentLead"));
-	const float SavedLead = LeadVar ? LeadVar->GetFloat() : 0.0f;
-	if (LeadVar)
+	int32 Back = 0;
 	{
-		LeadVar->Set(0.0f, ECVF_SetByCode);
-	}
-	TestTrue(TEXT("Settled between the resume altitude and the cut-over"), W.SettleAt(At(0.5 * (FDistanceBandLODStrategy::CutoverResumeFraction + 1.0) * Cutover)));
-	TestTrue(TEXT("Under the cut-over but over the resume altitude the window stays suspended"), W.Manager->IsVoxelWindowSuspended());
-	TestEqual(TEXT("... and empty"), W.Manager->GetLoadedChunkCount(), 0);
+		const VoxelTesting::FScopedCVar NoLead(TEXT("voxel.Stream.DescentLead"), 0.0f);
+		TestTrue(TEXT("Settled between the resume altitude and the cut-over"), W.SettleAt(At(0.5 * (FDistanceBandLODStrategy::CutoverResumeFraction + 1.0) * Cutover)));
+		TestTrue(TEXT("Under the cut-over but over the resume altitude the window stays suspended"), W.Manager->IsVoxelWindowSuspended());
+		TestEqual(TEXT("... and empty"), W.Manager->GetLoadedChunkCount(), 0);
 
-	// Under the resume altitude: the window streams back, the edited chunk with it.
-	TestTrue(TEXT("Settled back on the ground"), W.SettleAt(At(300.0)));
-	TestFalse(TEXT("Back on the ground the window resumed"), W.Manager->IsVoxelWindowSuspended());
-	const int32 Back = W.Manager->GetLoadedChunkCount();
-	TestTrue(TEXT("Back on the ground the window holds what it held before"), FMath::Abs(Back - OnTheGround) <= OnTheGround / 10);
-	TestTrue(TEXT("The edited chunk is back"), W.Manager->IsChunkLoaded(EditedChunk));
-	if (LeadVar)
-	{
-		LeadVar->Set(SavedLead, ECVF_SetByCode);
+		// Under the resume altitude: the window streams back, the edited chunk with it.
+		TestTrue(TEXT("Settled back on the ground"), W.SettleAt(At(300.0)));
+		TestFalse(TEXT("Back on the ground the window resumed"), W.Manager->IsVoxelWindowSuspended());
+		Back = W.Manager->GetLoadedChunkCount();
+		TestTrue(TEXT("Back on the ground the window holds what it held before"), FMath::Abs(Back - OnTheGround) <= OnTheGround / 10);
+		TestTrue(TEXT("The edited chunk is back"), W.Manager->IsChunkLoaded(EditedChunk));
 	}
 
 	// A fast descent from above the cut-over: the window resumes while the camera is still over the resume altitude, the
@@ -228,15 +228,12 @@ bool FVoxelPlanetCutoverDescentTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Stopped, the streaming viewer is the camera"), W.Manager->GetStreamingViewerLead(), 0.0);
 
 	// voxel.Stream.VoxelCutover 0: never suspended.
-	IConsoleVariable* CutoverVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.VoxelCutover"));
-	if (CutoverVar)
+	if (IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.VoxelCutover")))
 	{
-		const float Saved = CutoverVar->GetFloat();
-		CutoverVar->Set(0.0f, ECVF_SetByCode);
+		const VoxelTesting::FScopedCVar Never(TEXT("voxel.Stream.VoxelCutover"), 0.0f);
 		TestTrue(TEXT("Settled high with the cut-over off"), W.SettleAt(At(3.0 * Cutover)));
 		TestFalse(TEXT("With voxel.Stream.VoxelCutover 0 the window is never suspended"), W.Manager->IsVoxelWindowSuspended());
 		TestTrue(TEXT("... and keeps its ground disk"), W.Manager->GetLoadedChunkCount() > 30);
-		CutoverVar->Set(Saved, ECVF_SetByCode);
 	}
 
 	W.Stop();
@@ -262,15 +259,14 @@ bool FVoxelPlanetCutoverDescentStopTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelPlanetOrbitTestUtils;
 
-	IConsoleVariable* CutoverVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.VoxelCutover"));
-	IConsoleVariable* LeadVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.DescentLead"));
-	if (!CutoverVar || !LeadVar)
+	if (!IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.VoxelCutover")) || !IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Stream.DescentLead")))
 	{
 		return false;
 	}
-	const float SavedCutover = CutoverVar->GetFloat();
-	const float SavedLead = LeadVar->GetFloat();
-	LeadVar->Set(3.0f, ECVF_SetByConsole);
+	// The configuration's cut-over and a lead of 3 s for the run, whatever the console set, each at the variable's own
+	// priority, at least code's (G249); given back at it when the test ends.
+	const VoxelTesting::FScopedCVar ConfiguredCutover(TEXT("voxel.Stream.VoxelCutover"), -1.0f);
+	const VoxelTesting::FScopedCVar DefaultLead(TEXT("voxel.Stream.DescentLead"), 3.0f);
 
 	FOrbitWorld W;
 	W.Start(TEXT("VoxelPlanetCutoverStopTestWorld"));
@@ -371,7 +367,7 @@ bool FVoxelPlanetCutoverDescentStopTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("The resume came with the camera at the cut-over (within a tick)"), StopLow.ResumedAt <= Cutover && StopLow.ResumedAt >= Cutover - Fast);
 
 	// The cut-over at 40,000: a lead inside the band resumes with the camera under the cut-over; a lead past it at it.
-	CutoverVar->Set(40000.0f, ECVF_SetByConsole);
+	const VoxelTesting::FScopedCVar WideCutover(TEXT("voxel.Stream.VoxelCutover"), 40000.0f);
 	const double Wide = 40000.0;
 	TestTrue(TEXT("Settled over the wide cut-over"), W.SettleAt(At(Wide + 6000.0)));
 	const FDescent Slow = Descend(Wide + 6000.0, 300.0, 30.0, 1, true);
@@ -381,8 +377,6 @@ bool FVoxelPlanetCutoverDescentStopTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("A lead inside the band: resumed with the camera under the cut-over"), Slow.ResumedAt > 0.0 && Slow.ResumedAt <= Wide);
 	TestTrue(TEXT("A lead past the band: resumed at the cut-over"), Quick.ResumedAt <= Wide && Quick.ResumedAt > Wide - 100.0);
 
-	CutoverVar->Set(SavedCutover, ECVF_SetByConsole);
-	LeadVar->Set(SavedLead, ECVF_SetByConsole);
 	W.Stop();
 	return true;
 }
@@ -399,6 +393,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelPlanetCutoverFarFieldGateTest,
 bool FVoxelPlanetCutoverFarFieldGateTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelPlanetOrbitTestUtils;
+
+	// The configuration's cut-over, whatever the console set (G249).
+	const VoxelTesting::FScopedCVar ConfiguredCutover(TEXT("voxel.Stream.VoxelCutover"), -1.0f);
 
 	// At the priority the variable already holds (a console set earlier in a suite run outranks a code set).
 	IConsoleVariable* FarFieldVar = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.World.FarField"));

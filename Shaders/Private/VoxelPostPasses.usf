@@ -46,6 +46,15 @@ float3 PlanetAnchorDir;   // the anchor's direction from the planet centre
 float PlanetAnchorDist;   // the anchor's distance from the planet centre
 float PlanetSeaAltitudeOverAnchor; // WaterRadius - |anchor|, formed in double: below the sea when DeltaR <= this
 
+// The chunk's water columns (FVoxelChunkWaterColumns; the hydrology plan's section 5.4), read by the column kernels
+// (WaterColumnSeedColumnsCS, WaterLineSeedColumnsCS, WaterFloodSweepColumnsCS, WaterFloodSweepRadialColumnsCS), which
+// run in place of the four above for a chunk a lake or a river reach may reach: a level per column, or per down-line
+// on a planet, in place of the one level. A row's second value is the level a voxel is compared with: world Z on a
+// heightmap world (as WaterLevel), the level less the anchor's distance from the centre on a planet (as
+// PlanetSeaAltitudeOverAnchor); -1e30 where no body covers the column, which fails every comparison.
+StructuredBuffer<float4> WaterColumns;
+uint WaterColumnBase;     // the first column's row: 0 on a heightmap world, ChunkSize on a planet (the shift rows come first)
+
 RWStructuredBuffer<uint> VoxelData;
 RWStructuredBuffer<uint> ScratchFlags;   // UndergroundMark/Apply: 1 uint per voxel, 1 = flag this voxel
 
@@ -59,10 +68,16 @@ bool IsSolid(uint Packed)
     return ((Packed >> 8) & 0xFFu) >= VOXELGEN_SURFACE_THRESHOLD;
 }
 
+// A voxel's distance from the planet centre less the anchor's, in the chunk's frame.
+float PlanetVoxelDeltaR(uint3 Local)
+{
+    return PlanetFrameDeltaR(float3(Local) * VoxelSize - PlanetAnchorLocal, PlanetAnchorDir, PlanetAnchorDist);
+}
+
 // FVoxelSeaSurface::IsBelow for a planet's sea sphere, in the chunk's frame.
 bool IsBelowSeaSphere(uint3 Local)
 {
-    return PlanetFrameDeltaR(float3(Local) * VoxelSize - PlanetAnchorLocal, PlanetAnchorDir, PlanetAnchorDist) <= PlanetSeaAltitudeOverAnchor;
+    return PlanetVoxelDeltaR(Local) <= PlanetSeaAltitudeOverAnchor;
 }
 
 // The voxel a digital line (FVoxelDownLines) visits at step K, if it is inside the chunk. LineB / LineC are the line's
@@ -103,24 +118,31 @@ bool DownLineFromThread(uint LineId, out int LineB, out int LineC)
     return LineId < Span * Span;
 }
 
+// The id of the line a voxel is on (FVoxelDownLines::LineOf): with K the step along the lines' axis from the chunk's
+// upper side, (B - ShiftB + N) + (C - ShiftC + N) * 3N.
+uint DownLineOf(uint3 Local)
+{
+    const uint A = (LineAxisA == 0u) ? Local.x : ((LineAxisA == 1u) ? Local.y : Local.z);
+    const uint B = (LineAxisA == 0u) ? Local.y : ((LineAxisA == 1u) ? Local.z : Local.x);
+    const uint C = (LineAxisA == 0u) ? Local.z : ((LineAxisA == 1u) ? Local.x : Local.y);
+    const uint K = (LineForward != 0u) ? A : ChunkSize - 1u - A;
+    const int2 Shift = LineShifts[K];
+    const int LineB = (int)B - Shift.x + (int)ChunkSize;
+    const int LineC = (int)C - Shift.y + (int)ChunkSize;
+    return (uint)LineB + (uint)LineC * 3u * ChunkSize;
+}
+
 // ==================== Water fill: phase 1 — column seed ====================
 // One thread per XY column. Mirrors ApplyWaterFillPass phase 1: if the column is open from the
 // chunk top down to the water level (no solid / cave-flagged voxels), flag water from the water
-// level downward until a solid or cave barrier. Dispatched only when the chunk contains the
-// water level (matching the CPU bChunkContainsWaterLevel gate).
-[numthreads(8, 8, 1)]
-void WaterColumnSeedCS(uint3 ThreadId : SV_DispatchThreadID)
+// level downward until a solid or cave barrier. Dispatched when the chunk contains the water
+// level or lies wholly under it (WaterZ clamps to the top layer, G129), as the CPU pass gates it.
+void WaterColumnSeed(uint X, uint Y, float Level)
 {
-    const uint X = ThreadId.x;
-    const uint Y = ThreadId.y;
-    if (X >= ChunkSize || Y >= ChunkSize)
-    {
-        return;
-    }
-
-    const int WaterZ = clamp((int)floor((WaterLevel - ChunkWorldZ) / VoxelSize), 0, (int)ChunkSize - 1);
+    const int WaterZ = clamp((int)floor((Level - ChunkWorldZ) / VoxelSize), 0, (int)ChunkSize - 1);
 
     // Openness check from the chunk top down to (exclusive) the water level.
+    bool bColumnOpen = true;
     if (WaterZ < (int)ChunkSize - 1)
     {
         for (int Z = (int)ChunkSize - 1; Z > WaterZ; --Z)
@@ -128,9 +150,14 @@ void WaterColumnSeedCS(uint3 ThreadId : SV_DispatchThreadID)
             const uint Packed = VoxelData[LinearIndex(X, Y, (uint)Z)];
             if (IsSolid(Packed) || (Packed & PACKED_CAVE_BIT) != 0)
             {
-                return; // column blocked above water level — underground, no seeding
+                bColumnOpen = false; // column blocked above water level — underground, no seeding
+                break;
             }
         }
+    }
+    if (!bColumnOpen)
+    {
+        return;
     }
 
     // Flag water from the water level downward, stopping at a solid or cave barrier.
@@ -146,17 +173,47 @@ void WaterColumnSeedCS(uint3 ThreadId : SV_DispatchThreadID)
     }
 }
 
+[numthreads(8, 8, 1)]
+void WaterColumnSeedCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    const uint X = ThreadId.x;
+    const uint Y = ThreadId.y;
+    if (X >= ChunkSize || Y >= ChunkSize)
+    {
+        return;
+    }
+    WaterColumnSeed(X, Y, WaterLevel);
+}
+
+// The column seed with a level per column (the chunk's water columns): each column seeds from its own level, when that
+// level is not under the chunk, the chunk's own gate column by column; a column no body covers (-1e30) seeds nothing.
+// Mirrors ApplyWaterFillPass phase 1 with columns.
+[numthreads(8, 8, 1)]
+void WaterColumnSeedColumnsCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    const uint X = ThreadId.x;
+    const uint Y = ThreadId.y;
+    if (X >= ChunkSize || Y >= ChunkSize)
+    {
+        return;
+    }
+    const float Level = WaterColumns[X + Y * ChunkSize].y;
+    if (Level >= ChunkWorldZ)
+    {
+        WaterColumnSeed(X, Y, Level);
+    }
+}
+
 // ==================== Water fill: phase 1 on a planet — line seed ====================
 // One thread per digital line along the chunk's local down (FVoxelDownLines). Mirrors ApplyRadialWaterFillPass phase
 // 1: walking the line from where it enters the chunk, the first solid or cave voxel blocks the rest of the line; until
 // then, air inside the sea sphere takes the water flag. Each voxel is on exactly one line and a line reads and writes
-// only its own voxels, so the threads are independent and the result is the CPU's. Dispatched only when the sea
-// surface crosses the chunk's voxel box (the CPU's gate, evaluated in C++).
-[numthreads(64, 1, 1)]
-void WaterLineSeedCS(uint3 ThreadId : SV_DispatchThreadID)
+// only its own voxels, so the threads are independent and the result is the CPU's. Dispatched when the sea surface
+// crosses the chunk's voxel box or the box lies wholly under it (G132; the CPU's gate, evaluated in C++).
+void WaterLineSeed(uint LineId, float LevelOverAnchor)
 {
     int LineB, LineC;
-    if (!DownLineFromThread(ThreadId.x, LineB, LineC))
+    if (!DownLineFromThread(LineId, LineB, LineC))
     {
         return;
     }
@@ -172,13 +229,32 @@ void WaterLineSeedCS(uint3 ThreadId : SV_DispatchThreadID)
         const uint Packed = VoxelData[Index];
         if (IsSolid(Packed) || (Packed & PACKED_CAVE_BIT) != 0)
         {
-            return; // the line is blocked from here on
+            break; // the line is blocked from here on
         }
-        if (IsBelowSeaSphere(Local))
+        if (PlanetVoxelDeltaR(Local) <= LevelOverAnchor)
         {
             VoxelData[Index] = Packed | PACKED_WATER_BIT;
         }
     }
+}
+
+[numthreads(64, 1, 1)]
+void WaterLineSeedCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    WaterLineSeed(ThreadId.x, PlanetSeaAltitudeOverAnchor);
+}
+
+// The line seed with a level per down-line (the chunk's water columns): each line flags air at or under its own level.
+// Every line is walked; one no body covers (-1e30) flags nothing. Mirrors ApplyRadialWaterFillPass phase 1 with columns.
+[numthreads(64, 1, 1)]
+void WaterLineSeedColumnsCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    const uint Span = 3u * ChunkSize;
+    if (ThreadId.x >= Span * Span)
+    {
+        return;
+    }
+    WaterLineSeed(ThreadId.x, WaterColumns[WaterColumnBase + ThreadId.x].y);
 }
 
 // ==================== Water fill: phase 2 — flood sweep ====================
@@ -188,16 +264,27 @@ void WaterLineSeedCS(uint3 ThreadId : SV_DispatchThreadID)
 // eligibility of the CPU BFS. Water propagation is a monotone fixpoint (order-independent), so
 // repeated axis sweeps converge to the same result as the CPU's BFS; the C++ side dispatches
 // enough rounds for convergence on real terrain topology.
-bool IsFloodBelowSea(uint X, uint Y, uint Z, bool bRadial)
+// bColumns (a literal at each kernel): the level is the voxel's own column's, or its down-line's on a planet (the
+// chunk's water columns), in place of the one level.
+bool IsFloodBelowSea(uint X, uint Y, uint Z, bool bRadial, bool bColumns)
 {
     if (bRadial)
     {
+        if (bColumns)
+        {
+            const uint3 Local = uint3(X, Y, Z);
+            return PlanetVoxelDeltaR(Local) <= WaterColumns[WaterColumnBase + DownLineOf(Local)].y;
+        }
         return IsBelowSeaSphere(uint3(X, Y, Z));
+    }
+    if (bColumns)
+    {
+        return (ChunkWorldZ + (float)Z * VoxelSize) <= WaterColumns[X + Y * ChunkSize].y;
     }
     return (ChunkWorldZ + (float)Z * VoxelSize) <= WaterLevel;
 }
 
-void WaterFloodSweep(uint3 ThreadId, bool bRadial)
+void WaterFloodSweep(uint3 ThreadId, bool bRadial, bool bColumns)
 {
     if (ThreadId.x >= ChunkSize || ThreadId.y >= ChunkSize)
     {
@@ -233,7 +320,7 @@ void WaterFloodSweep(uint3 ThreadId, bool bRadial)
         else if (bCarry
             && !IsSolid(Packed)
             && (Packed & PACKED_CAVE_BIT) == 0
-            && IsFloodBelowSea(X, Y, Z, bRadial))
+            && IsFloodBelowSea(X, Y, Z, bRadial, bColumns))
         {
             VoxelData[Index] = Packed | PACKED_WATER_BIT;
         }
@@ -264,7 +351,7 @@ void WaterFloodSweep(uint3 ThreadId, bool bRadial)
         else if (bCarry
             && !IsSolid(Packed)
             && (Packed & PACKED_CAVE_BIT) == 0
-            && IsFloodBelowSea(X, Y, Z, bRadial))
+            && IsFloodBelowSea(X, Y, Z, bRadial, bColumns))
         {
             VoxelData[Index] = Packed | PACKED_WATER_BIT;
         }
@@ -278,13 +365,26 @@ void WaterFloodSweep(uint3 ThreadId, bool bRadial)
 [numthreads(8, 8, 1)]
 void WaterFloodSweepCS(uint3 ThreadId : SV_DispatchThreadID)
 {
-    WaterFloodSweep(ThreadId, false);
+    WaterFloodSweep(ThreadId, false, false);
 }
 
 [numthreads(8, 8, 1)]
 void WaterFloodSweepRadialCS(uint3 ThreadId : SV_DispatchThreadID)
 {
-    WaterFloodSweep(ThreadId, true);
+    WaterFloodSweep(ThreadId, true, false);
+}
+
+// The sweeps with a level per column or per down-line (the chunk's water columns).
+[numthreads(8, 8, 1)]
+void WaterFloodSweepColumnsCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    WaterFloodSweep(ThreadId, false, true);
+}
+
+[numthreads(8, 8, 1)]
+void WaterFloodSweepRadialColumnsCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    WaterFloodSweep(ThreadId, true, true);
 }
 
 // ==================== Underground classification: pass 1 — column scan ====================

@@ -8,6 +8,8 @@
 #include "VoxelNoiseTypes.h"
 #include "VoxelSurfaceQuery.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+
 // ==================== FVoxelBiomeSnapshot Parity Tests ====================
 //
 // FVoxelBiomeSnapshot::FromConfig must capture EVERYTHING the shared biome/material pipeline
@@ -139,3 +141,5 @@ bool FBiomeSnapshotParityTest::RunTest(const FString& Parameters)
 	Config->RemoveFromRoot();
 	return true;
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS

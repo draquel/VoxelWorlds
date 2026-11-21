@@ -1,0 +1,538 @@
+// Copyright Daniel Raquel. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "VoxelConditioningLine.h"
+#include "VoxelConditioningLineShape.h"
+#include "VoxelCubeSphere.h"
+#include "VoxelHydrologyConfiguration.h"
+#include "VoxelSeaSurface.h"
+#include "VoxelTerrainConditioning.h"
+#include "VoxelWaterLevels.h"
+
+class IVoxelWorldMode;
+class UVoxelWorldConfiguration;
+
+/**
+ * The natural ground the hydrology generator reads, and the world's values it works in. The height is a function any
+ * thread may call (a world mode's natural surface; a test's made ground).
+ *
+ * Two kinds of world, as a conditioning line's two kinds. A place is a column: world (X, Y, 0) on a heightmap world,
+ * the unit direction from the planet's centre on a planet. A height is a line's: a world Z, or on a planet an altitude
+ * over the datum sphere. A body's water level is the height on a heightmap world and the height plus the datum radius
+ * on a planet (GetLevelBase).
+ */
+struct VOXELGENERATION_API FVoxelHydrologyGround
+{
+	/** A heightmap world: the natural ground's height at a world (X, Y), a world Z. Thread-safe */
+	TFunction<double(double X, double Y)> Height;
+
+	/** A planet: the natural ground's altitude over the datum along a unit direction from the centre (the radial). Thread-safe */
+	TFunction<double(const FVector& Direction)> Altitude;
+
+	/** A planet: its centre and its datum radius, on which cells, widths and lengths are measured */
+	bool bRadial = false;
+	FVector PlanetCenter = FVector::ZeroVector;
+	double PlanetRadius = 0.0;
+
+	/**
+	 * A block world (cubic meshing on a heightmap; FVoxelBlockSurface): the ground a player stands on is block tops, a
+	 * column's from the natural height at its lower corner. The descents read the natural height as on a smooth world;
+	 * a lake's water is worked out on the block tops, its level is a block layer's top, and a bed steps a block a column
+	 * at most. BlockOrigin is the world origin the columns and layers are counted from.
+	 */
+	bool bBlocks = false;
+	FVector BlockOrigin = FVector::ZeroVector;
+
+	/** The world has a sea, at this height (a world Z; a planet: the sea sphere's altitude over the datum) */
+	bool bSea = false;
+	double SeaLevel = 0.0;
+
+	/** The world's voxel size, its chunk's width in world units, and its seed */
+	double VoxelSize = 100.0;
+	double ChunkWorldSize = 3200.0;
+	int32 Seed = 0;
+
+	/** @return Whether the ground can be read: the height function of its kind is set */
+	bool IsValid() const { return bRadial ? static_cast<bool>(Altitude) : static_cast<bool>(Height); }
+
+	/** @return The natural ground's height at a place */
+	double HeightAt(const FVector& Place) const { return bRadial ? Altitude(Place) : Height(Place.X, Place.Y); }
+
+	/**
+	 * @return The ground a lake's water stands against at a place: the natural height, or on a block world the top of
+	 *         the column's topmost block (the generator's own rule, FVoxelBlockSurface::BlockTopForHeight)
+	 */
+	double StandingHeightAt(const FVector& Place) const;
+
+	/** @return The top of the block layer a height lies in or on (a block world), else the height */
+	double BlockTopFor(double InHeight) const;
+
+	/** @return What a height is raised by to give a water level: the datum radius on a planet, 0 on a heightmap world */
+	double GetLevelBase() const { return bRadial ? PlanetRadius : 0.0; }
+
+	/** @return The frame the world's water levels are measured in */
+	FVoxelWaterFrame GetFrame() const;
+
+	/** @return The world's sea as a surface (off when the world has none) */
+	FVoxelSeaSurface GetSea() const;
+
+	/**
+	 * The ground of a world configuration: the world mode's natural surface (IVoxelWorldMode::GetSurfaceOnUpLine) with
+	 * the configuration's noise, and its sea.
+	 * @param Config The world configuration
+	 * @param WorldMode The world's mode (shared: the function holds it)
+	 * @return The ground
+	 */
+	static FVoxelHydrologyGround FromConfig(const UVoxelWorldConfiguration& Config, const TSharedRef<const IVoxelWorldMode>& WorldMode);
+};
+
+/**
+ * The generator's grid of a world: its cells, each cell's place and neighbours, and the lattice squares the springs
+ * are counted in. A value, made from the ground and the sanitized settings; pure and thread-safe.
+ *
+ * A heightmap world: a cell (X, Y) is the world place (X, Y) times the cell's width, a lattice square the cells
+ * [Square x spacing, (Square + 1) x spacing).
+ *
+ * A planet (the hydrology plan's H8): the cells of a cube sphere (FVoxelCubeSphereGrid), a cell an atlas coordinate
+ * and its place its centre's direction; as many cells along a face's edge as bring a cell nearest to the settings'
+ * width at a face's middle, in whole lattice squares. A cell's neighbours are the cells it shares a side or a corner
+ * with on the sphere (FVoxelCubeSphereGrid::GetAdjacentCell), the same relation from both sides of a face's edge: eight
+ * of them, seven at a cube's corner. A step's length is the arc between the two centres on the datum sphere. So a
+ * descent, a flood and a river are the same cells whichever face they are worked out from.
+ */
+struct VOXELGENERATION_API FVoxelHydrologyGrid
+{
+	FVoxelHydrologyGrid() = default;
+	FVoxelHydrologyGrid(const FVoxelHydrologyGround& Ground, const FVoxelHydrologySettings& Settings);
+
+	bool IsRadial() const { return bRadial; }
+
+	/** @return A cell's width: the settings' on a heightmap world; on a planet the cells' width at a face's middle */
+	double GetCellSize() const { return CellSize; }
+
+	/** @return A planet: the cells along a face's edge, the cells' grid and the lattice squares' */
+	int32 GetCellsPerEdge() const { return Cells.GetCellsPerEdge(); }
+	const FVoxelCubeSphereGrid& GetCells() const { return Cells; }
+	const FVoxelCubeSphereGrid& GetSquares() const { return Squares; }
+
+	/** @return The place of a cell: world (X, Y, 0), or the unit direction through its centre */
+	FVector PlaceOf(const FIntPoint& Cell) const;
+
+	/** @return The cell a place lies in (a heightmap world: the cell whose place is nearest) */
+	FIntPoint CellAt(const FVector& Place) const;
+
+	/** @return Where distances are measured from a place: the place itself, or its point on the datum sphere */
+	FVector PointOf(const FVector& Place) const { return bRadial ? Place * PlanetRadius : Place; }
+
+	/**
+	 * A cell's neighbour: the four sides first (0 to 3), then the four corners. The order decides every tie, so it is
+	 * part of what a world generates.
+	 * @param Cell The cell
+	 * @param Index 0 to 7
+	 * @param OutNeighbour The neighbour
+	 * @return False where a planet's cell has none (the corner off a cube's corner)
+	 */
+	bool GetNeighbour(const FIntPoint& Cell, int32 Index, FIntPoint& OutNeighbour) const;
+
+	/** @return The length of the step between two cells: between their places, along the datum sphere on a planet */
+	double GetStepLength(const FIntPoint& A, const FIntPoint& B) const;
+
+	/** @return The first cell of a lattice square: the one its cells are counted from (on a planet they lie on one face) */
+	FIntPoint GetSquareOrigin(const FIntPoint& Square) const;
+
+	/** @return The distance between two places: world XY, or the arc on the datum sphere */
+	double GetDistance(const FVector& A, const FVector& B) const;
+
+private:
+	bool bRadial = false;
+	double CellSize = 800.0;
+	double PlanetRadius = 0.0;
+	int32 Spacing = 1;
+	FVoxelCubeSphereGrid Cells;
+	FVoxelCubeSphereGrid Squares;
+};
+
+/**
+ * The natural ground on the generator's grid, kept as it is read. One per piece of work and per thread: not shared.
+ */
+class VOXELGENERATION_API FVoxelHydrologyHeights
+{
+public:
+	FVoxelHydrologyHeights(const FVoxelHydrologyGround& InGround, const FVoxelHydrologySettings& InSettings);
+
+	/** @return The ground's height at a cell */
+	double At(const FIntPoint& Cell);
+
+	/** @return A cell's width (world units) */
+	double GetCellSize() const { return Grid.GetCellSize(); }
+
+	/** @return The place of a cell: world (X, Y, 0), or on a planet the unit direction through its centre */
+	FVector PlaceOf(const FIntPoint& Cell) const { return Grid.PlaceOf(Cell); }
+
+	/** @return Whether a cell's ground is at or under the sea */
+	bool IsSea(const FIntPoint& Cell) { return Ground.bSea && At(Cell) <= Ground.SeaLevel; }
+
+	/**
+	 * Where water runs from a cell: the lowest of its neighbours that lies under it, by the steepest fall (a diagonal
+	 * step is root two long; on a planet a step is as long as the arc between the cells).
+	 * @param Cell The cell
+	 * @param OutNext The neighbour
+	 * @return False at a pit: no neighbour lies under the cell
+	 */
+	bool GetDownhill(const FIntPoint& Cell, FIntPoint& OutNext);
+
+	/** @return How many cells were read from the ground (not from the kept values) */
+	int64 GetNumSamples() const { return NumSamples; }
+
+	const FVoxelHydrologyGround& GetGround() const { return Ground; }
+	const FVoxelHydrologyGrid& GetGrid() const { return Grid; }
+
+private:
+	const FVoxelHydrologyGround& Ground;
+	FVoxelHydrologyGrid Grid;
+	TMap<FIntPoint, double> Kept;
+	int64 NumSamples = 0;
+};
+
+/**
+ * A pit's lake (the hydrology plan's sections 3.1 and 5.8): what the hollow around a pit holds when it fills. Made by
+ * one flood from the pit, lowest cell first. While the flood climbs, every cell it has taken lies under the level it
+ * has reached: the hollow so far. When it takes a cell under that level it has passed a saddle, and goes on down the
+ * ground beyond it: if that ground runs away (to the sea, or further down than a lake may be deep, or wider than a
+ * lake may be) the saddle is the lake's rim and the first cell beyond it the outlet; if it is one more hollow and the
+ * flood climbs out of it again, the two are one lake. So nested pits make one lake at their true spill level, from
+ * whichever pit the flood starts, and no lake needs another's to be made first.
+ *
+ * A lake that would be deeper or wider than the settings allow is closed: it stands at the cap, with no outlet.
+ * A closed lake is the one the flood from its own lowest cell finds, so every pit of a capped hollow whose flood comes
+ * to that cell has the same lake (G233).
+ * Shared and immutable.
+ */
+struct VOXELGENERATION_API FVoxelHydrologyLake
+{
+	/** The pit the lake was asked for, and the lake's lowest cell (the same lake from another of its pits has the same) */
+	FIntPoint Pit = FIntPoint::ZeroValue;
+	FIntPoint LowestCell = FIntPoint::ZeroValue;
+
+	/** The lowest ground in the lake. Every height of a lake is the ground's kind: a world Z, or an altitude on a planet */
+	double LowestGround = 0.0;
+
+	/**
+	 * The level the hollow fills to: the rim's lowest ground (an open lake's spill level; a lake closed for its width
+	 * the rim of the largest hollow the caps allow), or the depth cap's level. A cell of the hollow lies under it.
+	 */
+	double RimLevel = 0.0;
+
+	/**
+	 * The water's height: under the rim by the margin, and under every ground on the footprint's edge. The body's level
+	 * (FVoxelWaterBody::Level) is this height as a water level (on a planet the datum radius more). On a block world it
+	 * is a block layer's top, the water's blocks fill to it, and the body's level lies a tenth of a voxel under it, in
+	 * that layer.
+	 */
+	double WaterLevel = 0.0;
+
+	/** No outlet: closed for its depth (1), for its width (2), or because the flood found no end within its budget (3). 0: open */
+	uint8 Closed = 0;
+
+	/** An open lake: the rim's cell the water leaves over, the cell beyond it, and the lake's cell before it */
+	FIntPoint Saddle = FIntPoint::ZeroValue;
+	FIntPoint Outlet = FIntPoint::ZeroValue;
+	FIntPoint PreSaddle = FIntPoint::ZeroValue;
+
+	/** The hollow's cells: those under the rim that the flood reached from the pit */
+	TSet<FIntPoint> Cells;
+
+	/** An open lake: from each cell of the hollow the next one on the way to the saddle (PreSaddle maps to itself) */
+	TMap<FIntPoint, FIntPoint> ToSaddle;
+
+	/** Whether the lake is deep and wide enough to be a body, and its record when it is */
+	bool bKept = false;
+	FVoxelWaterBody Body;
+
+	/** The cells whose ground lies under the water's level, the water's area and its depth at the deepest */
+	int32 NumWetCells = 0;
+	double Area = 0.0;
+	double Depth = 0.0;
+
+	/** How far the level was lowered from the rim's margin for ground on the footprint's edge (0: not at all) */
+	double LoweredForEdge = 0.0;
+
+	/** Cells the flood took (the cost) */
+	int32 NumFlooded = 0;
+
+	/** @return Whether a cell's ground lies under the water of a kept lake */
+	bool IsOpen() const { return Closed == 0; }
+};
+
+/** How a spring's descent ended. */
+enum class EVoxelHydrologyEnd : uint8
+{
+	/** The lattice square holds no spring (its candidate stands too low, or in the sea) */
+	NoSpring,
+	/** In the sea */
+	Sea,
+	/** In a lake with no outlet */
+	ClosedLake,
+	/** Longer than the longest river */
+	TooLong,
+	/** Across more hollows than a river may cross */
+	TooManyLakes
+};
+
+/**
+ * A spring's descent: the cells from the spring down to where the water ends, by steepest descent over the natural
+ * ground, through each hollow on the way from where it enters it to its saddle. A function of the spring's lattice
+ * square and the ground alone, so it is the same from any region. Shared and immutable.
+ */
+struct VOXELGENERATION_API FVoxelHydrologyTrace
+{
+	/** The spring's lattice square, and its cell */
+	FIntPoint Square = FIntPoint::ZeroValue;
+	FIntPoint Spring = FIntPoint::ZeroValue;
+
+	EVoxelHydrologyEnd End = EVoxelHydrologyEnd::NoSpring;
+
+	/** The cells, spring first. Each is one of the eight neighbours of the one before */
+	TArray<FIntPoint> Cells;
+
+	/** Per cell: the lake whose hollow it lies in (an index into Lakes), or -1 */
+	TArray<int32> LakeOf;
+
+	/** The lakes the descent came to, in order */
+	TArray<TSharedPtr<const FVoxelHydrologyLake>> Lakes;
+
+	/** The descent's length along its cells, and its fall, spring to end */
+	double Length = 0.0;
+	double Fall = 0.0;
+
+	/** Whether the descent is a river: it ends in the sea or in a kept lake with no outlet, long enough and gentle enough */
+	bool bKept = false;
+
+	/** A kept descent's mouth: the first cell in the sea, or the cell it enters the closed lake at. Every river through one mouth is one system */
+	FIntPoint Mouth = FIntPoint::ZeroValue;
+};
+
+/** One river reach of a system: a chain of the tree between a spring, a join, a lake and the mouth, with its bed. */
+struct VOXELGENERATION_API FVoxelHydrologyReach
+{
+	/** The chain's first cell: the reach's identity (its body id and its bed's line id come from it) */
+	FIntPoint StartCell = FIntPoint::ZeroValue;
+
+	/** How many springs drain through it (its width class) */
+	int32 Flow = 1;
+
+	/** The river reach, and its bed's line */
+	FVoxelWaterBody Body;
+	FVoxelConditioningLineParams BedParams;
+	TSharedPtr<const FVoxelConditioningLine> Bed;
+
+	/** The profile it was given (the rules' counters, the deepest cut, the fall) */
+	FVoxelConditioningLineShape::FRiverProfile Profile;
+
+	/** The reach's length along its vertices */
+	double Length = 0.0;
+
+	/** What ends it: a join into another reach of the system, a lake, the sea */
+	bool bEndsAtJoin = false;
+};
+
+/**
+ * A river system: every kept descent that ends at one mouth, as river reaches. Whole or not at all: a system one of
+ * whose reaches cannot be made within the limits (the cut's cap, the bend bound) has no reach, so no river ends on
+ * land. Shared and immutable.
+ */
+struct VOXELGENERATION_API FVoxelHydrologySystem
+{
+	FIntPoint Mouth = FIntPoint::ZeroValue;
+
+	/** The springs that drain to the mouth */
+	int32 NumSprings = 0;
+
+	/** The reaches (none when the system is refused) */
+	TArray<FVoxelHydrologyReach> Reaches;
+
+	/** Why the system has no reach, when it has none: empty otherwise */
+	FString Refused;
+
+	/** The deepest cut and the longest way from a spring to the mouth */
+	double DeepestCut = 0.0;
+	double LongestRiver = 0.0;
+
+	/** Cells where two descents disagreed about the way on (0 in a sound network: the way on is the cell's alone) */
+	int32 NumConflicts = 0;
+
+	/** How many times the system was made: again, with its corners spread wider, while a bed broke the bend bound */
+	int32 NumAttempts = 1;
+
+	/** The first such cell, for a diagnostic: the cell and the two ways on */
+	FString ConflictNote;
+};
+
+/** What the generator keeps between pieces of work (the network's cache; a test may pass none). Thread-safe. */
+class IVoxelHydrologyCache
+{
+public:
+	virtual ~IVoxelHydrologyCache() = default;
+
+	virtual TSharedPtr<const FVoxelHydrologyTrace> FindTrace(const FIntPoint& Square) = 0;
+	/** Keep a trace; the one kept is returned (the first stored for a square wins) */
+	virtual TSharedRef<const FVoxelHydrologyTrace> StoreTrace(const TSharedRef<const FVoxelHydrologyTrace>& Trace) = 0;
+
+	virtual TSharedPtr<const FVoxelHydrologyLake> FindLake(const FIntPoint& Pit) = 0;
+	virtual TSharedRef<const FVoxelHydrologyLake> StoreLake(const TSharedRef<const FVoxelHydrologyLake>& Lake) = 0;
+
+	virtual TSharedPtr<const FVoxelHydrologySystem> FindSystem(const FIntPoint& Mouth) = 0;
+	virtual TSharedRef<const FVoxelHydrologySystem> StoreSystem(const TSharedRef<const FVoxelHydrologySystem>& System) = 0;
+};
+
+/** The bodies of a region (FVoxelHydrology::BuildRegion), and what working them out cost. */
+struct VOXELGENERATION_API FVoxelHydrologyRegion
+{
+	/** The kept lakes whose footprints meet the region, by body id */
+	TArray<TSharedRef<const FVoxelHydrologyLake>> Lakes;
+
+	/** The river systems with a reach that meets the region, by mouth */
+	TArray<TSharedRef<const FVoxelHydrologySystem>> Systems;
+
+	/** The systems whose mouths are near enough to reach the region and that were refused (no reach), by mouth */
+	TArray<TSharedRef<const FVoxelHydrologySystem>> Refused;
+
+	/** Lattice squares looked at, of them springs, descents worked out here (not from the cache), of them kept as rivers */
+	int32 NumSquares = 0;
+	int32 NumSprings = 0;
+	int32 NumTraced = 0;
+	int32 NumRivers = 0;
+
+	/** Systems and lakes worked out here, and systems refused */
+	int32 NumSystemsBuilt = 0;
+	int32 NumLakesBuilt = 0;
+	int32 NumRefused = 0;
+
+	/** Ground samples read */
+	int64 NumSamples = 0;
+};
+
+/**
+ * The hydrology generator (Documentation/HYDROLOGY_PLAN.md, section 5.8; D145): ponds and brooks as a pure function
+ * of the seed and the natural ground, the same from any region, on any thread and on every machine.
+ *
+ *  - Springs. A square of the lattice holds one candidate, placed by a hash; it is a spring when it stands high
+ *    enough over the sea (GetSpring).
+ *  - Descents. A spring's water runs to the lowest neighbour, cell by cell; at a pit it fills the pit's lake
+ *    (MakeLake) and goes on from its outlet; it ends in the sea or in a lake with no outlet (TraceSpring). A descent
+ *    long enough and gentle enough is a river.
+ *  - Lakes. A pit's lake is a body when it is deep and wide enough. Its level is under its rim by a margin, and under
+ *    every natural ground on its footprint's edge, read a voxel apart, so no water stands against the footprint's edge.
+ *  - Systems. The rivers that end at one mouth form a tree; a river reach is a chain of it between a spring, a join,
+ *    a lake and the mouth, as wide as the springs that drain through it. Each chain is shaped as a conditioning line
+ *    (FVoxelConditioningLineShape::RoundCorners), reads its ground and banks as a hand-placed river does
+ *    (FVoxelRiverCourse) and takes the river profile (MakeRiverProfile): the surface never rises along a chain or from
+ *    one chain to the next, a tributary comes into the reach it joins a tuck under that reach's surface, and a reach
+ *    that leaves a lake starts at the lake's level (BuildSystem).
+ *
+ * Why any region finds the same bodies: a descent depends on the ground within the longest river's length of its
+ * spring; a lake on its pit; a system on the springs within that length of its mouth. BuildRegion works out the
+ * springs within twice the length of its region, and from them every lake and every system that can reach it.
+ *
+ * Every world mode (the plan's H8): on a planet the grid is the cube sphere's (FVoxelHydrologyGrid), the ground is
+ * read along the radial, a lake's footprint lies in the plane tangent at its lowest cell and a bed is a line on the
+ * sphere; on a block world a lake's water is worked out on the block tops and a bed steps a block a column at most.
+ */
+struct VOXELGENERATION_API FVoxelHydrology
+{
+	/** The generator's version: part of the save fingerprint's term. Raise it when the same settings would make other bodies */
+	static constexpr int32 Version = 2;
+
+	/** @return Whether a world generates hydrology: its configuration names a hydrology configuration */
+	static bool IsEnabled(const UVoxelWorldConfiguration& Config);
+
+	/** @return The save fingerprint's term of a world that generates hydrology ("Hydrology=<version>:<settings hash>"), else empty */
+	static FString GetFingerprintTerm(const UVoxelWorldConfiguration& Config);
+
+	/** @return The settings as the generator uses them: the caps held to what the engine allows (a lake's depth under a chunk and a quarter, its span under the longest river) */
+	static FVoxelHydrologySettings Sanitize(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground);
+
+	/** @return How far a region's bodies depend on the ground around it: twice the longest river and a lattice square */
+	static double GetDependencyDistance(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground);
+
+	/**
+	 * A lattice square's spring.
+	 * @param Square The square
+	 * @param OutCell The spring's cell
+	 * @return Whether the square's candidate is a spring
+	 */
+	static bool GetSpring(const FVoxelHydrologySettings& Settings, FVoxelHydrologyHeights& Heights, const FIntPoint& Square, FIntPoint& OutCell);
+
+	/**
+	 * A pit's lake.
+	 * @param Pit A cell none of whose neighbours lies under it
+	 * @return The lake
+	 */
+	static TSharedRef<const FVoxelHydrologyLake> MakeLake(const FVoxelHydrologySettings& Settings, FVoxelHydrologyHeights& Heights, const FIntPoint& Pit);
+
+	/**
+	 * A lattice square's descent.
+	 * @param Square The square
+	 * @param Cache Where the lakes are kept (may be null)
+	 * @return The descent (End NoSpring when the square has no spring)
+	 */
+	static TSharedRef<const FVoxelHydrologyTrace> TraceSpring(const FVoxelHydrologySettings& Settings, FVoxelHydrologyHeights& Heights, const FIntPoint& Square,
+		IVoxelHydrologyCache* Cache);
+
+	/**
+	 * The river system of a mouth.
+	 * @param Mouth The mouth
+	 * @param Rivers Every kept descent that ends at it
+	 * @return The system
+	 */
+	static TSharedRef<const FVoxelHydrologySystem> BuildSystem(const FVoxelHydrologySettings& Settings, FVoxelHydrologyHeights& Heights, const FIntPoint& Mouth,
+		TConstArrayView<TSharedRef<const FVoxelHydrologyTrace>> Rivers);
+
+	/**
+	 * The lakes and the river systems that reach a region.
+	 * @param Region World XY on a heightmap world, a cap on a planet (FVoxelConditioningRegion::OfBox, OfCap; a region
+	 *               of the other kind, or everywhere, finds nothing)
+	 * @param Cache What is kept between calls (may be null: everything is worked out here)
+	 * @param Out The bodies, in a fixed order
+	 */
+	static void BuildRegion(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground, const FVoxelConditioningRegion& Region,
+		IVoxelHydrologyCache* Cache, FVoxelHydrologyRegion& Out);
+
+	/** BuildRegion over a heightmap world's XY box. */
+	static void BuildRegion(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground, const FBox2D& Region, IVoxelHydrologyCache* Cache,
+		FVoxelHydrologyRegion& Out)
+	{
+		BuildRegion(Settings, Ground, FVoxelConditioningRegion::OfBox(Region), Cache, Out);
+	}
+
+	/**
+	 * The lattice squares whose springs a region's bodies may depend on: those within the dependency distance of it.
+	 * @param Region A box on a heightmap world, a cap on a planet
+	 * @param OutSquares The squares (emptied first): row by row on a heightmap world, in a flood's order on a planet
+	 */
+	static void GetSquaresFor(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground, const FVoxelConditioningRegion& Region,
+		TArray<FIntPoint>& OutSquares);
+
+	/** @return Whether a body's footprint may reach a region of its world's kind */
+	static bool MeetsRegion(const FVoxelWaterBody& Body, const FVoxelConditioningRegion& Region, const FVoxelHydrologyGround& Ground);
+
+	/** @return Whether a bed's reach may reach a region of its world's kind */
+	static bool MeetsRegion(const FVoxelConditioningLine& Bed, const FVoxelConditioningRegion& Region, const FVoxelHydrologyGround& Ground);
+
+	/** @return A river reach's body id from its chain's first cell, and a lake's from its lowest cell and its size (never the sea's 0) */
+	static uint32 MakeReachId(int32 Seed, const FIntPoint& StartCell);
+	static uint32 MakeLakeId(int32 Seed, const FIntPoint& LowestCell, int32 NumCells);
+
+	/**
+	 * A bed's line id from its chain's first cell: over every road's and trail's between POIs (those lie under -2^61),
+	 * so a bed is applied after them, and under a hand-placed line's of order 0 or more.
+	 * @param StartCell The chain's first cell
+	 * @param bAtlas A planet's cell: an atlas coordinate, never negative (a heightmap world's cells lie either way of the origin)
+	 */
+	static int64 MakeBedLineId(const FIntPoint& StartCell, bool bAtlas = false);
+
+	/** The steepest a bed's segment may be on a block world: a block a column along a diagonal, with the shape functions' margin */
+	static double GetBlockBedGrade();
+};

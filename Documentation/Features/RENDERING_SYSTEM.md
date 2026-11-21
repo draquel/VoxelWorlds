@@ -12,15 +12,16 @@
 3. [Key Components](#key-components)
 4. [Render Regions](#render-regions)
 5. [Chunk Primitives](#chunk-primitives)
-6. [Shadow Culling](#shadow-culling)
-7. [Crossfades](#crossfades)
-8. [Vertex Format and Colour Encoding](#vertex-format-and-colour-encoding)
-9. [Renderer Interface](#renderer-interface)
-10. [Water Tile Rendering](#water-tile-rendering)
-11. [What the Renderer Does Not Draw](#what-the-renderer-does-not-draw)
-12. [Collision](#collision)
-13. [Integration Flow](#integration-flow)
-14. [Debugging](#debugging)
+6. [The Terrain on Nanite](#the-terrain-on-nanite)
+7. [Shadow Culling](#shadow-culling)
+8. [Crossfades](#crossfades)
+9. [Vertex Format and Colour Encoding](#vertex-format-and-colour-encoding)
+10. [Renderer Interface](#renderer-interface)
+11. [Water Tile Rendering](#water-tile-rendering)
+12. [What the Renderer Does Not Draw](#what-the-renderer-does-not-draw)
+13. [Collision](#collision)
+14. [Integration Flow](#integration-flow)
+15. [Debugging](#debugging)
 
 ---
 
@@ -208,6 +209,67 @@ likewise), in the in-editor gate.
 
 ---
 
+## The Terrain on Nanite
+
+A world can have its terrain rasterized by Nanite instead of the vertex factory above (the runtime Nanite opt-in plan,
+2026-11-18 to 11-19, the parent's `Documentation/RUNTIME_NANITE_OPTIN_PLAN.md`, frozen; why it is an option and not the
+default: [ARCHITECTURE.md](../ARCHITECTURE.md), "Nanite as an option, not the default"). It needs the chunk primitives
+(`voxel.Render.ChunkPrimitives 1`, the default).
+
+**Choosing (D158, D160).** `UVoxelWorldConfiguration::NaniteTerrain`: Off, On, or Auto, the default, which turns it on
+when `r.Shadow.Virtual.Enable` is on as the world's renderer starts (a world's own `ShadowMethod` can set it, "A World's
+Shadow Method" below). `voxel.Render.Nanite` overrides every world: -1 each world's setting, 0 off, 1 on. The region
+component resolves it at each submit through one pure function, `ResolveVoxelNaniteTerrain`. It is off on a dedicated
+server and in a process with no renderer (nothing is encoded), on a platform without Nanite, and on an engine whose
+Nanite format the encoder was not checked against (5.8 and 5.9 are; another version draws the terrain as before and logs
+one warning). The renderer logs one line per world, "the terrain on Nanite on" or "off", with the setting, the
+override, the virtual shadow maps, the shadow method and the net mode.
+
+**Encoding (D152).** `VoxelNaniteEncoder` (VoxelRendering, `Private/Nanite/`) turns a chunk mesh or a seam bucket into a
+Nanite resource at runtime: clusters taken in index order (the leaves' triangles last, in a section of their own, D162),
+every page a root page, a flat hierarchy and no simplification, since chunk LOD, seams and crossfades stay ours. A
+triangle's corner refers back to a vertex its cluster already holds (`voxel.Render.Nanite.Reuse`: about 2.6 times
+smaller on the GPU on a terrain grid). The encode runs on a task while the mesh draws as before
+(`voxel.Render.Nanite.Async`, `ProcessNaniteEncodes`; 0.3-0.4 ms a mesh on the game thread without it), and
+`voxel.Render.Nanite.Validate` decodes each encode on the CPU and compares it with its input. The engine's Nanite
+layouts the encoder writes are copied into the plugin (`VoxelNaniteFormat.h`) with static assertions on their sizes;
+`check_nanite_layouts.py` beside them compares them with the editor's engine in the in-editor gate, so an engine upgrade
+that changes them fails there before it reaches a GPU.
+
+**Drawing (D153-D155).** `FVoxelChunkNaniteSceneProxy`, a `Nanite::FSceneProxyBase`, draws the resource and is
+registered like any chunk primitive. A fading mesh stays an `FVoxelChunkSceneProxy` and is replaced by its Nanite
+primitive when its fade ends. Two material sections: the opaque one with the world's `NaniteMaterial`, or
+`voxel.Render.Nanite.Material` when it names none, and the masked one (the leaves) with the terrain material
+([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md), "The Terrain on Nanite", which also covers tessellation). Each Nanite mesh
+keeps a position and index buffer for its ray tracing geometry, as the chunk primitives do ("What Lumen Sees"), and
+`r.RayTracing.Nanite.Mode 1` works as well. The far field and the water stay on the hand-built renderer.
+
+**What it costs** (P50 on the bench routes; the spike plan and the opt-in plan in the parent's `Documentation/`, both
+frozen):
+
+| World | GPU | Render thread |
+|---|---|---|
+| No other Nanite content (VoxelDemo), shadow maps | about +1 ms (Nanite's fixed per-frame cost) | about +1.5 ms |
+| Nanite content already drawn (SmoothTerrain_Planet), shadow maps | +0.0 to +0.2 ms | +0.6 to +0.8 ms |
+| Virtual shadow maps, against shadow maps with the terrain off (planet routes) | within 0.1 ms | +0.5 to +0.8 ms |
+| Tessellated (`MI_VoxelMaster_Tessellated`, 10 uu), against the plain material (VoxelDemo chord) | about +1 ms | unchanged |
+
+With virtual shadow maps the terrain on Nanite also takes most of the "Non-Nanite Marking Job Queue overflow" warnings
+away (one route in four against three). A world that leaves the terrain off encodes nothing, and its counters read 0.
+
+**Debugging and tests.** `voxel.Render.NaniteStats [reset]`: the resources live, the encodes (count, triangles, how
+many in a masked section, mean and longest time), failures, the Nanite primitives created and the fades swapped to
+Nanite. Tests `VoxelWorlds.Rendering.Nanite.EncodeRoundTrip` (the encoder's round trip, masked materials included),
+`.TerrainSetting` (every case of the setting) and `.WorldShadowMethod`, in the in-editor gate with the layout check.
+
+**Not known.** Whether a packaged game switches the shadow method cleanly at runtime when the project's is shadow maps
+(whether its cooked shaders cover both); two worlds of a listen server that choose different shadow methods (the last
+one wins, logged). Under tessellation, the corner where a quad has a fourth material (the one hard corner the soft
+borders keep) has no mask; no crack was seen at the borders looked at, and the pawn's feet against the collision were
+not shot (at 10 uu about the centre the surface moves at most 5 uu).
+
+---
+
 ## Shadow Culling
 
 The proxy culls each batch per view (`FVoxelViewCull`): against the view's frustum, and in a shadow depth pass
@@ -256,6 +318,21 @@ the other pairs were inside the shared machine's noise (other sessions' editors 
 from raised views: a hill's shadow that faded at 200 m now runs on across the far slope; at eye level the ground past
 200 m is a thin band and almost no pixel changes. With the near cascades shortened (r.Shadow.DistanceScale 0.1) every
 terrain shadow past 2,000 uu comes from the far cascades, which shows them working end to end.
+
+### A World's Shadow Method (D164)
+
+The shadow method is the project's (shadow maps here: the cascades above; `r.Shadow.Virtual.Enable 0`), but a world can
+ask for its own while it runs: `UVoxelWorldConfiguration::ShadowMethod`, Project (the default, untouched),
+VirtualShadowMaps or ShadowMaps. `FVoxelShadowMethodOverride` sets the cvar when the world's renderer starts (before the
+first region component reads it for the terrain's Nanite setting, so Auto then puts the terrain on Nanite) and gives
+the value from before back when the last world that set it ends; worlds that disagree are logged and the last one wins;
+a value typed at the console wins over every world; a dedicated server sets nothing. The renderer's "the terrain on
+Nanite" line names the world's shadow method.
+
+The case for it (the parent's `Documentation/RUNTIME_NANITE_OPTIN_PLAN.md`, O3, frozen): a planet seen from altitude. At a low
+sun virtual shadow maps draw the terrain's cast shadows across the disc, where the cascades end; with the terrain on
+Nanite they cost about the cascades' GPU time on the planet routes (0.5-0.8 ms more render thread). On a plane world
+they cost 0.6-1.0 ms more GPU for sharper near shadows, so the project keeps the cascades.
 
 ### What Lumen Sees
 
@@ -473,10 +550,10 @@ The scheduling side (when a swap is held, seam buckets) is in [STREAMING_AND_SEA
 |-----------|------|-----------------|
 | UV1.x | MaterialID (exact float) | `MF_GetMaterialID` |
 | UV1.y | Face type against local up: 0 top, 1 side, 2 bottom (on a planet the radial direction) | |
-| Colour R | MaterialID (0-255); in the far field the quad's second material (G45) | `round(VertexColor.R * 255)` |
-| Colour G | BiomeID (0-255) | `round(VertexColor.G * 255)` |
-| Colour B | AO in the top 2 bits (0, 64, 128, 192) | `floor(VertexColor.B * 4)` → 0-3 |
-| Colour A | 255; in the far field 255 less the second material's weight at the vertex (G45) | |
+| Colour R | MaterialID (0-255); in a material blend (the far field, G45; a Dual Contouring border, VP2-O4) the quad's second material | `round(VertexColor.R * 255)` |
+| Colour G | BiomeID (0-255); on a Dual Contouring border with three materials the third | `round(VertexColor.G * 255)` |
+| Colour B | AO in the top 2 bits (0, 64, 128, 192); on a Dual Contouring border the third material's weight (0-63) | `floor(VertexColor.B * 4)` → 0-3 |
+| Colour A | 255; in a material blend below 255: the far field 255 less the second material's weight, a Dual Contouring border 254 less 254 x it | |
 
 ```cpp
 // In material:
@@ -592,7 +669,10 @@ underside with the water material.
   tangent cross(Z, N), UV0 the position on the normal's dominant plane in voxels (relative to the patch).
 - Both materials are flat per triangle (vertices duplicated where quads' pairs differ) and the terrain material picks
   between them per pixel by the interpolated weight ([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Far-Field Material
-  Blend"); every voxel chunk vertex has alpha 255, weight 0.
+  Blend"). A voxel chunk vertex has alpha 255 (weight 0) except on a Dual Contouring material border, which blends
+  the same way since VP2-O4 ([DUAL_CONTOURING.md](DUAL_CONTOURING.md) "Materials and soft borders"). The chunk meshes'
+  colour view is `R8G8B8A8` over `FColor`'s bytes, as the engine's `FColorVertexBuffer` uses: the manual fetch swizzles
+  `.bgra` itself ([MATERIAL_SYSTEM.md](MATERIAL_SYSTEM.md) "Soft Material Borders").
 - Sections are shown and hidden with `SetMeshSectionVisible` (a render command), so the window's hole moving costs no
   proxy rebuild; a component is created when its patch is built and goes when the patch is released or pruned. They
   are about 200 bytes a vertex (the component's CPU copy and the GPU one): 29-56 MB at the surveyed sites of the three

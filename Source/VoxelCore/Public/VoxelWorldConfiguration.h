@@ -12,6 +12,7 @@
 class UMaterialInterface;
 class UVoxelBiomeConfiguration;
 class UVoxelCaveConfiguration;
+class UVoxelHydrologyConfiguration;
 class UVoxelScatterConfiguration;
 class URuntimeVirtualTexture;
 class FVoxelMaterialTable;
@@ -267,6 +268,26 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water", meta = (EditCondition = "bEnableWaterLevel"))
 	TObjectPtr<UMaterialInterface> WaterMeshMaterial;
 
+	/**
+	 * Material for a river reach's drawn surface (the hydrology plan's D147): an instance of the water's master whose
+	 * ripples move downstream along the ribbon (its tangent) at the reach's speed in place of the wind's direction. If
+	 * null a river reach draws with WaterMeshMaterial, as a lake does; with neither, no lake and no river reach is drawn.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water")
+	TObjectPtr<UMaterialInterface> RiverMeshMaterial;
+
+	/**
+	 * The world's generated hydrology (Documentation/HYDROLOGY_PLAN.md, D145 and D146): with an asset named, ponds and
+	 * brooks are generated from the seed: springs run downhill over the natural ground, a run long and gentle enough is
+	 * kept as a brook with its bed, and a hollow one meets fills to its rim as a pond. Null (the default): the sea, and the
+	 * rivers and lakes a level's actors place by hand. Naming one changes the world's terrain, its POIs and its roads, so
+	 * the saves made without it are refused (the fingerprint's Hydrology term). Read in every world mode: on a planet
+	 * the generator walks the cube sphere's cells, on a block world a pond stands at a block layer's top and a bed steps
+	 * a block a column at most (the plan's H8).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Water")
+	TObjectPtr<UVoxelHydrologyConfiguration> HydrologyConfiguration;
+
 	// ==================== Terrain Generation Settings ====================
 
 	/** Sea level height - base elevation of terrain (world units) */
@@ -496,6 +517,33 @@ public:
 	int32 ScatterRegionChunks = -1;
 
 	/**
+	 * Whether the terrain is drawn through Nanite (D158): Auto when the project uses virtual shadow maps, On for a world
+	 * built around Nanite content, Off never. Needs a platform with Nanite; never on a dedicated server.
+	 * voxel.Render.Nanite overrides it for every world (-1 = this setting).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering")
+	EVoxelNaniteTerrain NaniteTerrain = EVoxelNaniteTerrain::Auto;
+
+	/**
+	 * The shadow method this world asks for while it runs (D164): Project leaves the project's; VirtualShadowMaps for a
+	 * planet seen from altitude (its terrain then goes on Nanite under NaniteTerrain Auto); ShadowMaps the cascades. Set
+	 * when the world's renderer starts, before NaniteTerrain's Auto reads it, and restored when the last world that set it
+	 * ends; a value typed at the console wins over it. Never on a dedicated server.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering")
+	EVoxelShadowMethod ShadowMethod = EVoxelShadowMethod::Project;
+
+	/**
+	 * The material the terrain's Nanite meshes draw their opaque section with, when the terrain is on Nanite
+	 * (NaniteTerrain). None: voxel.Render.Nanite.Material's (MI_VoxelMaster_Nanite, an Opaque instance of the master).
+	 * MI_VoxelMaster_Tessellated displaces the terrain by each material's height map (D163: a tessellated variant of the
+	 * master, a few milliseconds of GPU, so a world's choice and never a default). It is given the terrain material's
+	 * parameters and the atlas's height array at runtime.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering")
+	TSoftObjectPtr<UMaterialInterface> NaniteMaterial;
+
+	/**
 	 * Runtime Virtual Textures the terrain writes into.
 	 *
 	 * The UVoxelRegionComponent is created at runtime by the custom-VF renderer; this list is
@@ -674,13 +722,23 @@ public:
 	 * Settings that load and run but produce wrong results, one readable line each: a tree template using a
 	 * material id the material registry does not define (KC10); on a planet, a terrain shell that does not cover
 	 * the terrain's real amplitude, and water enabled while consumers still read the Z-plane WaterLevel
-	 * (SPHERICAL_PLANET_REQUIREMENTS.md SP-A5). Logged as warnings when the asset loads (PostLoad), when a voxel
-	 * world initializes with it, and from ValidateConfiguration.
+	 * (SPHERICAL_PLANET_REQUIREMENTS.md SP-A5). The tree templates are checked against the built-in material IDs; a
+	 * world starting with the asset checks them against its own atlas (GetSettingsWarningsAgainst), and the asset's load
+	 * logs only what needs no material table (GetLoadWarnings, G223).
 	 *
 	 * @return The warnings; empty when nothing is wrong.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Voxel|Configuration")
 	TArray<FString> GetSettingsWarnings() const;
+
+	/**
+	 * GetSettingsWarnings without the tree templates' materials, which only a world's material table can judge: what the
+	 * asset logs when it loads (PostLoad) and when it is edited (ValidateConfiguration). A world whose atlas defines more
+	 * materials than the built-in ones (the Megascans block world's trees on ids past 21) logged false warnings at every
+	 * load before (G223).
+	 * @return The warnings; empty when nothing is wrong.
+	 */
+	TArray<FString> GetLoadWarnings() const;
 
 	/**
 	 * GetSettingsWarnings with the tree templates' materials checked against a world's material table (its atlas's)
@@ -690,6 +748,16 @@ public:
 	 * @return The warnings; empty when nothing is wrong.
 	 */
 	TArray<FString> GetSettingsWarningsAgainst(const FVoxelMaterialTable& Materials) const;
+
+private:
+	/**
+	 * The warnings of GetSettingsWarnings, the trees' materials checked against Materials when there is one.
+	 * @param Materials The material table to check the tree templates against; null skips them
+	 * @return The warnings; empty when nothing is wrong.
+	 */
+	TArray<FString> CollectSettingsWarnings(const FVoxelMaterialTable* Materials) const;
+
+public:
 
 	/**
 	 * Get the spawn position for spherical planet mode over the datum (no terrain: the configuration has no world mode).
@@ -715,11 +783,11 @@ public:
 	 * standalone runs), then the voxel.World.ConfigOverride console variable (set it in the editor before
 	 * pressing Play). Read when a voxel world initializes, so a change applies to the next PIE session.
 	 *
-	 * @return Object path such as /Game/PluginTesting/Review/Review_Cubic, or empty.
+	 * @return Object path such as /Game/PluginTesting/Tests/Review/Review_Cubic, or empty.
 	 */
 	static FString GetOverridePath();
 
-	/** Logs GetSettingsWarnings, so a bad asset is reported when it loads. */
+	/** Logs GetLoadWarnings, so a bad asset is reported when it loads. */
 	virtual void PostLoad() override;
 
 #if WITH_EDITOR
