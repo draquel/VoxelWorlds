@@ -655,9 +655,9 @@ Cubic forces LOD off (`IsLODEnabled()`, D7) and meshes interiors plus face seams
 
 A world configuration that names a `UVoxelValleyConfiguration` (`UVoxelWorldConfiguration::ValleyConfiguration`;
 `Documentation/VALLEYS_PLAN.md` at the project root, D176) has a valley network made from its seed over its natural
-ground: on a plane or an island meshed smooth (`FVoxelValleyNetwork::IsEnabled`; block worlds and planets are the
-plan's V5). Since V2 the network is carved into the natural height (below); since V3 a world that also generates
-hydrology has a river on every valley's floor (`WATER_SYSTEM.md`, "Valley rivers").
+ground: on a plane, an island or a planet, meshed smooth or in blocks (`FVoxelValleyNetwork::IsEnabled`; block worlds
+and planets since the plan's V5). Since V2 the network is carved into the natural height (below); since V3 a world that
+also generates hydrology has a river on every valley's floor (`WATER_SYSTEM.md`, "Valley rivers").
 
 - **The network** (`FVoxelValleyNetwork`, `VoxelGeneration/Public/VoxelValleyNetwork.h`) is a pure function of the
   seed, the settings (`FVoxelValleySettings`) and the natural height without the valleys (`FVoxelValleyGround`, a
@@ -693,8 +693,28 @@ hydrology has a river on every valley's floor (`WATER_SYSTEM.md`, "Valley rivers
 - **Saves.** The fingerprint gains `Valleys=<version>:<hash of the settings>` (`GetFingerprintTerm`), so a save made
   without the valleys or with other settings is refused; a world with none keeps its fingerprint, and
   `GenerationVersion` does not move.
-- **The survey.** `voxel.World.Valleys.Survey` builds a window's tiles and logs the nodes, sinks, breaches, valley
-  links and length and the longest valley (`Documentation/EDITOR_CONSOLE_GUIDE.md`).
+- **On a planet** (V5). The lattice is a cube sphere's (`FVoxelValleyLattice` over `FVoxelCubeSphereGrid`, the grid
+  the hydrology's cells use): as many cells along a face's edge as bring a cell nearest to `CellSize` at a face's middle,
+  a cell an atlas coordinate, its neighbours the cells it shares a side or a corner with on the sphere
+  (`GetAdjacentCell`), the same relation from both sides of a face's edge (eight, seven round the cube's eight
+  corners), and a tile a face's square of `TileCells` cells (a face's last tiles smaller). A tile's margin is the cells
+  a breadth-first walk reaches in `GetMarginCells` steps, which on a square grid is the plane's square, so a node, its
+  link and its valley are the same from any tile and whichever face they are worked out from. The ground is the
+  planet's radial displacement (an altitude), the sea an altitude; a node is placed by the hash in its cell's face
+  coordinates; its point, every point of a curve (each brought back onto the datum sphere) and every segment's ends lie
+  on the datum sphere, relative to the planet's centre; a step's length is the chord. The carve is the same
+  evaluation in 3D: a segment's rows carry its ends' three coordinates (every z 0 on a heightmap world, so its floats
+  are the plane's), the distance is the chord, the planet's `GetTerrainAltitude` applies it after the radial
+  displacement (`FVoxelValleyNetwork::ApplyToAltitude`, from the segments that reach the direction's lattice cell, a
+  tile's cells its buckets), and so do the readers that take the displacement themselves (the surface queries, the far
+  field: `FSphericalPlanetWorldMode::ApplyValleys`); the generators read a chunk's list in the conditioning lines'
+  frame, datum points less the chunk anchor's (`FVoxelChunkValleySegments::BuildOnSphere`), at each voxel's datum
+  point, before the lines; the planet slab's cells widen by the floors that reach them, as a heightmap column does.
+- **On a block world** (V5) the valleys are the smooth world's: generation does not know the meshing mode, and the
+  block tops follow the carved height, so a floor is a level of blocks and a side steps a block a column as any ground
+  does. A valley river's bed steps a block a column at most (`WATER_SYSTEM.md`, "Valley rivers").
+- **The survey.** `voxel.World.Valleys.Survey` builds a window's tiles (a planet's every tile) and logs the nodes,
+  sinks, breaches, valley links and length and the longest valley (`Documentation/EDITOR_CONSOLE_GUIDE.md`).
 
 ---
 

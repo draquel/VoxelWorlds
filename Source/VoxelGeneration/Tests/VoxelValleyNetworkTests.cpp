@@ -344,10 +344,12 @@ bool FVoxelValleyFingerprintTest::RunTest(const FString& Parameters)
 	Config->WorldMode = EWorldMode::IslandBowl;
 	TestTrue(TEXT("an island that names one has valleys"), FVoxelValleyNetwork::IsEnabled(*Config) && FVoxelWorldModeFactory::MakeFingerprint(*Config).Shape.Contains(TEXT("Valleys=")));
 	Config->WorldMode = EWorldMode::SphericalPlanet;
-	TestTrue(TEXT("a planet has none yet (V5)"), !FVoxelValleyNetwork::IsEnabled(*Config) && !FVoxelWorldModeFactory::MakeFingerprint(*Config).Shape.Contains(TEXT("Valleys")));
+	TestTrue(TEXT("a planet that names one has valleys (V5)"), FVoxelValleyNetwork::IsEnabled(*Config) && FVoxelWorldModeFactory::MakeFingerprint(*Config).Shape.Contains(TEXT("Valleys=")));
 	Config->WorldMode = EWorldMode::InfinitePlane;
 	Config->MeshingMode = EMeshingMode::Cubic;
-	TestTrue(TEXT("a block world has none yet (V5)"), !FVoxelValleyNetwork::IsEnabled(*Config) && !FVoxelWorldModeFactory::MakeFingerprint(*Config).Shape.Contains(TEXT("Valleys")));
+	TestTrue(TEXT("a block world that names one has valleys (V5)"), FVoxelValleyNetwork::IsEnabled(*Config) && FVoxelWorldModeFactory::MakeFingerprint(*Config).Shape.Contains(TEXT("Valleys=")));
+	Config->ValleyConfiguration = nullptr;
+	TestTrue(TEXT("... and one that names none has no term"), !FVoxelValleyNetwork::IsEnabled(*Config) && !FVoxelWorldModeFactory::MakeFingerprint(*Config).Shape.Contains(TEXT("Valleys")));
 	return true;
 }
 

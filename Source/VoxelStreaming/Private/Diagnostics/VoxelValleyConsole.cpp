@@ -28,18 +28,35 @@ namespace VoxelValleyConsole
 		const TSharedPtr<FVoxelValleyNetwork> Network = FVoxelValleyNetwork::Create(Config);
 		if (!Network.IsValid())
 		{
-			UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.Valleys.Survey [%s]: no valleys (no valley configuration, or not a smooth plane or island)"), *Config.GetName());
+			UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.World.Valleys.Survey [%s]: no valleys (no valley configuration, or not a plane, an island or a planet)"), *Config.GetName());
 			return;
 		}
+		// A heightmap world's window; a planet's every tile (the window is not read: the whole planet, V5)
+		const bool bWhole = Network->IsRadial();
 		const FBox2D Window(Centre - FVector2D(Half), Centre + FVector2D(Half));
-		const FIntPoint Low = Network->TileOf(Network->CellOf(Window.Min));
-		const FIntPoint High = Network->TileOf(Network->CellOf(Window.Max));
+		const auto InWindow = [&Window, bWhole](const FVector& Point) { return bWhole || Window.IsInside(FVector2D(Point)); };
 		TArray<FIntPoint> TileCoords;
-		for (int32 TY = Low.Y; TY <= High.Y; ++TY)
+		if (bWhole)
 		{
-			for (int32 TX = Low.X; TX <= High.X; ++TX)
+			const int32 PerEdge = Network->GetLattice().GetTilesPerEdge();
+			for (int32 TY = 0; TY < PerEdge; ++TY)
 			{
-				TileCoords.Add(FIntPoint(TX, TY));
+				for (int32 TX = 0; TX < 6 * PerEdge; ++TX)
+				{
+					TileCoords.Add(FIntPoint(TX, TY));
+				}
+			}
+		}
+		else
+		{
+			const FIntPoint Low = Network->TileOf(Network->CellOf(Window.Min));
+			const FIntPoint High = Network->TileOf(Network->CellOf(Window.Max));
+			for (int32 TY = Low.Y; TY <= High.Y; ++TY)
+			{
+				for (int32 TX = Low.X; TX <= High.X; ++TX)
+				{
+					TileCoords.Add(FIntPoint(TX, TY));
+				}
 			}
 		}
 		// The tiles, built on the workers (the network keeps them), and the cost of one from nothing on this thread
@@ -58,12 +75,12 @@ namespace VoxelValleyConsole
 			const TSharedRef<const FVoxelValleyTile> Tile = Network->GetTile(Coord);
 			for (const FVoxelValleySegment& Segment : Tile->Segments)
 			{
-				LinkLength.FindOrAdd(Segment.Link) += FVector2D::Distance(Segment.A, Segment.B);
+				LinkLength.FindOrAdd(Segment.Link) += FVector::Distance(Segment.A, Segment.B);
 				FloorRises += Segment.FloorB > Segment.FloorA + 0.01 ? 1 : 0;
 			}
 			for (const FVoxelValleyNode& Node : Tile->Nodes)
 			{
-				if (!Window.IsInside(Node.Position))
+				if (!InWindow(Node.Position))
 				{
 					continue;
 				}
@@ -87,7 +104,7 @@ namespace VoxelValleyConsole
 		{
 			for (const FVoxelValleyNode& Head : Network->GetTile(Coord)->Nodes)
 			{
-				if (!Head.bHead || !Window.IsInside(Head.Position))
+				if (!Head.bHead || !InWindow(Head.Position))
 				{
 					continue;
 				}
@@ -96,14 +113,14 @@ namespace VoxelValleyConsole
 				for (int32 Guard = 0; Node.bValley && Guard < 4096; ++Guard)
 				{
 					const double* Known = LinkLength.Find(Node.Cell);
-					Length += Known ? *Known : FVector2D::Distance(Node.Position, Network->GetNode(Node.Down).Position);
+					Length += Known ? *Known : FVector::Distance(Node.Position, Network->GetNode(Node.Down).Position);
 					Node = Network->GetNode(Node.Down);
 				}
 				Node.bSea ? ++ToSea : ++ToSink;
 				if (Length > Longest)
 				{
 					Longest = Length;
-					LongestHead = Head.Position;
+					LongestHead = FVector2D(Head.Position);
 				}
 			}
 		}

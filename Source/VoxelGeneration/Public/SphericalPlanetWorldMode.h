@@ -147,6 +147,19 @@ public:
 		BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(InBiomeConfig);
 	}
 
+	/** The world's valleys (the valleys plan's V5), carved into the altitude before the conditioning (GetTerrainAltitude) */
+	virtual void SetValleyNetwork(TSharedPtr<const FVoxelValleyNetwork> InValleys) override { Valleys = MoveTemp(InValleys); }
+	virtual TSharedPtr<const FVoxelValleyNetwork> GetValleyNetwork() const override { return Valleys; }
+
+	/**
+	 * The valleys carved into a natural altitude (FVoxelValleyNetwork::ApplyToAltitude), as the generators carve them;
+	 * the altitude as it is with none. Every reader of the planet's natural surface takes it after SampleRadialDisplacement.
+	 * @param Direction Unit direction from the planet centre
+	 * @param Natural The natural altitude there
+	 * @return The altitude with the valleys
+	 */
+	float ApplyValleys(const FVector& Direction, float Natural) const;
+
 	/** The surface along the direction from the planet centre to WorldPos, with its outward normal (SP-A1). */
 	virtual FVoxelTerrainSurfacePoint GetSurfacePoint(const FVector& WorldPos, const FVoxelNoiseParams& NoiseParams) const override;
 
@@ -224,7 +237,7 @@ public:
 	 */
 	float GetTerrainAltitude(const FVector& Direction, const FVoxelNoiseParams& NoiseParams) const
 	{
-		return SampleRadialDisplacement(Direction, PlanetParams.PlanetRadius, TerrainParams, NoiseParams, &BiomeSnapshot);
+		return ApplyValleys(Direction, SampleRadialDisplacement(Direction, PlanetParams.PlanetRadius, TerrainParams, NoiseParams, &BiomeSnapshot));
 	}
 
 	// ==================== Static Helpers ====================
@@ -470,6 +483,9 @@ private:
 
 	/** Continentalness for GetSurfacePoint (SetBiomeContext); plain data, safe on any thread. */
 	FVoxelBiomeSnapshot BiomeSnapshot;
+
+	/** The world's valleys (null: none), applied after the radial displacement, before the conditioning (SetValleyNetwork) */
+	TSharedPtr<const FVoxelValleyNetwork> Valleys;
 
 	/** Practical chunk range for spherical planet (relative to viewer) */
 	static constexpr int32 CHUNK_RANGE = 32;

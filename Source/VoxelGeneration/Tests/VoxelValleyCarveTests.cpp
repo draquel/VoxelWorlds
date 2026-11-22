@@ -113,7 +113,7 @@ bool FVoxelValleyCarveTest::RunTest(const FString& Parameters)
 	int32 Columns = 0, Carved = 0;
 	for (int32 K = 0; K < Floors.Num(); K += FMath::Max(1, Floors.Num() / 8))
 	{
-		const FVector2D Middle = 0.5 * (Floors[K].A + Floors[K].B);
+		const FVector2D Middle = FVector2D(0.5 * (Floors[K].A + Floors[K].B));
 		FVoxelNoiseGenerationRequest Request;
 		Request.ChunkCoord = FIntVector(FMath::FloorToInt32(Middle.X / ChunkWorldSize), FMath::FloorToInt32(Middle.Y / ChunkWorldSize), 0);
 		Request.ChunkSize = ChunkSize;
@@ -132,7 +132,7 @@ bool FVoxelValleyCarveTest::RunTest(const FString& Parameters)
 				const double WX = Corner.X + X * VoxelSize, WY = Corner.Y + Y * VoxelSize;
 				const float Natural = static_cast<float>(Hills(WX, WY));
 				const float FromChunk = ValleyColumns.IsEmpty() ? Natural : ValleyColumns.Apply(X + Y * ChunkSize, Natural);
-				const float FromList = Segments.Apply(X * VoxelSize, Y * VoxelSize, Natural);
+				const float FromList = Segments.Apply(FVector3f(X * VoxelSize, Y * VoxelSize, 0.0f), Natural);
 				const double FromPoint = Network->ApplyToHeight(WX, WY, Natural);
 				MostApart = FMath::Max3(MostApart, FMath::Abs(FromChunk - FromPoint), static_cast<double>(FMath::Abs(FromChunk - FromList)));
 				++Columns;
@@ -148,7 +148,7 @@ bool FVoxelValleyCarveTest::RunTest(const FString& Parameters)
 	int32 OnFloor = 0, Deeper = 0, Off = 0;
 	for (const FVoxelValleySegment& Segment : Floors)
 	{
-		const FVector2D Middle = 0.5 * (Segment.A + Segment.B);
+		const FVector2D Middle = FVector2D(0.5 * (Segment.A + Segment.B));
 		const double Natural = Hills(Middle.X, Middle.Y);
 		if (Natural < 0.0)
 		{
@@ -221,7 +221,7 @@ bool FVoxelValleyCarveTest::RunTest(const FString& Parameters)
 		for (int32 K = 0; K < Samples; ++K)
 		{
 			const FVoxelValleySegment& Segment = Floors[K % Floors.Num()];
-			const FVector2D P = FMath::Lerp(Segment.A, Segment.B, (K % 7) / 7.0) + FVector2D(K % 13 * 900.0, 0.0);
+			const FVector2D P = FVector2D(FMath::Lerp(Segment.A, Segment.B, (K % 7) / 7.0)) + FVector2D(K % 13 * 900.0, 0.0);
 			Sink += Network->ApplyToHeight(P.X, P.Y, 3000.0);
 		}
 		AddInfo(FString::Printf(TEXT("the point query near valleys: %.3f us a sample (%d samples, %.0f)"), (FPlatformTime::Seconds() - T0) * 1.0e6 / Samples, Samples, Sink * 0.0));
@@ -295,8 +295,8 @@ bool FVoxelHeightValleyParityTest::RunTest(const FString& Parameters)
 			for (int32 K = 0; K < Tile->Segments.Num() && Points.Num() < 24; K += 17)
 			{
 				const FVoxelValleySegment& Segment = Tile->Segments[K];
-				const FVector2D Middle = 0.5 * (Segment.A + Segment.B);
-				const FVector2D Across = (Segment.B - Segment.A).GetSafeNormal().GetRotated(90.0);
+				const FVector2D Middle = FVector2D(0.5 * (Segment.A + Segment.B));
+				const FVector2D Across = FVector2D(Segment.B - Segment.A).GetSafeNormal().GetRotated(90.0);
 				for (const double Offset : { 0.0, 0.5 * (Segment.FloorHalfWidth + Segment.ValleyHalfWidth) })
 				{
 					const FVector2D P = Middle + Across * Offset;
@@ -349,7 +349,7 @@ bool FVoxelValleySlabTest::RunTest(const FString& Parameters)
 			const TSharedRef<const FVoxelValleyTile> Tile = Network->GetTile(FIntPoint(TX, TY));
 			for (int32 K = 0; K < Tile->Segments.Num(); K += 23)
 			{
-				const FVector2D Middle = 0.5 * (Tile->Segments[K].A + Tile->Segments[K].B);
+				const FVector2D Middle = FVector2D(0.5 * (Tile->Segments[K].A + Tile->Segments[K].B));
 				const FVector2D Min(FMath::FloorToDouble(Middle.X / Column) * Column, FMath::FloorToDouble(Middle.Y / Column) * Column);
 				const FVector2D Max = Min + FVector2D(Column);
 				const FFloatInterval Range = Mode.GetSurfaceRange(Min, Max, Noise);

@@ -572,13 +572,13 @@ struct VOXELGENERATION_API FVoxelHydrology
 	static TSharedRef<const FVoxelHydrologySystem> BuildValleyRiver(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground, const FIntPoint& Link);
 
 	/**
-	 * The valley river pieces whose reaches may reach a box, by their links' cells, from the cache when it has them.
-	 * @param Box World XY
+	 * The valley river pieces whose reaches may reach a region, by their links' cells, from the cache when it has them.
+	 * @param Region A box of world XY, or on a planet a cap (the world's kind; another gives none)
 	 * @param Cache What is kept between calls (may be null)
 	 * @param Out The pieces (appended), in a fixed order
 	 */
-	static void GatherValleyRivers(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground, const FBox2D& Box, IVoxelHydrologyCache* Cache,
-		TArray<TSharedRef<const FVoxelHydrologySystem>>& Out);
+	static void GatherValleyRivers(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground, const FVoxelConditioningRegion& Region,
+		IVoxelHydrologyCache* Cache, TArray<TSharedRef<const FVoxelHydrologySystem>>& Out);
 
 	/** @return A valley river piece's body id from its link's cell (never the sea's 0; a hash of its own, apart from a brook's) */
 	static uint32 MakeValleyReachId(int32 Seed, const FIntPoint& Link);

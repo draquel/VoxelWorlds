@@ -17,6 +17,7 @@
 #include "VoxelChunkLineSegments.h"
 #include "VoxelChunkValleySegments.h"
 #include "VoxelValleyNetwork.h"
+#include "VoxelValleyConfiguration.h"
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelChunkWaterColumns.h"
 #include "VoxelConditioningLine.h"
@@ -2762,7 +2763,7 @@ bool FVoxelGPUvsCPUValleyParityTest::RunTest(const FString& Parameters)
 			const TSharedRef<const FVoxelValleyTile> Tile = Network->GetTile(OriginTile + FIntPoint(TX, TY));
 			for (const FVoxelValleySegment& Segment : Tile->Segments)
 			{
-				const FVector2D Middle = 0.5 * (Segment.A + Segment.B);
+				const FVector2D Middle = FVector2D(0.5 * (Segment.A + Segment.B));
 				const double Natural = Ground.Height(Middle.X, Middle.Y);
 				const double Floor = 0.5 * (Segment.FloorA + Segment.FloorB);
 				if (Natural - Floor < 600.0)
@@ -2783,7 +2784,7 @@ bool FVoxelGPUvsCPUValleyParityTest::RunTest(const FString& Parameters)
 				else if (!bSide && Segment.TaperA >= 1.0f)
 				{
 					bSide = true;
-					const FVector2D Across = (Segment.B - Segment.A).GetSafeNormal().GetRotated(90.0);
+					const FVector2D Across = FVector2D(Segment.B - Segment.A).GetSafeNormal().GetRotated(90.0);
 					const FVector2D P = Middle + Across * (0.5 * (Segment.FloorHalfWidth + Segment.ValleyHalfWidth));
 					const double Carved = Network->ApplyToHeight(P.X, P.Y, Ground.Height(P.X, P.Y));
 					Sites.Add({ TEXT("Valley side"), MakeRequest(FVector(P, Carved)) });
@@ -2853,6 +2854,228 @@ bool FVoxelGPUvsCPUValleyParityTest::RunTest(const FString& Parameters)
 	BiomeConfig->RemoveFromRoot();
 	TestTrue(TEXT("The valleys move every test chunk"), bAllMoved);
 	TestTrue(TEXT("GPU==CPU parity with valleys, across LOD 0/1/2"), bAllPass);
+	return true;
+}
+
+// The valleys on a planet's GPU (Documentation/VALLEYS_PLAN.md, V5): a planet chunk's valley segments
+// (FVoxelChunkValleySegments::BuildOnSphere: datum points less the anchor's, the conditioning lines' frame) are uploaded
+// as ValleyData and walked by GpuApplyValleys (Valleys.ush) in the planet branch (SphericalPlanet.ush) at each voxel's
+// datum point, before the lines; the GPU gives what the CPU generator gives from the same list, at LOD 0/1/2. On the
+// parity planet (Review_Planet's size and terrain, off the world origin, biomes and a sea) with the default valley
+// settings scaled to its size (0.3: a 105 m lattice, the widths alike): chunks at the floor's altitude on valley floors, on a side, at a head, on a valley that runs across a cube
+// face's edge where there is one, and one with a planet conditioning line over a floor (the valleys come before the
+// lines). A CPU run without the network shows the valleys change the voxels of each chunk (non-vacuous).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUValleyPlanetParityTest, "VoxelWorlds.Generation.GPUvsCPUValleyPlanetParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelGPUvsCPUValleyPlanetParityTest::RunTest(const FString& Parameters)
+{
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
+	const float Radius = 250000.0f;
+	const float WaterRadius = Radius - 500.0f;
+	const float VoxelSize = 100.0f;
+	const int32 ChunkSize = 32;
+	const double ChunkWorldSize = ChunkSize * VoxelSize;
+	UVoxelBiomeConfiguration* PlanetBiomes = NewObject<UVoxelBiomeConfiguration>();
+	PlanetBiomes->AddToRoot();
+	PlanetBiomes->InitializeDefaults();
+	PlanetBiomes->bEnableContinentalness = true;
+	PlanetBiomes->RebuildCaches();
+	PlanetBiomes->BuildGpuData();
+	UVoxelValleyConfiguration* ValleyConfig = NewObject<UVoxelValleyConfiguration>();
+	ValleyConfig->AddToRoot();
+	// D181's lattice and widths scaled to the 2.5 km planet (0.3: a 105 m lattice); at 350 m its land holds one valley link
+	{
+		FVoxelValleySettings& V = ValleyConfig->Settings;
+		const float Scale = 0.3f;
+		V.CellSize *= Scale;
+		V.FloorHalfWidthMin *= Scale;
+		V.FloorHalfWidthMax *= Scale;
+		V.ValleyHalfWidthMin *= Scale;
+		V.ValleyHalfWidthMax *= Scale;
+		V.RiverHalfWidthMin *= Scale;
+		V.RiverHalfWidthMax *= Scale;
+	}
+	UVoxelWorldConfiguration* Config = NewObject<UVoxelWorldConfiguration>();
+	Config->AddToRoot();
+	Config->WorldMode = EWorldMode::SphericalPlanet;
+	Config->WorldOrigin = FVector(12345.0, 54321.0, 0.0);
+	Config->WorldRadius = Radius;
+	Config->PlanetHeightScale = 6000.0f;
+	Config->BaseHeight = 0.0f;
+	Config->PlanetMaxTerrainHeight = 6500.0f;
+	Config->PlanetMaxTerrainDepth = 6500.0f;
+	Config->VoxelSize = VoxelSize;
+	Config->ChunkSize = ChunkSize;
+	Config->NoiseParams.NoiseType = EVoxelNoiseType::Simplex;
+	Config->NoiseParams.Seed = 248675;
+	Config->NoiseParams.Octaves = 3;
+	Config->NoiseParams.Frequency = 0.000025f;
+	Config->NoiseParams.Lacunarity = 1.681f;
+	Config->NoiseParams.Persistence = 0.5f;
+	Config->BiomeConfiguration = PlanetBiomes;
+	Config->bEnableBiomes = true;
+	Config->bEnableCaves = false;
+	Config->bEnableWaterLevel = true;
+	Config->WaterRadius = WaterRadius;
+	Config->ValleyConfiguration = ValleyConfig;
+	const TSharedRef<IVoxelWorldMode> Mode = FVoxelWorldModeFactory::Create(*Config);
+	const FSphericalPlanetWorldMode& Planet = static_cast<const FSphericalPlanetWorldMode&>(*Mode);
+	const TSharedPtr<const FVoxelValleyNetwork> Network = Mode->GetValleyNetwork();
+	if (!TestTrue(TEXT("the planet has a valley network"), Network.IsValid()))
+	{
+		Config->RemoveFromRoot();
+		ValleyConfig->RemoveFromRoot();
+		PlanetBiomes->RemoveFromRoot();
+		return false;
+	}
+	const FVector Origin = Config->WorldOrigin;
+	FVoxelGPUNoiseGenerator GPUGenerator;
+	GPUGenerator.Initialize();
+	FVoxelCPUNoiseGenerator CPUGenerator;
+	CPUGenerator.Initialize();
+	auto MakePlanetRequest = [&](const FVector& Direction, double Altitude)
+	{
+		FVoxelNoiseGenerationRequest Request;
+		const FVector Local = (Origin + Direction * (Radius + Altitude) - Origin) / ChunkWorldSize;
+		Request.ChunkCoord = FIntVector(FMath::FloorToInt(Local.X), FMath::FloorToInt(Local.Y), FMath::FloorToInt(Local.Z));
+		Request.ChunkSize = Config->ChunkSize;
+		Request.VoxelSize = Config->VoxelSize;
+		Request.NoiseParams = Config->NoiseParams;
+		FVoxelWorldModeFactory::FillGenerationRequest(*Config, Request);
+		Request.bEnableBiomes = true;
+		Request.BiomeConfiguration = Config->BiomeConfiguration;
+		Request.bEnableWaterLevel = true;
+		Request.WaterRadius = Config->WaterRadius;
+		Request.Valleys = Network;
+		return Request;
+	};
+	auto Natural = [&](const FVector& Direction)
+	{
+		return static_cast<double>(FSphericalPlanetWorldMode::SampleRadialDisplacement(Direction, Radius, Planet.GetTerrainParams(), Config->NoiseParams, &Planet.GetBiomeSnapshot()));
+	};
+
+	// The sites: every tile's segments, the chunk at the floor's (or the carved side's) altitude
+	struct FSite { FString Name; FVoxelNoiseGenerationRequest Request; };
+	TArray<FSite> Sites;
+	bool bHead = false, bSide = false, bEdge = false;
+	int32 Floors = 0, Segments = 0;
+	const int32 PerEdge = Network->GetLattice().GetTilesPerEdge();
+	const int32 CellsPerEdge = Network->GetLattice().GetCells().GetCellsPerEdge();
+	for (int32 TY = 0; TY < PerEdge; ++TY)
+	{
+		for (int32 TX = 0; TX < 6 * PerEdge; ++TX)
+		{
+			for (const FVoxelValleySegment& Segment : Network->GetTile(FIntPoint(TX, TY))->Segments)
+			{
+				++Segments;
+				const FVector Middle = (0.5 * (Segment.A + Segment.B)).GetSafeNormal();
+				const double Floor = 0.5 * (Segment.FloorA + Segment.FloorB);
+				const double Ground = Natural(Middle);
+				if (Ground - Floor < 600.0)
+				{
+					continue; // a cut of 6 m or more: the chunk at the floor holds the valley's surface, not the natural one
+				}
+				const bool bAcross = Network->GetLattice().CellOf(Segment.A).X / CellsPerEdge != Network->GetLattice().CellOf(Segment.B).X / CellsPerEdge;
+				if (!bEdge && bAcross)
+				{
+					bEdge = true;
+					Sites.Add({ TEXT("Planet valley across a face's edge"), MakePlanetRequest(Middle, Network->ApplyToAltitude(Middle, Ground)) });
+				}
+				else if (!bHead && Segment.TaperA < 0.5f)
+				{
+					bHead = true;
+					Sites.Add({ TEXT("Planet valley head"), MakePlanetRequest(Middle, Network->ApplyToAltitude(Middle, Ground)) });
+				}
+				else if (Floors < 3 && Segment.TaperA >= 1.0f)
+				{
+					++Floors;
+					Sites.Add({ FString::Printf(TEXT("Planet valley floor %d"), Floors), MakePlanetRequest(Middle, Floor) });
+				}
+				else if (!bSide && Segment.TaperA >= 1.0f)
+				{
+					bSide = true;
+					const FVector Across = FVector::CrossProduct(Middle, (Segment.B - Segment.A).GetSafeNormal()).GetSafeNormal();
+					const FVector P = (Middle * Radius + Across * (0.5 * (Segment.FloorHalfWidth + Segment.ValleyHalfWidth))).GetSafeNormal();
+					Sites.Add({ TEXT("Planet valley side"), MakePlanetRequest(P, Network->ApplyToAltitude(P, Natural(P))) });
+				}
+			}
+		}
+	}
+	AddInfo(FString::Printf(TEXT("%d valley segments on the planet; a valley across a face's edge with a cut of 6 m: %s"), Segments, bEdge ? TEXT("yes") : TEXT("none")));
+	TestTrue(TEXT("Sites on floors, a side and a head were found"), Floors >= 2 && bSide && bHead);
+	if (Floors > 0)
+	{
+		// A levelled planet line across a floor's chunk: the valleys come before the lines
+		FSite Lined = Sites.Last();
+		for (const FSite& Site : Sites)
+		{
+			if (Site.Name.StartsWith(TEXT("Planet valley floor")))
+			{
+				Lined = Site;
+				break;
+			}
+		}
+		Lined.Name = TEXT("Planet valley floor under a conditioning line");
+		const FVector Through = Lined.Request.GetPlanetAnchorRelative().GetSafeNormal();
+		const FVector Tangent = FVector::CrossProduct(Through, FVector::UpVector).GetSafeNormal();
+		FVoxelConditioningLineParams Params;
+		Params.bRadial = true;
+		Params.FalloffWidth = 4.0f * VoxelSize;
+		Params.Blend = EVoxelConditioningLineBlend::Level;
+		const float Target = static_cast<float>(Lined.Request.GetPlanetAnchorRelative().Size() - Radius + 0.25 * ChunkWorldSize);
+		for (int32 Step = -16; Step <= 16; ++Step)
+		{
+			const double Angle = Step * 2.0 * VoxelSize / Radius;
+			Params.Vertices.Add(FVoxelConditioningLineVertex((Through * FMath::Cos(Angle) + Tangent * FMath::Sin(Angle)).GetSafeNormal(), Target, 3.0f * VoxelSize));
+		}
+		Lined.Request.Conditioning.Lines.Add(FVoxelConditioningLine::Make(Params));
+		Sites.Add(Lined);
+	}
+
+	bool bAllMoved = true;
+	for (const FSite& Site : Sites)
+	{
+		FVoxelNoiseGenerationRequest Without = Site.Request;
+		Without.Valleys.Reset();
+		TArray<FVoxelData> With, Plain;
+		CPUGenerator.GenerateChunkCPU(Site.Request, With);
+		CPUGenerator.GenerateChunkCPU(Without, Plain);
+		int32 Differ = 0;
+		for (int32 Index = 0; Index < With.Num() && Index < Plain.Num(); ++Index)
+		{
+			Differ += With[Index].Density != Plain[Index].Density ? 1 : 0;
+		}
+		FVoxelChunkValleySegments List;
+		FVoxelChunkValleySegments::Build(Site.Request, List);
+		AddInfo(FString::Printf(TEXT("%s: chunk (%d, %d, %d), %d valley segments, %d voxels changed by the valleys"),
+			*Site.Name, Site.Request.ChunkCoord.X, Site.Request.ChunkCoord.Y, Site.Request.ChunkCoord.Z, List.Num(), Differ));
+		if (List.Num() == 0 || Differ < 50)
+		{
+			AddError(FString::Printf(TEXT("%s: the valleys do not change the chunk (%d segments, %d voxels)"), *Site.Name, List.Num(), Differ));
+			bAllMoved = false;
+		}
+	}
+	CPUGenerator.Shutdown();
+
+	VoxelParityHarness::FParityThresholds Thresholds;
+	Thresholds.DensityClose = 99.5f;
+	Thresholds.Mat = 99.0f;
+	Thresholds.Biome = 99.9f;
+	Thresholds.Meta = 99.0f;
+	Thresholds.MatWhenDensEq = 99.5f;
+	bool bAllPass = true;
+	for (const FSite& Site : Sites)
+	{
+		bAllPass &= VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Site.Request, *Site.Name, Thresholds);
+	}
+	GPUGenerator.Shutdown();
+	Config->RemoveFromRoot();
+	ValleyConfig->RemoveFromRoot();
+	PlanetBiomes->RemoveFromRoot();
+	TestTrue(TEXT("The valleys move every test chunk"), bAllMoved);
+	TestTrue(TEXT("GPU==CPU parity with valleys on a planet, across LOD 0/1/2"), bAllPass);
 	return true;
 }
 

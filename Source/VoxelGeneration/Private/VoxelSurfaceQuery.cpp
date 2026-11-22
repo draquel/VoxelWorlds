@@ -177,6 +177,7 @@ FVoxelTerrainSurfacePoint FVoxelSurfaceQuery::GetGeneratedSurface(
 	float Continentalness = 0.0f;
 	float Altitude = FSphericalPlanetWorldMode::SampleRadialDisplacement(
 		Direction, Params.PlanetRadius, Planet.GetTerrainParams(), NoiseParams, &Planet.GetBiomeSnapshot(), &Continentalness);
+	Altitude = Planet.ApplyValleys(Direction, Altitude);
 	if (bConditioned)
 	{
 		Altitude = Conditioning->ApplyToAltitude(Direction, Params.PlanetRadius, Altitude);
@@ -587,6 +588,8 @@ void FVoxelSurfaceQuery::QueryPlanetSurfaceConditions(
 	float Continentalness = 0.0f;
 	float TerrainAltitude = FSphericalPlanetWorldMode::SampleRadialDisplacement(
 		Direction, Params.PlanetRadius, Planet.GetTerrainParams(), NoiseParams, BiomeSnapshot.bIsValid ? &BiomeSnapshot : &Planet.GetBiomeSnapshot(), &Continentalness);
+	// The valleys, as the generator carves them before the conditioning (the valleys plan's V5)
+	TerrainAltitude = Planet.ApplyValleys(Direction, TerrainAltitude);
 	if (Conditioning && !Conditioning->IsEmpty())
 	{
 		// The conditioned terrain (SP-B10), as the generator blends it.

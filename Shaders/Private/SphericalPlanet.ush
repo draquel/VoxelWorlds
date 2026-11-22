@@ -196,6 +196,13 @@ void GeneratePlanetVoxel(uint3 VoxelCoord, float3 WorldPos, float VoxelSize,
         NoiseType, NoiseSeed, NoiseOctaves, NoiseFrequency, NoiseLacunarity, NoisePersistence, NoiseRidged);
     float TerrainAltitude = EffectiveBaseHeight + TerrainNoise * EffectiveHeightScale * 0.5f;
 
+    // The valleys (the chunk's valley segments, in the lines' frame; the valleys plan's V5), carved into the natural
+    // altitude before the conditioning, as on the CPU.
+    if (ValleySegmentCount > 0)
+    {
+        TerrainAltitude = GpuApplyValleys(SurfaceOffset, TerrainAltitude);
+    }
+
     // Terrain conditioning (SP-B10): the planet lines (the chunk's segment list, relative to the anchor's datum point),
     // then the planet zones, blend the altitude along this direction before the SDF, as on the CPU. The lines also
     // leave a surface along this direction: the band's material and depth, the caves' minimum depth.

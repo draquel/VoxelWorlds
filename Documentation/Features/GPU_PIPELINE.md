@@ -91,14 +91,17 @@ the CPU). Per voxel, in the CPU generator's order:
    with no segment skips the call on one count test. `VoxelWorlds.Generation.GPUvsCPULineParity` holds the two sides
    to each other.
 
-   **Valleys** (`Valleys.ush`; `WORLD_MODES.md`, "Valleys"). On a plane or an island with valleys the upload builds the
-   chunk's valley segments with the CPU generator's function (`FVoxelChunkValleySegments::Build`, from the request's
-   network) and sends them as `ValleySegmentCount`, `ValleySeaLevel` and `ValleyData`, 3 float4s a segment
-   (`VOXELGEN_VALLEY_SEGMENT_STRIDE`): `[A.xy, B.xy] [floor at A, floor at B, floor half width, valley half width]
-   [taper at A, taper at B, 0, 0]`, relative to the chunk's origin corner. `GpuApplyValleys` carves them into the
-   natural height after the island's falloff and before the lines: each segment's weight and floor, the deepest cut plus
-   the highest fill, ground under the sea left alone (`VoxelValleyCarve`, operation for operation). A world with none
-   uploads a count of 0. `VoxelWorlds.Generation.GPUvsCPUValleyParity` holds the two sides to each other.
+   **Valleys** (`Valleys.ush`; `WORLD_MODES.md`, "Valleys"). On a world with valleys the upload builds the chunk's
+   valley segments with the CPU generator's function (`FVoxelChunkValleySegments::Build`, from the request's network)
+   and sends them as `ValleySegmentCount`, `ValleySeaLevel` and `ValleyData`, 3 float4s a segment
+   (`VOXELGEN_VALLEY_SEGMENT_STRIDE`): `[A.xyz, floor at A] [B.xyz, floor at B] [floor half width, valley half width,
+   taper at A, taper at B]`, relative to the chunk's origin corner with every z 0 on a heightmap world, and on a planet
+   (the valleys plan's V5) the ends' datum points less the anchor's, the conditioning lines' frame; the distance is the
+   chord. `GpuApplyValleys` carves them into the natural height after the island's falloff, or into a planet's altitude
+   at the voxel's datum point (`SurfaceOffset`, in `SphericalPlanet.ush`), before the lines: each segment's weight and
+   floor, the deepest cut plus the highest fill, ground under the sea left alone (`VoxelValleyCarve`, operation for
+   operation). A world with none uploads a count of 0. `VoxelWorlds.Generation.GPUvsCPUValleyParity` and
+   `.GPUvsCPUValleyPlanetParity` hold the two sides to each other.
 
    The same walk leaves the surface under the lines at the voxel's column (`ConditioningLineSurface`, the CPU's
    `FVoxelChunkLineSurface`; `WORLD_MODES.md`, "The surface under a line"): the band's material and depth where the
