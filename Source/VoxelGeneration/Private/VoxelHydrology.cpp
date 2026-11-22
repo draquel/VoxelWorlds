@@ -9,6 +9,7 @@
 #include "VoxelWorldModeFactory.h"
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelPolyline.h"
+#include "VoxelValleyNetwork.h"
 #include <limits>
 
 namespace VoxelHydrologyPrivate
@@ -1061,6 +1062,108 @@ TSharedRef<const FVoxelHydrologyTrace> FVoxelHydrology::TraceSpring(const FVoxel
 		return false;
 	};
 
+	// A descent that comes onto a valley's floor ends at its valley river, led straight across the floor to the river's
+	// water (G267, G268): on a floor level across, the steepest way on runs down the valley beside the river, and where
+	// floors are dead flat (every node a few metres over the sea has the same floor, MinFloorHeight over it) a descent
+	// wanders and turns back on itself. The way on from a floor cell is the cell's alone: toward the nearest vertex of
+	// the piece of the floor it lies on (FVoxelValleyNetwork::FindFloorAt), so two descents never disagree there.
+	const auto ValleyPieceOf = [&](const FIntPoint& Link) -> TSharedRef<const FVoxelHydrologySystem>
+	{
+		TSharedPtr<const FVoxelHydrologySystem> River = Cache ? Cache->FindValleyRiver(Link) : nullptr;
+		if (!River.IsValid())
+		{
+			const TSharedRef<const FVoxelHydrologySystem> Made = BuildValleyRiver(Settings, TraceGround, Link);
+			River = Cache ? Cache->StoreValleyRiver(Made).ToSharedPtr() : Made.ToSharedPtr();
+		}
+		return River.ToSharedRef();
+	};
+	const auto InPiece = [&Heights, &TraceGround](const FVoxelHydrologySystem& Piece, const FIntPoint& At) -> bool
+	{
+		const FVector Place = Heights.PlaceOf(At);
+		const FVoxelHydrologyReach& Reach = Piece.Reaches[0];
+		FVoxelWaterReachSample Sample;
+		return Reach.Body.Reach.IsValid() && (TraceGround.bRadial ? Reach.Body.Reach->SampleOnSphere(Place, TraceGround.PlanetRadius, Sample)
+			: (Reach.Body.Bounds.IsInsideOrOnXY(Place) && Reach.Body.Reach->SampleAt(Place.X, Place.Y, Sample)));
+	};
+	// The piece of the floor a cell lies on, and the point the way on heads for: its nearest vertex
+	const auto FloorTarget = [&](const FIntPoint& At, TSharedPtr<const FVoxelHydrologySystem>& OutPiece, FVector& OutTarget) -> bool
+	{
+		FVoxelValleySegment Floor;
+		if (!TraceGround.Valleys.IsValid() || !TraceGround.Valleys->FindFloorAt(Grid.PointOf(Heights.PlaceOf(At)), Floor))
+		{
+			return false;
+		}
+		const TSharedRef<const FVoxelHydrologySystem> Piece = ValleyPieceOf(Floor.Link);
+		if (Piece->Reaches.Num() != 1 || !Piece->Reaches[0].Body.Reach.IsValid())
+		{
+			return false;
+		}
+		const FVector From = Grid.PointOf(Heights.PlaceOf(At));
+		double Best = MAX_dbl;
+		for (const FVoxelWaterReachVertex& Vertex : Piece->Reaches[0].Body.Reach->GetVertices())
+		{
+			const FVector Point = Grid.PointOf(Vertex.Position);
+			const double Distance = FVector::DistSquared(From, Point);
+			if (Distance < Best)
+			{
+				Best = Distance;
+				OutTarget = Point;
+			}
+		}
+		OutPiece = Piece.ToSharedPtr();
+		return true;
+	};
+	// The walk across a floor from a cell on it to the river's water: false when it makes no way (the cells then left to the descent)
+	const auto CrossFloor = [&](const FIntPoint& From, TArray<FIntPoint>& OutPath, double& OutLength, FIntPoint& OutEnd) -> bool
+	{
+		TSharedPtr<const FVoxelHydrologySystem> Piece;
+		FVector Target;
+		if (!FloorTarget(From, Piece, Target))
+		{
+			return false;
+		}
+		FIntPoint At = From;
+		for (int32 Guard = 0; Guard < 512; ++Guard)
+		{
+			if (InPiece(*Piece, At) || (ValleyRivers.Num() > 0 && InValleyRiver(At)))
+			{
+				OutEnd = At;
+				return true;
+			}
+			TSharedPtr<const FVoxelHydrologySystem> Here;
+			FVector HereTarget;
+			if (FloorTarget(At, Here, HereTarget))
+			{
+				Piece = Here;
+				Target = HereTarget;
+			}
+			const double Now = FVector::DistSquared(Grid.PointOf(Heights.PlaceOf(At)), Target);
+			FIntPoint Next = At;
+			double Best = Now;
+			for (int32 Index = 0; Index < 8; ++Index)
+			{
+				FIntPoint Neighbour;
+				if (Grid.GetNeighbour(At, Index, Neighbour))
+				{
+					const double Distance = FVector::DistSquared(Grid.PointOf(Heights.PlaceOf(Neighbour)), Target);
+					if (Distance < Best)
+					{
+						Best = Distance;
+						Next = Neighbour;
+					}
+				}
+			}
+			if (Next == At)
+			{
+				return false;
+			}
+			OutPath.Add(At);
+			OutLength += Grid.GetStepLength(At, Next);
+			At = Next;
+		}
+		return false;
+	};
+
 	FIntPoint Cell = Trace->Spring;
 	int32 DescentStart = 0;   // where the descent in hand began: the spring, or the cell past the last lake's saddle
 	double Length = 0.0;
@@ -1081,6 +1184,41 @@ TSharedRef<const FVoxelHydrologyTrace> FVoxelHydrology::TraceSpring(const FVoxel
 			Trace->End = EVoxelHydrologyEnd::ValleyRiver;
 			Trace->Mouth = Cell;
 			break;
+		}
+		if (TraceGround.Valleys.IsValid())
+		{
+			TArray<FIntPoint> Across;
+			double AcrossLength = 0.0;
+			FIntPoint End;
+			if (CrossFloor(Cell, Across, AcrossLength, End))
+			{
+				// A walk that comes back to a cell the descent has been on (a river's water reaches a little past its
+				// floor where its course runs straight into a node, or a hollow's saddle on a flat floor lies in it) ends
+				// the descent at that cell's first visit: a way on is never two ways
+				const int32 Seen = Cells.Find(End);
+				if (Seen != INDEX_NONE)
+				{
+					Cells.SetNum(Seen + 1);
+					LakeOf.SetNum(Seen + 1);
+					Length = 0.0;
+					for (int32 Index = 1; Index < Cells.Num(); ++Index)
+					{
+						Length += Grid.GetStepLength(Cells[Index - 1], Cells[Index]);
+					}
+				}
+				else
+				{
+					for (const FIntPoint& Step : Across)
+					{
+						Push(Step, INDEX_NONE);
+					}
+					Length += AcrossLength;
+					Push(End, INDEX_NONE);
+				}
+				Trace->End = EVoxelHydrologyEnd::ValleyRiver;
+				Trace->Mouth = End;
+				break;
+			}
 		}
 		if (Length > Settings.MaxRiverLength)
 		{
@@ -1684,8 +1822,16 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildSystem(const FVoxe
 		{
 			// The reach comes to the water it ends in at that water's level, as it comes to the sea's: ground a little
 			// over a lake's level would else put the surface under the lake's just before it, and the lake's water
-			// would stand over the river's where the footprints meet.
-			ChainParams.MinSurface = FMath::Max(ChainParams.MinSurface, BodyLevels[Num - 1] - ChainParams.BodyTuck);
+			// would stand over the river's where the footprints meet. Water whose level falls along the chain's tail in
+			// it (a valley river the brook runs into downstream) is met at its highest there, where the reach enters
+			// it: the reach is cut a few vertices in, and a bound from the tail's last point, further down the river,
+			// left it under the river's water where it ends (G268)
+			double EndBody = BodyLevels[Num - 1];
+			for (int32 Index = Num - 2; Index >= 0 && !FMath::IsNaN(BodyLevels[Index]); --Index)
+			{
+				EndBody = FMath::Max(EndBody, BodyLevels[Index]);
+			}
+			ChainParams.MinSurface = FMath::Max(ChainParams.MinSurface, EndBody - ChainParams.BodyTuck);
 		}
 		// The banks where the river will have them: the floor narrows at a head, which the taper of a first profile over
 		// level banks gives.

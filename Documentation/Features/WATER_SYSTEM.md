@@ -738,16 +738,31 @@ whole or not at all; a valley has no length bound, so its river is made a link a
   under the next). A head starts at its own first place and no lower than the node it runs to. A coast's
   floor lies `MinFloorHeight` under the sea, so a valley comes down to a drowned mouth (a flat at the sea's very level
   is neither sea nor land, and a river reaching it would end on land), and a piece into a coast keeps only the
-  `BodyVertices` past the shore that a brook keeps inside the body it ends in; a piece with no more than two places
-  on land is no river (a valley of one link at a coast, its head half way along where the ground is already under the
-  sea: refused as "a valley river that starts in the sea"). A head
+  `BodyVertices` past the shore that a brook keeps inside the body it ends in (and ends at the last of them still under
+  the sea, where the seabed rises over the water again past the shore); a head with no more than two places on land is
+  no river (a valley of one link at a coast, its head half way along where the ground is already under the sea:
+  refused as "a valley river that starts in the sea"). A piece that another comes into is kept however short, at the
+  sea's level from its start, and the piece into it ends at that level (G268: refused, it left the piece above ending
+  on land; kept at its node's level, it dropped to the sea over the sea's own water). A head
   starts from nothing over `HeadLength`. The bed is the surface less the depth, lowered through the bends as a
   brook's (rule 8, `FVoxelConditioningLineShape::HoldBedThroughBends`, shared with `MakeRiverProfile`), a lower-only
   line with the brooks' band and cave depth. The reach's id is `MakeValleyReachId` (the seed and the link), its bed
   line's `MakeValleyBedLineId`, apart from the brooks'.
 - **The brooks.** A descent that comes into a valley river's water ends there (`EVoxelHydrologyEnd::ValleyRiver`):
   the river is made as one that ends in the sea, its reaches meeting the valley river's pieces near its mouth as
-  water. `TraceSpring` gathers the pieces within the longest river of the spring.
+  water. `TraceSpring` gathers the pieces within the longest river of the spring. A descent that comes onto a valley's
+  floor (within a segment's `FloorHalfWidth` of its centre curve: `FVoxelValleyNetwork::FindFloorAt`, the point query's
+  buckets) ends at that floor's piece too, led straight across the floor to its water a cell at a time, each step to
+  the neighbour nearest the piece's nearest vertex from the cell it leaves, so the way on from a floor cell is that
+  cell's alone and two descents never disagree there; a walk that comes back to a cell the descent has been on (a
+  hollow's saddle on a flat floor, or the river's water a little past its floor where its course runs straight into
+  a node) ends the descent at that cell's first visit (G267, G268: on a floor level across the steepest way on ran
+  down the valley beside the river for up to a kilometre, and on floors dead flat at `MinFloorHeight` over the sea a
+  descent wandered and turned back on itself, its system refused). A brook ending in water whose level falls along the
+  chain's tail in it, as a valley river's does downstream, is bounded under by the tail's highest level less the tuck,
+  where the reach enters it, not by the level at the tail's last point further down (G268). A cell is the sea's when
+  its ground lies strictly under the sea's level, as the sea covers it (`FVoxelHydrologyHeights::IsSea`; G268: a
+  valley floor falling through the sea's level put a cell's float altitude at the level itself).
 - **The network** keeps the pieces by link (`IVoxelHydrologyCache::FindValleyRiver` / `StoreValleyRiver`) beside
   the systems; a region (`FVoxelHydrology::GatherValleyRivers`, `BuildRegion`) holds the pieces of the links whose
   segments reach it. A piece depends on its link alone, so any region, tiling or cache gives it the same record.
@@ -765,8 +780,8 @@ whole or not at all; a valley has no length bound, so its river is made a link a
 - **On a block world** a piece's bed steps a block a column at most, as a brook's does: after the bends a segment
   steeper than `GetBlockBedGrade` has its higher end lowered, from the end up and from the start down; the course and
   the surface are the smooth world's, and the bed's check is the block world's (`bBlockWorld`).
-- **The fingerprint** is the valleys' term (`FVoxelValleyNetwork::Version` 2 since V3: the same settings make other
-  bodies); a world with no valleys makes the bodies it did.
+- **The fingerprint** is the valleys' term (`FVoxelValleyNetwork::Version` 2 since V3, 3 since G268's fix: the same
+  settings make other bodies); a world with no valleys makes the bodies it did.
 
 Tests: `Generation.Hydrology.ValleyRivers.Pieces` (made hills falling to a sea, the network carved: every valley link
 has its piece or would start in the sea, no surface rises, a piece meets the piece below at the node and never under it, a head starts from

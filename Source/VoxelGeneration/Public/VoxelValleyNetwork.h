@@ -250,9 +250,10 @@ class VOXELGENERATION_API FVoxelValleyNetwork
 public:
 	/**
 	 * The network's version, in the fingerprint's term: it moves when the same settings would make other valleys or other
-	 * bodies in them (2: the valley rivers, the valleys plan's V3)
+	 * bodies in them (2: the valley rivers, the valleys plan's V3; 3: G268's, a short piece kept for the pieces into it and
+	 * the brooks led across a valley's floor to its river)
 	 */
-	static constexpr int32 Version = 2;
+	static constexpr int32 Version = 3;
 
 	FVoxelValleyNetwork(const FVoxelValleySettings& InSettings, FVoxelValleyGround InGround);
 
@@ -365,6 +366,16 @@ public:
 	 */
 	bool GetFloorRangeNear(const FVector& Point, double Distance, double& OutMin, double& OutMax) const;
 
+	/**
+	 * The valley floor a network point lies on (G267, G268): the nearest segment whose floor holds the point (within its
+	 * FloorHalfWidth of the centre curve, where the carve's weight is whole but for a head's taper), from the segments
+	 * that reach the point's tile (the point query's buckets). Ties by the link's cell. Any thread.
+	 * @param Point A network point (world (X, Y, 0), or on the datum sphere)
+	 * @param OutSegment The segment
+	 * @return Whether the point lies on a valley's floor
+	 */
+	bool FindFloorAt(const FVector& Point, FVoxelValleySegment& OutSegment) const;
+
 private:
 	/**
 	 * Every segment that reaches a tile, as rows in the tile's frame, bucketed for the point query: a heightmap world's
@@ -378,6 +389,7 @@ private:
 		FIntPoint FirstCell = FIntPoint::ZeroValue;
 		FIntPoint Size = FIntPoint::ZeroValue;
 		TArray<FVector4f> Rows;
+		TArray<FVoxelValleySegment> Segments;
 		TArray<int32> First;
 		TArray<int32> Items;
 	};
