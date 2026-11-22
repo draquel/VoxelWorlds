@@ -3,6 +3,7 @@
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelCPUNoiseGenerator.h"
 #include "VoxelBiomeConfiguration.h"
+#include "VoxelValleyNetwork.h"
 
 FInfinitePlaneWorldMode::FInfinitePlaneWorldMode()
 	: TerrainParams()
@@ -44,7 +45,9 @@ float FInfinitePlaneWorldMode::GetTerrainHeightAt(
 	// Match generation: modulate the terrain params by continentalness so the analytic height equals
 	// the real generated surface (spawn / nav / POI placement). Generation applies continentalness
 	// whenever a biome config has it enabled; mirror that here.
-	return SampleTerrainHeight(X, Y, TerrainParams, NoiseParams, &BiomeSnapshot);
+	const float Natural = SampleTerrainHeight(X, Y, TerrainParams, NoiseParams, &BiomeSnapshot);
+	// The valleys (the valleys plan, section 6.2): carved into the natural height, as generation carves them
+	return Valleys.IsValid() ? static_cast<float>(Valleys->ApplyToHeight(X, Y, Natural)) : Natural;
 }
 
 float FInfinitePlaneWorldMode::SampleTerrainHeight(

@@ -1,6 +1,8 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelValleyNetwork.h"
+#include "VoxelChunkValleySegments.h"
+#include "IVoxelWorldMode.h"
 #include "InfinitePlaneWorldMode.h"
 #include "IslandBowlWorldMode.h"
 #include "VoxelBiomeSnapshot.h"
@@ -153,6 +155,7 @@ FVoxelValleySettings FVoxelValleyNetwork::Sanitize(const FVoxelValleySettings& I
 	Out.ValleyDrainage = FMath::Clamp(Out.ValleyDrainage, 1, 64);
 	Out.FullWidthDrainage = FMath::Clamp(Out.FullWidthDrainage, Out.ValleyDrainage + 1, 1024);
 	Out.FloorFraction = FMath::Clamp(Out.FloorFraction, 0.0f, 1.0f);
+	Out.MinFloorHeight = FMath::Max(Out.MinFloorHeight, 0.0f);
 	Out.FloorHalfWidthMin = FMath::Max(Out.FloorHalfWidthMin, 0.0f);
 	Out.FloorHalfWidthMax = FMath::Max(Out.FloorHalfWidthMax, Out.FloorHalfWidthMin);
 	// A side of at least a little width: the valley meets the hills smoothly
@@ -335,8 +338,13 @@ TSharedRef<FVoxelValleyTile> FVoxelValleyNetwork::BuildTile(const FVoxelValleySe
 		}
 	}
 
-	// ---- The floors: a share of the ground over the sea; on a breach the sink's; at a coast the sea's level ----
-	auto OwnFloor = [&](int32 K) { return G.Sea[K] ? SeaZ : SeaZ + S.FloorFraction * FMath::Max(0.0, G.Height[K] - SeaZ); };
+	// ---- The floors: a share of the ground over the sea, at least MinFloorHeight over it (or the ground, if lower);
+	// on a breach the sink's; at a coast the sea's level. Each term grows with the ground, so a floor falls along a link
+	auto OwnFloor = [&](int32 K)
+	{
+		const double Over = FMath::Max(0.0, G.Height[K] - SeaZ);
+		return G.Sea[K] ? SeaZ : SeaZ + FMath::Max(S.FloorFraction * Over, FMath::Min(Over, static_cast<double>(S.MinFloorHeight)));
+	};
 	for (int32 K = 0; K < Count; ++K)
 	{
 		G.Floor[K] = PathSink[K] != -1 ? OwnFloor(PathSink[K]) : OwnFloor(K);
@@ -538,4 +546,109 @@ int32 FVoxelValleyNetwork::GetNumTiles() const
 {
 	FReadScopeLock ReadLock(Lock);
 	return Tiles.Num();
+}
+
+TSharedRef<const FVoxelValleyNetwork::FReach> FVoxelValleyNetwork::GetReach(const FIntPoint& TileCoord) const
+{
+	{
+		FReadScopeLock ReadLock(ReachLock);
+		if (const TSharedRef<const FReach>* Found = Reaches.Find(TileCoord))
+		{
+			return *Found;
+		}
+	}
+	// The tile's square, its segments and the buckets: a segment goes in every bucket its valley overlaps
+	TSharedRef<FReach> Reach = MakeShared<FReach>();
+	const double Side = static_cast<double>(Settings.TileCells) * Settings.CellSize;
+	Reach->Origin = FVector2D(TileCoord.X * Side, TileCoord.Y * Side);
+	Reach->Buckets = 8;
+	Reach->BucketSize = Side / Reach->Buckets;
+	TArray<FVoxelValleySegment> Segments;
+	GatherSegments(FBox2D(Reach->Origin, Reach->Origin + FVector2D(Side)), Segments);
+	TArray<TArray<int32>> Lists;
+	Lists.SetNum(Reach->Buckets * Reach->Buckets);
+	for (int32 Index = 0; Index < Segments.Num(); ++Index)
+	{
+		const FVoxelValleySegment& Segment = Segments[Index];
+		VoxelValleyCarve::AppendRows(Segment, Reach->Origin, Reach->Rows);
+		const double R = Segment.ValleyHalfWidth;
+		const FVector2D Low = FVector2D(FMath::Min(Segment.A.X, Segment.B.X) - R, FMath::Min(Segment.A.Y, Segment.B.Y) - R) - Reach->Origin;
+		const FVector2D High = FVector2D(FMath::Max(Segment.A.X, Segment.B.X) + R, FMath::Max(Segment.A.Y, Segment.B.Y) + R) - Reach->Origin;
+		const int32 X0 = FMath::Clamp(FMath::FloorToInt32(Low.X / Reach->BucketSize), 0, Reach->Buckets - 1);
+		const int32 X1 = FMath::Clamp(FMath::FloorToInt32(High.X / Reach->BucketSize), 0, Reach->Buckets - 1);
+		const int32 Y0 = FMath::Clamp(FMath::FloorToInt32(Low.Y / Reach->BucketSize), 0, Reach->Buckets - 1);
+		const int32 Y1 = FMath::Clamp(FMath::FloorToInt32(High.Y / Reach->BucketSize), 0, Reach->Buckets - 1);
+		for (int32 Y = Y0; Y <= Y1; ++Y)
+		{
+			for (int32 X = X0; X <= X1; ++X)
+			{
+				Lists[Y * Reach->Buckets + X].Add(Index);
+			}
+		}
+	}
+	Reach->First.Reserve(Lists.Num() + 1);
+	for (const TArray<int32>& List : Lists)
+	{
+		Reach->First.Add(Reach->Items.Num());
+		Reach->Items.Append(List);
+	}
+	Reach->First.Add(Reach->Items.Num());
+	FWriteScopeLock WriteLock(ReachLock);
+	return Reaches.FindOrAdd(TileCoord, Reach);
+}
+
+double FVoxelValleyNetwork::ApplyToHeight(double X, double Y, double Natural) const
+{
+	if (Ground.bSea && Natural < Ground.SeaLevel)
+	{
+		return Natural;
+	}
+	const TSharedRef<const FReach> Reach = GetReach(TileOf(CellOf(FVector2D(X, Y))));
+	const FVector2D Local = FVector2D(X, Y) - Reach->Origin;
+	const int32 BX = FMath::Clamp(FMath::FloorToInt32(Local.X / Reach->BucketSize), 0, Reach->Buckets - 1);
+	const int32 BY = FMath::Clamp(FMath::FloorToInt32(Local.Y / Reach->BucketSize), 0, Reach->Buckets - 1);
+	const int32 Bucket = BY * Reach->Buckets + BX;
+	if (Reach->First[Bucket] == Reach->First[Bucket + 1])
+	{
+		return Natural;
+	}
+	// In float, in the tile's frame: the generators' evaluation
+	const float Px = static_cast<float>(Local.X), Py = static_cast<float>(Local.Y), N = static_cast<float>(Natural);
+	float Cut = 0.0f, Fill = 0.0f;
+	for (int32 Item = Reach->First[Bucket]; Item < Reach->First[Bucket + 1]; ++Item)
+	{
+		const FVector4f* Rows = &Reach->Rows[Reach->Items[Item] * VoxelValleyCarve::SegmentStride];
+		float Weight = 0.0f, Floor = 0.0f;
+		VoxelValleyCarve::SegmentAt(Px, Py, Rows[0], Rows[1], Rows[2], Weight, Floor);
+		if (Weight > 0.0f)
+		{
+			VoxelValleyCarve::Fold(Weight, Floor, N, Cut, Fill);
+		}
+	}
+	return Cut == 0.0f && Fill == 0.0f ? Natural : static_cast<double>(VoxelValleyCarve::Finish(N, Cut, Fill));
+}
+
+void IVoxelWorldMode::AddValleyFloorsToRange(const FVector2D& MinXY, const FVector2D& MaxXY, FFloatInterval& InOutRange) const
+{
+	const TSharedPtr<const FVoxelValleyNetwork> Valleys = GetValleyNetwork();
+	double FloorMin = 0.0, FloorMax = 0.0;
+	if (Valleys.IsValid() && Valleys->GetFloorRange(FBox2D(MinXY, MaxXY), FloorMin, FloorMax))
+	{
+		InOutRange.Min = FMath::Min(InOutRange.Min, static_cast<float>(FloorMin));
+		InOutRange.Max = FMath::Max(InOutRange.Max, static_cast<float>(FloorMax));
+	}
+}
+
+bool FVoxelValleyNetwork::GetFloorRange(const FBox2D& Bounds, double& OutMin, double& OutMax) const
+{
+	TArray<FVoxelValleySegment> Segments;
+	GatherSegments(Bounds, Segments);
+	OutMin = MAX_dbl;
+	OutMax = -MAX_dbl;
+	for (const FVoxelValleySegment& Segment : Segments)
+	{
+		OutMin = FMath::Min3(OutMin, Segment.FloorA, Segment.FloorB);
+		OutMax = FMath::Max3(OutMax, Segment.FloorA, Segment.FloorB);
+	}
+	return Segments.Num() > 0;
 }

@@ -132,7 +132,8 @@ struct FVoxelValleyTile
  * lowest saddle out of its hollow to the first lower node within BreachCells (a bounded priority-flood; D180), the
  * steps of that path at the sink's floor. A node's drainage counts the nodes linking into it within DrainageReach
  * links; a link from a node of ValleyDrainage or more is a valley. A node's floor is FloorFraction of its ground over
- * the sea, the sea's level at a coast, and never rises along a link. A valley's links are joined into a curve, each
+ * the sea and at least MinFloorHeight over it (or its ground, if lower), the sea's level at a coast, and never rises
+ * along a link. A valley's links are joined into a curve, each
  * node's corner spread between its main link in and its link out.
  */
 class VOXELGENERATION_API FVoxelValleyNetwork
@@ -198,9 +199,43 @@ public:
 	/** @return How many tiles the network has kept */
 	int32 GetNumTiles() const;
 
+	/**
+	 * The height with the valleys at a world (X, Y) (section 6.2): the world modes' point query, the same evaluation as
+	 * the generators' (VoxelValleyCarve), from the segments that reach the point's tile. Any thread.
+	 * @param X, Y The place
+	 * @param Natural The natural height there (after the island's falloff)
+	 * @return The height with the valleys
+	 */
+	double ApplyToHeight(double X, double Y, double Natural) const;
+
+	/**
+	 * The lowest and highest floor among the valley segments that reach a box: what a column's slab widens by, since its
+	 * samples may miss a valley narrower than the column or a floor over the hills it fills.
+	 * @param Bounds The box (world X, Y)
+	 * @param OutMin, OutMax The floors' range
+	 * @return Whether any valley reaches the box
+	 */
+	bool GetFloorRange(const FBox2D& Bounds, double& OutMin, double& OutMax) const;
+
 private:
+	/** Every segment that reaches a tile, as rows in the tile's frame, bucketed for the point query. */
+	struct FReach
+	{
+		FVector2D Origin = FVector2D::ZeroVector;
+		double BucketSize = 1.0;
+		int32 Buckets = 1;
+		TArray<FVector4f> Rows;
+		TArray<int32> First;
+		TArray<int32> Items;
+	};
+
+	/** @return The segments that reach a tile, worked out on first use and kept */
+	TSharedRef<const FReach> GetReach(const FIntPoint& Tile) const;
+
 	FVoxelValleySettings Settings;
 	FVoxelValleyGround Ground;
 	mutable FRWLock Lock;
 	mutable TMap<FIntPoint, TSharedRef<const FVoxelValleyTile>> Tiles;
+	mutable FRWLock ReachLock;
+	mutable TMap<FIntPoint, TSharedRef<const FReach>> Reaches;
 };

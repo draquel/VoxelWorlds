@@ -15,6 +15,9 @@
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelTerrainConditioning.h"
 #include "VoxelChunkLineSegments.h"
+#include "VoxelChunkValleySegments.h"
+#include "VoxelValleyNetwork.h"
+#include "InfinitePlaneWorldMode.h"
 #include "VoxelChunkWaterColumns.h"
 #include "VoxelConditioningLine.h"
 #include "VoxelWaterLevels.h"
@@ -2680,6 +2683,176 @@ bool FVoxelGPUvsCPUWaterBodiesParityTest::RunTest(const FString& Parameters)
 	Caves->RemoveFromRoot();
 	TestTrue(TEXT("The bodies change every test chunk"), bAllChanged);
 	TestTrue(TEXT("GPU==CPU parity with a lake and a river reach, plane and planet, across LOD 0/1/2"), bAllPass);
+	return true;
+}
+
+
+// The valleys on the GPU (Documentation/VALLEYS_PLAN.md, V2): a chunk's valley segments (FVoxelChunkValleySegments),
+// built from the network its request carries, are uploaded as ValleyData and walked by GpuApplyValleys (Valleys.ush)
+// after the island's falloff; the GPU gives what the CPU generator gives from the same list, at LOD 0/1/2. On a plane
+// 1,000 km from the world's origin with kilometre-wide hills and valleys of the default settings: chunks at the floor's
+// height on valley floors (the surface the valley makes runs through them), on a side, at a head, and one with a
+// conditioning line over a valley (the valleys come before the lines). A CPU run without the network shows the valleys
+// change the voxels of each chunk (non-vacuous).
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelGPUvsCPUValleyParityTest, "VoxelWorlds.Generation.GPUvsCPUValleyParity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelGPUvsCPUValleyParityTest::RunTest(const FString& Parameters)
+{
+	if (GUsingNullRHI) { AddInfo(TEXT("Skipped: GPU test requires a real RHI (run without -nullrhi)")); return true; }
+
+	UVoxelBiomeConfiguration* BiomeConfig = NewObject<UVoxelBiomeConfiguration>();
+	BiomeConfig->AddToRoot();
+	BiomeConfig->InitializeDefaults();
+	BiomeConfig->BuildGpuData();
+	FVoxelGPUNoiseGenerator GPUGenerator;
+	GPUGenerator.Initialize();
+	FVoxelCPUNoiseGenerator CPUGenerator;
+	CPUGenerator.Initialize();
+
+	const float VoxelSize = 75.0f;
+	const int32 ChunkSize = 32;
+	const double ChunkWorldSize = ChunkSize * VoxelSize;
+	const FVector PlaneOrigin(1.0e6 + 37.5, -2.0e6 + 112.5, 0.0);
+	FVoxelNoiseParams Noise;
+	Noise.NoiseType = EVoxelNoiseType::Simplex;
+	Noise.Seed = 248675;
+	Noise.Frequency = 6e-6f;
+	Noise.Octaves = 5;
+	Noise.Lacunarity = 2.0f;
+	Noise.Persistence = 0.5f;
+	const FWorldModeTerrainParams Terrain(0.0f, 8000.0f, 3000.0f);
+	FVoxelValleyGround Ground;
+	Ground.Height = [Noise, Terrain](double X, double Y)
+	{
+		return static_cast<double>(FInfinitePlaneWorldMode::SampleTerrainHeight(static_cast<float>(X), static_cast<float>(Y), Terrain, Noise, nullptr));
+	};
+	Ground.Seed = Noise.Seed;
+	const TSharedRef<FVoxelValleyNetwork> Network = MakeShared<FVoxelValleyNetwork>(FVoxelValleySettings(), Ground);
+
+	auto MakeRequest = [&](const FVector& At)
+	{
+		FVoxelNoiseGenerationRequest Request;
+		const FVector Local = (At - PlaneOrigin) / ChunkWorldSize;
+		Request.ChunkCoord = FIntVector(FMath::FloorToInt(Local.X), FMath::FloorToInt(Local.Y), FMath::FloorToInt(Local.Z));
+		Request.ChunkSize = ChunkSize;
+		Request.VoxelSize = VoxelSize;
+		Request.WorldOrigin = PlaneOrigin;
+		Request.NoiseParams = Noise;
+		Request.WorldMode = EWorldMode::InfinitePlane;
+		Request.SeaLevel = Terrain.SeaLevel;
+		Request.HeightScale = Terrain.HeightScale;
+		Request.BaseHeight = Terrain.BaseHeight;
+		Request.bEnableBiomes = true;
+		Request.BiomeConfiguration = BiomeConfig;
+		Request.Valleys = Network;
+		return Request;
+	};
+
+	// The sites: segments near the plane's origin, the chunk at the floor's (or the carved side's) height
+	struct FSite { FString Name; FVoxelNoiseGenerationRequest Request; };
+	TArray<FSite> Sites;
+	const FIntPoint OriginTile = Network->TileOf(Network->CellOf(FVector2D(PlaneOrigin)));
+	bool bHead = false, bSide = false;
+	int32 Floors = 0;
+	for (int32 TY = 0; TY < 2; ++TY)
+	{
+		for (int32 TX = 0; TX < 2; ++TX)
+		{
+			const TSharedRef<const FVoxelValleyTile> Tile = Network->GetTile(OriginTile + FIntPoint(TX, TY));
+			for (const FVoxelValleySegment& Segment : Tile->Segments)
+			{
+				const FVector2D Middle = 0.5 * (Segment.A + Segment.B);
+				const double Natural = Ground.Height(Middle.X, Middle.Y);
+				const double Floor = 0.5 * (Segment.FloorA + Segment.FloorB);
+				if (Natural - Floor < 600.0)
+				{
+					continue; // a cut of 6 m or more: the chunk at the floor holds the valley's surface, not the natural one
+				}
+				if (!bHead && Segment.TaperA < 0.5f)
+				{
+					bHead = true;
+					const double Carved = Network->ApplyToHeight(Middle.X, Middle.Y, Natural);
+					Sites.Add({ TEXT("Valley head"), MakeRequest(FVector(Middle, Carved)) });
+				}
+				else if (Floors < 3 && Segment.TaperA >= 1.0f)
+				{
+					++Floors;
+					Sites.Add({ FString::Printf(TEXT("Valley floor %d"), Floors), MakeRequest(FVector(Middle, Floor)) });
+				}
+				else if (!bSide && Segment.TaperA >= 1.0f)
+				{
+					bSide = true;
+					const FVector2D Across = (Segment.B - Segment.A).GetSafeNormal().GetRotated(90.0);
+					const FVector2D P = Middle + Across * (0.5 * (Segment.FloorHalfWidth + Segment.ValleyHalfWidth));
+					const double Carved = Network->ApplyToHeight(P.X, P.Y, Ground.Height(P.X, P.Y));
+					Sites.Add({ TEXT("Valley side"), MakeRequest(FVector(P, Carved)) });
+				}
+			}
+		}
+	}
+	TestTrue(TEXT("Sites on floors, a side and a head were found"), Floors >= 2 && bSide && bHead);
+	if (Floors > 0)
+	{
+		// A levelled line across a floor's chunk: the valleys come before the lines
+		FSite Lined = Sites[bHead ? 1 : 0];
+		Lined.Name = TEXT("Valley floor under a conditioning line");
+		const FVector Corner = Lined.Request.GetChunkWorldPosition();
+		FVoxelConditioningLineParams Params;
+		Params.FalloffWidth = 4.0f * VoxelSize;
+		Params.Blend = EVoxelConditioningLineBlend::Level;
+		const float Target = static_cast<float>(Corner.Z + 0.5 * ChunkWorldSize);
+		const FVector2D A(Corner.X - 600.0, Corner.Y + 300.0), B(Corner.X + ChunkWorldSize + 600.0, Corner.Y + ChunkWorldSize - 300.0);
+		const int32 Steps = FMath::CeilToInt32(FVector2D::Distance(A, B) / (2.0 * VoxelSize));
+		for (int32 Step = 0; Step <= Steps; ++Step)
+		{
+			const FVector2D P = FMath::Lerp(A, B, static_cast<double>(Step) / Steps);
+			Params.Vertices.Add(FVoxelConditioningLineVertex(FVector(P.X, P.Y, 0.0), Target, 3.0f * VoxelSize));
+		}
+		Lined.Request.Conditioning.Lines.Add(FVoxelConditioningLine::Make(Params));
+		Sites.Add(Lined);
+	}
+
+	bool bAllMoved = true;
+	for (const FSite& Site : Sites)
+	{
+		FVoxelNoiseGenerationRequest Without = Site.Request;
+		Without.Valleys.Reset();
+		TArray<FVoxelData> With, Plain;
+		CPUGenerator.GenerateChunkCPU(Site.Request, With);
+		CPUGenerator.GenerateChunkCPU(Without, Plain);
+		int32 Differ = 0;
+		for (int32 Index = 0; Index < With.Num() && Index < Plain.Num(); ++Index)
+		{
+			Differ += With[Index].Density != Plain[Index].Density ? 1 : 0;
+		}
+		FVoxelChunkValleySegments Segments;
+		FVoxelChunkValleySegments::Build(Site.Request, Segments);
+		AddInfo(FString::Printf(TEXT("%s: chunk (%d, %d, %d), %d valley segments, %d voxels changed by the valleys"),
+			*Site.Name, Site.Request.ChunkCoord.X, Site.Request.ChunkCoord.Y, Site.Request.ChunkCoord.Z, Segments.Num(), Differ));
+		if (Segments.Num() == 0 || Differ < 50)
+		{
+			AddError(FString::Printf(TEXT("%s: the valleys do not change the chunk (%d segments, %d voxels)"), *Site.Name, Segments.Num(), Differ));
+			bAllMoved = false;
+		}
+	}
+	CPUGenerator.Shutdown();
+
+	VoxelParityHarness::FParityThresholds Thresholds;
+	Thresholds.DensityClose = 99.5f;
+	Thresholds.Mat = 99.0f;
+	Thresholds.Biome = 99.9f;
+	Thresholds.Meta = 99.9f;
+	Thresholds.MatWhenDensEq = 99.5f;
+	bool bAllPass = true;
+	for (const FSite& Site : Sites)
+	{
+		bAllPass &= VoxelParityHarness::RunGpuCpuParity(*this, GPUGenerator, Site.Request, *Site.Name, Thresholds);
+	}
+	GPUGenerator.Shutdown();
+	BiomeConfig->RemoveFromRoot();
+	TestTrue(TEXT("The valleys move every test chunk"), bAllMoved);
+	TestTrue(TEXT("GPU==CPU parity with valleys, across LOD 0/1/2"), bAllPass);
 	return true;
 }
 

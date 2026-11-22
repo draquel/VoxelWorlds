@@ -12,6 +12,7 @@
 class UVoxelBiomeConfiguration;
 class UVoxelCaveConfiguration;
 class FVoxelWaterLevels;
+class FVoxelValleyNetwork;
 
 // Re-export EVoxelNoiseType and FVoxelNoiseParams from VoxelCoreTypes.h
 // These are defined in VoxelCore to avoid circular dependencies with VoxelWorldConfiguration
@@ -132,6 +133,14 @@ struct VOXELGENERATION_API FVoxelNoiseGenerationRequest
 	 * the one level as it always did. Shared and immutable: a copy of the request shares it.
 	 */
 	TSharedPtr<const FVoxelWaterLevels> WaterBodies;
+
+	/**
+	 * The world's valley network (Documentation/VALLEYS_PLAN.md, section 6.3), or null for a world with none: the
+	 * generators build the chunk's valley segments from it (FVoxelChunkValleySegments::Build) and carve them into the
+	 * natural height before the conditioning. Shared, immutable to a reader (its tiles are built on first use, by any
+	 * thread); the world mode's own network.
+	 */
+	TSharedPtr<const FVoxelValleyNetwork> Valleys;
 
 	// ==================== Terrain Conditioning (Phase 6c) ====================
 

@@ -119,6 +119,10 @@ StructuredBuffer<float4> ConditioningZoneData;
 // The chunk's conditioning line segments (FVoxelChunkLineSegments), 5 float4s a segment; layout in ConditioningLines.ush.
 int ConditioningLineSegmentCount;
 StructuredBuffer<float4> ConditioningLineData;
+// The chunk's valley segments (FVoxelChunkValleySegments), 3 float4s a segment; layout in Valleys.ush.
+int ValleySegmentCount;
+float ValleySeaLevel;
+StructuredBuffer<float4> ValleyData;
 
 // IslandBowl world-mode params (Phase C) — see IslandFalloff.ush.
 int IslandShape;
@@ -177,6 +181,7 @@ RWStructuredBuffer<uint> OutputVoxelData;
 // Per-voxel biome selection + material pipeline (references the biome globals declared above).
 #include "/Plugin/VoxelWorlds/Private/BiomeMaterial.ush"
 #include "/Plugin/VoxelWorlds/Private/ConditioningLines.ush"
+#include "/Plugin/VoxelWorlds/Private/Valleys.ush"
 // The planet noise (references NoiseOrigins) and the chunk frame.
 #include "/Plugin/VoxelWorlds/Private/VoxelNoise.ush"
 #include "/Plugin/VoxelWorlds/Private/PlanetFrame.ush"
@@ -499,6 +504,11 @@ void MainCS(
         if (WorldMode == VOXELGEN_WORLD_MODE_ISLAND_BOWL)
         {
             TerrainHeight = ApplyIslandFalloffToHeight(WorldPos.x, WorldPos.y, TerrainHeight);
+        }
+        // The valleys (the chunk's valley segments), carved into the natural height before the conditioning, as on the CPU.
+        if (ValleySegmentCount > 0)
+        {
+            TerrainHeight = GpuApplyValleys(Offset2D, TerrainHeight);
         }
         // Terrain conditioning: the lines (the chunk's segment list, in the chunk's frame), then the zones, as on the CPU.
         // The lines also leave a surface at this column: the band's material and depth, the caves' minimum depth.

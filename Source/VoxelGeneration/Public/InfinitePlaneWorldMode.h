@@ -126,6 +126,10 @@ public:
 		BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(InBiomeConfig);
 	}
 
+	/** The world's valley network, carved into GetTerrainHeightAt's height (the valleys plan, section 6.3) */
+	virtual void SetValleyNetwork(TSharedPtr<const FVoxelValleyNetwork> InValleys) override { Valleys = MoveTemp(InValleys); }
+	virtual TSharedPtr<const FVoxelValleyNetwork> GetValleyNetwork() const override { return Valleys; }
+
 	/**
 	 * The biome snapshot by value (SetBiomeContext snapshots a configuration): a synthetic continentalness, as the POI
 	 * placement tests give a plane (code review CR2, POI-15).
@@ -313,6 +317,9 @@ private:
 	 * any thread and for tasks that outlive the world. Default (never set) => raw base terrain height.
 	 */
 	FVoxelBiomeSnapshot BiomeSnapshot;
+
+	/** The world's valleys (null: none), applied after continentalness, before the conditioning (SetValleyNetwork) */
+	TSharedPtr<const FVoxelValleyNetwork> Valleys;
 
 	/** Practical vertical limits for chunk generation */
 	static constexpr int32 MIN_Z_CHUNKS = -64;
