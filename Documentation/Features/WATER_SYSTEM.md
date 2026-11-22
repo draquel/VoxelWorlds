@@ -731,10 +731,16 @@ whole or not at all; a valley has no length bound, so its river is made a link a
   refused, a valley is never dry. The width is the segment's river half width (by drainage, the network's).
 - **Its surface** is the floor or the ground there, whichever is lower, less `SurfaceBelowGroundVoxels`, held from
   falling under a tuck under the sea, and never rising: from its upper node's level to its lower node's, so the
-  pieces meet at each node at one place and one level, and a piece into a coast ends a tuck under the sea. A coast's
+  pieces meet at each node at one place and one level, and a piece into a coast ends a tuck under the sea. A node's
+  level is the same whichever piece asks: its own floor or ground (whichever is lower) less the margin, and no
+  higher than the level of any valley link into it, so it never stands over a node upstream (since V4: taken from the
+  node's own ground alone, a node a neighbouring valley's drowned mouth had cut low left a piece of the demo 1.7 m
+  under the next). A head starts at its own first place and no lower than the node it runs to. A coast's
   floor lies `MinFloorHeight` under the sea, so a valley comes down to a drowned mouth (a flat at the sea's very level
   is neither sea nor land, and a river reaching it would end on land), and a piece into a coast keeps only the
-  `BodyVertices` past the shore that a brook keeps inside the body it ends in. A head
+  `BodyVertices` past the shore that a brook keeps inside the body it ends in; a piece with no more than two places
+  on land is no river (a valley of one link at a coast, its head half way along where the ground is already under the
+  sea: refused as "a valley river that starts in the sea"). A head
   starts from nothing over `HeadLength`. The bed is the surface less the depth, lowered through the bends as a
   brook's (rule 8, `FVoxelConditioningLineShape::HoldBedThroughBends`, shared with `MakeRiverProfile`), a lower-only
   line with the brooks' band and cave depth. The reach's id is `MakeValleyReachId` (the seed and the link), its bed
@@ -752,13 +758,15 @@ whole or not at all; a valley has no length bound, so its river is made a link a
   bodies); a world with no valleys makes the bodies it did.
 
 Tests: `Generation.Hydrology.ValleyRivers.Pieces` (made hills falling to a sea, the network carved: every valley link
-has its piece, no surface rises, a piece meets the piece below at the node and never under it, a head starts from
+has its piece or would start in the sea, no surface rises, a piece meets the piece below at the node and never under it, a head starts from
 nothing, a piece into a coast ends a tuck under the sea, the course keeps to its valley's floor, no bed breaks a
 line's limits, every head leads to the sea), `.Regions` (two regions that overlap and a run with a cache give each
 valley river the same id and vertices), `.Brooks` (descents end in a valley river, and every brook's end lies in
-water at its level, less at most the tuck). The survey (`voxel.Water.Hydrology.Survey`) counts the pieces and reads
+water at its level, less at most the tuck, as does every valley river's round three mouths); in the game module
+`VoxelEngine.Valleys.Demo` reads the same rules on VoxelDemo's own valleys within 4 km of its spawn (the joints
+there are what the made hills did not have). The survey (`voxel.Water.Hydrology.Survey`) counts the pieces and reads
 them back against the same rules as any reach; `hydrology_gate.py --valleys [--swim=river]` plays a world with
-valleys given in memory.
+valleys given in memory, and VoxelDemo has them since V4.
 
 H1 changed no output: no world has a body, a gather with none is the sea's snapshot, and the gates read as the base
 (the plan's H1 result). The cost of the point gather was measured by `Streaming.Water.Bodies.Plane` and `.Planet` in a

@@ -100,7 +100,7 @@ bool FVoxelValleyRiverPiecesTest::RunTest(const FString& Parameters)
 	const double Tuck = FVoxelConditioningLineShape::FRiverProfileParams().BodyTuck;
 	FCache Cache;
 
-	int32 Pieces = 0, Rises = 0, Joints = 0, JointGaps = 0, JointRises = 0, Heads = 0, BadHeads = 0, Mouths = 0, BadMouths = 0, OffFloor = 0, Notes = 0;
+	int32 AtSea = 0, Pieces = 0, Rises = 0, Joints = 0, JointGaps = 0, JointRises = 0, Heads = 0, BadHeads = 0, Mouths = 0, BadMouths = 0, OffFloor = 0, Notes = 0;
 	TMap<FIntPoint, TSharedRef<const FVoxelHydrologySystem>> ByLink;
 	auto PieceOf = [&](const FIntPoint& Link) -> TSharedRef<const FVoxelHydrologySystem>
 	{
@@ -126,6 +126,12 @@ bool FVoxelValleyRiverPiecesTest::RunTest(const FString& Parameters)
 					continue;
 				}
 				const TSharedRef<const FVoxelHydrologySystem> Piece = PieceOf(Node.Cell);
+				// A valley of one link at a coast has no river: its head would start in the sea
+				if (Piece->Refused.Contains(TEXT("starts in the sea")))
+				{
+					++AtSea;
+					continue;
+				}
 				if (!TestTrue(FString::Printf(TEXT("the valley link (%d, %d) has its river"), Node.Cell.X, Node.Cell.Y), Piece->bValleyRiver && Piece->Reaches.Num() == 1))
 				{
 					continue;
@@ -207,7 +213,7 @@ bool FVoxelValleyRiverPiecesTest::RunTest(const FString& Parameters)
 			}
 		}
 	}
-	AddInfo(FString::Printf(TEXT("%d pieces, %d heads, %d into a coast, %d joints, %d with a bed note"), Pieces, Heads, Mouths, Joints, Notes));
+	AddInfo(FString::Printf(TEXT("%d pieces (%d more would start in the sea), %d heads, %d into a coast, %d joints, %d with a bed note"), Pieces, AtSea, Heads, Mouths, Joints, Notes));
 	TestTrue(TEXT("the hills have valley rivers, heads, mouths and joints"), Pieces > 20 && Heads > 0 && Mouths > 0 && Joints > 0);
 	TestEqual(TEXT("no surface rises along a piece"), Rises, 0);
 	TestEqual(TEXT("a piece's bed keeps a line's limits"), Notes, 0);
