@@ -2,6 +2,7 @@
 
 #include "VoxelWorldModeFactory.h"
 #include "VoxelHydrology.h"
+#include "VoxelValleyNetwork.h"
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelNoiseTypes.h"
 #include "VoxelWorldConfiguration.h"
@@ -144,6 +145,12 @@ FVoxelWorldFingerprint FVoxelWorldModeFactory::MakeFingerprint(const UVoxelWorld
 	if (const FString Hydrology = FVoxelHydrology::GetFingerprintTerm(Config); !Hydrology.IsEmpty())
 	{
 		Params.Add(Hydrology);
+	}
+	// Valleys (the valleys plan's D176): a world that has a valley network carved into its natural height has other
+	// terrain, so a save made without it, or with other settings, is refused. A world that has none has no term.
+	if (const FString Valleys = FVoxelValleyNetwork::GetFingerprintTerm(Config); !Valleys.IsEmpty())
+	{
+		Params.Add(Valleys);
 	}
 
 	FVoxelWorldFingerprint Fingerprint;
