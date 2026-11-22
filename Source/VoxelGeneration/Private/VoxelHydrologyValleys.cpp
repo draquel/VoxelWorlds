@@ -253,6 +253,7 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 	// A piece into a coast keeps only the few vertices past the shore that a brook keeps inside the body it ends in
 	// (FRiverProfileParams::BodyVertices): its course runs on over the seabed to the node, and a bed there would stand
 	// far over the ground, past the cut and fill cap the LOD slab assumes
+	bool bStartsInSea = false;
 	if (Down.bSea && Ground.bSea)
 	{
 		const int32 Kept = FVoxelConditioningLineShape::FRiverProfileParams().BodyVertices;
@@ -260,13 +261,16 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 		{
 			if (HeightAt(Places[Index]) < Ground.SeaLevel)
 			{
-				// A piece with no more than two places on land is no river: a valley of one link at a coast, whose head
-				// starts half way along where the drowned mouth has already put the ground under the sea
-				if (Index <= 2)
+				// A head with no more than two places on land is no river: a valley of one link at a coast, whose head
+				// starts half way along where the drowned mouth has already put the ground under the sea. A piece that
+				// another comes into is kept however short, so the piece above ends in its water (G268: refused, it left
+				// the piece above ending on land)
+				if (Index <= 2 && Node.bHead)
 				{
 					System->Refused = TEXT("a valley river that starts in the sea");
 					return System;
 				}
+				bStartsInSea = Index <= 2;
 				// It ends under the sea: a seabed that rises over the water again within the kept vertices (a bump past the
 				// shore) ends it at the last of them still under it, never on land (the block world of the plan's V5)
 				int32 Last = FMath::Min(Index + Kept - 1, Places.Num() - 1);
@@ -344,10 +348,21 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 		}
 	}
 	const bool bToSea = Down.bSea;
-	const double EndLevel = bToSea ? (Ground.bSea ? Ground.SeaLevel - Tuck : Own[Num - 1]) : LevelOf(Down.Cell, 0);
+	double EndLevel = bToSea ? (Ground.bSea ? Ground.SeaLevel - Tuck : Own[Num - 1]) : LevelOf(Down.Cell, 0);
+	// A node one link from a coast whose own piece starts in the sea (a short piece kept for the pieces coming into it,
+	// at the sea's level from its start): the piece into it ends at that piece's first level, not at the node's
+	if (!bToSea && Ground.bSea && Down.bValley && Down.bHasLink && Valleys.GetNode(Down.Down).bSea)
+	{
+		const TSharedRef<const FVoxelHydrologySystem> Below = BuildValleyRiver(InSettings, Ground, Down.Cell);
+		if (Below->Reaches.Num() == 1)
+		{
+			EndLevel = FMath::Min(EndLevel, Below->Reaches[0].Body.Reach->GetVertices()[0].SurfaceLevel - Ground.GetLevelBase());
+		}
+	}
 	// A head starts at its own first place, half way along its link, and no lower than the node it runs to (whose
-	// level is no higher than any node upstream, the head's own included)
-	const double StartLevel = FMath::Max(Node.bHead ? Own[0] : LevelOf(Node.Cell, 0), EndLevel);
+	// level is no higher than any node upstream, the head's own included). A piece that starts in the sea lies at the
+	// sea's level from its start (G268: from its node's level it dropped to the sea in a step over the sea's water)
+	const double StartLevel = bStartsInSea ? EndLevel : FMath::Max(Node.bHead ? Own[0] : LevelOf(Node.Cell, 0), EndLevel);
 	TArray<double> Surface;
 	Surface.SetNum(Num);
 	Surface[0] = StartLevel;

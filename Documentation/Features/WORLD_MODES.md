@@ -710,6 +710,10 @@ also generates hydrology has a river on every valley's floor (`WATER_SYSTEM.md`,
   field: `FSphericalPlanetWorldMode::ApplyValleys`); the generators read a chunk's list in the conditioning lines'
   frame, datum points less the chunk anchor's (`FVoxelChunkValleySegments::BuildOnSphere`), at each voxel's datum
   point, before the lines; the planet slab's cells widen by the floors that reach them, as a heightmap column does.
+- **The review worlds.** The review planet (`Review_Planet`, 2.5 km across) and the review block world
+  (`Review_Cubic`) name `ReviewValleyConfig` since the fix of G268 (`Scripts/setup_review_valleys.py`): D181's values
+  with the lattice and the widths at 0.3 (a 105 m lattice), since at 350 m the planet's land holds one valley link and
+  the block world's small islands a few, none near its start.
 - **On a block world** (V5) the valleys are the smooth world's: generation does not know the meshing mode, and the
   block tops follow the carved height, so a floor is a level of blocks and a side steps a block a column as any ground
   does. A valley river's bed steps a block a column at most (`WATER_SYSTEM.md`, "Valley rivers").

@@ -179,8 +179,12 @@ public:
 	/** @return The place of a cell: world (X, Y, 0), or on a planet the unit direction through its centre */
 	FVector PlaceOf(const FIntPoint& Cell) const { return Grid.PlaceOf(Cell); }
 
-	/** @return Whether a cell's ground is at or under the sea */
-	bool IsSea(const FIntPoint& Cell) { return Ground.bSea && At(Cell) <= Ground.SeaLevel; }
+	/**
+	 * @return Whether a cell's ground is under the sea: strictly, as the sea covers it (FVoxelSeaSurface::GetDepth over 0;
+	 *         G268: a valley floor falling through the sea's level put a cell's float altitude at the level itself, and a
+	 *         descent ended there in a sea that does not cover it)
+	 */
+	bool IsSea(const FIntPoint& Cell) { return Ground.bSea && At(Cell) < Ground.SeaLevel; }
 
 	/**
 	 * Where water runs from a cell: the lowest of its neighbours that lies under it, by the steepest fall (a diagonal

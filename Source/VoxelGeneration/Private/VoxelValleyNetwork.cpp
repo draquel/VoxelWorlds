@@ -872,6 +872,7 @@ TSharedRef<const FVoxelValleyNetwork::FReach> FVoxelValleyNetwork::GetReach(cons
 		{
 			const FVoxelValleySegment& Segment = Segments[Index];
 			VoxelValleyCarve::AppendRows(Segment, Reach->Origin, Reach->Rows);
+			Reach->Segments.Add(Segment);
 			for (int32 Bucket = 0; Bucket < Reach->Buckets; ++Bucket)
 			{
 				if (VoxelValleyNetworkPrivate::SegmentDistanceSquared(Middles[Bucket], Segment.A, Segment.B) <= FMath::Square(Reaches2[Bucket] + Segment.ValleyHalfWidth))
@@ -895,6 +896,7 @@ TSharedRef<const FVoxelValleyNetwork::FReach> FVoxelValleyNetwork::GetReach(cons
 		{
 			const FVoxelValleySegment& Segment = Segments[Index];
 			VoxelValleyCarve::AppendRows(Segment, Reach->Origin, Reach->Rows);
+			Reach->Segments.Add(Segment);
 			const double R = Segment.ValleyHalfWidth;
 			const FVector2D Low = FVector2D(FMath::Min(Segment.A.X, Segment.B.X) - R, FMath::Min(Segment.A.Y, Segment.B.Y) - R) - Origin2D;
 			const FVector2D High = FVector2D(FMath::Max(Segment.A.X, Segment.B.X) + R, FMath::Max(Segment.A.Y, Segment.B.Y) + R) - Origin2D;
@@ -972,6 +974,50 @@ double FVoxelValleyNetwork::ApplyToAltitude(const FVector& Direction, double Nat
 		return Natural;
 	}
 	return Evaluate(*Reach, Local.Y * Reach->Size.X + Local.X, FVector3f(Unit * Lattice.GetRadius() - Reach->Origin), Natural);
+}
+
+bool FVoxelValleyNetwork::FindFloorAt(const FVector& Point, FVoxelValleySegment& OutSegment) const
+{
+	TSharedPtr<const FReach> Reach;
+	int32 Bucket = 0;
+	if (Ground.bRadial)
+	{
+		const FIntPoint Cell = Lattice.CellOf(Point);
+		Reach = GetReach(TileOf(Cell));
+		const FIntPoint Local = Cell - Reach->FirstCell;
+		if (Local.X < 0 || Local.Y < 0 || Local.X >= Reach->Size.X || Local.Y >= Reach->Size.Y)
+		{
+			return false;
+		}
+		Bucket = Local.Y * Reach->Size.X + Local.X;
+	}
+	else
+	{
+		Reach = GetReach(TileOf(CellOf(FVector2D(Point.X, Point.Y))));
+		const FVector2D Local = FVector2D(Point.X, Point.Y) - FVector2D(Reach->Origin.X, Reach->Origin.Y);
+		const int32 BX = FMath::Clamp(FMath::FloorToInt32(Local.X / Reach->BucketSize), 0, Reach->Buckets - 1);
+		const int32 BY = FMath::Clamp(FMath::FloorToInt32(Local.Y / Reach->BucketSize), 0, Reach->Buckets - 1);
+		Bucket = BY * Reach->Buckets + BX;
+	}
+	const FVector At = Ground.bRadial ? Lattice.OntoSurface(Point) : FVector(Point.X, Point.Y, 0.0);
+	double Best = MAX_dbl;
+	bool bFound = false;
+	for (int32 Item = Reach->First[Bucket]; Item < Reach->First[Bucket + 1]; ++Item)
+	{
+		const FVoxelValleySegment& Segment = Reach->Segments[Reach->Items[Item]];
+		const double Distance = FMath::Sqrt(VoxelValleyNetworkPrivate::SegmentDistanceSquared(At, Segment.A, Segment.B));
+		if (Distance > Segment.FloorHalfWidth)
+		{
+			continue;
+		}
+		if (!bFound || Distance < Best || (Distance == Best && VoxelValleyNetworkPrivate::CellLess(Segment.Link, OutSegment.Link)))
+		{
+			Best = Distance;
+			OutSegment = Segment;
+			bFound = true;
+		}
+	}
+	return bFound;
 }
 
 void IVoxelWorldMode::AddValleyFloorsToRange(const FVector2D& MinXY, const FVector2D& MaxXY, FFloatInterval& InOutRange) const
