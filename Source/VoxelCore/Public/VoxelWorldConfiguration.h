@@ -14,6 +14,7 @@ class UVoxelBiomeConfiguration;
 class UVoxelCaveConfiguration;
 class UVoxelHydrologyConfiguration;
 class UVoxelScatterConfiguration;
+class UVoxelValleyConfiguration;
 class URuntimeVirtualTexture;
 class FVoxelMaterialTable;
 
@@ -304,6 +305,16 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain")
 	float BaseHeight = 0.0f;
+
+	/**
+	 * The world's valleys (Documentation/VALLEYS_PLAN.md, D176: a setting per world): with an asset named, a valley
+	 * network made from the seed over the natural ground (FVoxelValleyNetwork) is carved into the natural height, a
+	 * wide floor falling to the sea between the hills. Null (the default): the natural height as before the plan.
+	 * Naming one changes the world's terrain, so the saves made without it are refused (the fingerprint's Valleys
+	 * term). Read on the plane and the island, smooth meshing; block worlds and planets later (the plan's V5).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World|Terrain", meta = (EditCondition = "WorldMode != EWorldMode::SphericalPlanet"))
+	TObjectPtr<UVoxelValleyConfiguration> ValleyConfiguration;
 
 	// ==================== Voxel Settings ====================
 
