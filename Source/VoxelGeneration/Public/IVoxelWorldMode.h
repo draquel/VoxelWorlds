@@ -7,6 +7,7 @@
 #include "VoxelWorldModeTypes.h"
 
 class UVoxelBiomeConfiguration;
+class FVoxelValleyNetwork;
 
 /**
  * Abstract interface for world generation modes.
@@ -176,6 +177,16 @@ public:
 	virtual void SetBiomeContext(const UVoxelBiomeConfiguration* /*InBiomeConfig*/) {}
 
 	/**
+	 * Provide the world's valley network (Documentation/VALLEYS_PLAN.md, section 6.3), carved into the natural height
+	 * the analytic surface returns. The plane and the island use it; other modes ignore it. Null: no valleys. Set once,
+	 * by FVoxelWorldModeFactory::Create, before the mode is shared.
+	 */
+	virtual void SetValleyNetwork(TSharedPtr<const FVoxelValleyNetwork> /*InValleys*/) {}
+
+	/** @return The valley network the mode carves into its height, or null */
+	virtual TSharedPtr<const FVoxelValleyNetwork> GetValleyNetwork() const { return nullptr; }
+
+	/**
 	 * Worst-case terrain bounds as altitudes above the datum (GetAltitude), over the whole world (spherical SP-A4; code
 	 * review CR2, CORE-26: the interface's one bounds method). Heightmap modes: their world-Z height bounds
 	 * (GetWorldBounds().MinZ / MaxZ, the authority for vertical chunk-culling) through GetAltitude (Z - SeaLevel); a
@@ -225,8 +236,16 @@ public:
 			Range.Min = FMath::Min(Range.Min, Height);
 			Range.Max = FMath::Max(Range.Max, Height);
 		}
+		AddValleyFloorsToRange(MinXY, MaxXY, Range);
 		return Range;
 	}
+
+	/**
+	 * Widen a footprint's surface range by the floors of every valley that reaches it (the valleys plan, section 6.3):
+	 * the five samples can miss a valley narrower than the footprint, and a floor can lie over the hills it fills.
+	 * Nothing for a mode with no valley network.
+	 */
+	void AddValleyFloorsToRange(const FVector2D& MinXY, const FVector2D& MaxXY, FFloatInterval& InOutRange) const;
 
 	/** Step (uu) GetSurfacePoint takes either side of a point for the surface normal's finite differences. */
 	static constexpr float SurfaceNormalStep = 50.0f;

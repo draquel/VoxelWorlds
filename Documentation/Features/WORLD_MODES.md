@@ -656,8 +656,7 @@ Cubic forces LOD off (`IsLODEnabled()`, D7) and meshes interiors plus face seams
 A world configuration that names a `UVoxelValleyConfiguration` (`UVoxelWorldConfiguration::ValleyConfiguration`;
 `Documentation/VALLEYS_PLAN.md` at the project root, D176) has a valley network made from its seed over its natural
 ground: on a plane or an island meshed smooth (`FVoxelValleyNetwork::IsEnabled`; block worlds and planets are the
-plan's V5). As of V1 the network is built and surveyed but nothing reads it: no world's height changes yet (V2 carves
-it into the natural height).
+plan's V5). Since V2 the network is carved into the natural height (below); its valley rivers are V3's.
 
 - **The network** (`FVoxelValleyNetwork`, `VoxelGeneration/Public/VoxelValleyNetwork.h`) is a pure function of the
   seed, the settings (`FVoxelValleySettings`) and the natural height without the valleys (`FVoxelValleyGround`, a
@@ -674,6 +673,21 @@ it into the natural height).
 - **Tiles.** The network is worked out by tiles of `TileCells` cells, each built from the ground out to a fixed margin
   (`GetMarginCells`), so two tiles never disagree; any thread builds a tile and the network keeps it (`GetTile`,
   `GatherSegments`). On `VoxelDemo` a tile of 8 cells costs about 1.1 ms on one thread.
+- **In the height** (V2). `VoxelValleyCarve` (`VoxelChunkValleySegments.h`) is the one evaluation: each segment that
+  reaches a point gives a weight (1 on the floor, a smoothstep to 0 across the side to the valley's half width, times
+  the head's taper) and the floor there; its change is the weight times (floor - natural), and the segments combine as
+  the deepest cut plus the highest fill, each continuous where valleys overlap, so a junction has no step. Ground under
+  the sea is left as it is, and a land node's floor stands at least `MinFloorHeight` (3 m) over it, so a floor near the
+  coast does not read as flooded where the far field draws its sea. The plane's and the island's `GetTerrainHeightAt` apply it after continentalness and the
+  island's falloff (`FVoxelValleyNetwork::ApplyToHeight`, from the segments that reach the point's tile, bucketed and
+  kept), so every reader of the natural surface (`GetSurfaceOnUpLine`, the far field, the map, the surface queries, the
+  hydrology's ground, the navigation) gets the valleys; the CPU generator per column (`FVoxelChunkValleyColumns`) and
+  the GPU from the same chunk list (`GPU_PIPELINE.md`), both before the conditioning lines and zones, so a road or a pad
+  conditions the valley's ground as any other. A column's surface range (`GetSurfaceRange`, the LOD window's slab)
+  widens by the floors of every valley that reaches its footprint (`AddValleyFloorsToRange`). The world mode holds the
+  network (`SetValleyNetwork`, set by `FVoxelWorldModeFactory::Create`) and the chunk manager hands it to each
+  generation request (`FVoxelNoiseGenerationRequest::Valleys`). The spike combined overlapping valleys by the greatest
+  weight; that steps where two floors overlap, so V2 takes the cut and the fill.
 - **Saves.** The fingerprint gains `Valleys=<version>:<hash of the settings>` (`GetFingerprintTerm`), so a save made
   without the valleys or with other settings is refused; a world with none keeps its fingerprint, and
   `GenerationVersion` does not move.

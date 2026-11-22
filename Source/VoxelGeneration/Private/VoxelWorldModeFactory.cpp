@@ -67,6 +67,9 @@ TSharedRef<IVoxelWorldMode> FVoxelWorldModeFactory::Create(const UVoxelWorldConf
 	// biome materials), so the analytic height takes the same context. The mode snapshots it by value: no UObject
 	// reference is kept, and the instance stays safe for tasks that outlive the world.
 	Mode->SetBiomeContext(Config.BiomeConfiguration);
+	// The world's valleys (the valleys plan, D176): a network of its own per mode, a pure function of the
+	// configuration, so every mode made from one configuration carves the same valleys
+	Mode->SetValleyNetwork(FVoxelValleyNetwork::Create(Config));
 	return Mode.ToSharedRef();
 }
 

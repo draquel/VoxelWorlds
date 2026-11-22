@@ -3,6 +3,7 @@
 #include "IslandBowlWorldMode.h"
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelMaterialRegistry.h"
+#include "VoxelValleyNetwork.h"
 
 FIslandBowlWorldMode::FIslandBowlWorldMode()
 	: TerrainParams()
@@ -63,8 +64,9 @@ float FIslandBowlWorldMode::GetTerrainHeightAt(
 
 	const float BaseTerrainHeight = FInfinitePlaneWorldMode::NoiseToTerrainHeight(NoiseValue, EffectiveParams);
 
-	// Apply falloff and return
-	return ComposeTerrainHeight(X, Y, BaseTerrainHeight, IslandParams);
+	// Apply falloff, then the valleys (the valleys plan, section 6.2), as generation does
+	const float Natural = ComposeTerrainHeight(X, Y, BaseTerrainHeight, IslandParams);
+	return Valleys.IsValid() ? static_cast<float>(Valleys->ApplyToHeight(X, Y, Natural)) : Natural;
 }
 
 void FIslandBowlWorldMode::GetTerrainHeightBounds(float& OutMin, float& OutMax) const

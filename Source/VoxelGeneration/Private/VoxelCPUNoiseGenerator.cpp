@@ -5,6 +5,7 @@
 #include "VoxelGeneration.h"
 #include "VoxelTerrainConditioning.h"
 #include "VoxelChunkLineSegments.h"
+#include "VoxelChunkValleySegments.h"
 #include "InfinitePlaneWorldMode.h"
 #include "IslandBowlWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
@@ -224,6 +225,16 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 		LineSegments.EvaluateColumns(ChunkSize, VoxelSize, LineColumns);
 	}
 	const bool bLines = !LineColumns.IsEmpty();
+	// The valleys (the valleys plan, section 6.2): each column's (weight, floor) entries, worked out once, applied to
+	// the column's natural height after the island's falloff and before the lines, as the shader does (Valleys.ush)
+	FVoxelChunkValleyColumns ValleyColumns;
+	if (Request.Valleys.IsValid())
+	{
+		FVoxelChunkValleySegments ValleySegments;
+		FVoxelChunkValleySegments::Build(Request, ValleySegments);
+		ValleySegments.EvaluateColumns(ChunkSize, VoxelSize, ValleyColumns);
+	}
+	const bool bValleys = !ValleyColumns.IsEmpty();
 	const bool bLineSurfaces = LineColumns.HasSurfaces();
 	const bool bZones = Request.Conditioning.Zones.Num() > 0;
 	const FVoxelChunkLineSurface NoLineSurface;
@@ -265,6 +276,10 @@ void FVoxelCPUNoiseGenerator::GenerateChunkHeightmap(
 				{
 					TerrainHeight = FIslandBowlWorldMode::ComposeTerrainHeight(
 						WorldPos.X, WorldPos.Y, TerrainHeight, *IslandParams);
+				}
+				if (bValleys)
+				{
+					TerrainHeight = ValleyColumns.Apply(X + Y * ChunkSize, TerrainHeight);
 				}
 
 				// Phase 6c: blend the natural height toward the chunk's terrain conditioning (level along lines, flatten

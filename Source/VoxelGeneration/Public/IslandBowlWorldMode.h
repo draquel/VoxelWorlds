@@ -214,6 +214,10 @@ public:
 		BiomeSnapshot = FVoxelBiomeSnapshot::FromConfig(InBiomeConfig);
 	}
 
+	/** The world's valley network, carved into GetTerrainHeightAt's height (the valleys plan, section 6.3) */
+	virtual void SetValleyNetwork(TSharedPtr<const FVoxelValleyNetwork> InValleys) override { Valleys = MoveTemp(InValleys); }
+	virtual TSharedPtr<const FVoxelValleyNetwork> GetValleyNetwork() const override { return Valleys; }
+
 	/**
 	 * This mode's vertical-cull bounds (GetWorldBounds' MinZ / MaxZ): the base continentalness extent, with the minimum
 	 * lowered to the seabed's floor beyond the edge (EdgeHeight - SeabedDepth) when that is deeper.
@@ -382,6 +386,9 @@ private:
 	 * tasks that outlive the world. Default (never set) => raw base terrain height (no continentalness).
 	 */
 	FVoxelBiomeSnapshot BiomeSnapshot;
+
+	/** The world's valleys (null: none), applied after the island's falloff, before the conditioning (SetValleyNetwork) */
+	TSharedPtr<const FVoxelValleyNetwork> Valleys;
 
 	/** Practical vertical limits for chunk generation */
 	static constexpr int32 MIN_Z_CHUNKS = -4;

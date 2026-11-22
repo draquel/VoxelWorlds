@@ -3221,6 +3221,8 @@ void UVoxelChunkManager::BuildChunkGenerationRequest(const FIntVector& ChunkCoor
 	OutRequest.NoiseParams = Configuration->GetNoiseParams();
 	// World mode, origin, terrain params and the island / planet params, from the one builder (WM-A1).
 	FVoxelWorldModeFactory::FillGenerationRequest(*Configuration, OutRequest);
+	// The valleys: the world mode's network, so the generators and the analytic surface read the same tiles
+	OutRequest.Valleys = WorldMode.IsValid() ? WorldMode->GetValleyNetwork() : nullptr;
 
 	// Biome configuration (contains biome definitions, blend settings, height rules)
 	OutRequest.bEnableBiomes = Configuration->bEnableBiomes;

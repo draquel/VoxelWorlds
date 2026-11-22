@@ -12,6 +12,7 @@
 #include "VoxelSeaSurface.h"
 #include "VoxelNoise.h"
 #include "VoxelChunkLineSegments.h"
+#include "VoxelChunkValleySegments.h"
 #include "SphericalPlanetWorldMode.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphResources.h"
@@ -723,6 +724,14 @@ static FGenerateVoxelDensityCS::FParameters* BuildDensityShaderParameters(
 	FVoxelChunkLineSegments::Build(Request, LineSegments);
 	Parameters->ConditioningLineSegmentCount = LineSegments.Num();
 	Parameters->ConditioningLineData = CreateFloat4StructuredSRV(GraphBuilder, LineSegments.Data, TEXT("VoxelConditioningLineData"));
+
+	// The valleys: the chunk's valley segments, the same float4s the CPU generator evaluates (FVoxelChunkValleySegments),
+	// walked by GpuApplyValleys (Valleys.ush) after the island's falloff. A world with none uploads a count of 0.
+	FVoxelChunkValleySegments ValleySegments;
+	FVoxelChunkValleySegments::Build(Request, ValleySegments);
+	Parameters->ValleySegmentCount = ValleySegments.Num();
+	Parameters->ValleySeaLevel = ValleySegments.SeaLevel;
+	Parameters->ValleyData = CreateFloat4StructuredSRV(GraphBuilder, ValleySegments.Data, TEXT("VoxelValleyData"));
 
 	// The chunk's water columns where a lake or a river reach may reach it: the same float4s the CPU generator reads
 	// (FVoxelChunkWaterColumns), a level per column or, on a planet, per down-line (the shift rows first, with the
