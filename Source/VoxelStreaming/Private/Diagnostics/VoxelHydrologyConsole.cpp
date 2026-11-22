@@ -125,12 +125,20 @@ namespace VoxelHydrologyConsole
 			Bodies.Add(Lake->Body);
 		}
 		int32 NumReaches = 0;
+		int32 NumValleyRivers = 0;
+		double ValleyRiverLength = 0.0;
 		for (const TSharedRef<const FVoxelHydrologySystem>& System : Region.Systems)
 		{
 			for (const FVoxelHydrologyReach& Reach : System->Reaches)
 			{
 				Bodies.Add(Reach.Body);
 				++NumReaches;
+				if (System->bValleyRiver)
+				{
+					// A valley river's pieces (the valleys plan's V3): one reach a valley link
+					++NumValleyRivers;
+					ValleyRiverLength += Reach.Length;
+				}
 			}
 		}
 		const FVoxelSeaSurface Sea = Ground.GetSea();
@@ -380,9 +388,9 @@ namespace VoxelHydrologyConsole
 			Ground.bRadial ? Window.East.X : 1.0, Ground.bRadial ? Window.East.Y : 0.0, Ground.bRadial ? Window.East.Z : 0.0,
 			Ground.bRadial ? Window.North.X : 0.0, Ground.bRadial ? Window.North.Y : 1.0, Ground.bRadial ? Window.North.Z : 0.0,
 			Grid.GetCellSize(), Grid.GetCellsPerEdge());
-		Json += FString::Printf(TEXT(" \"squares\": %d, \"springs\": %d, \"rivers\": %d, \"systems\": %d, \"refused\": %d, \"reaches\": %d, \"reach_km\": %.3f, \"longest_river_m\": %.1f, \"longest_reach_m\": %.1f, \"most_flow\": %d, \"deepest_cut_voxels\": %.2f,\n"),
+		Json += FString::Printf(TEXT(" \"squares\": %d, \"springs\": %d, \"rivers\": %d, \"systems\": %d, \"refused\": %d, \"reaches\": %d, \"reach_km\": %.3f, \"longest_river_m\": %.1f, \"longest_reach_m\": %.1f, \"most_flow\": %d, \"deepest_cut_voxels\": %.2f, \"valley_rivers\": %d, \"valley_river_km\": %.3f,\n"),
 			Region.NumSquares, Region.NumSprings, Region.NumRivers, Region.Systems.Num(), Region.NumRefused, NumReaches, ReachLength / 1.0e5, LongestRiver / 100.0,
-			LongestReach / 100.0, MostFlow, DeepestCut / Voxel);
+			LongestReach / 100.0, MostFlow, DeepestCut / Voxel, NumValleyRivers, ValleyRiverLength / 1.0e5);
 		Json += FString::Printf(TEXT(" \"lakes\": %d, \"lake_ha\": %.3f, \"largest_lake_ha\": %.3f, \"deepest_lake_m\": %.2f,\n"), Region.Lakes.Num(), LakeArea / 1.0e8, LargestLake / 1.0e8, DeepestLake / 100.0);
 		Json += FString::Printf(TEXT(" \"violations\": %d, \"rises\": %d, \"ends_on_land\": %d, \"ends_over_body\": %d, \"bad_heads\": %d, \"line_warnings\": %d, \"conflicts\": %d, \"digest\": \"%08X\",\n"),
 			Violations, Rises, EndsOnLand, EndsOverBody, BadHeads, LineWarnings, Conflicts, Digest);
@@ -420,9 +428,10 @@ namespace VoxelHydrologyConsole
 				const FVoxelWaterReachVertex& Last = Vertices.Last();
 				const FVector2D FirstAt = Window.ToWindow(First.Position), MiddleAt = Window.ToWindow(Middle.Position), LastAt = Window.ToWindow(Last.Position);
 				const FVector FirstWorld = WorldAt(First.Position, First.SurfaceLevel), MiddleWorld = WorldAt(Middle.Position, Middle.SurfaceLevel), LastWorld = WorldAt(Last.Position, Last.SurfaceLevel);
-				Json += FString::Printf(TEXT("%s\n  {\"id\": %u, \"mouth\": [%d, %d], \"flow\": %d, \"length\": %.0f, \"fall\": %.1f, \"cut\": %.1f, \"grade_holds\": %d, \"join\": %s, \"head\": %s, \"first\": [%.0f, %.0f, %.1f], \"middle\": [%.0f, %.0f, %.1f], \"last\": [%.0f, %.0f, %.1f], \"first_world\": [%.1f, %.1f, %.1f], \"middle_world\": [%.1f, %.1f, %.1f], \"last_world\": [%.1f, %.1f, %.1f]}"),
+				Json += FString::Printf(TEXT("%s\n  {\"id\": %u, \"mouth\": [%d, %d], \"flow\": %d, \"length\": %.0f, \"fall\": %.1f, \"cut\": %.1f, \"grade_holds\": %d, \"join\": %s, \"head\": %s, \"valley\": %s, \"half_width\": %.1f, \"first\": [%.0f, %.0f, %.1f], \"middle\": [%.0f, %.0f, %.1f], \"last\": [%.0f, %.0f, %.1f], \"first_world\": [%.1f, %.1f, %.1f], \"middle_world\": [%.1f, %.1f, %.1f], \"last_world\": [%.1f, %.1f, %.1f]}"),
 					bFirst ? TEXT("") : TEXT(","), Reach.Body.Id, System->Mouth.X, System->Mouth.Y, Reach.Flow, Reach.Length, Reach.Profile.Fall, Reach.Profile.DeepestCut,
 					Reach.Profile.NumGradeHolds, Reach.bEndsAtJoin ? TEXT("true") : TEXT("false"), Reach.Profile.bStartsInBody ? TEXT("false") : TEXT("true"),
+					System->bValleyRiver ? TEXT("true") : TEXT("false"), Middle.HalfWidth,
 					FirstAt.X, FirstAt.Y, First.SurfaceLevel - LevelBase, MiddleAt.X, MiddleAt.Y, Middle.SurfaceLevel - LevelBase, LastAt.X, LastAt.Y, Last.SurfaceLevel - LevelBase,
 					FirstWorld.X, FirstWorld.Y, FirstWorld.Z, MiddleWorld.X, MiddleWorld.Y, MiddleWorld.Z, LastWorld.X, LastWorld.Y, LastWorld.Z);
 				bFirst = false;
@@ -439,10 +448,10 @@ namespace VoxelHydrologyConsole
 		FFileHelper::SaveStringToFile(Json, *(Base + TEXT(".json")), FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 
 		UE_LOG(LogVoxelStreaming, Warning,
-			TEXT("voxel.Water.Hydrology.Survey [%s]: net=%s: (%.0f, %.0f) +- %.0f uu, %.2f km2 of land: %d spring(s), %d river(s), %d system(s) (%d refused), %d river reach(es) of %.2f km (the longest river %.0f m, most springs through one %d, deepest cut %.1f voxels), %d lake(s) of %.2f ha (the largest %.2f ha, the deepest %.1f m); violations=%d (%d rise(s), %d end(s) on land, %d end(s) over the body, %d head(s), %d line warning(s), %d cell(s) with two ways on); digest=%08X; %.0f ms -> %s.json"),
+			TEXT("voxel.Water.Hydrology.Survey [%s]: net=%s: (%.0f, %.0f) +- %.0f uu, %.2f km2 of land: %d spring(s), %d river(s), %d system(s) (%d refused), %d river reach(es) of %.2f km (the longest river %.0f m, most springs through one %d, deepest cut %.1f voxels), %d lake(s) of %.2f ha (the largest %.2f ha, the deepest %.1f m), %d valley river piece(s) of %.2f km; violations=%d (%d rise(s), %d end(s) on land, %d end(s) over the body, %d head(s), %d line warning(s), %d cell(s) with two ways on); digest=%08X; %.0f ms -> %s.json"),
 			*World->GetName(), NetName(World), Centre.X, Centre.Y, Half, LandKm2, Region.NumSprings, Region.NumRivers, Region.Systems.Num(), Region.NumRefused, NumReaches,
 			ReachLength / 1.0e5, LongestRiver / 100.0, MostFlow, DeepestCut / Voxel, Region.Lakes.Num(), LakeArea / 1.0e8, LargestLake / 1.0e8, DeepestLake / 100.0,
-			Violations, Rises, EndsOnLand, EndsOverBody, BadHeads, LineWarnings, Conflicts, Digest, SurveyMs, *Base);
+			NumValleyRivers, ValleyRiverLength / 1.0e5, Violations, Rises, EndsOnLand, EndsOverBody, BadHeads, LineWarnings, Conflicts, Digest, SurveyMs, *Base);
 		if (!FirstWarning.IsEmpty())
 		{
 			UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.Water.Hydrology.Survey [%s]: the first fault: %s"), *World->GetName(), *FirstWarning);

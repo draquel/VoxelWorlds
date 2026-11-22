@@ -368,4 +368,18 @@ struct VOXELGENERATION_API FVoxelConditioningLineShape
 	 */
 	static FRiverProfile MakeRiverProfile(TConstArrayView<FVector> Points, TConstArrayView<double> Ground, TConstArrayView<double> BankGround,
 		TConstArrayView<double> Heights, TConstArrayView<double> BodyLevels, const FRiverProfileParams& Params);
+
+	/**
+	 * MakeRiverProfile's rule 8 on a bed made some other way (a valley river's, whose surface is its valley floor's): a
+	 * segment steeper than its two vertices' turns allow has its higher end lowered, by no more than
+	 * Params.MaxBendDeepening of the depth there times the taper. Nothing when Params.VoxelSize is 0.
+	 * @param Points The line's vertices, upstream to downstream
+	 * @param Taper The share of the full depth at each vertex (0 at a head)
+	 * @param Params The depth, the bed's widths and the voxel size
+	 * @param Bed The bed's target at each vertex, lowered in place
+	 * @param OutMostHold Receives the most a vertex was lowered by (optional)
+	 * @return How many vertices were lowered
+	 */
+	static int32 HoldBedThroughBends(TConstArrayView<FVector> Points, TConstArrayView<double> Taper, const FRiverProfileParams& Params, TArrayView<double> Bed,
+		double* OutMostHold = nullptr);
 };

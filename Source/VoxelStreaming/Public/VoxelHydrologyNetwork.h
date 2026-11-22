@@ -147,6 +147,8 @@ public:
 	virtual TSharedRef<const FVoxelHydrologyLake> StoreLake(const TSharedRef<const FVoxelHydrologyLake>& Lake) override;
 	virtual TSharedPtr<const FVoxelHydrologySystem> FindSystem(const FIntPoint& Mouth) override;
 	virtual TSharedRef<const FVoxelHydrologySystem> StoreSystem(const TSharedRef<const FVoxelHydrologySystem>& System) override;
+	virtual TSharedPtr<const FVoxelHydrologySystem> FindValleyRiver(const FIntPoint& Link) override;
+	virtual TSharedRef<const FVoxelHydrologySystem> StoreValleyRiver(const TSharedRef<const FVoxelHydrologySystem>& River) override;
 
 	// ---- The warm-up ----
 
@@ -314,6 +316,9 @@ private:
 	TMap<FIntPoint, TSharedRef<const FVoxelHydrologyTrace>> Traces;
 	TMap<FIntPoint, TSharedRef<const FVoxelHydrologyLake>> Lakes;
 	TMap<FIntPoint, TSharedRef<const FVoxelHydrologySystem>> Systems;
+
+	/** The valley rivers' pieces, by their links' valley cells (the valleys plan's V3) */
+	TMap<FIntPoint, TSharedRef<const FVoxelHydrologySystem>> ValleyRivers;
 
 	TArray<FIntPoint> Queue;
 	TSet<FIntPoint> QueuedTiles;

@@ -656,7 +656,8 @@ Cubic forces LOD off (`IsLODEnabled()`, D7) and meshes interiors plus face seams
 A world configuration that names a `UVoxelValleyConfiguration` (`UVoxelWorldConfiguration::ValleyConfiguration`;
 `Documentation/VALLEYS_PLAN.md` at the project root, D176) has a valley network made from its seed over its natural
 ground: on a plane or an island meshed smooth (`FVoxelValleyNetwork::IsEnabled`; block worlds and planets are the
-plan's V5). Since V2 the network is carved into the natural height (below); its valley rivers are V3's.
+plan's V5). Since V2 the network is carved into the natural height (below); since V3 a world that also generates
+hydrology has a river on every valley's floor (`WATER_SYSTEM.md`, "Valley rivers").
 
 - **The network** (`FVoxelValleyNetwork`, `VoxelGeneration/Public/VoxelValleyNetwork.h`) is a pure function of the
   seed, the settings (`FVoxelValleySettings`) and the natural height without the valleys (`FVoxelValleyGround`, a
@@ -678,7 +679,8 @@ plan's V5). Since V2 the network is carved into the natural height (below); its 
   the head's taper) and the floor there; its change is the weight times (floor - natural), and the segments combine as
   the deepest cut plus the highest fill, each continuous where valleys overlap, so a junction has no step. Ground under
   the sea is left as it is, and a land node's floor stands at least `MinFloorHeight` (3 m) over it, so a floor near the
-  coast does not read as flooded where the far field draws its sea. The plane's and the island's `GetTerrainHeightAt` apply it after continentalness and the
+  coast does not read as flooded where the far field draws its sea; a coast's floor lies as far under it, so a valley
+  comes down to a drowned mouth and not to a flat at the sea's very level, which the sea does not cover (V3). The plane's and the island's `GetTerrainHeightAt` apply it after continentalness and the
   island's falloff (`FVoxelValleyNetwork::ApplyToHeight`, from the segments that reach the point's tile, bucketed and
   kept), so every reader of the natural surface (`GetSurfaceOnUpLine`, the far field, the map, the surface queries, the
   hydrology's ground, the navigation) gets the valleys; the CPU generator per column (`FVoxelChunkValleyColumns`) and

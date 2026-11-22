@@ -173,6 +173,13 @@ struct VOXELCORE_API FVoxelHydrologySettings
 	float ReachDrawDistance = 250000.0f;
 
 	/**
+	 * A valley river (a world with valleys, Documentation/VALLEYS_PLAN.md) is drawn out to this distance from the viewer
+	 * (and no further than the far field draws the ground): it is meant to be seen from the hills on either side
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Network", meta = (ClampMin = "10000.0"))
+	float ValleyRiverDrawDistance = 600000.0f;
+
+	/**
 	 * The values that decide which bodies a world has, as one line of text: the fingerprint's term is the generator's
 	 * version and a hash of this. The network's values are left out (they change no body).
 	 * @return The line

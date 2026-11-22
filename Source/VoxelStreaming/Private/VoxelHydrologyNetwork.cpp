@@ -178,8 +178,10 @@ double FVoxelHydrologyNetwork::GetWarmUpRadius() const
 
 double FVoxelHydrologyNetwork::GetFarRadius() const
 {
-	// What draws far away: the far field's beds, and the lakes out to where they are drawn.
-	return FMath::Max3(static_cast<double>(Settings.FarViewDistances) * ViewDistance, GetWarmUpRadius(), static_cast<double>(Settings.LakeDrawDistance));
+	// What draws far away: the far field's beds, the lakes out to where they are drawn, and in a world with valleys the
+	// valley rivers out to theirs.
+	const double Far = FMath::Max3(static_cast<double>(Settings.FarViewDistances) * ViewDistance, GetWarmUpRadius(), static_cast<double>(Settings.LakeDrawDistance));
+	return Ground.Valleys.IsValid() ? FMath::Max(Far, static_cast<double>(Settings.ValleyRiverDrawDistance)) : Far;
 }
 
 // ==================== The generator's cache ====================
@@ -236,6 +238,23 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrologyNetwork::StoreSystem(cons
 	}
 	++Stats.SystemsMade;
 	return Systems.Add(System->Mouth, System);
+}
+
+TSharedPtr<const FVoxelHydrologySystem> FVoxelHydrologyNetwork::FindValleyRiver(const FIntPoint& Link)
+{
+	FScopeLock Scope(&Lock);
+	const TSharedRef<const FVoxelHydrologySystem>* Found = ValleyRivers.Find(Link);
+	return Found ? Found->ToSharedPtr() : nullptr;
+}
+
+TSharedRef<const FVoxelHydrologySystem> FVoxelHydrologyNetwork::StoreValleyRiver(const TSharedRef<const FVoxelHydrologySystem>& River)
+{
+	FScopeLock Scope(&Lock);
+	if (const TSharedRef<const FVoxelHydrologySystem>* Found = ValleyRivers.Find(River->Mouth))
+	{
+		return *Found;
+	}
+	return ValleyRivers.Add(River->Mouth, River);
 }
 
 // ==================== Working tiles out ====================
@@ -414,6 +433,7 @@ void FVoxelHydrologyNetwork::Trim()
 		Traces.Reset();
 		Lakes.Reset();
 		Systems.Reset();
+		ValleyRivers.Reset();
 	}
 }
 

@@ -339,11 +339,15 @@ TSharedRef<FVoxelValleyTile> FVoxelValleyNetwork::BuildTile(const FVoxelValleySe
 	}
 
 	// ---- The floors: a share of the ground over the sea, at least MinFloorHeight over it (or the ground, if lower);
-	// on a breach the sink's; at a coast the sea's level. Each term grows with the ground, so a floor falls along a link
+	// on a breach the sink's; at a coast MinFloorHeight under the sea's level, so a valley comes down to a drowned mouth
+	// and not to a flat at the sea's very level, which the sea does not cover (the sea stands where the ground is under
+	// it) and a river reaching it would end on land (the valleys plan's V3). Each term grows with the ground, so a
+	// floor falls along a link
 	auto OwnFloor = [&](int32 K)
 	{
 		const double Over = FMath::Max(0.0, G.Height[K] - SeaZ);
-		return G.Sea[K] ? SeaZ : SeaZ + FMath::Max(S.FloorFraction * Over, FMath::Min(Over, static_cast<double>(S.MinFloorHeight)));
+		return G.Sea[K] ? SeaZ - static_cast<double>(S.MinFloorHeight)
+			: SeaZ + FMath::Max(S.FloorFraction * Over, FMath::Min(Over, static_cast<double>(S.MinFloorHeight)));
 	};
 	for (int32 K = 0; K < Count; ++K)
 	{

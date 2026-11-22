@@ -13,6 +13,7 @@
 
 class IVoxelWorldMode;
 class UVoxelWorldConfiguration;
+class FVoxelValleyNetwork;
 
 /**
  * The natural ground the hydrology generator reads, and the world's values it works in. The height is a function any
@@ -53,6 +54,13 @@ struct VOXELGENERATION_API FVoxelHydrologyGround
 	double VoxelSize = 100.0;
 	double ChunkWorldSize = 3200.0;
 	int32 Seed = 0;
+
+	/**
+	 * The world's valley network (Documentation/VALLEYS_PLAN.md, section 6.4), or null: its valleys are in Height
+	 * already (the world mode carves them); the generator also makes a valley river on each valley's floor, a piece a
+	 * link (BuildValleyRiver), and a descent that reaches one ends there (EVoxelHydrologyEnd::ValleyRiver)
+	 */
+	TSharedPtr<const FVoxelValleyNetwork> Valleys;
 
 	/** @return Whether the ground can be read: the height function of its kind is set */
 	bool IsValid() const { return bRadial ? static_cast<bool>(Altitude) : static_cast<bool>(Height); }
@@ -278,7 +286,9 @@ enum class EVoxelHydrologyEnd : uint8
 	/** Longer than the longest river */
 	TooLong,
 	/** Across more hollows than a river may cross */
-	TooManyLakes
+	TooManyLakes,
+	/** In a valley river (the valleys plan's D179): a river like one that ends in the sea */
+	ValleyRiver
 };
 
 /**
@@ -368,6 +378,13 @@ struct VOXELGENERATION_API FVoxelHydrologySystem
 
 	/** The first such cell, for a diagnostic: the cell and the two ways on */
 	FString ConflictNote;
+
+	/**
+	 * A piece of a valley river (the valleys plan's D179, section 6.4): one reach along one valley link, Mouth the
+	 * link's upper node's lattice cell (a valley lattice's, not the hydrology grid's), NumSprings its drainage. Never
+	 * refused: a valley is never dry.
+	 */
+	bool bValleyRiver = false;
 };
 
 /** What the generator keeps between pieces of work (the network's cache; a test may pass none). Thread-safe. */
@@ -385,6 +402,10 @@ public:
 
 	virtual TSharedPtr<const FVoxelHydrologySystem> FindSystem(const FIntPoint& Mouth) = 0;
 	virtual TSharedRef<const FVoxelHydrologySystem> StoreSystem(const TSharedRef<const FVoxelHydrologySystem>& System) = 0;
+
+	/** A valley river's piece by its link's upper node's valley cell (a cache that keeps none returns what it is given) */
+	virtual TSharedPtr<const FVoxelHydrologySystem> FindValleyRiver(const FIntPoint& Link) { return nullptr; }
+	virtual TSharedRef<const FVoxelHydrologySystem> StoreValleyRiver(const TSharedRef<const FVoxelHydrologySystem>& River) { return River; }
 };
 
 /** The bodies of a region (FVoxelHydrology::BuildRegion), and what working them out cost. */
@@ -535,4 +556,33 @@ struct VOXELGENERATION_API FVoxelHydrology
 
 	/** The steepest a bed's segment may be on a block world: a block a column along a diagonal, with the shape functions' margin */
 	static double GetBlockBedGrade();
+
+	// ---- Valley rivers (Documentation/VALLEYS_PLAN.md, section 6.4; D179) ----
+
+	/**
+	 * A valley link's river: one river reach along the link's centre curve, winding across its floor (a sine of
+	 * RiverHalfWaves half-waves, nothing at the two nodes, over RiverWinding of the room between the river's banks and
+	 * the floor's edge), its surface SurfaceBelowGroundVoxels under the floor or the ground there, whichever is lower,
+	 * never rising, from the upper node's level to the lower node's (so the pieces meet), down to a tuck under the sea at
+	 * a coast; a head starts from nothing half a link down, where the valley's floor is whole. With its bed, a
+	 * lower-only line DepthVoxels under the surface. A pure function of the network and the ground.
+	 * @param Link The link's upper node's valley lattice cell
+	 * @return The piece (no reach when the cell carries no valley)
+	 */
+	static TSharedRef<const FVoxelHydrologySystem> BuildValleyRiver(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground, const FIntPoint& Link);
+
+	/**
+	 * The valley river pieces whose reaches may reach a box, by their links' cells, from the cache when it has them.
+	 * @param Box World XY
+	 * @param Cache What is kept between calls (may be null)
+	 * @param Out The pieces (appended), in a fixed order
+	 */
+	static void GatherValleyRivers(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground, const FBox2D& Box, IVoxelHydrologyCache* Cache,
+		TArray<TSharedRef<const FVoxelHydrologySystem>>& Out);
+
+	/** @return A valley river piece's body id from its link's cell (never the sea's 0; a hash of its own, apart from a brook's) */
+	static uint32 MakeValleyReachId(int32 Seed, const FIntPoint& Link);
+
+	/** @return A valley river piece's bed line id: counted up from -2^59, over every brook's bed (from -2^60) */
+	static int64 MakeValleyBedLineId(const FIntPoint& Link);
 };
