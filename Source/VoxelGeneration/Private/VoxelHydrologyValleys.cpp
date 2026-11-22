@@ -230,6 +230,13 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 		{
 			if (Ground.Height(Places[Index].X, Places[Index].Y) < Ground.SeaLevel)
 			{
+				// A piece with no more than two places on land is no river: a valley of one link at a coast, whose head
+				// starts half way along where the drowned mouth has already put the ground under the sea
+				if (Index <= 2)
+				{
+					System->Refused = TEXT("a valley river that starts in the sea");
+					return System;
+				}
 				const int32 Last = FMath::Min(Index + Kept - 1, Places.Num() - 1);
 				Places.SetNum(Last + 1);
 				Points.SetNum(Last + 1);
@@ -244,8 +251,48 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 		return System;
 	}
 
-	// The surface: under the floor or the ground there, whichever is lower, never rising, from this node's level to the
-	// next's (so the pieces meet), down to a tuck under the sea at a coast
+	// A node's level, the same whichever piece asks: under its floor or its ground there, whichever is lower, held at a
+	// tuck under the sea at least, and no higher than the level of any valley link into it (a link joins one of its
+	// eight neighbours), so it never stands over a node upstream of it. A piece starts at its upper node's level and ends
+	// at its lower node's, so the pieces meet at each node at one level and the water never rises from one to the next.
+	// Taken from the node's own ground alone, a node a neighbouring valley's drowned mouth had cut low left the piece
+	// from it under the next (the demo, V4)
+	const double MinLevel = Ground.bSea ? Ground.SeaLevel - Tuck : -TNumericLimits<double>::Max();
+	TMap<FIntPoint, double> Levels;
+	TFunction<double(const FIntPoint&, int32)> LevelOf;
+	LevelOf = [&](const FIntPoint& Cell, int32 Depth) -> double
+	{
+		if (const double* Known = Levels.Find(Cell))
+		{
+			return *Known;
+		}
+		const FVoxelValleyNode At = Valleys.GetNode(Cell);
+		double Level = FMath::Min(At.Floor, Ground.Height(At.Position.X, At.Position.Y)) - Under;
+		if (Depth < 4096)
+		{
+			for (int32 DY = -1; DY <= 1; ++DY)
+			{
+				for (int32 DX = -1; DX <= 1; ++DX)
+				{
+					if (DX == 0 && DY == 0)
+					{
+						continue;
+					}
+					const FVoxelValleyNode In = Valleys.GetNode(Cell + FIntPoint(DX, DY));
+					if (In.bValley && In.bHasLink && In.Down == Cell)
+					{
+						Level = FMath::Min(Level, LevelOf(In.Cell, Depth + 1));
+					}
+				}
+			}
+		}
+		Level = FMath::Max(Level, MinLevel);
+		Levels.Add(Cell, Level);
+		return Level;
+	};
+
+	// The surface: under the floor or the ground there, whichever is lower, never rising, from the upper node's level
+	// (a head's own first place) to the lower node's, down to a tuck under the sea at a coast
 	TArray<double> Own;
 	Own.SetNum(Num);
 	double DeepestCut = 0.0;
@@ -263,19 +310,18 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 		}
 	}
 	const bool bToSea = Down.bSea;
-	double EndLevel = (bToSea && Ground.bSea) ? Ground.SeaLevel - Tuck : Own[Num - 1];
-	EndLevel = FMath::Min(EndLevel, Own[0]);
+	const double EndLevel = bToSea ? (Ground.bSea ? Ground.SeaLevel - Tuck : Own[Num - 1]) : LevelOf(Down.Cell, 0);
+	// A head starts at its own first place, half way along its link, and no lower than the node it runs to (whose
+	// level is no higher than any node upstream, the head's own included)
+	const double StartLevel = FMath::Max(Node.bHead ? Own[0] : LevelOf(Node.Cell, 0), EndLevel);
 	TArray<double> Surface;
 	Surface.SetNum(Num);
-	Surface[0] = Own[0];
+	Surface[0] = StartLevel;
 	for (int32 Index = 1; Index < Num; ++Index)
 	{
 		Surface[Index] = FMath::Max(EndLevel, FMath::Min(Surface[Index - 1], Own[Index]));
 	}
-	if (bToSea && Ground.bSea)
-	{
-		Surface[Num - 1] = EndLevel;
-	}
+	Surface[Num - 1] = EndLevel;
 
 	// A head starts from nothing: its width and depth grow over the head's length
 	TArray<double> Ramp;
