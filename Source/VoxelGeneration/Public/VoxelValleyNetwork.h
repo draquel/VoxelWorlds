@@ -132,15 +132,18 @@ struct FVoxelValleyTile
  * lowest saddle out of its hollow to the first lower node within BreachCells (a bounded priority-flood; D180), the
  * steps of that path at the sink's floor. A node's drainage counts the nodes linking into it within DrainageReach
  * links; a link from a node of ValleyDrainage or more is a valley. A node's floor is FloorFraction of its ground over
- * the sea and at least MinFloorHeight over it (or its ground, if lower), the sea's level at a coast, and never rises
+ * the sea and at least MinFloorHeight over it (or its ground, if lower), MinFloorHeight under the sea's level at a coast, and never rises
  * along a link. A valley's links are joined into a curve, each
  * node's corner spread between its main link in and its link out.
  */
 class VOXELGENERATION_API FVoxelValleyNetwork
 {
 public:
-	/** The network's version, in the fingerprint's term: it moves when the same settings would make other valleys */
-	static constexpr int32 Version = 1;
+	/**
+	 * The network's version, in the fingerprint's term: it moves when the same settings would make other valleys or other
+	 * bodies in them (2: the valley rivers, the valleys plan's V3)
+	 */
+	static constexpr int32 Version = 2;
 
 	FVoxelValleyNetwork(const FVoxelValleySettings& InSettings, FVoxelValleyGround InGround);
 

@@ -95,6 +95,8 @@ FVoxelHydrologyGround FVoxelHydrologyGround::FromConfig(const UVoxelWorldConfigu
 	Ground.bSea = Sea.bEnabled && !Sea.bRadial;
 	Ground.SeaLevel = Sea.PlaneZ;
 	Ground.bBlocks = FVoxelBlockSurface::UsesBlockSurface(Config);
+	// The valleys are in the world mode's height already; the network gives their rivers (the valleys plan's V3)
+	Ground.Valleys = WorldMode->GetValleyNetwork();
 	Ground.BlockOrigin = Config.WorldOrigin;
 	return Ground;
 }
@@ -1022,6 +1024,33 @@ TSharedRef<const FVoxelHydrologyTrace> FVoxelHydrology::TraceSpring(const FVoxel
 		Cells.Add(Cell);
 		LakeOf.Add(Lake);
 	};
+	// The valley rivers a descent from this spring may reach (the valleys plan, D179): it ends in the first one whose
+	// water it enters, a river like one that ends in the sea
+	TArray<TSharedRef<const FVoxelHydrologySystem>> ValleyRivers;
+	const FVoxelHydrologyGround& TraceGround = Heights.GetGround();
+	if (TraceGround.Valleys.IsValid() && !TraceGround.bRadial)
+	{
+		const FVector2D SpringAt(Heights.PlaceOf(Trace->Spring));
+		const double Reach = Settings.MaxRiverLength + Heights.GetCellSize();
+		GatherValleyRivers(Settings, TraceGround, FBox2D(SpringAt - FVector2D(Reach), SpringAt + FVector2D(Reach)), Cache, ValleyRivers);
+	}
+	const auto InValleyRiver = [&ValleyRivers, &Heights](const FIntPoint& At) -> bool
+	{
+		const FVector Place = Heights.PlaceOf(At);
+		for (const TSharedRef<const FVoxelHydrologySystem>& River : ValleyRivers)
+		{
+			for (const FVoxelHydrologyReach& Reach : River->Reaches)
+			{
+				FVoxelWaterReachSample Sample;
+				if (Reach.Body.Reach.IsValid() && Reach.Body.Bounds.IsInsideOrOnXY(Place) && Reach.Body.Reach->SampleAt(Place.X, Place.Y, Sample))
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+
 	FIntPoint Cell = Trace->Spring;
 	int32 DescentStart = 0;   // where the descent in hand began: the spring, or the cell past the last lake's saddle
 	double Length = 0.0;
@@ -1033,6 +1062,13 @@ TSharedRef<const FVoxelHydrologyTrace> FVoxelHydrology::TraceSpring(const FVoxel
 		{
 			Push(Cell, INDEX_NONE);
 			Trace->End = EVoxelHydrologyEnd::Sea;
+			Trace->Mouth = Cell;
+			break;
+		}
+		if (ValleyRivers.Num() > 0 && InValleyRiver(Cell))
+		{
+			Push(Cell, INDEX_NONE);
+			Trace->End = EVoxelHydrologyEnd::ValleyRiver;
 			Trace->Mouth = Cell;
 			break;
 		}
@@ -1154,7 +1190,8 @@ TSharedRef<const FVoxelHydrologyTrace> FVoxelHydrology::TraceSpring(const FVoxel
 
 	Trace->Length = Length;
 	Trace->Fall = Cells.Num() > 0 ? Heights.At(Trace->Spring) - Heights.At(Cells.Last()) : 0.0;
-	const bool bEndsInWater = Trace->End == EVoxelHydrologyEnd::Sea || (Trace->End == EVoxelHydrologyEnd::ClosedLake && bEndsUnderLake);
+	const bool bEndsInWater = Trace->End == EVoxelHydrologyEnd::Sea || Trace->End == EVoxelHydrologyEnd::ValleyRiver
+		|| (Trace->End == EVoxelHydrologyEnd::ClosedLake && bEndsUnderLake);
 	Trace->bKept = bEndsInWater && Length >= Settings.MinRiverLength && Length <= Settings.MaxRiverLength && Length > 0.0
 		&& Trace->Fall / Length <= Settings.MaxMeanGrade;
 	return Trace;
@@ -1506,9 +1543,23 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildSystem(const FVoxe
 		return System;
 	}
 
-	// The water the reaches meet: the sea and the kept lakes on the rivers' ways.
+	// The water the reaches meet: the sea and the kept lakes on the rivers' ways, and the valley river a system ends in.
 	TArray<FVoxelWaterBody> Bodies;
 	LakeBodies.GenerateValueArray(Bodies);
+	if (Ground.Valleys.IsValid() && !bRadial && Rivers.ContainsByPredicate([](const TSharedRef<const FVoxelHydrologyTrace>& River) { return River->End == EVoxelHydrologyEnd::ValleyRiver; }))
+	{
+		const FVector2D MouthAt(Heights.PlaceOf(Mouth));
+		const double Near = 4.0 * Heights.GetCellSize();
+		TArray<TSharedRef<const FVoxelHydrologySystem>> ValleyRivers;
+		GatherValleyRivers(Settings, Ground, FBox2D(MouthAt - FVector2D(Near), MouthAt + FVector2D(Near)), nullptr, ValleyRivers);
+		for (const TSharedRef<const FVoxelHydrologySystem>& River : ValleyRivers)
+		{
+			for (const FVoxelHydrologyReach& Reach : River->Reaches)
+			{
+				Bodies.Add(Reach.Body);
+			}
+		}
+	}
 	const FVoxelWaterLevels Water = FVoxelWaterLevels::Make(Ground.GetSea(), Frame, FVoxelWaterLevels::WholeWorld(), MoveTemp(Bodies));
 	const auto GroundAt = [&Ground](const FVector& Place) { return Ground.HeightAt(Place); };
 	const auto BodyLevelAt = [&Water](const FVector& Place, double GroundHeight) { return FVoxelRiverCourse::GetBodyLevelAt(Water, Place, GroundHeight); };
@@ -1893,6 +1944,24 @@ void FVoxelHydrology::BuildRegion(const FVoxelHydrologySettings& InSettings, con
 			{
 				Out.Systems.Add(System.ToSharedRef());
 				break;
+			}
+		}
+	}
+
+	// The valley rivers that reach the region (the valleys plan, D179): a piece a valley link, after the brooks' systems
+	if (Ground.Valleys.IsValid() && !Region.bCap)
+	{
+		TArray<TSharedRef<const FVoxelHydrologySystem>> ValleyRivers;
+		GatherValleyRivers(Settings, Ground, Region.Box, Cache, ValleyRivers);
+		for (const TSharedRef<const FVoxelHydrologySystem>& River : ValleyRivers)
+		{
+			for (const FVoxelHydrologyReach& Reach : River->Reaches)
+			{
+				if (MeetsRegion(Reach.Body, Region, Ground) || (Reach.Bed.IsValid() && MeetsRegion(*Reach.Bed, Region, Ground)))
+				{
+					Out.Systems.Add(River);
+					break;
+				}
 			}
 		}
 	}

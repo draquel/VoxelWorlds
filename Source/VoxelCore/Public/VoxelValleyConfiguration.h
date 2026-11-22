@@ -65,9 +65,11 @@ struct VOXELCORE_API FVoxelValleySettings
 	float FloorFraction = 0.2f;
 
 	/**
-	 * A land node's floor stands at least this far over the sea, or at its ground where that is lower: only a valley's
-	 * last link comes down to the sea's level. A floor a hand's breadth over the sea reads as flooded from afar (the
-	 * far field draws its ground a voxel under the voxels' and its sea over ground within its sea margin of it; V2)
+	 * A land node's floor stands at least this far over the sea, or at its ground where that is lower, and a coast's
+	 * this far under it: only a valley's last link comes down to the sea, to a drowned mouth. A floor a hand's breadth
+	 * over the sea reads as flooded from afar (the far field draws its ground a voxel under the voxels' and its sea over
+	 * ground within its sea margin of it; V2); a floor at the sea's very level is neither sea nor land, and a river
+	 * reaching it ends on land (V3)
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Shape", meta = (ClampMin = "0.0"))
 	float MinFloorHeight = 300.0f;

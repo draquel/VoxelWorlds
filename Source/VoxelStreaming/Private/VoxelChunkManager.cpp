@@ -4258,7 +4258,9 @@ void UVoxelChunkManager::UpdateWaterBodyMeshes()
 	{
 		LakeReach = FMath::Min(Reach, static_cast<double>(HydrologyNetwork->GetSettings().LakeDrawDistance));
 		RiverReach = FMath::Min(Reach, static_cast<double>(HydrologyNetwork->GetSettings().ReachDrawDistance));
-		Reach = FMath::Max(LakeReach, RiverReach);
+		// A valley river asks for its own distance (FVoxelWaterBody::DrawDistance): the gather reaches it
+		const double ValleyReach = FMath::Min(Reach, static_cast<double>(HydrologyNetwork->GetSettings().ValleyRiverDrawDistance));
+		Reach = FMath::Max3(LakeReach, RiverReach, WorldMode.IsValid() && WorldMode->GetValleyNetwork().IsValid() ? ValleyReach : 0.0);
 	}
 	const bool bMovedFar = bWaterBodyMeshesGathered
 		&& FVector::DistSquared(CurrentViewerPosition, WaterBodyMeshGatherPosition) > FMath::Square(FMath::Min(LakeReach, RiverReach) / 8.0);
@@ -4295,7 +4297,8 @@ void UVoxelChunkManager::UpdateWaterBodyMeshes()
 				{
 					return false;
 				}
-				const double Limit = Body.Kind == EVoxelWaterBodyKind::Reach ? RiverReach : LakeReach;
+				const double Limit = Body.DrawDistance > 0.0f ? FMath::Min(Reach, static_cast<double>(Body.DrawDistance))
+					: Body.Kind == EVoxelWaterBodyKind::Reach ? RiverReach : LakeReach;
 				if (Frame.bRadial)
 				{
 					// A planet body's bounds are a box round its water in the world: the straight distance to it.

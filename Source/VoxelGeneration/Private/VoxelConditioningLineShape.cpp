@@ -722,6 +722,74 @@ FVoxelConditioningLineShape::FProfile FVoxelConditioningLineShape::MakeProfile(T
 	return Result;
 }
 
+int32 FVoxelConditioningLineShape::HoldBedThroughBends(TConstArrayView<FVector> Points, TConstArrayView<double> Taper, const FRiverProfileParams& Params,
+	TArrayView<double> Bed, double* OutMostHold)
+{
+	const int32 Num = FMath::Min3(Points.Num(), Taper.Num(), Bed.Num());
+	if (OutMostHold)
+	{
+		*OutMostHold = 0.0;
+	}
+	if (Params.VoxelSize <= 0.0 || Num < 3)
+	{
+		return 0;
+	}
+	TArray<double> Along;
+	Along.SetNumUninitialized(Num);
+	Along[0] = 0.0;
+	for (int32 Index = 1; Index < Num; ++Index)
+	{
+		Along[Index] = Along[Index - 1] + FVector::Dist(Points[Index - 1], Points[Index]);
+	}
+	TArray<double> VertexGrade;
+	VertexGrade.Init(TNumericLimits<double>::Max(), Num);
+	for (int32 Index = 1; Index + 1 < Num; ++Index)
+	{
+		const double Turn = GetTurnAt(Points.Left(Num), Index);
+		if (Turn > UE_DOUBLE_SMALL_NUMBER)
+		{
+			const double Grade = GetMaxGradeForTurn(Turn, Params.HalfWidth, Params.FalloffWidth, Params.VoxelSize);
+			VertexGrade[Index] = Grade < TNumericLimits<double>::Max() ? BoundMargin * Grade : Grade;
+		}
+	}
+	const auto MaxStep = [&](int32 Segment)
+	{
+		const double Grade = FMath::Min(VertexGrade[Segment], VertexGrade[Segment + 1]);
+		return Grade < TNumericLimits<double>::Max() ? Grade * (Along[Segment + 1] - Along[Segment]) : TNumericLimits<double>::Max();
+	};
+	const TArray<double> Before(Bed.GetData(), Num);
+	for (int32 Index = Num - 2; Index >= 0; --Index)
+	{
+		const double Most = MaxStep(Index);
+		if (Most < TNumericLimits<double>::Max())
+		{
+			Bed[Index] = FMath::Min(Bed[Index], Bed[Index + 1] + Most);
+		}
+	}
+	for (int32 Index = 1; Index < Num; ++Index)
+	{
+		const double Most = MaxStep(Index - 1);
+		if (Most < TNumericLimits<double>::Max())
+		{
+			Bed[Index] = FMath::Min(Bed[Index], Bed[Index - 1] + Most);
+		}
+	}
+	int32 Held = 0;
+	for (int32 Index = 0; Index < Num; ++Index)
+	{
+		Bed[Index] = FMath::Max(Bed[Index], Before[Index] - FMath::Max(Params.MaxBendDeepening, 0.0) * Params.Depth * Taper[Index]);
+		if (Before[Index] - Bed[Index] > UE_DOUBLE_KINDA_SMALL_NUMBER)
+		{
+			++Held;
+			if (OutMostHold)
+			{
+				*OutMostHold = FMath::Max(*OutMostHold, Before[Index] - Bed[Index]);
+			}
+		}
+	}
+	return Held;
+}
+
 FVoxelConditioningLineShape::FRiverProfile FVoxelConditioningLineShape::MakeRiverProfile(TConstArrayView<FVector> Points, TConstArrayView<double> Ground,
 	TConstArrayView<double> BankGround, TConstArrayView<double> Heights, TConstArrayView<double> BodyLevels, const FRiverProfileParams& Params)
 {
@@ -839,48 +907,7 @@ FVoxelConditioningLineShape::FRiverProfile FVoxelConditioningLineShape::MakeRive
 	// share of the depth the river has there, so a head still starts from nothing and no bend digs a pit.
 	if (Params.VoxelSize > 0.0)
 	{
-		TArray<double> VertexGrade;
-		VertexGrade.Init(TNumericLimits<double>::Max(), Num);
-		for (int32 Index = 1; Index + 1 < Num; ++Index)
-		{
-			const double Turn = GetTurnAt(Points.Left(Num), Index);
-			if (Turn > UE_DOUBLE_SMALL_NUMBER)
-			{
-				const double Grade = GetMaxGradeForTurn(Turn, Params.HalfWidth, Params.FalloffWidth, Params.VoxelSize);
-				VertexGrade[Index] = Grade < TNumericLimits<double>::Max() ? BoundMargin * Grade : Grade;
-			}
-		}
-		const auto MaxStep = [&](int32 Segment)
-		{
-			const double Grade = FMath::Min(VertexGrade[Segment], VertexGrade[Segment + 1]);
-			return Grade < TNumericLimits<double>::Max() ? Grade * (Along[Segment + 1] - Along[Segment]) : TNumericLimits<double>::Max();
-		};
-		const TArray<double> Before = Result.Bed;
-		for (int32 Index = Num - 2; Index >= 0; --Index)
-		{
-			const double Most = MaxStep(Index);
-			if (Most < TNumericLimits<double>::Max())
-			{
-				Result.Bed[Index] = FMath::Min(Result.Bed[Index], Result.Bed[Index + 1] + Most);
-			}
-		}
-		for (int32 Index = 1; Index < Num; ++Index)
-		{
-			const double Most = MaxStep(Index - 1);
-			if (Most < TNumericLimits<double>::Max())
-			{
-				Result.Bed[Index] = FMath::Min(Result.Bed[Index], Result.Bed[Index - 1] + Most);
-			}
-		}
-		for (int32 Index = 0; Index < Num; ++Index)
-		{
-			Result.Bed[Index] = FMath::Max(Result.Bed[Index], Before[Index] - FMath::Max(Params.MaxBendDeepening, 0.0) * Params.Depth * Result.Taper[Index]);
-			if (Before[Index] - Result.Bed[Index] > UE_DOUBLE_KINDA_SMALL_NUMBER)
-			{
-				++Result.NumBendHolds;
-				Result.MostBendHold = FMath::Max(Result.MostBendHold, Before[Index] - Result.Bed[Index]);
-			}
-		}
+		Result.NumBendHolds = HoldBedThroughBends(Points.Left(Num), Result.Taper, Params, Result.Bed, &Result.MostBendHold);
 	}
 
 	// The bed's grade, where it is bounded (a block world: a block a column). A segment steeper than the bound has its

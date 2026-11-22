@@ -1,6 +1,7 @@
 # Water System Architecture
 
-> State as of 2026-11-19 (G229: a lake's sheet cut to its shore, in "Lakes and river reaches drawn"); 2026-11-16
+> State as of 2026-11-22 (the valleys plan's V3: "Valley rivers", under "On a Planet"); 2026-11-19 (G229: a lake's
+> sheet cut to its shore, in "Lakes and river reaches drawn"); 2026-11-16
 > (the hydrology plan's H1 to H8: "Lakes and river reaches", "A chunk's water columns",
 > "Lakes and river reaches drawn", "The river and the lake placed by hand" and "Ponds and brooks from the seed", under
 > "On a Planet"; the water plan's W1, 2026-11-13: the material paragraphs; its W2: "The water levels"; the rest as of
@@ -713,6 +714,51 @@ with a cache give each body with the same record; the rules, with river reaches 
 a block a column, beds lowered for it); `Streaming.Hydrology.Planet`, `.Cubic` (a streamed planet and a streamed
 block world: a generated lake's and a river reach's voxels flagged and sampled, a gather over a cap, no tile worked
 out on the game thread along a walk). The gate in a play world is `Scripts/qa/hydrology_gate.py`.
+
+**Valley rivers (the valleys plan's V3, 2026-11-22; D179).** A world with valleys (`WORLD_MODES.md`, "Valleys") and
+hydrology has a river on the floor of every valley, which the brooks run into. A traced river is one system a mouth,
+whole or not at all; a valley has no length bound, so its river is made a link at a time.
+
+- **A piece a link** (`FVoxelHydrology::BuildValleyRiver`, `VoxelHydrologyValleys.cpp`; a system with
+  `bValleyRiver`, its mouth the link's cell, one reach). The link's curve from the network (`FVoxelValleySegment`s,
+  upper node to lower; a head's from half the link on, where its floor is whole) is cut back at both ends to a
+  straight chord into its node, rounded to a radius the winding fits inside, wound across the floor (the room is
+  `RiverWinding` of the floor's half width less the river's and the bank, `RiverHalfWaves` half waves, nothing at the
+  two nodes), and rounded again to the bend bound's turn (`FVoxelConditioningLineShape::RoundCorners`). A node's
+  corner is split between the piece in and the piece out and rounding keeps a line's ends, hence the chords; the
+  footprint and the bed are round at the node and cover the corner's outside. Where the winding still folds on a
+  tight bend and the course breaks the bound, the piece winds over half the room, a quarter, then none: no piece is
+  refused, a valley is never dry. The width is the segment's river half width (by drainage, the network's).
+- **Its surface** is the floor or the ground there, whichever is lower, less `SurfaceBelowGroundVoxels`, held from
+  falling under a tuck under the sea, and never rising: from its upper node's level to its lower node's, so the
+  pieces meet at each node at one place and one level, and a piece into a coast ends a tuck under the sea. A coast's
+  floor lies `MinFloorHeight` under the sea, so a valley comes down to a drowned mouth (a flat at the sea's very level
+  is neither sea nor land, and a river reaching it would end on land), and a piece into a coast keeps only the
+  `BodyVertices` past the shore that a brook keeps inside the body it ends in. A head
+  starts from nothing over `HeadLength`. The bed is the surface less the depth, lowered through the bends as a
+  brook's (rule 8, `FVoxelConditioningLineShape::HoldBedThroughBends`, shared with `MakeRiverProfile`), a lower-only
+  line with the brooks' band and cave depth. The reach's id is `MakeValleyReachId` (the seed and the link), its bed
+  line's `MakeValleyBedLineId`, apart from the brooks'.
+- **The brooks.** A descent that comes into a valley river's water ends there (`EVoxelHydrologyEnd::ValleyRiver`):
+  the river is made as one that ends in the sea, its reaches meeting the valley river's pieces near its mouth as
+  water. `TraceSpring` gathers the pieces within the longest river of the spring.
+- **The network** keeps the pieces by link (`IVoxelHydrologyCache::FindValleyRiver` / `StoreValleyRiver`) beside
+  the systems; a region (`FVoxelHydrology::GatherValleyRivers`, `BuildRegion`) holds the pieces of the links whose
+  segments reach it. A piece depends on its link alone, so any region, tiling or cache gives it the same record.
+- **Drawn** out to `ValleyRiverDrawDistance` (6 km; `FVoxelWaterBody::DrawDistance`, which a body's source may set
+  and the chunk manager's body meshes read before the kind's distance), a brook's 2.5 km being too short for a river
+  seen from the hills.
+- **The fingerprint** is the valleys' term (`FVoxelValleyNetwork::Version` 2 since V3: the same settings make other
+  bodies); a world with no valleys makes the bodies it did.
+
+Tests: `Generation.Hydrology.ValleyRivers.Pieces` (made hills falling to a sea, the network carved: every valley link
+has its piece, no surface rises, a piece meets the piece below at the node and never under it, a head starts from
+nothing, a piece into a coast ends a tuck under the sea, the course keeps to its valley's floor, no bed breaks a
+line's limits, every head leads to the sea), `.Regions` (two regions that overlap and a run with a cache give each
+valley river the same id and vertices), `.Brooks` (descents end in a valley river, and every brook's end lies in
+water at its level, less at most the tuck). The survey (`voxel.Water.Hydrology.Survey`) counts the pieces and reads
+them back against the same rules as any reach; `hydrology_gate.py --valleys [--swim=river]` plays a world with
+valleys given in memory.
 
 H1 changed no output: no world has a body, a gather with none is the sea's snapshot, and the gates read as the base
 (the plan's H1 result). The cost of the point gather was measured by `Streaming.Water.Bodies.Plane` and `.Planet` in a

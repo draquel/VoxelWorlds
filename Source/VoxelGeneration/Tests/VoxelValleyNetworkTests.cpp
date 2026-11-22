@@ -16,8 +16,8 @@
 //   place, ground, link, flags, drainage and floor, and every valley link the same curve; a cached tile is the one
 //   built from nothing.
 // - Generation.Valleys.Rules: on hills falling to a sea, every link steps to a neighbour; every link but a breach's
-//   falls in height; no floor rises along a link or a segment; a coast has the sea's level and no link; a valley link
-//   into a coast ends at the sea's level; every chain ends (at the sea or a sink kept), so the links make no loop.
+//   falls in height; no floor rises along a link or a segment; a coast's floor lies MinFloorHeight under the sea and it
+//   has no link; a valley link into a coast ends there, at a drowned mouth (V3); every chain ends (at the sea or a sink kept), so the links make no loop.
 // - Generation.Valleys.Sinks: the sink rule (D180). A hollow on a slope is breached through its saddle: its sink links
 //   on, the breach's steps hold the sink's floor, and its chain reaches the sea. A hollow wider than the breach's
 //   reach keeps its sink with no link.
@@ -149,7 +149,8 @@ bool FVoxelValleyRulesTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelValleyTest;
 	const FVoxelValleyNetwork Network(FVoxelValleySettings(), MakeGround(&Hills));
-	const double SeaLevel = 0.0;
+	// A coast's floor: MinFloorHeight under the sea, a drowned mouth (the valleys plan's V3)
+	const double CoastFloor = 0.0 - FVoxelValleySettings().MinFloorHeight;
 
 	int32 Far = 0, Rises = 0, FloorRises = 0, BadCoasts = 0, Loops = 0, Breaches = 0, Coasts = 0, ToSea = 0;
 	for (int32 Y = -24; Y < 24; ++Y)
@@ -160,7 +161,7 @@ bool FVoxelValleyRulesTest::RunTest(const FString& Parameters)
 			if (Node.bSea)
 			{
 				++Coasts;
-				BadCoasts += (Node.bHasLink || Node.Floor != SeaLevel) ? 1 : 0;
+				BadCoasts += (Node.bHasLink || FMath::Abs(Node.Floor - CoastFloor) > 1.0e-3) ? 1 : 0;
 				continue;
 			}
 			if (!Node.bHasLink)
@@ -188,11 +189,11 @@ bool FVoxelValleyRulesTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("every link but a breach's falls"), Rises, 0);
 	TestEqual(TEXT("no floor rises along a link"), FloorRises, 0);
 	TestTrue(TEXT("the ground has coasts"), Coasts > 0);
-	TestEqual(TEXT("a coast has the sea's level and no link"), BadCoasts, 0);
+	TestEqual(TEXT("a coast's floor lies under the sea and it has no link"), BadCoasts, 0);
 	TestEqual(TEXT("every chain ends: the links make no loop"), Loops, 0);
 	TestTrue(TEXT("chains reach the sea"), ToSea > 0);
 
-	// Along each valley link's curve the floor never rises, and a link into a coast ends at the sea's level
+	// Along each valley link's curve the floor never rises, and a link into a coast ends at the coast's floor
 	int32 SegmentRises = 0, MouthsAbove = 0, Mouths = 0;
 	for (int32 TY = -3; TY < 3; ++TY)
 	{
@@ -207,14 +208,14 @@ bool FVoxelValleyRulesTest::RunTest(const FString& Parameters)
 				if (bLast && Network.GetNode(Network.GetNode(Segment.Link).Down).bSea)
 				{
 					++Mouths;
-					MouthsAbove += FMath::Abs(Segment.FloorB - SeaLevel) > 1.0e-3 ? 1 : 0;
+					MouthsAbove += FMath::Abs(Segment.FloorB - CoastFloor) > 1.0e-3 ? 1 : 0;
 				}
 			}
 		}
 	}
 	TestEqual(TEXT("no floor rises along a curve"), SegmentRises, 0);
 	TestTrue(TEXT("valleys reach the sea"), Mouths > 0);
-	TestEqual(TEXT("a valley into a coast ends at the sea's level"), MouthsAbove, 0);
+	TestEqual(TEXT("a valley into a coast ends at the coast's floor"), MouthsAbove, 0);
 	AddInfo(FString::Printf(TEXT("%d coasts, %d breach steps, %d chains to the sea, %d mouths"), Coasts, Breaches, ToSea, Mouths));
 	return true;
 }

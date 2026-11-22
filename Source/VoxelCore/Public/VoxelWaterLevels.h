@@ -417,6 +417,13 @@ struct VOXELCORE_API FVoxelWaterBody
 	/** The surface's water level; a river reach's highest (its vertices carry the rest) */
 	double Level = 0.0;
 
+	/**
+	 * How far from the viewer its source asks for it to be drawn (world units; 0: as far as its kind is): a valley river
+	 * is meant to be seen from the hills, a brook is under a pixel wide past a few kilometres (the valleys plan's V3).
+	 * What is drawn only, never what the body is
+	 */
+	float DrawDistance = 0.0f;
+
 	/** Where the record holds: the body's water lies inside these bounds, and a change to it invalidates them (D112) */
 	FBox Bounds = FBox(ForceInit);
 
