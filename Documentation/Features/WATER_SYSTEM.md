@@ -1,6 +1,6 @@
 # Water System Architecture
 
-> State as of 2026-11-22 (the valleys plan's V3: "Valley rivers", under "On a Planet"); 2026-11-19 (G229: a lake's
+> State as of 2026-11-22 (the valleys plan's V3 to V5: "Valley rivers", under "On a Planet"); 2026-11-19 (G229: a lake's
 > sheet cut to its shore, in "Lakes and river reaches drawn"); 2026-11-16
 > (the hydrology plan's H1 to H8: "Lakes and river reaches", "A chunk's water columns",
 > "Lakes and river reaches drawn", "The river and the lake placed by hand" and "Ponds and brooks from the seed", under
@@ -754,6 +754,17 @@ whole or not at all; a valley has no length bound, so its river is made a link a
 - **Drawn** out to `ValleyRiverDrawDistance` (6 km; `FVoxelWaterBody::DrawDistance`, which a body's source may set
   and the chunk manager's body meshes read before the kind's distance), a brook's 2.5 km being too short for a river
   seen from the hills.
+- **On a planet** (the valleys plan's V5) a piece is worked on the datum sphere: the network's points lie on it (its
+  centre's frame), every point of the course is brought back onto it after each sampling, rounding and winding (a mean
+  of points on a sphere lies under it, as a brook's chain is shaped), the winding runs across the course on the plane
+  tangent at each point (up x along), the vertices are directions and the levels the altitude plus the datum radius,
+  the bed a planet line (`bRadial`) whose check reads a segment's sag. A node's neighbours are the lattice's on the
+  sphere (`FVoxelValleyNetwork::GetNeighbour`), so a node's level is the same from both sides of a face's edge. A
+  region is a cap (`GatherValleyRivers` takes the conditioning's region, a box or a cap; a cap's links by the chord
+  round its middle), and a descent ends in a piece's water by `SampleOnSphere`.
+- **On a block world** a piece's bed steps a block a column at most, as a brook's does: after the bends a segment
+  steeper than `GetBlockBedGrade` has its higher end lowered, from the end up and from the start down; the course and
+  the surface are the smooth world's, and the bed's check is the block world's (`bBlockWorld`).
 - **The fingerprint** is the valleys' term (`FVoxelValleyNetwork::Version` 2 since V3: the same settings make other
   bodies); a world with no valleys makes the bodies it did.
 
@@ -764,7 +775,11 @@ line's limits, every head leads to the sea), `.Regions` (two regions that overla
 valley river the same id and vertices), `.Brooks` (descents end in a valley river, and every brook's end lies in
 water at its level, less at most the tuck, as does every valley river's round three mouths); in the game module
 `VoxelEngine.Valleys.Demo` reads the same rules on VoxelDemo's own valleys within 4 km of its spawn (the joints
-there are what the made hills did not have). The survey (`voxel.Water.Hydrology.Survey`) counts the pieces and reads
+there are what the made hills did not have). On a made planet (`.Planet`): every valley link but those that start in
+the sea has its piece, its vertices directions, no surface rising, the pieces meeting at the nodes (across a face's
+edge too) and never under one another, heads from nothing, mouths a tuck under the sea, no bed note; two caps that
+overlap give the pieces they share the same. On a block world (`.Blocks`): no bed steps more than a block a column, the
+engine's check finds nothing, and the pieces are the smooth world's but for a bed lowered. The survey (`voxel.Water.Hydrology.Survey`) counts the pieces and reads
 them back against the same rules as any reach; `hydrology_gate.py --valleys [--swim=river]` plays a world with
 valleys given in memory, and VoxelDemo has them since V4.
 

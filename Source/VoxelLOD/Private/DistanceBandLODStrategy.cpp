@@ -7,6 +7,7 @@
 #include "InfinitePlaneWorldMode.h"
 #include "SphericalPlanetWorldMode.h"
 #include "VoxelWorldModeFactory.h"
+#include "VoxelValleyNetwork.h"
 #include "VoxelCoordinates.h"
 #include "DrawDebugHelpers.h"
 #include "HAL/IConsoleManager.h"
@@ -1391,6 +1392,25 @@ FFloatInterval FDistanceBandLODStrategy::GetPlanetCellSurfaceRange(const FIntPoi
 			const float Altitude = PlanetWorldMode->GetTerrainAltitude(PlanetSlabGrid.DirectionAt(Cell, Fraction[0], Fraction[1]), SlabNoiseParams);
 			Range.Min = FMath::Min(Range.Min, Altitude);
 			Range.Max = FMath::Max(Range.Max, Altitude);
+		}
+		// The valleys' floors that reach the cell, both ways (the valleys plan's V5, as a heightmap column's slab takes
+		// them: IVoxelWorldMode::AddValleyFloorsToRange): the samples can miss a valley narrower than the cell, and a
+		// floor can lie over the hills it fills
+		if (const TSharedPtr<const FVoxelValleyNetwork> Valleys = PlanetWorldMode->GetValleyNetwork())
+		{
+			const double Radius = PlanetWorldMode->GetPlanetParams().PlanetRadius;
+			const FVector Middle = PlanetSlabGrid.DirectionAt(Cell, 0.5, 0.5) * Radius;
+			double Reach = 0.0;
+			for (int32 Corner = 0; Corner < 4; ++Corner)
+			{
+				Reach = FMath::Max(Reach, FVector::Dist(Middle, PlanetSlabGrid.DirectionAt(Cell, Fractions[Corner][0], Fractions[Corner][1]) * Radius));
+			}
+			double FloorMin = 0.0, FloorMax = 0.0;
+			if (Valleys->GetFloorRangeNear(Middle, Reach, FloorMin, FloorMax))
+			{
+				Range.Min = FMath::Min(Range.Min, static_cast<float>(FloorMin));
+				Range.Max = FMath::Max(Range.Max, static_cast<float>(FloorMax));
+			}
 		}
 	}
 	else

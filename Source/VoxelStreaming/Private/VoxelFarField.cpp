@@ -240,6 +240,7 @@ float FVoxelFarFieldSurface::SampleAltitude(const FVector& Direction, const FVox
 	float Continentalness = 0.0f;
 	float Altitude = FSphericalPlanetWorldMode::SampleRadialDisplacement(Direction, Params.PlanetRadius, Planet.GetTerrainParams(),
 		NoiseParams, &Planet.GetBiomeSnapshot(), &Continentalness);
+	Altitude = Planet.ApplyValleys(Direction, Altitude);
 	if (!Conditioning.IsEmpty())
 	{
 		Altitude = Conditioning.ApplyToAltitude(Direction, Params.PlanetRadius, Altitude);

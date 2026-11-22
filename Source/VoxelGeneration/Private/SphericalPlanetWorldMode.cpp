@@ -9,6 +9,7 @@
 #include "VoxelTerrainConditioning.h"
 #include "VoxelNoise.h"
 #include "VoxelBiomeSnapshot.h"
+#include "VoxelValleyNetwork.h"
 
 #include <atomic>
 
@@ -83,7 +84,7 @@ FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetSurfacePoint(const FVect
 	const double Radius = PlanetParams.PlanetRadius;
 	auto SurfaceAt = [&](const FVector& Direction)
 	{
-		return Center + Direction * (Radius + static_cast<double>(SampleRadialDisplacement(Direction, Radius, TerrainParams, NoiseParams, &BiomeSnapshot)));
+		return Center + Direction * (Radius + static_cast<double>(GetTerrainAltitude(Direction, NoiseParams)));
 	};
 
 	const FVector Dir = GetDirectionFromCenter(WorldPos, Center);
@@ -136,6 +137,11 @@ FVoxelTerrainSurfacePoint FSphericalPlanetWorldMode::GetConditionedSurfacePoint(
 	}
 	Point.Altitude = GetAltitude(Point.Position);
 	return Point;
+}
+
+float FSphericalPlanetWorldMode::ApplyValleys(const FVector& Direction, float Natural) const
+{
+	return Valleys.IsValid() ? static_cast<float>(Valleys->ApplyToAltitude(Direction, Natural)) : Natural;
 }
 
 float FSphericalPlanetWorldMode::GetConditionedTerrainAltitude(const FVector& Direction, const FVoxelNoiseParams& NoiseParams,

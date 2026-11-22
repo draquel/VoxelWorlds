@@ -2,15 +2,17 @@
 //
 // The valleys on the GPU (Documentation/VALLEYS_PLAN.md, section 6.2): the chunk's valley segments carved into the
 // natural height, after the island's falloff and before the conditioning lines, in the heightmap branch
-// (GenerateVoxelDensity.usf). Mirrors VoxelValleyCarve (VoxelChunkValleySegments.h) operation for operation: the CPU
+// (GenerateVoxelDensity.usf) and into a planet's altitude in its branch (SphericalPlanet.ush, the plan's V5). Mirrors VoxelValleyCarve (VoxelChunkValleySegments.h) operation for operation: the CPU
 // generator evaluates the same float4s, so GPU and CPU match (VoxelWorlds.Generation.GPUvsCPUValleyParity). Any change
 // here must be mirrored there.
 //
 // Include AFTER the generation globals: this file reads ValleySegmentCount, ValleyData and ValleySeaLevel.
 //
 // ValleyData is the chunk's segment list, 3 float4s a segment (VOXELGEN_VALLEY_SEGMENT_STRIDE,
-// VoxelValleyCarve::SegmentStride), positions relative to the chunk's origin corner:
-//   [A.x, A.y, B.x, B.y] [floor at A, floor at B, floor half width, valley half width] [taper at A, taper at B, 0, 0]
+// VoxelValleyCarve::SegmentStride), positions relative to the chunk's origin corner with every z 0 on a heightmap world,
+// and on a planet points on the datum sphere less the anchor's datum point (the conditioning lines' frame):
+//   [A.xyz, floor at A] [B.xyz, floor at B] [floor half width, valley half width, taper at A, taper at B]
+// The distance is the chord. ValleySeaLevel is the sea's level, a planet's as an altitude.
 
 #pragma once
 
@@ -21,11 +23,12 @@
  * across the side, times the head's taper) and floor; the deepest cut plus the highest fill; ground under the sea left
  * as it is.
  *
- * @param Offset2D The point, from the chunk's origin corner (z unused)
- * @param Natural The natural height there
+ * @param Offset The point in the list's frame: from the chunk's origin corner with z 0, or a planet voxel's datum point
+ *        less the anchor's (SurfaceOffset)
+ * @param Natural The natural height (a planet: altitude) there
  * @return The height with the valleys
  */
-float GpuApplyValleys(float3 Offset2D, float Natural)
+float GpuApplyValleys(float3 Offset, float Natural)
 {
     if (Natural < ValleySeaLevel)
     {
@@ -38,20 +41,22 @@ float GpuApplyValleys(float3 Offset2D, float Natural)
         const float4 r0 = ValleyData[Segment * VOXELGEN_VALLEY_SEGMENT_STRIDE + 0];
         const float4 r1 = ValleyData[Segment * VOXELGEN_VALLEY_SEGMENT_STRIDE + 1];
         const float4 r2 = ValleyData[Segment * VOXELGEN_VALLEY_SEGMENT_STRIDE + 2];
-        const float ABx = r0.z - r0.x;
-        const float ABy = r0.w - r0.y;
-        const float Length2 = ABx * ABx + ABy * ABy;
-        const float T = Length2 > 0.0f ? clamp(((Offset2D.x - r0.x) * ABx + (Offset2D.y - r0.y) * ABy) / Length2, 0.0f, 1.0f) : 0.0f;
-        const float Dx = Offset2D.x - (r0.x + ABx * T);
-        const float Dy = Offset2D.y - (r0.y + ABy * T);
-        const float D = sqrt(Dx * Dx + Dy * Dy);
-        if (D >= r1.w)
+        const float ABx = r1.x - r0.x;
+        const float ABy = r1.y - r0.y;
+        const float ABz = r1.z - r0.z;
+        const float Length2 = ABx * ABx + ABy * ABy + ABz * ABz;
+        const float T = Length2 > 0.0f ? clamp(((Offset.x - r0.x) * ABx + (Offset.y - r0.y) * ABy + (Offset.z - r0.z) * ABz) / Length2, 0.0f, 1.0f) : 0.0f;
+        const float Dx = Offset.x - (r0.x + ABx * T);
+        const float Dy = Offset.y - (r0.y + ABy * T);
+        const float Dz = Offset.z - (r0.z + ABz * T);
+        const float D = sqrt(Dx * Dx + Dy * Dy + Dz * Dz);
+        if (D >= r2.y)
         {
             continue;
         }
-        const float Floor = r1.x + (r1.y - r1.x) * T;
-        const float U = clamp((D - r1.z) / max(1.0f, r1.w - r1.z), 0.0f, 1.0f);
-        const float Weight = (1.0f - U * U * (3.0f - 2.0f * U)) * (r2.x + (r2.y - r2.x) * T);
+        const float Floor = r0.w + (r1.w - r0.w) * T;
+        const float U = clamp((D - r2.x) / max(1.0f, r2.y - r2.x), 0.0f, 1.0f);
+        const float Weight = (1.0f - U * U * (3.0f - 2.0f * U)) * (r2.z + (r2.w - r2.z) * T);
         if (Weight > 0.0f)
         {
             const float Change = Weight * (Floor - Natural);

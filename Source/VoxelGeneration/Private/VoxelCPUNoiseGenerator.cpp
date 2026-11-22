@@ -564,6 +564,14 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 	const bool bLines = LineSegments.Num() > 0;
 	const bool bZones = Request.Conditioning.Zones.Num() > 0;
 	const FVector AnchorDirection = FSphericalPlanetWorldMode::GetDirectionFromCenter(Request.GetPlanetAnchorRelative(), FVector::ZeroVector);
+	// The valleys (the valleys plan's V5): the chunk's valley segments in the lines' frame, the floats the GPU uploads,
+	// carved into the natural altitude before the conditioning. A voxel first tests the list's bounds.
+	FVoxelChunkValleySegments ValleySegments;
+	if (Request.Valleys.IsValid())
+	{
+		FVoxelChunkValleySegments::Build(Request, ValleySegments);
+	}
+	const bool bValleys = ValleySegments.Num() > 0;
 	// The water over each voxel's down-line: the request's one sea, or with a lake or a river reach near the line's own
 	// row (FVoxelChunkWaterColumns: the level as an altitude, a lake's minimum cave depth). A planet chunk has no columns.
 	const bool bWaterColumns = !WaterColumns.IsEmpty();
@@ -601,10 +609,14 @@ void FVoxelCPUNoiseGenerator::GenerateChunkSphericalPlanet(
 				// The lines also leave a surface along this direction: the band's material and depth, the caves'
 				// minimum depth.
 				FVoxelChunkLineSurface LineSurface;
-				if (bLines)
+				if (bLines || bValleys)
 				{
 					const FVector3f SurfaceOffset((Direction - AnchorDirection) * PlanetRadius);
-					if (LineSegments.MayReach(SurfaceOffset))
+					if (bValleys && ValleySegments.MayReach(SurfaceOffset))
+					{
+						TerrainAltitude = ValleySegments.Apply(SurfaceOffset, TerrainAltitude);
+					}
+					if (bLines && LineSegments.MayReach(SurfaceOffset))
 					{
 						TerrainAltitude = LineSegments.Apply(SurfaceOffset, TerrainAltitude, LineSurface);
 					}

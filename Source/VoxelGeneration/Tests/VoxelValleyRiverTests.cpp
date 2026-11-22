@@ -110,7 +110,7 @@ bool FVoxelValleyRiverPiecesTest::RunTest(const FString& Parameters)
 		}
 		TArray<TSharedRef<const FVoxelHydrologySystem>> One;
 		const FVoxelValleyNode Node = Valleys.GetNode(Link);
-		FVoxelHydrology::GatherValleyRivers(World.Settings, World.Ground, FBox2D(Node.Position, Node.Position), &Cache, One);
+		FVoxelHydrology::GatherValleyRivers(World.Settings, World.Ground, FVoxelConditioningRegion::OfBox(FBox2D(FVector2D(Node.Position), FVector2D(Node.Position))), &Cache, One);
 		TSharedPtr<const FVoxelHydrologySystem> Piece = Cache.FindValleyRiver(Link);
 		const TSharedRef<const FVoxelHydrologySystem> Made = Piece.IsValid() ? Piece.ToSharedRef() : FVoxelHydrology::BuildValleyRiver(World.Settings, World.Ground, Link);
 		return ByLink.Add(Link, Made);
@@ -176,9 +176,10 @@ bool FVoxelValleyRiverPiecesTest::RunTest(const FString& Parameters)
 							continue;
 						}
 						const FVector2D P(Vertices[K].Position);
-						const FVector2D AB = Segment.B - Segment.A;
-						const double T = FMath::Clamp(((P - Segment.A) | AB) / FMath::Max(AB.SizeSquared(), 1.0e-6), 0.0, 1.0);
-						const double D = FVector2D::Distance(P, Segment.A + AB * T);
+						const FVector2D SA(Segment.A);
+						const FVector2D AB = FVector2D(Segment.B) - SA;
+						const double T = FMath::Clamp(((P - SA) | AB) / FMath::Max(AB.SizeSquared(), 1.0e-6), 0.0, 1.0);
+						const double D = FVector2D::Distance(P, SA + AB * T);
 						if (D < Best)
 						{
 							Best = D;
@@ -369,7 +370,7 @@ bool FVoxelValleyRiverBrooksTest::RunTest(const FString& Parameters)
 			{
 				if (Mouths < 3 && Node.bValley && World.Valleys->GetNode(Node.Down).bSea)
 				{
-					const FVector2D At = World.Valleys->GetNode(Node.Down).Position;
+					const FVector2D At = FVector2D(World.Valleys->GetNode(Node.Down).Position);
 					CheckRegion(FBox2D(At - FVector2D(60000.0), At + FVector2D(60000.0)));
 					++Mouths;
 				}

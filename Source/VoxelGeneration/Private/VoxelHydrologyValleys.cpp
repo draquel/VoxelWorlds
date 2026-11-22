@@ -1,7 +1,9 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 // The valley rivers (Documentation/VALLEYS_PLAN.md, section 6.4; D179): a river reach a valley link, made from the valley
-// network's curve and floors, so a valley's river has no length bound and is never refused.
+// network's curve and floors, so a valley's river has no length bound and is never refused. On a planet (the plan's V5)
+// the course is worked on the datum sphere, every point brought back onto it; on a block world the bed steps a block a
+// column at most, as a brook's does.
 
 #include "VoxelHydrology.h"
 #include "VoxelHash.h"
@@ -27,11 +29,27 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 	TSharedRef<FVoxelHydrologySystem> System = MakeShared<FVoxelHydrologySystem>();
 	System->Mouth = Link;
 	System->bValleyRiver = true;
-	if (!Ground.Valleys.IsValid() || Ground.bRadial || !Ground.IsValid())
+	if (!Ground.Valleys.IsValid() || Ground.Valleys->IsRadial() != Ground.bRadial || !Ground.IsValid())
 	{
 		System->Refused = TEXT("no valleys");
 		return System;
 	}
+	// A network point (world (X, Y, 0), or on the datum sphere) as a place (the column, or the direction), and a point
+	// brought back onto the datum sphere on a planet (a mean of points on a sphere lies under it)
+	const bool bRadial = Ground.bRadial;
+	const double SphereRadius = bRadial ? Ground.Valleys->GetLattice().GetRadius() : 0.0;
+	const auto PlaceOf = [bRadial](const FVector& Point) { return bRadial ? Point.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector) : Point; };
+	const auto OntoSphere = [SphereRadius](TArray<FVector>& Points)
+	{
+		if (SphereRadius > 0.0)
+		{
+			for (FVector& Point : Points)
+			{
+				Point = Point.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector) * SphereRadius;
+			}
+		}
+	};
+	const auto HeightAt = [&Ground, &PlaceOf](const FVector& Point) { return Ground.HeightAt(PlaceOf(Point)); };
 	const FVoxelHydrologySettings Settings = Sanitize(InSettings, Ground);
 	const FVoxelValleyNetwork& Valleys = *Ground.Valleys;
 	const FVoxelValleySettings& ValleySettings = Valleys.GetSettings();
@@ -74,7 +92,7 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 	// The centre curve's points, a vertex every two voxels, with where each lies along the link and the floor there
 	struct FPoint
 	{
-		FVector2D Position;
+		FVector Position;
 		double T;
 		double Floor;
 	};
@@ -86,7 +104,7 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 		{
 			continue;
 		}
-		const int32 Steps = FMath::Max(1, FMath::CeilToInt32(FVector2D::Distance(Segment.A, Segment.B) / Step));
+		const int32 Steps = FMath::Max(1, FMath::CeilToInt32(FVector::Distance(Segment.A, Segment.B) / Step));
 		for (int32 Q = Points.Num() == 0 ? 0 : 1; Q <= Steps; ++Q)
 		{
 			const double U = static_cast<double>(Q) / Steps;
@@ -95,7 +113,12 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 			{
 				continue;
 			}
-			Points.Add({ FMath::Lerp(Segment.A, Segment.B, U), T, FMath::Lerp(Segment.FloorA, Segment.FloorB, U) });
+			FVector At = FMath::Lerp(Segment.A, Segment.B, U);
+			if (bRadial)
+			{
+				At = At.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector) * SphereRadius;
+			}
+			Points.Add({ At, T, FMath::Lerp(Segment.FloorA, Segment.FloorB, U) });
 		}
 	}
 	if (Points.Num() < 2)
@@ -133,7 +156,7 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 			}
 			const double Span = FromAlong[Seg + 1] - FromAlong[Seg];
 			const double U = Span > UE_DOUBLE_SMALL_NUMBER ? FMath::Clamp((At - FromAlong[Seg]) / Span, 0.0, 1.0) : 0.0;
-			Out[Index] = { FVector2D(Rounded[Index]), FMath::Lerp(Points[Seg].T, Points[Seg + 1].T, U), FMath::Lerp(Points[Seg].Floor, Points[Seg + 1].Floor, U) };
+			Out[Index] = { Rounded[Index], FMath::Lerp(Points[Seg].T, Points[Seg + 1].T, U), FMath::Lerp(Points[Seg].Floor, Points[Seg + 1].Floor, U) };
 		}
 		Points = MoveTemp(Out);
 	};
@@ -149,7 +172,7 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 		Centre.Reserve(Points.Num());
 		for (const FPoint& Point : Points)
 		{
-			Centre.Add(FVector(Point.Position.X, Point.Position.Y, 0.0));
+			Centre.Add(Point.Position);
 		}
 		{
 			const double Length = FVoxelConditioningLineShape::GetLength(Centre);
@@ -180,6 +203,7 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 		}
 		TArray<FVector> Smooth;
 		FVoxelConditioningLineShape::RoundCorners(Centre, Step, FVoxelConditioningLineShape::GetMaxTurnForReach(Step, Room + RiverReach), 4.0 * Step, Smooth, 8);
+		OntoSphere(Smooth);
 		if (Smooth.Num() < 2)
 		{
 			System->Refused = TEXT("a valley river of one place");
@@ -201,13 +225,19 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 		Wound.SetNum(Centre.Num());
 		for (int32 Index = 0; Index < Centre.Num(); ++Index)
 		{
-			const FVector2D Along = (Centre[FMath::Min(Index + 1, Centre.Num() - 1)].Position - Centre[FMath::Max(Index - 1, 0)].Position).GetSafeNormal();
+			const FVector Along = (Centre[FMath::Min(Index + 1, Centre.Num() - 1)].Position - Centre[FMath::Max(Index - 1, 0)].Position).GetSafeNormal();
 			const double Offset = Winding * FMath::Sin(UE_DOUBLE_PI * ValleySettings.RiverHalfWaves * Centre[Index].T);
-			const FVector2D At = Centre[Index].Position + FVector2D(-Along.Y, Along.X) * Offset;
-			Wound[Index] = FVector(At.X, At.Y, 0.0);
+			// Across the course: on a planet on the plane tangent at the point (up x along), as (-along.y, along.x) is
+			// on a heightmap world
+			const FVector Side = bRadial
+				? FVector::CrossProduct(Centre[Index].Position.GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector::UpVector), Along).GetSafeNormal()
+				: FVector(-Along.Y, Along.X, 0.0);
+			Wound[Index] = Centre[Index].Position + Side * Offset;
 		}
+		OntoSphere(Wound);
 		const FVoxelConditioningLineShape::FRounding Rounding = FVoxelConditioningLineShape::RoundCorners(
 			Wound, Step, FVoxelConditioningLineShape::GetMaxTurnForReach(Step, RiverReach), 4.0 * Step, Places, 8);
+		OntoSphere(Places);
 		if (Rounding.bWithinBound)
 		{
 			break;
@@ -228,7 +258,7 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 		const int32 Kept = FVoxelConditioningLineShape::FRiverProfileParams().BodyVertices;
 		for (int32 Index = 1; Index < Places.Num(); ++Index)
 		{
-			if (Ground.Height(Places[Index].X, Places[Index].Y) < Ground.SeaLevel)
+			if (HeightAt(Places[Index]) < Ground.SeaLevel)
 			{
 				// A piece with no more than two places on land is no river: a valley of one link at a coast, whose head
 				// starts half way along where the drowned mouth has already put the ground under the sea
@@ -237,7 +267,13 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 					System->Refused = TEXT("a valley river that starts in the sea");
 					return System;
 				}
-				const int32 Last = FMath::Min(Index + Kept - 1, Places.Num() - 1);
+				// It ends under the sea: a seabed that rises over the water again within the kept vertices (a bump past the
+				// shore) ends it at the last of them still under it, never on land (the block world of the plan's V5)
+				int32 Last = FMath::Min(Index + Kept - 1, Places.Num() - 1);
+				while (Last > Index && HeightAt(Places[Last]) >= Ground.SeaLevel)
+				{
+					--Last;
+				}
 				Places.SetNum(Last + 1);
 				Points.SetNum(Last + 1);
 				break;
@@ -267,22 +303,20 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 			return *Known;
 		}
 		const FVoxelValleyNode At = Valleys.GetNode(Cell);
-		double Level = FMath::Min(At.Floor, Ground.Height(At.Position.X, At.Position.Y)) - Under;
+		double Level = FMath::Min(At.Floor, HeightAt(At.Position)) - Under;
 		if (Depth < 4096)
 		{
-			for (int32 DY = -1; DY <= 1; ++DY)
+			for (int32 Neighbour = 0; Neighbour < 8; ++Neighbour)
 			{
-				for (int32 DX = -1; DX <= 1; ++DX)
+				FIntPoint InCell;
+				if (!Valleys.GetNeighbour(Cell, Neighbour, InCell))
 				{
-					if (DX == 0 && DY == 0)
-					{
-						continue;
-					}
-					const FVoxelValleyNode In = Valleys.GetNode(Cell + FIntPoint(DX, DY));
-					if (In.bValley && In.bHasLink && In.Down == Cell)
-					{
-						Level = FMath::Min(Level, LevelOf(In.Cell, Depth + 1));
-					}
+					continue;
+				}
+				const FVoxelValleyNode In = Valleys.GetNode(InCell);
+				if (In.bValley && In.bHasLink && In.Down == Cell)
+				{
+					Level = FMath::Min(Level, LevelOf(In.Cell, Depth + 1));
 				}
 			}
 		}
@@ -300,7 +334,7 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 	GroundAt.SetNum(Num);
 	for (int32 Index = 0; Index < Num; ++Index)
 	{
-		GroundAt[Index] = Ground.Height(Places[Index].X, Places[Index].Y);
+		GroundAt[Index] = HeightAt(Places[Index]);
 		Own[Index] = FMath::Min(Points[Index].Floor, GroundAt[Index]) - Under;
 		// Never below a tuck under the sea: a piece near a coast ends in the sea at the sea's level, and every piece at a
 		// node computes the same value there, so the pieces still meet
@@ -345,7 +379,7 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 	Bed.Strength = 1.0f;
 	Bed.Blend = EVoxelConditioningLineBlend::LowerOnly;
 	Bed.Id = MakeValleyBedLineId(Link);
-	Bed.bRadial = false;
+	Bed.bRadial = bRadial;
 	Bed.Surface.BandMaterialID = Settings.BedMaterialID;
 	Bed.Surface.MinCaveDepth = Settings.BedMinCaveDepth;
 	Bed.Surface.ClearHalfWidth = static_cast<float>(RiverHalf + 0.5 * Bank);
@@ -360,8 +394,10 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 		const double Half = RiverHalf * Ramp[Index];
 		const double BedLevel = Surface[Index] - Depth * Ramp[Index];
 		DeepestCut = FMath::Max(DeepestCut, GroundAt[Index] - BedLevel);
-		Bed.Vertices.Add(FVoxelConditioningLineVertex(Places[Index], static_cast<float>(BedLevel), static_cast<float>(FMath::Max(Half, 1.0))));
-		Vertices.Add(FVoxelWaterReachVertex(Places[Index], BedLevel + LevelBase, Surface[Index] + LevelBase, Half + Bank));
+		// A vertex's position is its place: the column, or on a planet the direction
+		const FVector Place = PlaceOf(Places[Index]);
+		Bed.Vertices.Add(FVoxelConditioningLineVertex(Place, static_cast<float>(BedLevel), static_cast<float>(FMath::Max(Half, 1.0))));
+		Vertices.Add(FVoxelWaterReachVertex(Place, BedLevel + LevelBase, Surface[Index] + LevelBase, Half + Bank));
 		Profile.Surface.Add(Surface[Index]);
 		Profile.Bed.Add(BedLevel);
 		Profile.Taper.Add(Ramp[Index]);
@@ -378,6 +414,20 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 		BendParams.FalloffWidth = static_cast<float>(Bank);
 		BendParams.VoxelSize = Voxel;
 		FVoxelConditioningLineShape::HoldBedThroughBends(Places, Profile.Taper, BendParams, Profile.Bed);
+		// A block world's bed steps a block a column at most, as a brook's does (FRiverProfileParams::MaxBedGrade): a
+		// segment steeper than the bound has its higher end lowered, from the end up and from the start down
+		if (Ground.bBlocks)
+		{
+			const double Grade = GetBlockBedGrade();
+			for (int32 Index = Num - 2; Index >= 0; --Index)
+			{
+				Profile.Bed[Index] = FMath::Min(Profile.Bed[Index], Profile.Bed[Index + 1] + Grade * FVector::Dist(Places[Index], Places[Index + 1]));
+			}
+			for (int32 Index = 1; Index < Num; ++Index)
+			{
+				Profile.Bed[Index] = FMath::Min(Profile.Bed[Index], Profile.Bed[Index - 1] + Grade * FVector::Dist(Places[Index - 1], Places[Index]));
+			}
+		}
 		for (int32 Index = 0; Index < Num; ++Index)
 		{
 			Bed.Vertices[Index].TargetHeight = static_cast<float>(Profile.Bed[Index]);
@@ -390,7 +440,7 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 	Profile.Fall = Surface[0] - Surface[Num - 1];
 	Profile.DeepestCut = DeepestCut;
 
-	const TSharedRef<const FVoxelWaterReach> Shape = FVoxelWaterReach::Make(MoveTemp(Vertices), false, Settings.FlowSpeed);
+	const TSharedRef<const FVoxelWaterReach> Shape = FVoxelWaterReach::Make(MoveTemp(Vertices), bRadial, Settings.FlowSpeed);
 	if (Shape->NumSegments() < 1)
 	{
 		System->Refused = TEXT("a valley river of one place");
@@ -400,6 +450,8 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 	// The engine's own check of the bed's line: kept as a note (a valley is never dry), read back by the survey
 	FVoxelConditioningLineLimits Limits;
 	Limits.VoxelSize = static_cast<float>(Voxel);
+	Limits.bBlockWorld = Ground.bBlocks;
+	Limits.PlanetRadius = bRadial ? Ground.PlanetRadius : 0.0;
 	for (const FString& Warning : Reach.Bed->GetWarnings(Limits))
 	{
 		if (Node.bHead && Warning.Contains(TEXT("the levelled core is")))
@@ -417,16 +469,27 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrology::BuildValleyRiver(const 
 	return System;
 }
 
-void FVoxelHydrology::GatherValleyRivers(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground, const FBox2D& Box, IVoxelHydrologyCache* Cache,
-	TArray<TSharedRef<const FVoxelHydrologySystem>>& Out)
+void FVoxelHydrology::GatherValleyRivers(const FVoxelHydrologySettings& Settings, const FVoxelHydrologyGround& Ground, const FVoxelConditioningRegion& Region,
+	IVoxelHydrologyCache* Cache, TArray<TSharedRef<const FVoxelHydrologySystem>>& Out)
 {
-	if (!Ground.Valleys.IsValid() || Ground.bRadial || !Box.bIsValid)
+	if (!Ground.Valleys.IsValid() || Ground.Valleys->IsRadial() != Ground.bRadial || Region.bEverywhere || Region.bCap != Ground.bRadial
+		|| (!Region.bCap && !Region.Box.bIsValid))
 	{
 		return;
 	}
-	// The links whose valley reaches the box: a river stays on its valley's floor
+	// The links whose valley reaches the region: a river stays on its valley's floor. A planet's cap as a chord around
+	// its middle on the datum sphere
 	TArray<FVoxelValleySegment> Segments;
-	Ground.Valleys->GatherSegments(Box, Segments);
+	if (Region.bCap)
+	{
+		const double Radius = Ground.Valleys->GetLattice().GetRadius();
+		const double Chord = Region.AngularRadius >= UE_DOUBLE_PI ? -1.0 : 2.0 * Radius * FMath::Sin(0.5 * Region.AngularRadius);
+		Ground.Valleys->GatherSegmentsNear(Region.Direction * Radius, Chord, Segments);
+	}
+	else
+	{
+		Ground.Valleys->GatherSegments(Region.Box, Segments);
+	}
 	TSet<FIntPoint> Seen;
 	TArray<FIntPoint> Links;
 	for (const FVoxelValleySegment& Segment : Segments)
