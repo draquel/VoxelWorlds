@@ -115,8 +115,8 @@ acceleration structures (`FVoxelRayTracingCounters`, F3.3); the JSON's `memory` 
 `PrimN` and `PrimAddN` are the chunk primitives in the scenes and those added since the last sample (G116, 0 on the region
 proxy's path); `RTBusyMs` is the render thread's own CPU time in its last frame, waits left out (`QueryThreadCycleTime`
 over its frame, Windows), since `RTMs`, the engine's render thread time, reads 0 in the editor's PIE (each Slate window's
-present sets it and resets the idle counters).
-
+present sets it and resets the idle counters).
+
 `RendGPUMB` (and the JSON's renderer GPU figures) is what the renderer's scene proxies and chunk primitives hold on the GPU: every chunk,
 seam and water mesh and the ones crossfades retain, at the bytes uploaded (`FVoxelSceneProxy::GetMeshBufferBytes`,
 since 2026-11-04, G119). Before that it was the mesher's vertices (`FVoxelVertex`, 28 bytes) and the indices of the
@@ -135,6 +135,16 @@ chunk meshes alone, a figure no buffer had: records older than G119 read low aga
   PIE or process per run (`bench_gate.py` starts a PIE for each).
 - Headless uses the map's **saved** config unless `-VoxelConfig=` overrides it, so
   PIE(GPU) vs headless(CPU) compare scheduler/queue dynamics, not identical per-job cost.
+- **Which job holds the workers.** The bench reports the game thread's side. Every background job the streaming
+  launches opens its own scope in an Unreal Insights trace: `VoxelWorker_Generate`, `VoxelWorker_InjectTrees`,
+  `VoxelWorker_Mesh`, `VoxelWorker_SeamFace`, `VoxelWorker_SeamEdge`, `VoxelWorker_SeamCorner`,
+  `VoxelWorker_Collision`, `VoxelWorker_ScatterPlacement`, `VoxelWorker_ScatterDistance`,
+  `VoxelWorker_ScatterExtract`, `VoxelWorker_FarFieldBuild`, `VoxelWorker_FarCompress` and `VoxelWorker_Hydrology`
+  (before, all of them showed as one unnamed task). The parent project's `Scripts/qa/play_trace.py --workers`
+  sets their load per second, in threads, beside the game thread's frame. On VoxelDemo a teleport onto fresh ground
+  ran about six threads of them for 10 s, 3.3 cooking collision (a cook's median 72 ms), and the frame averaged 34
+  to 39 ms against 17 at rest; with `voxel.Collision.MaxAsyncTasks 1` it averaged 21 to 28 ms (G275, open: the
+  jobs' load slows the game thread, not only the work the game thread does for them).
 
 ---
 
