@@ -416,6 +416,17 @@ private:
 	/** Mark a level-0 tile explored (ExplorationRevision counts the new ones). */
 	void MarkExplored(FIntPoint TileCoord);
 
+	/**
+	 * Whether a chunk generated for another player: in a world with a player of its own that streams around other players
+	 * too (a listen server's remote players, UVoxelChunkManager::GetFurtherViewers), a chunk nearer one of them than the
+	 * streaming viewer, this world's own player. Its map does not count such a chunk as explored: each player's map shows
+	 * the ground that player has been to (G270). A client's world and a standalone game stream around their own player
+	 * alone, and a dedicated server has no player of its own, its map keeping every player's ground (the save's).
+	 * @param ChunkCoord The generated chunk
+	 * @return True for another player's chunk outside a dedicated server; false everywhere else
+	 */
+	bool IsAnotherPlayersChunk(const FIntVector& ChunkCoord) const;
+
 	/** Apply an explored blob to the mask (the world resolved). @return Tiles the blob holds, -1 when malformed */
 	int32 ApplyExploredBlob(const FString& Encoded, int32 Count);
 

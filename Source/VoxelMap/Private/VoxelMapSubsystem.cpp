@@ -858,13 +858,15 @@ void UVoxelMapSubsystem::OnChunkGenerated(FIntVector ChunkCoord)
 
 	// The tiles the chunk spans (its column; on a planet the cells its corners span, spherical Phase 4): each explored
 	// (chunks that generate are in the player's vicinity) inside the world only, an island also generating a ring of
-	// floor chunks past its edge (WM-I2). Nothing is drawn here: the views ask for what they show.
+	// floor chunks past its edge (WM-I2), and not where another player's streaming generated it (a listen server's
+	// remote players, G270). Nothing is drawn here: the views ask for what they show.
+	const bool bExplores = !IsAnotherPlayersChunk(ChunkCoord);
 	TArray<FIntPoint> Tiles;
 	GetChunkTiles(ChunkCoord, Tiles);
 	for (const FIntPoint& Tile : Tiles)
 	{
 		const uint64 TileKey = PackTileKey(Tile);
-		if (IsTileInsideWorld(Tile))
+		if (bExplores && IsTileInsideWorld(Tile))
 		{
 			MarkExplored(Tile);
 		}
@@ -874,6 +876,32 @@ void UVoxelMapSubsystem::OnChunkGenerated(FIntVector ChunkCoord)
 			MarkOverlayDirty(TileKey);
 		}
 	}
+}
+
+bool UVoxelMapSubsystem::IsAnotherPlayersChunk(const FIntVector& ChunkCoord) const
+{
+	const UWorld* World = GetWorld();
+	const UVoxelChunkManager* ChunkMgr = CachedChunkManagerWeak.Get();
+	if (!World || World->GetNetMode() == NM_DedicatedServer || !ChunkMgr)
+	{
+		return false;
+	}
+	const TArray<FVoxelFurtherViewer>& Others = ChunkMgr->GetFurtherViewers();
+	if (Others.Num() == 0)
+	{
+		return false;
+	}
+	const double ChunkWorldSize = static_cast<double>(CachedChunkSize) * CachedVoxelSize;
+	const FVector Centre = CachedWorldOrigin + (FVector(ChunkCoord) + FVector(0.5)) * ChunkWorldSize;
+	const double OwnDistanceSq = FVector::DistSquared(Centre, ChunkMgr->GetStreamingViewerPosition());
+	for (const FVoxelFurtherViewer& Other : Others)
+	{
+		if (FVector::DistSquared(Centre, Other.Position) < OwnDistanceSq)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 void UVoxelMapSubsystem::HandleTerrainConditioningChanged(const FVoxelConditioningRegion& Region)

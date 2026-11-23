@@ -100,7 +100,7 @@ World subsystem that manages tile generation, caching, and exploration tracking.
 
 ### Exploration and View Requests
 
-Exploration and drawing are apart (MAP_PYRAMID_PLAN.md P1). Tiles are **explored** as chunks generate (`OnChunkGenerated`: the tiles the chunk spans), as the minimap asks (`RequestTilesInRadius`), by `voxel.Map.ExploreAll` and from a save; that draws nothing. Images are **drawn** when a view asks for them (`RequestView`): the minimap and the world map each ask, at every fill, for the tiles they show at their level, nearest their centre first. The generated surface is a function of the world's configuration and needs no loaded chunk, so any tile at any level can be drawn ahead of streaming.
+Exploration and drawing are apart (MAP_PYRAMID_PLAN.md P1). Tiles are **explored** as chunks generate (`OnChunkGenerated`: the tiles the chunk spans; not a chunk nearer another player than the world's own streaming viewer, a listen server's remote players' ground, `IsAnotherPlayersChunk`, G270: each player's map shows where that player has been, a client's world streams around its own player alone, and a dedicated server's map keeps every player's ground, the save's), as the minimap asks (`RequestTilesInRadius`), by `voxel.Map.ExploreAll` and from a save; that draws nothing. Images are **drawn** when a view asks for them (`RequestView`): the minimap and the world map each ask, at every fill, for the tiles they show at their level, nearest their centre first. The generated surface is a function of the world's configuration and needs no loaded chunk, so any tile at any level can be drawn ahead of streaming.
 
 ### Async Generation
 
