@@ -148,8 +148,10 @@ pixel's local up (below).
 
 Overlays are saved with the world (`ExportEditOverlays` / `ImportEditOverlays`: magic `VMEO`, zlib and base64 in the
 world document), so edits show on the map before their area loads again; a loaded save's tiles whose edited chunks are
-loaded are rebuilt from them, a tile with no edits left is cleared. Only the server saves; a client's map rebuilds its
-overlays as chunks load. `voxel.Map.Redraw [1]` redraws every explored tile (1 rebuilds the overlays too),
+loaded are rebuilt from them, a tile with no edits left is cleared. Only the server saves. A client holds every edit (the
+server sends them, G273: `EDIT_LAYER.md`, "Edits on network clients") and rebuilds the overlays of its loaded chunks;
+for the rest the server sends its overlays when they change and the client's edits are in step (VoxelCharacterPlugin's
+`UVCMapExplorationComponent`, `vc.Map.OverlayPushSeconds`, D193), which its `ImportEditOverlays` reconciles the same way. `voxel.Map.Redraw [1]` redraws every explored tile (1 rebuilds the overlays too),
 `voxel.Map.Capture [radius] [name] [highlight]` writes the cached tiles around the pawn to a PNG (overlay columns tinted
 with highlight 1). Tests: `VoxelWorlds.Map.EditOverlay.*`, `VoxelWorlds.Map.Tiles.*`.
 

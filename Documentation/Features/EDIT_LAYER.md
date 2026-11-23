@@ -131,7 +131,9 @@ validator knows):
   nearest the player first, at `voxel.Edit.Net.CatchUpKBps` (64) and only while the connection is not saturated
   (`PickCatchUp`). A client that joins late and every client after a restart (the server loads the edits file) take that
   path. A message holds at most `voxel.Edit.Net.MaxVoxelsPerMessage` voxels (2048). Every edited chunk reaches every
-  client, whatever its distance (D190), so the client's map draws the edits' overlays anywhere from its own layer.
+  client, whatever its distance (D190): a chunk it streams in later holds its edits. Its map draws a tile's overlay
+  from the tile's loaded chunks, so for the edits far from it the server sends its map's overlays as well, once the
+  client's edits are in step (`IsClientInStep`; the game layer's `UVCMapExplorationComponent`, D193).
 - **On the client.** `ApplyReplicatedMessage` writes each voxel as the server's (no history, no validator) and broadcasts
   each chunk with the server's source, centre and radius, so its re-mesh, re-cook, scatter, navigation and map overlays
   follow as for a local edit. A whole chunk's first part removes the client's marked voxels there first. A network client

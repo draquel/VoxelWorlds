@@ -79,6 +79,14 @@ public:
 	const FVoxelEditSendState& GetSendState() const { return SendState; }
 
 	/**
+	 * Server: whether this remote player's client holds every replicated chunk at the server's revision (its catch-up is
+	 * done). What follows on the controller's channel then reaches a client whose edit layer is the server's (the map's
+	 * overlays, G273).
+	 * @return True when serving a remote client that is bound and has nothing behind
+	 */
+	bool IsClientInStep() const;
+
+	/**
 	 * One line on this component for voxel.Edit.Net: the side, the chunks in step and behind, the messages and bytes.
 	 * @return The line
 	 */

@@ -178,6 +178,12 @@ bool UVoxelEditReplicationComponent::IsServingRemoteClient() const
 	return (NetMode == NM_DedicatedServer || NetMode == NM_ListenServer) && !PC->IsLocalController() && PC->GetNetConnection() != nullptr;
 }
 
+bool UVoxelEditReplicationComponent::IsClientInStep() const
+{
+	const UVoxelEditManager* EditManager = BoundManager.Get();
+	return EditManager && IsServingRemoteClient() && SendState.CountBehind(*EditManager) == 0;
+}
+
 bool UVoxelEditReplicationComponent::BindServer()
 {
 	UVoxelChunkManager* ChunkManager = UVoxelChunkManager::Find(GetWorld());
