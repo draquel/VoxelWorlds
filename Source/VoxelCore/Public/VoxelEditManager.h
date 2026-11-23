@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "VoxelEditTypes.h"
+#include "VoxelEditWire.h"
 #include "VoxelEditManager.generated.h"
 
 class UVoxelWorldConfiguration;
@@ -23,6 +24,36 @@ DECLARE_MULTICAST_DELEGATE_FourParams(FOnChunkEdited, const FIntVector& /*ChunkC
  * Delegate fired when undo/redo state changes.
  */
 DECLARE_MULTICAST_DELEGATE(FOnUndoRedoStateChanged);
+
+/**
+ * One chunk's part of a replicated change (G273): the voxels it changed with the edits they now hold, and the chunk's
+ * replicated revision before and after it. A client that holds PreviousRevision can take Wire as a delta; one that does
+ * not gets the chunk whole.
+ */
+struct FVoxelReplicatedChunkChange
+{
+	FVoxelEditWireChunk Wire;
+	uint32 PreviousRevision = 0;
+	uint32 Revision = 0;
+
+	/** True when the change has no delta to send (a clear, a load): every client gets the chunk whole. */
+	bool bResendWhole = false;
+};
+
+/** A replicated change on the server: what the client's OnChunkEdited broadcasts, and the chunks it changed. */
+struct FVoxelReplicatedChange
+{
+	EEditSource Source = EEditSource::System;
+	FVector EditCenter = FVector::ZeroVector;
+	float EditRadius = 0.0f;
+	TArray<FVoxelReplicatedChunkChange> Chunks;
+};
+
+/**
+ * Delegate fired when a replicated operation, or the undo, redo or clear of one, has changed the edit layer: the network
+ * transport (UVoxelEditReplicationComponent) sends it to the clients. Broadcast before OnChunkEdited, only when bound.
+ */
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnReplicatedChange, const FVoxelReplicatedChange& /*Change*/);
 
 /**
  * Voxel Edit Manager.
@@ -123,6 +154,17 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
 	EEditSource GetEditSource() const { return CurrentEditSource; }
+
+	/**
+	 * Set whether subsequent edit operations are sent to network clients (G273, D189). Replicated is the default; a caller
+	 * whose edits every machine makes for itself from the seed (the POI bridge's dungeon stamp) sets Local around them and
+	 * restores the previous value, as it does the source.
+	 * @param Replication The class of the operations begun from now on
+	 */
+	void SetEditReplication(EVoxelEditReplication Replication) { CurrentEditReplication = Replication; }
+
+	/** @return The class of the operations begun from now on */
+	EVoxelEditReplication GetEditReplication() const { return CurrentEditReplication; }
 
 	/**
 	 * Install an edit validator — a pluggable veto consulted per voxel (see IVoxelEditValidator).
@@ -321,6 +363,41 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
 	bool LoadEditsFromFile(const FString& FilePath);
 
+	// ==================== Replication (G273) ====================
+
+	/**
+	 * The chunk's replicated revision: bumped by every replicated change to it (an operation, its undo or redo, a clear,
+	 * a load). 0 for a chunk no replicated change has reached.
+	 * @param ChunkCoord The chunk
+	 * @return The revision
+	 */
+	uint32 GetReplicatedRevision(const FIntVector& ChunkCoord) const { return ReplicatedRevisions.FindRef(ChunkCoord); }
+
+	/** @return Every chunk a replicated change has reached, with its revision (the server's catch-up reads it) */
+	const TMap<FIntVector, uint32>& GetReplicatedRevisions() const { return ReplicatedRevisions; }
+
+	/**
+	 * A chunk's whole replicated state, for a client that lacks it or holds an older revision: every marked voxel with the
+	 * edit it holds (or none), in parts of at most MaxVoxelsPerPart, the first FullFirst and the rest FullMore. A chunk
+	 * with no marked voxel gives one empty FullFirst part (the client removes what it had marked there).
+	 * @param ChunkCoord The chunk
+	 * @param MaxVoxelsPerPart The most voxels a part holds (at least 1)
+	 * @param OutParts Receives the parts (replaced)
+	 */
+	void GatherReplicatedChunk(const FIntVector& ChunkCoord, int32 MaxVoxelsPerPart, TArray<FVoxelEditWireChunk>& OutParts) const;
+
+	/**
+	 * A client writes an edit message from the server into its layer (D187): each voxel takes the server's edit or none and
+	 * is marked; a FullFirst part first removes the chunk's marked voxels. No history, no validator. Each chunk is
+	 * broadcast with the message's source, centre and radius, so the client's readers do what the server's did.
+	 * @param Message The decoded message
+	 * @return The number of voxels written
+	 */
+	int32 ApplyReplicatedMessage(const FVoxelEditWireMessage& Message);
+
+	/** Fired when a replicated change has changed the layer (see FOnReplicatedChange) */
+	FOnReplicatedChange OnReplicatedChange;
+
 	// ==================== Events ====================
 
 	/** Called when a chunk's edits are modified */
@@ -421,6 +498,31 @@ protected:
 	void BroadcastChunkEdited(const FIntVector& ChunkCoord, EEditSource Source, const FVector& EditCenter, float EditRadius,
 		const FVoxelEditedVoxelBounds& Bounds);
 
+	/**
+	 * Bump the revisions of the chunks a replicated change reached and, when OnReplicatedChange is bound, gather the
+	 * voxels' current edits and broadcast it. The voxels are marked by the caller.
+	 * @param ChunkVoxels Each chunk's changed voxels (linear indices); an empty set has no delta and every client gets the
+	 *        chunk whole (a clear, a load)
+	 * @param Source The source the change is broadcast with
+	 * @param EditCenter The brush centre, or the zero vector
+	 * @param EditRadius The brush radius, or 0
+	 */
+	void PublishReplicatedChange(const TMap<FIntVector, TSet<int32>>& ChunkVoxels, EEditSource Source, const FVector& EditCenter,
+		float EditRadius);
+
+	/**
+	 * The voxels an operation changed, per chunk (linear indices), for its replicated change.
+	 * @param Operation The operation
+	 * @param OutChunkVoxels Receives each chunk's voxels
+	 */
+	void CollectOperationVoxels(const FVoxelEditOperation& Operation, TMap<FIntVector, TSet<int32>>& OutChunkVoxels) const;
+
+	/**
+	 * Mark voxels as changed by a replicated operation (an undo or redo of one, after a clear took the marks).
+	 * @param ChunkVoxels Each chunk's voxels (linear indices)
+	 */
+	void MarkReplicatedVoxels(const TMap<FIntVector, TSet<int32>>& ChunkVoxels);
+
 protected:
 	// ==================== Configuration ====================
 
@@ -433,6 +535,12 @@ protected:
 
 	/** Current edit source - determines how scatter and other systems respond */
 	EEditSource CurrentEditSource = EEditSource::Player;
+
+	/** Whether operations begun from now on are sent to clients (SetEditReplication) */
+	EVoxelEditReplication CurrentEditReplication = EVoxelEditReplication::Replicated;
+
+	/** Each chunk's replicated revision (GetReplicatedRevision); never removed while the manager lives */
+	TMap<FIntVector, uint32> ReplicatedRevisions;
 
 	/** Pluggable per-voxel edit veto (non-owning; see SetEditValidator). */
 	const class IVoxelEditValidator* EditValidator = nullptr;

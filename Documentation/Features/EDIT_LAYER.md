@@ -1,6 +1,6 @@
 # Edit Layer System
 
-> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-23 (G273, edits on network clients). Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelCore (`VoxelEditTypes.h`, `VoxelEditManager.h/.cpp`); the chunk manager (VoxelStreaming) reacts to edits.
 
@@ -17,7 +17,8 @@ The edit layer is an **overlay** on the generated voxels:
 - Edits are never written into the generated data; a reader merges them with `FVoxelEdit::ApplyToProceduralData()`.
 - An edit's mode is `EEditMode` (`Set`, `Add`, `Subtract`, `Paint`). `Add` and `Subtract` are relative (`DensityDelta`),
   `Add` and `Paint` carry `BrushMaterialID`, `Set` carries the whole voxel (`NewData`).
-- `SaveEditsToFile` / `LoadEditsFromFile` write a binary file with the magic `VETI`, version 3 (version 2 still loads).
+- `SaveEditsToFile` / `LoadEditsFromFile` write a binary file with the magic `VETI`, version 4: each chunk's edits and its
+  replicated voxels (below); versions 2 and 3 still load, with no voxel marked.
 - The game module's `AVoxelDemoActor` drives edits from the mouse and keyboard; `bUseDiscreteEditing` (or a cubic world)
   edits single blocks.
 
@@ -103,3 +104,46 @@ it had reached (world modes review G60; history: `WORLD_MODES_REVIEW_PLAN.md` §
 `FVoxelBrushParams::Axis` is the Cylinder shape's axis. Zero (the default) means the world's local up at the brush
 centre: +Z on heightmap worlds (the old arithmetic, the same voxels: `Edit.Brush.CylinderAxis`) and the radial direction
 on a planet, so a dig there is a shaft along local up. A tilted axis widens the voxel box the brush visits by √2.
+
+### Edits on network clients (G273)
+
+Until 2026-11-23 an edit changed the server's layer alone: a client never saw a dig, its own or another player's
+(`Documentation/EDIT_REPLICATION_PLAN.md`, D187-D192). The server now sends each changed voxel's edit, not the brush, so a
+client's layer cannot drift from the server's (a relative edit on a voxel held differently, a claim only the server's
+validator knows):
+
+- **What replicates.** An operation has a class (`EVoxelEditReplication`, `SetEditReplication`, captured at
+  `BeginEditOperation` like the source). `Replicated`, the default: a player's dig or placement, a felled voxel tree, water
+  propagation's flood, and the undo or redo of one. `Local`: what every machine makes for itself from the seed, the
+  dungeon's stamp and entrance stitch (the POI bridge sets it around them). A voxel a replicated operation changed is
+  marked in its chunk's layer (`FChunkEditLayer::ReplicatedVoxels`, kept when the edit is removed), and a `Local` operation
+  never writes over a marked voxel, on the server or a client: a dig into a dungeon wall survives the stamp a client makes
+  after the dig reached it, and the server's own re-stamp after a restart. The marks are in the edits file (version 4).
+- **Revisions.** Each replicated change bumps its chunks' revision (`GetReplicatedRevision`; a clear and a load too) and,
+  when anything listens, broadcasts `OnReplicatedChange` before `OnChunkEdited` with each chunk's changed voxels and their
+  edits now (`FVoxelReplicatedChange`). `GatherReplicatedChunk` gives a chunk's whole replicated state.
+- **The bytes.** `FVoxelEditWire` (VoxelCore): the source, brush centre and radius, then per chunk its kind (`Delta`, or a
+  whole chunk's `FullFirst` and `FullMore` parts) and per voxel its index and edit (mode, delta, brush material, voxel),
+  Oodle-compressed when that is smaller (a few bytes a voxel). A bad, cut or foreign message is refused.
+- **The transport.** `UVoxelEditReplicationComponent` (VoxelStreaming), on the game layer's player controller: on the
+  server, for a remote player, a change goes at once as a reliable client RPC for each chunk the client holds at the
+  change's previous revision (`FVoxelEditSendState::TakeLive`); every chunk the client lacks or holds older goes whole,
+  nearest the player first, at `voxel.Edit.Net.CatchUpKBps` (64) and only while the connection is not saturated
+  (`PickCatchUp`). A client that joins late and every client after a restart (the server loads the edits file) take that
+  path. A message holds at most `voxel.Edit.Net.MaxVoxelsPerMessage` voxels (2048). Every edited chunk reaches every
+  client, whatever its distance (D190): a chunk it streams in later holds its edits. Its map draws a tile's overlay
+  from the tile's loaded chunks, so for the edits far from it the server sends its map's overlays as well, once the
+  client's edits are in step (`IsClientInStep`; the game layer's `UVCMapExplorationComponent`, D193).
+- **On the client.** `ApplyReplicatedMessage` writes each voxel as the server's (no history, no validator) and broadcasts
+  each chunk with the server's source, centre and radius, so its re-mesh, re-cook, scatter, navigation and map overlays
+  follow as for a local edit. A whole chunk's first part removes the client's marked voxels there first. A network client
+  runs no water propagation of its own (the server's flood arrives). The client does not predict its dig (D191): it shows
+  one round trip later.
+- `voxel.Edit.Net [X,Y,Z ...]` logs each play world's edits and marked voxels, each controller's side (in step, behind,
+  messages, bytes), and each world's voxel at the places given.
+
+Not replicated: the undo history (a client has none of its own), and an old save's edits (version 3 and before: no voxel
+marked) until an edit changes them again. Tests: `VoxelWorlds.Edit.Replication.*` (the bytes, live edits on a plane and
+a planet, the catch-up, the Local stamp, the saved marks); `VoxelEngine.Replication.Edits` (a dedicated server and two
+clients in PIE, the in-editor gate); `Scripts/qa/edit_replication.py` (dedicated and listen: the other client's terrain
+and map, a reconnect, a restart).

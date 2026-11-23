@@ -1486,8 +1486,10 @@ void UVoxelChunkManager::HandleChunkEdited(const FIntVector& ChunkCoord, EEditSo
 		// and redo the operation's own source, centre and radius (G60).
 	}
 
-	// Notify water propagation system of the edit
-	if (WaterPropagation)
+	// Notify water propagation system of the edit. A network client floods nothing of its own: the server's flood is a
+	// replicated operation and reaches it with the dig that let the water in (G273, D189).
+	const UWorld* EditWorld = GetWorld();
+	if (WaterPropagation && !(EditWorld && EditWorld->GetNetMode() == NM_Client))
 	{
 		WaterPropagation->OnChunkEdited(ChunkCoord, Source, EditCenter, EditRadius);
 	}
