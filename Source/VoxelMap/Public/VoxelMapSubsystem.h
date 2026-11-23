@@ -655,6 +655,9 @@ private:
 	TWeakObjectPtr<UVoxelEditManager> CachedEditManagerWeak;
 	FDelegateHandle ChunkEditedHandle;
 
+	/** UVoxelChunkManager::OnInitialized: the map resolves when its world's voxel world starts (G272). */
+	FDelegateHandle ChunkManagerInitializedHandle;
+
 	/**
 	 * Set in Deinitialize(). In-flight async completions arriving after this are discarded
 	 * (no cache writes, no broadcasts) and no new generation tasks may start.

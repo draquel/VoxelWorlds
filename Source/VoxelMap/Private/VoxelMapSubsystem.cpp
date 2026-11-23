@@ -245,12 +245,25 @@ void UVoxelMapSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	// It may not be available yet (depends on actor initialization order),
 	// so we also resolve lazily in RequestTilesInRadius / OnChunkGenerated.
 	ResolveChunkManager();
+
+	// And when this world's voxel world starts (G272): a map nothing asks for tiles (a dedicated server's, which has no
+	// minimap) resolved never, so it bound none of the chunk manager's events, explored nothing and recorded no edit
+	// overlay, and the save took an empty overlay set from it.
+	ChunkManagerInitializedHandle = UVoxelChunkManager::OnInitialized.AddWeakLambda(this, [this](UVoxelChunkManager& Manager)
+	{
+		if (!bShuttingDown && Manager.GetWorld() == GetWorld())
+		{
+			ResolveChunkManager();
+		}
+	});
 }
 
 void UVoxelMapSubsystem::Deinitialize()
 {
 	// Block new task launches and mark in-flight completions for discard before anything else.
 	bShuttingDown = true;
+	UVoxelChunkManager::OnInitialized.Remove(ChunkManagerInitializedHandle);
+	ChunkManagerInitializedHandle.Reset();
 
 	// Unbind delegates
 	if (bDelegatesBound && CachedChunkManagerWeak.IsValid())
