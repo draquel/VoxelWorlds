@@ -25,7 +25,9 @@ static TAutoConsoleVariable<float> CVarVoxelEditUndoHistoryMB(
 // File format version for binary serialization
 // Version 2: EditMode, DensityDelta, BrushMaterialID, NewData, then the pre-G60 OriginalData (4 bytes, skipped on read)
 // Version 3: without OriginalData (CR1, CORE-12). Version 1 (NewData/OriginalData only) is no longer read.
-static constexpr uint32 VOXEL_EDIT_FILE_VERSION = 3;
+// Version 4: each chunk's edits followed by its replicated voxels' indices (G273): what the server sends its clients, and
+// what a Local operation (a dungeon's stamp after a restart) leaves as it is. Versions 2 and 3 load with none marked.
+static constexpr uint32 VOXEL_EDIT_FILE_VERSION = 4;
 static constexpr uint32 VOXEL_EDIT_FILE_MAGIC = 0x56455449; // "VETI" - Voxel Edit
 
 UVoxelEditManager::UVoxelEditManager()
@@ -105,6 +107,7 @@ void UVoxelEditManager::BeginEditOperation(const FString& Description, bool bAdd
 
 	CurrentOperation = MakeUnique<FVoxelEditOperation>(NextOperationId++, Description);
 	CurrentOperation->bAddToUndoHistory = bAddToUndoHistory;
+	CurrentOperation->Replication = CurrentEditReplication;
 	OperationBounds.Reset();
 
 	UE_LOG(LogVoxelEdit, Verbose, TEXT("Edit operation started: '%s' (ID=%llu)"),
@@ -137,6 +140,14 @@ void UVoxelEditManager::EndEditOperation()
 	const TArray<FIntVector> AffectedChunks = CurrentOperation->AffectedChunks;
 	const bool bAddToUndoHistory = CurrentOperation->bAddToUndoHistory;
 
+	// The voxels a replicated operation changed go to the clients (G273), before the broadcasts below: a listener that edits
+	// in turn (water propagation) sends its own operation after this one.
+	TMap<FIntVector, TSet<int32>> ReplicatedVoxels;
+	if (CurrentOperation->Replication == EVoxelEditReplication::Replicated)
+	{
+		CollectOperationVoxels(*CurrentOperation, ReplicatedVoxels);
+	}
+
 	// What the broadcasts below carry, for a redo to broadcast again (G60).
 	CurrentOperation->Source = CurrentEditSource;
 	CurrentOperation->EditCenter = CurrentEditCenter;
@@ -156,6 +167,11 @@ void UVoxelEditManager::EndEditOperation()
 	// Else edits that follow from others (water propagation's flood): no undo step, and the redo stack stays. Undoing the
 	// operation that caused them restores its voxels as they were before it, these edits there included (G60).
 	CurrentOperation.Reset();
+
+	if (ReplicatedVoxels.Num() > 0)
+	{
+		PublishReplicatedChange(ReplicatedVoxels, CurrentEditSource, CurrentEditCenter, CurrentEditRadius);
+	}
 
 	// Batched edit notification: one broadcast per affected chunk (operation-level source/center/radius), with the voxels
 	// the operation changed in that chunk.
@@ -462,6 +478,15 @@ bool UVoxelEditManager::Undo()
 	TMap<FIntVector, FVoxelEditedVoxelBounds> AffectedChunks;
 	RestoreOperation(Operation, /*bAsLeft=*/false, AffectedChunks);
 
+	// An undo of a replicated operation is sent as one (G273), broadcast as the undo is: System, no radius.
+	if (Operation.Replication == EVoxelEditReplication::Replicated)
+	{
+		TMap<FIntVector, TSet<int32>> ReplicatedVoxels;
+		CollectOperationVoxels(Operation, ReplicatedVoxels);
+		MarkReplicatedVoxels(ReplicatedVoxels);
+		PublishReplicatedChange(ReplicatedVoxels, EEditSource::System, FVector::ZeroVector, 0.0f);
+	}
+
 	// Add to redo stack
 	RedoStack.Add(MoveTemp(Operation));
 
@@ -498,6 +523,15 @@ bool UVoxelEditManager::Redo()
 	const EEditSource Source = Operation.Source;
 	const FVector EditCenter = Operation.EditCenter;
 	const float EditRadius = Operation.EditRadius;
+
+	// A redo of a replicated operation is sent with the operation's own source, centre and radius (G273).
+	if (Operation.Replication == EVoxelEditReplication::Replicated)
+	{
+		TMap<FIntVector, TSet<int32>> ReplicatedVoxels;
+		CollectOperationVoxels(Operation, ReplicatedVoxels);
+		MarkReplicatedVoxels(ReplicatedVoxels);
+		PublishReplicatedChange(ReplicatedVoxels, Source, EditCenter, EditRadius);
+	}
 
 	// Add back to undo stack
 	UndoStack.Add(MoveTemp(Operation));
@@ -601,6 +635,14 @@ bool UVoxelEditManager::ClearChunkEdits(const FIntVector& ChunkCoord)
 {
 	if (FChunkEditLayer* Layer = EditLayers.Find(ChunkCoord))
 	{
+		// A chunk whose replicated voxels are cleared goes to the clients whole (G273): they remove what they had there.
+		if (Layer->HasReplicatedVoxels())
+		{
+			Layer->ReplicatedVoxels.Empty();
+			TMap<FIntVector, TSet<int32>> Whole;
+			Whole.Add(ChunkCoord);
+			PublishReplicatedChange(Whole, EEditSource::System, FVector::ZeroVector, 0.0f);
+		}
 		if (!Layer->IsEmpty())
 		{
 			FVoxelEditedVoxelBounds Cleared;
@@ -621,8 +663,13 @@ void UVoxelEditManager::ClearAllEdits()
 {
 	// Collect affected chunks, and the voxels each loses, before clearing
 	TArray<TPair<FIntVector, FVoxelEditedVoxelBounds>> AffectedChunks;
+	TMap<FIntVector, TSet<int32>> WholeChunks;
 	for (const auto& Pair : EditLayers)
 	{
+		if (Pair.Value.HasReplicatedVoxels())
+		{
+			WholeChunks.Add(Pair.Key);
+		}
 		if (!Pair.Value.IsEmpty())
 		{
 			FVoxelEditedVoxelBounds Cleared;
@@ -635,6 +682,12 @@ void UVoxelEditManager::ClearAllEdits()
 	}
 
 	EditLayers.Empty();
+
+	// The chunks whose replicated voxels went go to the clients whole (G273): they remove what they had there.
+	if (WholeChunks.Num() > 0)
+	{
+		PublishReplicatedChange(WholeChunks, EEditSource::System, FVector::ZeroVector, 0.0f);
+	}
 
 	// Notify all affected chunks (clearing is system action - regenerate scatter)
 	for (const TPair<FIntVector, FVoxelEditedVoxelBounds>& Pair : AffectedChunks)
@@ -699,6 +752,14 @@ bool UVoxelEditManager::SaveEditsToFile(const FString& FilePath)
 			Writer << const_cast<uint8&>(Edit.NewData.BiomeID);
 			Writer << const_cast<uint8&>(Edit.NewData.Metadata);
 		}
+
+		// The replicated voxels (version 4)
+		int32 MarkCount = Layer.ReplicatedVoxels.Num();
+		Writer << MarkCount;
+		for (int32 Index : Layer.ReplicatedVoxels)
+		{
+			Writer << Index;
+		}
 	}
 
 	// Save to file
@@ -744,9 +805,9 @@ bool UVoxelEditManager::LoadEditsFromFile(const FString& FilePath)
 		return false;
 	}
 
-	if (Version != VOXEL_EDIT_FILE_VERSION && Version != 2)
+	if (Version < 2 || Version > VOXEL_EDIT_FILE_VERSION)
 	{
-		UE_LOG(LogVoxelEdit, Error, TEXT("LoadEditsFromFile: Unsupported version %d (expected %d or 2)"),
+		UE_LOG(LogVoxelEdit, Error, TEXT("LoadEditsFromFile: Unsupported version %d (expected 2 to %d)"),
 			Version, VOXEL_EDIT_FILE_VERSION);
 		return false;
 	}
@@ -761,6 +822,7 @@ bool UVoxelEditManager::LoadEditsFromFile(const FString& FilePath)
 
 	// Read each chunk's edits
 	TArray<TPair<FIntVector, FVoxelEditedVoxelBounds>> LoadedChunks;
+	TMap<FIntVector, TSet<int32>> MarkedChunks;
 	int32 TotalEdits = 0;
 
 	for (int32 ChunkIndex = 0; ChunkIndex < ChunkCount; ++ChunkIndex)
@@ -806,7 +868,39 @@ bool UVoxelEditManager::LoadEditsFromFile(const FString& FilePath)
 			++TotalEdits;
 		}
 
+		// The replicated voxels (version 4; an older file marks none, so its edits reach no client until edited again)
+		if (Version >= 4)
+		{
+			int32 MarkCount = 0;
+			Reader << MarkCount;
+			const int32 VolumeSize = Layer->ChunkSize * Layer->ChunkSize * Layer->ChunkSize;
+			if (Reader.IsError() || MarkCount < 0 || MarkCount > VolumeSize)
+			{
+				UE_LOG(LogVoxelEdit, Error, TEXT("LoadEditsFromFile: bad replicated voxel count %d in chunk %s"), MarkCount, *ChunkCoord.ToString());
+				return false;
+			}
+			for (int32 Mark = 0; Mark < MarkCount; ++Mark)
+			{
+				int32 Index = 0;
+				Reader << Index;
+				if (Index >= 0 && Index < VolumeSize)
+				{
+					Layer->ReplicatedVoxels.Add(Index);
+				}
+			}
+			if (Layer->HasReplicatedVoxels())
+			{
+				MarkedChunks.Add(ChunkCoord);
+			}
+		}
+
 		LoadedChunks.Emplace(ChunkCoord, Loaded);
+	}
+
+	// The loaded replicated voxels go to every client whole (G273), the clients connected now and those that join later.
+	if (MarkedChunks.Num() > 0)
+	{
+		PublishReplicatedChange(MarkedChunks, EEditSource::System, FVector::ZeroVector, 0.0f);
 	}
 
 	// Notify all loaded chunks (loading from file is system action - regenerate scatter)
@@ -944,6 +1038,19 @@ void UVoxelEditManager::ApplyEditInternal(
 	if (!Layer)
 	{
 		return;
+	}
+
+	// A Local operation (a stamp every machine makes) leaves a voxel a replicated one changed as it is (G273, D189): the
+	// server's voxel is the one every machine shows.
+	const int32 VoxelIndex = Layer->ToIndex(LocalPos);
+	const EVoxelEditReplication Replication = CurrentOperation.IsValid() ? CurrentOperation->Replication : CurrentEditReplication;
+	if (Replication == EVoxelEditReplication::Local && Layer->IsReplicatedVoxel(VoxelIndex))
+	{
+		return;
+	}
+	if (Replication == EVoxelEditReplication::Replicated)
+	{
+		Layer->ReplicatedVoxels.Add(VoxelIndex);
 	}
 
 	// Make a copy with correct local position
@@ -1169,4 +1276,155 @@ void UVoxelEditManager::RestoreOperation(const FVoxelEditOperation& Operation, b
 		}
 		OutChunkBounds.FindOrAdd(Change.ChunkCoord).Add(Change.LocalPosition);
 	}
+}
+
+// ==================== Replication (G273) ====================
+
+void UVoxelEditManager::CollectOperationVoxels(const FVoxelEditOperation& Operation, TMap<FIntVector, TSet<int32>>& OutChunkVoxels) const
+{
+	const int32 ChunkSize = Configuration ? Configuration->ChunkSize : VOXEL_DEFAULT_CHUNK_SIZE;
+	for (const FVoxelEditChange& Change : Operation.Changes)
+	{
+		const FIntVector& P = Change.LocalPosition;
+		OutChunkVoxels.FindOrAdd(Change.ChunkCoord).Add(P.X + P.Y * ChunkSize + P.Z * ChunkSize * ChunkSize);
+	}
+}
+
+void UVoxelEditManager::MarkReplicatedVoxels(const TMap<FIntVector, TSet<int32>>& ChunkVoxels)
+{
+	for (const TPair<FIntVector, TSet<int32>>& Pair : ChunkVoxels)
+	{
+		GetOrCreateEditLayer(Pair.Key)->ReplicatedVoxels.Append(Pair.Value);
+	}
+}
+
+void UVoxelEditManager::PublishReplicatedChange(const TMap<FIntVector, TSet<int32>>& ChunkVoxels, EEditSource Source,
+	const FVector& EditCenter, float EditRadius)
+{
+	const bool bListened = OnReplicatedChange.IsBound();
+	FVoxelReplicatedChange Change;
+	Change.Source = Source;
+	Change.EditCenter = EditCenter;
+	Change.EditRadius = EditRadius;
+	for (const TPair<FIntVector, TSet<int32>>& Pair : ChunkVoxels)
+	{
+		uint32& Revision = ReplicatedRevisions.FindOrAdd(Pair.Key);
+		const uint32 Previous = Revision;
+		++Revision;
+		if (!bListened)
+		{
+			continue;
+		}
+		FVoxelReplicatedChunkChange& Chunk = Change.Chunks.AddDefaulted_GetRef();
+		Chunk.PreviousRevision = Previous;
+		Chunk.Revision = Revision;
+		Chunk.Wire.Coord = Pair.Key;
+		Chunk.Wire.Kind = EVoxelEditWireKind::Delta;
+		Chunk.bResendWhole = Pair.Value.Num() == 0;
+		const FChunkEditLayer* Layer = EditLayers.Find(Pair.Key);
+		for (const int32 Index : Pair.Value)
+		{
+			FVoxelEditWireVoxel& Voxel = Chunk.Wire.Voxels.AddDefaulted_GetRef();
+			Voxel.Index = Index;
+			const FVoxelEdit* Edit = Layer ? Layer->Edits.Find(Index) : nullptr;
+			Voxel.bHasEdit = Edit != nullptr;
+			if (Edit)
+			{
+				Voxel.Edit = *Edit;
+			}
+		}
+	}
+	if (bListened && Change.Chunks.Num() > 0)
+	{
+		OnReplicatedChange.Broadcast(Change);
+	}
+}
+
+void UVoxelEditManager::GatherReplicatedChunk(const FIntVector& ChunkCoord, int32 MaxVoxelsPerPart, TArray<FVoxelEditWireChunk>& OutParts) const
+{
+	OutParts.Reset();
+	MaxVoxelsPerPart = FMath::Max(MaxVoxelsPerPart, 1);
+	FVoxelEditWireChunk* Part = &OutParts.AddDefaulted_GetRef();
+	Part->Coord = ChunkCoord;
+	Part->Kind = EVoxelEditWireKind::FullFirst;
+	const FChunkEditLayer* Layer = EditLayers.Find(ChunkCoord);
+	if (!Layer)
+	{
+		return;
+	}
+	for (const int32 Index : Layer->ReplicatedVoxels)
+	{
+		if (Part->Voxels.Num() >= MaxVoxelsPerPart)
+		{
+			Part = &OutParts.AddDefaulted_GetRef();
+			Part->Coord = ChunkCoord;
+			Part->Kind = EVoxelEditWireKind::FullMore;
+		}
+		FVoxelEditWireVoxel& Voxel = Part->Voxels.AddDefaulted_GetRef();
+		Voxel.Index = Index;
+		const FVoxelEdit* Edit = Layer->Edits.Find(Index);
+		Voxel.bHasEdit = Edit != nullptr;
+		if (Edit)
+		{
+			Voxel.Edit = *Edit;
+		}
+	}
+}
+
+int32 UVoxelEditManager::ApplyReplicatedMessage(const FVoxelEditWireMessage& Message)
+{
+	if (!bIsInitialized || !Configuration)
+	{
+		return 0;
+	}
+	if (CurrentOperation.IsValid())
+	{
+		UE_LOG(LogVoxelEdit, Warning, TEXT("ApplyReplicatedMessage: an edit operation ('%s') is open; the server's voxels are written outside it"),
+			*CurrentOperation->Description);
+	}
+
+	// Every chunk written first, then each broadcast, as an operation does: a reader of one chunk sees its neighbours' voxels.
+	TArray<TPair<FIntVector, FVoxelEditedVoxelBounds>> Written;
+	int32 Count = 0;
+	for (const FVoxelEditWireChunk& Chunk : Message.Chunks)
+	{
+		FChunkEditLayer* Layer = GetOrCreateEditLayer(Chunk.Coord);
+		FVoxelEditedVoxelBounds Bounds;
+		if (Chunk.Kind == EVoxelEditWireKind::FullFirst)
+		{
+			for (const int32 Index : Layer->ReplicatedVoxels)
+			{
+				const FIntVector Local = Layer->ToLocalPosition(Index);
+				Layer->RemoveEdit(Local);
+				Bounds.Add(Local);
+			}
+			Layer->ReplicatedVoxels.Reset();
+		}
+		for (const FVoxelEditWireVoxel& Voxel : Chunk.Voxels)
+		{
+			const FIntVector Local = Layer->ToLocalPosition(Voxel.Index);
+			if (Voxel.bHasEdit)
+			{
+				FVoxelEdit Edit = Voxel.Edit;
+				Edit.LocalPosition = Local;
+				Layer->ApplyEdit(Edit);
+			}
+			else
+			{
+				Layer->RemoveEdit(Local);
+			}
+			Layer->ReplicatedVoxels.Add(Voxel.Index);
+			Bounds.Add(Local);
+			++Count;
+		}
+		if (Bounds.IsValid())
+		{
+			Written.Emplace(Chunk.Coord, Bounds);
+		}
+	}
+	for (const TPair<FIntVector, FVoxelEditedVoxelBounds>& Pair : Written)
+	{
+		BroadcastChunkEdited(Pair.Key, Message.Source, Message.EditCenter, Message.EditRadius, Pair.Value);
+	}
+	return Count;
 }

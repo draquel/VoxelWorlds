@@ -24,6 +24,25 @@ enum class EEditSource : uint8
 };
 
 /**
+ * Whether an edit operation is sent to network clients (G273, D189).
+ */
+UENUM(BlueprintType)
+enum class EVoxelEditReplication : uint8
+{
+	/**
+	 * Made on the server alone and sent to every client: a player's dig or placement, a felled voxel tree, water
+	 * propagation's flood, an undo or redo of one. The voxels it changes are marked in their chunk's layer.
+	 */
+	Replicated,
+
+	/**
+	 * Made by every machine for itself from the seed (a dungeon's stamp and entrance stitch): never sent, and never
+	 * written over a marked voxel, so a dig into a dungeon wall survives the stamp a machine makes after it.
+	 */
+	Local
+};
+
+/**
  * Brush shape for voxel editing operations.
  */
 UENUM(BlueprintType)
@@ -285,6 +304,13 @@ struct VOXELCORE_API FChunkEditLayer
 	UPROPERTY()
 	int32 ChunkSize = VOXEL_DEFAULT_CHUNK_SIZE;
 
+	/**
+	 * The voxels (linear indices) a replicated operation changed, with an edit or without one (G273, D189): what the server
+	 * sends a client of this chunk, and what a Local operation leaves as it is. Saved in the edits file (version 4).
+	 */
+	UPROPERTY()
+	TSet<int32> ReplicatedVoxels;
+
 	FChunkEditLayer() = default;
 
 	explicit FChunkEditLayer(const FIntVector& InChunkCoord, int32 InChunkSize = VOXEL_DEFAULT_CHUNK_SIZE)
@@ -355,11 +381,51 @@ struct VOXELCORE_API FChunkEditLayer
 	}
 
 	/**
-	 * Clear all edits from this layer.
+	 * Clear all edits from this layer, and the replicated voxels' marks.
 	 */
 	void Clear()
 	{
 		Edits.Empty();
+		ReplicatedVoxels.Empty();
+	}
+
+	/**
+	 * Was the voxel at a linear index changed by a replicated operation?
+	 * @param Index Linear voxel index in the chunk
+	 * @return True when it is marked
+	 */
+	FORCEINLINE bool IsReplicatedVoxel(int32 Index) const
+	{
+		return ReplicatedVoxels.Contains(Index);
+	}
+
+	/**
+	 * Does the layer hold any voxel a replicated operation changed?
+	 * @return True when at least one voxel is marked
+	 */
+	FORCEINLINE bool HasReplicatedVoxels() const
+	{
+		return ReplicatedVoxels.Num() > 0;
+	}
+
+	/**
+	 * Linear index of a local position in this layer's chunk.
+	 * @param LocalPos Position within the chunk
+	 * @return The index
+	 */
+	FORCEINLINE int32 ToIndex(const FIntVector& LocalPos) const
+	{
+		return LocalPos.X + LocalPos.Y * ChunkSize + LocalPos.Z * ChunkSize * ChunkSize;
+	}
+
+	/**
+	 * Local position of a linear index in this layer's chunk.
+	 * @param Index Linear voxel index
+	 * @return The position within the chunk
+	 */
+	FORCEINLINE FIntVector ToLocalPosition(int32 Index) const
+	{
+		return FIntVector(Index % ChunkSize, (Index / ChunkSize) % ChunkSize, Index / (ChunkSize * ChunkSize));
 	}
 
 	/**
@@ -367,7 +433,7 @@ struct VOXELCORE_API FChunkEditLayer
 	 */
 	SIZE_T GetMemoryUsage() const
 	{
-		return sizeof(FChunkEditLayer) + Edits.GetAllocatedSize();
+		return sizeof(FChunkEditLayer) + Edits.GetAllocatedSize() + ReplicatedVoxels.GetAllocatedSize();
 	}
 };
 
@@ -446,6 +512,10 @@ struct VOXELCORE_API FVoxelEditOperation
 	 */
 	UPROPERTY()
 	bool bAddToUndoHistory = true;
+
+	/** Whether the operation is sent to network clients, and so whether its undo and redo are (G273). */
+	UPROPERTY()
+	EVoxelEditReplication Replication = EVoxelEditReplication::Replicated;
 
 	/**
 	 * The source, brush centre and radius the operation's edits were broadcast with when it ended. A redo broadcasts them

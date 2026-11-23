@@ -46,6 +46,10 @@ section true on its date); the Features docs are the current truth.
   chunk boundary (face, edge, corner) belongs to one seam job that reads both sides (`FVoxelSeamRegistry`). A chunk
   never waits for, or re-meshes on, a neighbour; an edit re-meshes the chunks it changed and restales their seams.
   Do not add a mesher path that reads a neighbour's voxels into a chunk mesh.
+- **Edits reach clients as voxels, from the server.** An edit operation is `Replicated` (the default: the server makes it
+  and every client gets each changed voxel's edit, G273) or `Local` (every machine makes it for itself from the seed: a
+  dungeon stamp). A new kind of edit that each machine makes for itself sets `Local` around it; never run a brush on a
+  client to copy the server's (`EDIT_LAYER.md`, "Edits on network clients").
 - **Voxel reads go through snapshots.** A reader off the game thread takes a chunk's edit-merged voxels as an immutable
   snapshot (`UVoxelChunkManager::GetVoxelSnapshot`, taken on the game thread; shared copy-on-write with the resident
   array, or decoded by a worker from far compression), never a raw pointer to a descriptor's array, and nothing expands
