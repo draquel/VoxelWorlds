@@ -455,6 +455,7 @@ bool FVoxelHydrologyNetwork::Enqueue(const FIntPoint& Tile)
 
 void FVoxelHydrologyNetwork::RunWorker()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_Hydrology);
 	for (;;)
 	{
 		TArray<FIntPoint> One;

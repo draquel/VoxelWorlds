@@ -1320,6 +1320,7 @@ void UVoxelScatterManager::ProcessPendingExclusionRegrow()
 			[WeakThis, ChunkCoord, ChunkSeed, SurfaceCopy = MoveTemp(SurfaceCopy),
 			 Definitions = MoveTemp(Definitions)]() mutable
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_ScatterPlacement);
 			// === THREAD POOL: placement-only relaunch from cached surface data ===
 			FAsyncScatterResult Result;
 			Result.ChunkCoord = ChunkCoord;
@@ -2013,6 +2014,7 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 			 DefsToGenerate = MoveTemp(DefsToGenerate),
 			 TypeIDs = MoveTemp(TypeIDs)]() mutable
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_ScatterDistance);
 			FDistanceStreamResult Result;
 			Result.ChunkCoord = ChunkCoord;
 
@@ -2142,6 +2144,7 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 		 CapturedClearedVolumes = MoveTemp(CapturedClearedVolumes),
 		 ExtractionContext, bCubicExtraction]() mutable
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_ScatterExtract);
 		// === THREAD POOL: Voxel-based surface extraction + placement ===
 
 		FAsyncScatterResult Result;

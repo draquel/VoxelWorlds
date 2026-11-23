@@ -1957,6 +1957,7 @@ void FVoxelFarField::LaunchBuilds()
 		TSharedPtr<FBuildSink, ESPMode::ThreadSafe> TaskSink = Sink;
 		auto Build = [TaskSink, BuildSettings = Settings, SharedSurface, Conditioning = MoveTemp(Conditioning), PatchWater, Key, Serial]()
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_FarFieldBuild);
 			TSharedPtr<FVoxelFarFieldPatchMesh> Mesh = MakeShared<FVoxelFarFieldPatchMesh>();
 			BuildPatch(BuildSettings, *SharedSurface, Conditioning, Key, *Mesh, PatchWater.Get());
 			FScopeLock Lock(&TaskSink->Lock);

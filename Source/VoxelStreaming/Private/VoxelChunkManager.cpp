@@ -5279,6 +5279,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 		CapturedNoiseParams, CapturedWorldMode,
 		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel, TreeConditioning = MoveTemp(TreeConditioning), TreeWaterOver]() mutable
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_Generate);
 		// Generate voxel data on background thread
 		TArray<FVoxelData> VoxelData;
 		const bool bSuccess = GeneratorPtr->GenerateChunkCPU(GenRequest, VoxelData);
@@ -5538,6 +5539,7 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 		CapturedNoiseParams, CapturedWorldMode,
 		CapturedBiomeConfig, CapturedEnableWaterLevel, CapturedWaterLevel, TreeConditioning = MoveTemp(TreeConditioning), TreeWaterOver]() mutable
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_InjectTrees);
 		FVoxelTreeInjector::InjectTrees(
 			ChunkCoord,
 			GenRequest.ChunkSize,
@@ -5803,6 +5805,7 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 	Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(WorkerJobs), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel, DispatchSerial,
 		DeferredVoxels = MoveTemp(DeferredVoxels), DeferredDecode = MoveTemp(DeferredDecode)]() mutable
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_Mesh);
 		// Generate mesh on background thread
 		FChunkMeshData MeshData;
 		const double WorkerStart = FPlatformTime::Seconds();
@@ -6913,6 +6916,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
 		Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(WorkerJobs), WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = FaceLODLevel, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_SeamFace);
 			WaitForSnapshotDecodes(SnapshotDecodes);
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
@@ -6964,6 +6968,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
 		Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(WorkerJobs), WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_SeamEdge);
 			WaitForSnapshotDecodes(SnapshotDecodes);
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
@@ -7014,6 +7019,7 @@ void UVoxelChunkManager::DispatchSeamJob(const FVoxelSeamJob& Job)
 		SeamInFlightPeak = FMath::Max(SeamInFlightPeak, SeamJobsInFlight.Num());
 		Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(WorkerJobs), WeakThis, SeamMesherPtr, SeamRequest = MoveTemp(SeamRequest), Key, LODLevel = MinParticipantLOD, DirtiedAt = Job.DirtiedAtSeconds, ReadyAt = Job.ReadyAtSeconds, ScheduledAt = Job.ScheduledAtSeconds, DispatchedAt, OwnerEpoch = Job.OwnerResidencyEpoch, SnapshotDecodes]() mutable
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_SeamCorner);
 			WaitForSnapshotDecodes(SnapshotDecodes);
 			FChunkMeshData MeshData;
 			const double WorkerStart = FPlatformTime::Seconds();
@@ -7999,6 +8005,7 @@ void UVoxelChunkManager::DispatchFarCompression(const FIntVector& ChunkCoord, FC
 	UE::Tasks::Launch(UE_SOURCE_LOCATION,
 		[Results = FarCompressResults, ChunkCoord, Ticket, Codec, ChunkSize = Descriptor.ChunkSize, Shared = MoveTemp(Shared)]() mutable
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_FarCompress);
 			FFarCompressResult Done;
 			Done.ChunkCoord = ChunkCoord;
 			Done.Ticket = Ticket;
