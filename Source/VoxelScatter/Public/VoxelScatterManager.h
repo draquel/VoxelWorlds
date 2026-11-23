@@ -288,6 +288,15 @@ public:
 	FString ComputeScatterDigest(TArray<FString>* OutChunkLines = nullptr) const;
 
 	/**
+	 * One cached chunk's spawn points, a line each in the cache's order with the values the digest's CRC reads (G265:
+	 * which of a chunk's points two runs disagree on, and whether they disagree on the points or on their order).
+	 * @param Chunk The chunk
+	 * @param OutLines The lines (appended): type, position, yaw, scale, local up, and the point's flags
+	 * @return Whether the chunk is cached
+	 */
+	bool DumpChunkPoints(const FIntVector& Chunk, TArray<FString>& OutLines) const;
+
+	/**
 	 * The two caches against each other and the renderer, to check that every chunk's scatter renders once (world modes
 	 * review G30; voxel.Scatter.Digest logs it under the digest): chunks with spawn points, chunks with surface data,
 	 * chunks with spawn points but no surface data (none since G30: an unloaded chunk drops both), spawn points, rendered
