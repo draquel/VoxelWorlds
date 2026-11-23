@@ -493,6 +493,13 @@ points). When it streams back in, its extraction is a first pass, as on its firs
 again (the distance spawn and the audits read it) and its spawn points replace nothing. Until world modes review G30 the
 two cache removals were joined by a short-circuit `||`, so a chunk with surface data kept its spawn points cached after
 unloading and its reload was taken for a supplemental pass. Tests: `Scatter.Reload.*`.
+
+A chunk's cached spawn points are kept ordered by scatter type, each type's in the order it placed them
+(`VoxelScatterManagerPrivate::OrderByType`, a stable sort after the first pass and after each supplemental one). A type
+is placed on a chunk once, but whether two types arrive in one pass or one in a later pass (its spawn distance reached
+later) hangs on the viewer's timing, and appended as they came the order of the same points varied from one play session
+to the next (G265: the digest's CRC of a chunk took one of two values). Nothing reads a point by its index: edits and
+felled trees remove points by position.
 `voxel.Scatter.Digest` logs a second line, `caches:` (`ComputeCacheResidency`), that checks this: chunks with spawn
 points, with surface data, with spawn points but no surface data (0), spawn points against the renderer's instances
 (`UVoxelScatterRenderer::GetChunkInstanceCount`; the chunks that differ are logged per type, `file` writes them to

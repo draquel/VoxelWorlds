@@ -22,6 +22,7 @@
 #include "VoxelScatter.h"
 #include "DrawDebugHelpers.h"
 #include "Algo/BinarySearch.h"
+#include "Algo/StableSort.h"
 #include "Async/Async.h"
 #include "Async/ParallelFor.h"
 #include "Engine/World.h"
@@ -42,6 +43,21 @@ static TAutoConsoleVariable<int32> CVarVoxelScatterRegionChunks(
 /** The scatter HISM regions by default (voxel.Scatter.RegionChunks -1), every world mode: a quarter of the render regions' edge. */
 static constexpr int32 DefaultScatterRegionChunks = 4;
 
+namespace VoxelScatterManagerPrivate
+{
+	/**
+	 * A chunk's spawn points in a fixed order: by scatter type, each type's in the order it placed them (a stable sort).
+	 * A type is placed on a chunk once, but whether two types arrive in one pass or the second in a supplemental pass
+	 * (its spawn distance reached later) hangs on the viewer's timing; appended as they came, the cache's order varied
+	 * from one play session to the next with the same points (G265: the scatter digest's CRC of a chunk took one of two
+	 * values). Nothing reads a point by its index: edits and felled trees remove points by position.
+	 */
+	void OrderByType(TArray<FScatterSpawnPoint>& Points)
+	{
+		Algo::StableSortBy(Points, [](const FScatterSpawnPoint& Point) { return Point.ScatterTypeID; });
+	}
+}
+
 namespace
 {
 	/**
@@ -49,12 +65,13 @@ namespace
 	 * "file", also write one line per chunk (X,Y,Z,count,crc) to Saved/VoxelAudit/ScatterDigest_<world>_<time>.csv, to
 	 * see which chunks two builds disagree on. A second line checks the caches against each other and the renderer
 	 * (ComputeCacheResidency, world modes review G30), with up to five chunks whose instances differ from their spawn
-	 * points; "file" writes all of them to ScatterCaches_<world>_<time>.csv.
+	 * points; "file" writes all of them to ScatterCaches_<world>_<time>.csv. "file X Y Z" also writes the points of chunk
+	 * (X, Y, Z) in the cache's order to ScatterPoints_<world>_<X>_<Y>_<Z>_<time>.csv (G265).
 	 */
 	FAutoConsoleCommand GVoxelScatterDigestCmd(
 		TEXT("voxel.Scatter.Digest"),
 		TEXT("Log a digest of the cached scatter spawn points (counts and a CRC per type) for every game world, to compare builds. ")
-		TEXT("'voxel.Scatter.Digest file' also writes a per-chunk CSV to Saved/VoxelAudit."),
+		TEXT("'voxel.Scatter.Digest file' also writes a per-chunk CSV to Saved/VoxelAudit; 'file X Y Z' also writes that chunk's points in the cache's order."),
 		FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
 		{
 			const bool bFile = Args.Num() > 0 && Args[0].Equals(TEXT("file"), ESearchCase::IgnoreCase);
@@ -82,6 +99,18 @@ namespace
 						*World->GetName(), *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S")));
 					MismatchLines.Insert(TEXT("X,Y,Z,spawnPoints,instances,surface,types"), 0);
 					FFileHelper::SaveStringArrayToFile(MismatchLines, *Path);
+				}
+				if (bFile && Args.Num() >= 4)
+				{
+					const FIntVector Chunk(FCString::Atoi(*Args[1]), FCString::Atoi(*Args[2]), FCString::Atoi(*Args[3]));
+					TArray<FString> PointLines;
+					PointLines.Add(TEXT("index,type,x,y,z,yaw,scale,upx,upy,upz"));
+					const bool bCached = It->DumpChunkPoints(Chunk, PointLines);
+					const FString Path = FPaths::ProjectSavedDir() / TEXT("VoxelAudit") / FString::Printf(TEXT("ScatterPoints_%s_%d_%d_%d_%s.csv"),
+						*World->GetName(), Chunk.X, Chunk.Y, Chunk.Z, *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S")));
+					FFileHelper::SaveStringArrayToFile(PointLines, *Path);
+					UE_LOG(LogVoxelScatter, Display, TEXT("voxel.Scatter.Digest [%s]: chunk (%d, %d, %d) %s, %d point(s) written to %s"), *World->GetName(),
+						Chunk.X, Chunk.Y, Chunk.Z, bCached ? TEXT("cached") : TEXT("not cached"), PointLines.Num() - 1, *FPaths::ConvertRelativePathToFull(Path));
 				}
 				if (bFile)
 				{
@@ -2056,10 +2085,11 @@ void UVoxelScatterManager::ProcessCompletedDistanceStream()
 		if (ExistingScatter && ExistingScatter->bIsValid)
 		{
 			ExistingScatter->SpawnPoints.Append(Result.ScatterData.SpawnPoints);
+			VoxelScatterManagerPrivate::OrderByType(ExistingScatter->SpawnPoints);
 		}
 		else
 		{
-			SpawnCache.Add(Result.ChunkCoord, MoveTemp(Result.ScatterData));
+			VoxelScatterManagerPrivate::OrderByType(SpawnCache.Add(Result.ChunkCoord, MoveTemp(Result.ScatterData)).SpawnPoints);
 		}
 
 		TotalSpawnPointsGenerated += SpawnCount;
@@ -2245,6 +2275,7 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 			// guarantees this pass only generated types NOT already on the chunk, so the render
 			// update below is append-only and never disturbs existing instances.
 			ExistingScatter->SpawnPoints.Append(Result.ScatterData.SpawnPoints);
+			VoxelScatterManagerPrivate::OrderByType(ExistingScatter->SpawnPoints);
 
 			UE_LOG(LogVoxelScatter, Verbose, TEXT("Chunk (%d,%d,%d): Supplemental scatter appended (+%d spawn, total %d)"),
 				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z,
@@ -2254,7 +2285,7 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 		{
 			// First pass: cache new data
 			SurfaceCache.Add(Result.ChunkCoord, MoveTemp(Result.SurfaceData));
-			SpawnCache.Add(Result.ChunkCoord, MoveTemp(Result.ScatterData));
+			VoxelScatterManagerPrivate::OrderByType(SpawnCache.Add(Result.ChunkCoord, MoveTemp(Result.ScatterData)).SpawnPoints);
 		}
 
 		TotalSurfacePointsExtracted += SurfacePointCount;
@@ -3183,6 +3214,22 @@ void UVoxelScatterManager::ExtractSurfacePointsByBlockTop(
 
 	OutSurfaceData.SurfaceAreaEstimate = OutSurfaceData.SurfacePoints.Num() * VoxelSize * VoxelSize;
 	OutSurfaceData.bIsValid = true;
+}
+
+bool UVoxelScatterManager::DumpChunkPoints(const FIntVector& Chunk, TArray<FString>& OutLines) const
+{
+	const auto* Cached = SpawnCache.Find(Chunk);
+	if (!Cached)
+	{
+		return false;
+	}
+	int32 Index = 0;
+	for (const FScatterSpawnPoint& Point : Cached->SpawnPoints)
+	{
+		OutLines.Add(FString::Printf(TEXT("%d,%d,%.1f,%.1f,%.1f,%.2f,%.3f,%.4f,%.4f,%.4f"), Index++, Point.ScatterTypeID,
+			Point.Position.X, Point.Position.Y, Point.Position.Z, Point.RotationYaw, Point.Scale, Point.LocalUp.X, Point.LocalUp.Y, Point.LocalUp.Z));
+	}
+	return true;
 }
 
 FString UVoxelScatterManager::ComputeScatterDigest(TArray<FString>* OutChunkLines) const
