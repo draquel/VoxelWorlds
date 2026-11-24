@@ -38,3 +38,30 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelCollisionAuditNeighborsCmd(
 				List.IsEmpty() ? TEXT("") : TEXT("; stale:"), *List);
 		}
 	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GVoxelCollisionCookStatsCmd(
+	TEXT("voxel.Collision.CookStats"),
+	TEXT("G275: log what the collision cooks cost on their workers since the last reset, a mean per cook and per stage (the wait for "
+	     "far-compressed snapshots, the voxel copy, the neighbour slices, the mesh at the collision LOD, the Chaos triangle mesh), "
+	     "then reset. `voxel.Collision.CookStats keep` logs without the reset."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
+	{
+		const bool bKeep = Args.Num() > 0 && Args[0] == TEXT("keep");
+		for (TObjectIterator<UVoxelChunkManager> It; It; ++It)
+		{
+			UVoxelCollisionManager* Collision = It->GetCollisionManager();
+			if (!It->GetWorld() || !It->GetWorld()->IsGameWorld() || !Collision || !Collision->IsInitialized())
+			{
+				continue;
+			}
+			const FVoxelCollisionCookStats& Stats = Collision->GetCookStats();
+			const double PerCook = Stats.Cooks > 0 ? 1.0 / static_cast<double>(Stats.Cooks) : 0.0;
+			UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.Collision.CookStats: %lld cooks (%lld empty), %.0f triangles a cook; a cook %.2f ms (the longest %.1f): wait %.2f, copy %.2f, slices %.2f, mesh %.2f, triangle mesh %.2f; %.1f thread-seconds in all"),
+				Stats.Cooks, Stats.EmptyCooks, Stats.Triangles * PerCook, Stats.TotalMs * PerCook, Stats.MaxTotalMs, Stats.WaitMs * PerCook,
+				Stats.CopyMs * PerCook, Stats.SlicesMs * PerCook, Stats.MeshMs * PerCook, Stats.TriMeshMs * PerCook, Stats.TotalMs / 1000.0);
+			if (!bKeep)
+			{
+				Collision->ResetCookStats();
+			}
+		}
+	}));

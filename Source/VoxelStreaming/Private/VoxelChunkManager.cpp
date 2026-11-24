@@ -2,6 +2,7 @@
 
 #include "VoxelChunkManager.h"
 #include "VoxelWorkerJobGuard.h"
+#include "Diagnostics/VoxelStreamProbe.h"
 #include "VoxelStreamingBenchmark.h"
 #include "VoxelWorldsSettings.h"
 #include "VoxelChunkManagerPrivate.h"
@@ -637,6 +638,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	RecoverLostRenderData();
 
+	VoxelStreamProbe::BeginTick(*this);
 	const double TickStartTime = FPlatformTime::Seconds();
 	FVoxelTimingStats Timing;
 
@@ -767,6 +769,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// the balanced LOD cache over the whole candidate volume and sat outside every section (§13.11).
 	if (LODStrategy)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_LODStrategyUpdate);
 		const double LODUpdateStart = FPlatformTime::Seconds();
 		LODStrategy->Update(Context, DeltaTime);
 		Timing.LODUpdateMs = VoxelTickTiming::MsSince(LODUpdateStart);
@@ -927,18 +930,24 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 	// === Generated hydrology (the hydrology plan's H7) ===
 	// The worker works ahead around the viewers; tiles that arrived late are announced. A world without it pays one test.
+	SectionStart = FPlatformTime::Seconds();
 	UpdateHydrology();
+	Timing.HydrologyMs = VoxelTickTiming::MsSince(SectionStart);
 
 	// === Lakes and river reaches (the hydrology plan's H3) ===
 	// One mesh a body, made when the bodies change or the viewer has moved far; a world with none pays one test.
+	SectionStart = FPlatformTime::Seconds();
 	UpdateWaterBodyMeshes();
+	Timing.WaterBodyMeshMs = VoxelTickTiming::MsSince(SectionStart);
 
 	// === Planet far field (spherical Phase 6, WM-BP9) ===
 	// After this tick's generation results, meshes and unloads: an edge patch shows in the tick its chunks leave and
 	// hides once they have been drawn a moment. Timed into FarFieldStats.UpdateMs (the bench's FarFieldMs).
 	if (FarField)
 	{
+		SectionStart = FPlatformTime::Seconds();
 		UpdateFarField(CurrentCameraPosition, CurrentViewerPosition, Context.FieldOfView);
+		Timing.FarFieldMs = VoxelTickTiming::MsSince(SectionStart);
 	}
 
 	// === Water propagation (bounded BFS per frame) ===
@@ -1034,12 +1043,14 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	// Flush all pending render operations as a single batched command
 	if (MeshRenderer)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_RenderFlush);
 		const double FlushStart = FPlatformTime::Seconds();
 		MeshRenderer->FlushPendingOperations();
 		Timing.RenderFlushMs = VoxelTickTiming::MsSince(FlushStart);
 	}
 	Timing.TotalMs = VoxelTickTiming::MsSince(TickStartTime);
 	LastTimingStats = Timing;
+	VoxelStreamProbe::EndTick(*this);
 }
 
 // ==================== Initialization ====================
@@ -2688,6 +2699,7 @@ float UVoxelChunkManager::GetNearestViewerDistance(const FVector& Point, float S
 
 void UVoxelChunkManager::UpdateGroundWindows(const FLODQueryContext& Context)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_UpdateGroundWindows);
 	GatherFurtherViewers(FurtherViewers);
 
 	// The collision shell and the scatter follow the same viewers (the hand-over is skipped while there never were any).
@@ -2961,6 +2973,7 @@ bool UVoxelChunkManager::IsVoxelWindowSuspended() const
 
 void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_UpdateLoadDecisions);
 	if (!LODStrategy)
 	{
 		return;
@@ -3079,6 +3092,7 @@ void UVoxelChunkManager::UpdateLoadDecisions(const FLODQueryContext& Context)
 
 void UVoxelChunkManager::UpdateUnloadDecisions(const FLODQueryContext& Context)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_UpdateUnloadDecisions);
 	if (!LODStrategy)
 	{
 		return;
@@ -3147,6 +3161,7 @@ void UVoxelChunkManager::UpdateUnloadDecisions(const FLODQueryContext& Context)
 
 void UVoxelChunkManager::ProcessGenerationQueue(float TimeSliceMS)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_ProcessGenerationQueue);
 	if (GenerationQueue.Num() == 0 || !NoiseGenerator || !Configuration)
 	{
 		return;
@@ -3644,6 +3659,7 @@ void UVoxelChunkManager::StopHydrology()
 
 void UVoxelChunkManager::UpdateHydrology()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_UpdateHydrology);
 	if (!HydrologyNetwork.IsValid())
 	{
 		return;
@@ -4222,6 +4238,7 @@ void UVoxelChunkManager::SetWaterBodyMeshesVisible(bool bVisible)
 
 void UVoxelChunkManager::UpdateWaterBodyMeshes()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_UpdateWaterBodyMeshes);
 	// The sea alone: nothing to draw here (the tiles, the far seas and the shell draw the sea).
 	if (WaterBodySources.IsEmpty())
 	{
@@ -4663,6 +4680,7 @@ bool UVoxelChunkManager::UpdateStreamingForCamera(const FVector& CameraPosition)
 
 void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVector& ViewerPosition, float FieldOfView)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_UpdateFarField);
 	if (!FarField || !Configuration)
 	{
 		return;
@@ -5324,6 +5342,7 @@ void UVoxelChunkManager::LaunchAsyncGeneration(const FChunkLODRequest& Request, 
 
 void UVoxelChunkManager::ProcessCompletedAsyncGenerations(FVoxelTimingStats& Timing)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_ProcessCompletedAsyncGenerations);
 	int32 ProcessedCount = 0;
 	const int32 MaxProcessPerFrame = 8;
 
@@ -5395,6 +5414,7 @@ void UVoxelChunkManager::ProcessCompletedAsyncGenerations(FVoxelTimingStats& Tim
 
 void UVoxelChunkManager::ProcessPendingGPUReadbacks()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_ProcessPendingGPUReadbacks);
 	if (PendingGPUReadbacks.Num() == 0 || !GPUGeneratorPtr)
 	{
 		return;
@@ -5571,6 +5591,7 @@ void UVoxelChunkManager::LaunchPostReadbackProcessing(const FIntVector& ChunkCoo
 
 void UVoxelChunkManager::ProcessMeshingQueue(float TimeSliceMS, FVoxelTimingStats& Timing)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_ProcessMeshingQueue);
 	if (MeshingQueue.Num() == 0 || !Mesher || !Configuration)
 	{
 		return;
@@ -5838,6 +5859,7 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 
 void UVoxelChunkManager::ProcessCompletedAsyncMeshes()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_ProcessCompletedAsyncMeshes);
 	const int32 MaxProcessPerFrame = 8; // Limit how many we process to spread render uploads
 
 	// Bounded drain: results beyond this tick's budget stay queued. The old
@@ -6087,6 +6109,7 @@ bool UVoxelChunkManager::IsChunkBeyondUnloadDistance(const FIntVector& ChunkCoor
 
 void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_ProcessUnloadQueue);
 	int32 ProcessedCount = 0;
 
 	while (UnloadQueue.Num() > 0 && ProcessedCount < MaxChunks)
@@ -6180,6 +6203,7 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 
 int32 UVoxelChunkManager::EvaluateLODLevelChanges(const FLODQueryContext& Context, int32& OutQueued, bool& OutCapReached)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_EvaluateLODLevelChanges);
 	OutQueued = 0;
 	OutCapReached = false;
 
@@ -6597,6 +6621,7 @@ void UVoxelChunkManager::RemoveChunkState(const FIntVector& ChunkCoord)
 
 void UVoxelChunkManager::TickSeamScheduler()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_TickSeamScheduler);
 	if (!SeamRegistry.IsValid())
 	{
 		return;
@@ -7880,6 +7905,7 @@ FString UVoxelChunkManager::DescribeSnapshotCache() const
 
 void UVoxelChunkManager::ProcessFarCompressionSweep(const FLODQueryContext& Context, FVoxelTimingStats& Timing)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_ProcessFarCompressionSweep);
 	const bool bEnabled = CVarFarCompression.GetValueOnGameThread() != 0;
 	const int32 MinStride = FMath::Max(1, CVarFarCompressionMinStride.GetValueOnGameThread());
 	const int64 IdleFrames = FMath::Max(0, CVarFarCompressionIdleFrames.GetValueOnGameThread());
@@ -8097,6 +8123,7 @@ void UVoxelChunkManager::HandOffChunkScatter(const FIntVector& ChunkCoord, FVoxe
 
 void UVoxelChunkManager::ProcessEditScatterReaders()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_ProcessEditScatterReaders);
 	if (EditScatterReaderChunks.Num() == 0)
 	{
 		EditScatterEditedChunks.Reset();
@@ -8130,6 +8157,7 @@ void UVoxelChunkManager::ProcessEditScatterReaders()
 
 void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_OnChunkMeshingComplete);
 	FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
 	if (!State || State->State != EChunkState::Meshing)
 	{
@@ -9141,6 +9169,7 @@ void UVoxelChunkManager::TickWhilePaused()
 
 void UVoxelChunkManager::ProcessDirtyWaterTiles(int32 MaxTilesPerFrame)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_ProcessDirtyWaterTiles);
 	if (!Configuration || !MeshRenderer)
 	{
 		return;
