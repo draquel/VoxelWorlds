@@ -1154,6 +1154,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	// Launch async task: mesh generation + Chaos trimesh construction on thread pool
 	Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(ChunkManager->GetWorkerJobs()), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), NeighborShells = MoveTemp(NeighborShells), ChunkCoord, LODLevel, ChunkSizeCapture, SnapshotDecodes = MoveTemp(SnapshotDecodes)]() mutable
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_Collision);
 		for (UE::Tasks::FTask& Decode : SnapshotDecodes)
 		{
 			Decode.Wait();
