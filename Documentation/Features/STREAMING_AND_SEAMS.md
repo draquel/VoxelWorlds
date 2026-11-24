@@ -292,7 +292,11 @@ a point read of a uniform chunk reads its value. `voxel.FarCompression.Stats` lo
 ahead and below a falling pawn first; the `voxel.Collision.*` tuning in `Documentation/EDITOR_CONSOLE_GUIDE.md` §3.7)
 and cooks them on workers. The focus is the first player's pawn; on a server every other player's pawn is a further
 focus with a shell of its own (Further viewers and their ground windows, below). `PrepareCollisionMeshRequest` hands a cook the chunk's snapshot and its 26 neighbours'
-face slabs; the cook meshes the whole chunk with the main mesher at the collision LOD.
+face slabs; the cook meshes the whole chunk with the main mesher at the collision LOD. On VoxelDemo (64-voxel
+chunks, Dual Contouring, LOD 0, four cooks at once) a cook takes 20 to 21 ms on its worker, 13.6 to 14.3 of them the
+mesh and 5 to 6 the Chaos triangle mesh (`voxel.Collision.CookStats`; 75 to 80 ms before G275's fix of the mesher's
+working memory, `DUAL_CONTOURING.md`, "Cost"), and a teleport onto fresh ground launches about 470 of them, 175 of
+chunks with no surface (G283).
 
 A neighbour without voxel data at cook time is read as air. The cook records those neighbours
 (`FChunkCollisionData::MissingNeighborMask`); when one arrives (`OnChunkVoxelDataAvailable`, from

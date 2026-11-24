@@ -282,6 +282,7 @@ void UVoxelCollisionManager::Shutdown()
 
 void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTime)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_Collision);
 	if (!bIsInitialized)
 	{
 		return;
@@ -498,6 +499,7 @@ float UVoxelCollisionManager::GetDirtyPriority(const FChunkCollisionData& Data, 
 
 void UVoxelCollisionManager::ProcessDirtyChunks(const FVector& ViewerPosition)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_Collision_ProcessDirtyChunks);
 	if (!Configuration)
 	{
 		return;
@@ -731,6 +733,7 @@ int32 UVoxelCollisionManager::MarkNeighborsDirtyForEdit(const FIntVector& Edited
 
 void UVoxelCollisionManager::ProcessNeighborRecooks()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_Collision_ProcessNeighborRecooks);
 	if (PendingNeighborRecooks.Num() == 0 || !ChunkManager)
 	{
 		return;
@@ -972,6 +975,7 @@ void UVoxelCollisionManager::DrawDebugVisualization(UWorld* World, const FVector
 
 void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosition)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_Collision_UpdateCollisionDecisions);
 	if (!Configuration || !ChunkManager)
 	{
 		return;
@@ -1069,6 +1073,7 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 
 void UVoxelCollisionManager::ProcessCookingQueue()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_Collision_ProcessCookingQueue);
 	// Launch async tasks from the queue up to the concurrency limit (cvar override for Tier 1 headroom).
 	const int32 AsyncOverride = CVarCollisionMaxAsyncTasks.GetValueOnGameThread();
 	const int32 MaxAsync = AsyncOverride > 0 ? FMath::Clamp(AsyncOverride, 1, 8) : MaxAsyncCollisionTasks;
@@ -1155,6 +1160,16 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(ChunkManager->GetWorkerJobs()), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), NeighborShells = MoveTemp(NeighborShells), ChunkCoord, LODLevel, ChunkSizeCapture, SnapshotDecodes = MoveTemp(SnapshotDecodes)]() mutable
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_Collision);
+		const double CookStart = FPlatformTime::Seconds();
+		double StageStart = CookStart;
+		// A stage's milliseconds, from the last stage's end.
+		auto EndStage = [&StageStart]() -> float
+		{
+			const double Now = FPlatformTime::Seconds();
+			const float Ms = static_cast<float>((Now - StageStart) * 1000.0);
+			StageStart = Now;
+			return Ms;
+		};
 		for (UE::Tasks::FTask& Decode : SnapshotDecodes)
 		{
 			Decode.Wait();
@@ -1162,6 +1177,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 		FAsyncCollisionResult Result;
 		Result.ChunkCoord = ChunkCoord;
 		Result.LODLevel = LODLevel;
+		Result.WaitMs = EndStage();
 
 		// Materialize the shared voxel snapshot into the request off the game thread (the
 		// snapshot outlives cache eviction via this ref; see PrepareCollisionMeshRequest).
@@ -1170,6 +1186,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 			MeshRequest.VoxelData = *SharedVoxels;
 			SharedVoxels.Reset();
 		}
+		Result.CopyMs = EndStage();
 
 		// Extract the 26-neighborhood slices from the shared snapshots off the game thread.
 		// Snapshots are already edit-merged; a missing map entry means that neighbor had no
@@ -1214,10 +1231,12 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 			NeighborSnapshots.Empty();
 			NeighborShells.Empty();
 		}
+		Result.SlicesMs = EndStage();
 
 		// Step 1: Generate mesh on background thread (the expensive part, ~2-4ms)
 		FChunkMeshData MeshData;
 		const bool bMeshSuccess = MesherPtr->GenerateMeshCPU(MeshRequest, MeshData);
+		Result.MeshMs = EndStage();
 
 		if (bMeshSuccess && !MeshData.IsValid())
 		{
@@ -1263,6 +1282,9 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 			}
 		}
 
+		Result.TriMeshMs = EndStage();
+		Result.TotalMs = static_cast<float>((FPlatformTime::Seconds() - CookStart) * 1000.0);
+
 		// Enqueue result for game thread (thread-safe MPSC queue)
 		if (UVoxelCollisionManager* This = WeakThis.Get())
 		{
@@ -1273,6 +1295,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 
 void UVoxelCollisionManager::ProcessCompletedCollisionCooks()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_Collision_ProcessCompletedCollisionCooks);
 	// Tier 1: cvar-tunable applies-per-frame (was a hardcoded 2 — a throughput bottleneck during
 	// sustained traversal). Clamped so a bad value can't stall the game thread.
 	const int32 MaxApplies = FMath::Clamp(VoxelSettings::Resolve(CVarCollisionMaxApplies, UVoxelWorldsSettings::Get().CollisionMaxAppliesPerFrame), 1, 16);
@@ -1284,6 +1307,17 @@ void UVoxelCollisionManager::ProcessCompletedCollisionCooks()
 	{
 		// Remove from in-progress tracking
 		AsyncCollisionInProgress.Remove(Result.ChunkCoord);
+
+		++CookStats.Cooks;
+		CookStats.EmptyCooks += (Result.bSuccess && Result.bEmpty) ? 1 : 0;
+		CookStats.Triangles += Result.NumTriangles;
+		CookStats.WaitMs += Result.WaitMs;
+		CookStats.CopyMs += Result.CopyMs;
+		CookStats.SlicesMs += Result.SlicesMs;
+		CookStats.MeshMs += Result.MeshMs;
+		CookStats.TriMeshMs += Result.TriMeshMs;
+		CookStats.TotalMs += Result.TotalMs;
+		CookStats.MaxTotalMs = FMath::Max<double>(CookStats.MaxTotalMs, Result.TotalMs);
 
 		// Check if chunk is still relevant (may have been removed while cooking)
 		FChunkCollisionData* Data = CollisionData.Find(Result.ChunkCoord);

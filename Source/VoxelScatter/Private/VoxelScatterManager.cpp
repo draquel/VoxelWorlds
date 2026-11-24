@@ -544,6 +544,7 @@ float UVoxelScatterManager::GetViewerDistance(const FVector& Point) const
 
 void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_Scatter);
 	if (!bIsInitialized)
 	{
 		return;

@@ -172,6 +172,13 @@ and a total. `Scripts/qa/mesh_digest.py <a.log> <b.log>` compares two suite logs
 that should leave the meshers' output alone leaves every line identical. The first record is
 `Documentation/CodeReview/CR2/mesh_digest_2026-10-31.txt`.
 
+`VoxelWorlds.Meshing.DualContour.Bench` (`Source/VoxelMeshing/Tests/DualContourBenchTests.cpp`, headless, about a
+second) meshes a 64-voxel chunk of noise terrain at LOD 0 in both domains, ten times alone and ten times in each of
+four lanes at once, and logs a `[DCBench]` line per domain: the mesh's CRC and triangles, the mean per mesh alone with
+its passes, and the mean and the meshes a second with four at once. It fails only on a mesh that differs between
+runs. The four-at-once figure is the one to read after a change to a mesher's working memory: a job bound by memory
+slows beside its own kind (G275).
+
 ## Test worlds and the garbage collector
 
 Tests that build worlds (`UWorld::CreateWorld`, then `DestroyWorld`) leave them to the garbage collector, and nothing

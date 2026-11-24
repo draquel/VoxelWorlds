@@ -1769,6 +1769,10 @@ public:
 		float LODUpdateMs = 0.0f;   // LOD strategy Update (balanced-LOD cache rebuild), before the streaming section
 		float StreamingMs = 0.0f;
 		float TotalMs = 0.0f;
+		// What the sections above leave out (G275): the generated hydrology's update, the water bodies' meshes, the far field.
+		float HydrologyMs = 0.0f;
+		float WaterBodyMeshMs = 0.0f;
+		float FarFieldMs = 0.0f;
 
 		// Generation sub-phases (GenerationMs = launch + poll + apply). Added to attribute the
 		// residual game-thread generation cost after the post-passes moved to the GPU.

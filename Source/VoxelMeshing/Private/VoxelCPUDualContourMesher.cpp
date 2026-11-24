@@ -6,6 +6,15 @@
 #include "QEFSolver.h"
 #include "VoxelCrossingGradient.h"
 #include "VoxelMeshingVoxelSampler.h"
+#include "HAL/IConsoleManager.h"
+
+static TAutoConsoleVariable<int32> CVarMeshDCDenseArrays(
+	TEXT("voxel.Mesh.DCDenseArrays"),
+	0,
+	TEXT("A/B (G275): 1 = Dual Contouring's chunk meshes keep an edge crossing and a cell vertex for every cell of the chunk, as ")
+	TEXT("before (48 MB zeroed and walked for a 64-voxel chunk); 0 = a sign per corner and the crossings and vertices of the ")
+	TEXT("surface's cells only (default). The meshes are the same, bit for bit."),
+	ECVF_Default);
 
 FVoxelCPUDualContourMesher::FVoxelCPUDualContourMesher()
 {
@@ -122,23 +131,51 @@ bool FVoxelCPUDualContourMesher::GenerateMeshCPU(
 	const int32 GridDim = GridSize + 3;
 	const int32 TotalCells = GridDim * GridDim * GridDim;
 
-	// Pass 1: Detect edge crossings (flat array: 3 edges per cell position)
-	TArray<FDCEdgeCrossing> EdgeCrossings;
-	EdgeCrossings.SetNumZeroed(TotalCells * 3);
 	TArray<int32> ValidEdgeIndices;
 	ValidEdgeIndices.Reserve(GridSize * GridSize * 4);
-	DetectEdgeCrossings(Request, Stride, GridDim, EdgeCrossings, ValidEdgeIndices);
+	double SetupEnd = 0.0;
+	double CrossingsEnd = 0.0;
+	double VerticesEnd = 0.0;
+	if (CVarMeshDCDenseArrays.GetValueOnAnyThread() != 0)
+	{
+		// Pass 1: Detect edge crossings (flat array: 3 edges per cell position)
+		TArray<FDCEdgeCrossing> EdgeCrossings;
+		EdgeCrossings.SetNumZeroed(TotalCells * 3);
+		TArray<FDCCellVertex> CellVertices;
+		CellVertices.SetNumZeroed(TotalCells);
+		SetupEnd = FPlatformTime::Seconds();
+		DetectEdgeCrossings(Request, Stride, GridDim, EdgeCrossings, ValidEdgeIndices);
+		CrossingsEnd = FPlatformTime::Seconds();
 
-	// Pass 2: Solve QEF for cell vertices
-	TArray<FDCCellVertex> CellVertices;
-	CellVertices.SetNumZeroed(TotalCells);
-	SolveCellVertices(Request, Stride, GridDim, EdgeCrossings, CellVertices);
+		// Pass 2: Solve QEF for cell vertices
+		SolveCellVertices(Request, Stride, GridDim, EdgeCrossings, CellVertices);
+		VerticesEnd = FPlatformTime::Seconds();
 
-	// Pass 3: Generate quads
-	GenerateQuads(Request, Stride, GridDim, EdgeCrossings, ValidEdgeIndices, CellVertices, OutMeshData, TriangleCount);
+		// Pass 3: Generate quads
+		GenerateQuads(Request, Stride, GridDim, EdgeCrossings, ValidEdgeIndices, CellVertices, OutMeshData, TriangleCount);
+	}
+	else
+	{
+		// The same three passes over the surface's cells only (G275). A chunk's surface crosses a few percent of its cells:
+		// a sign per corner says which, and only those cells' crossings and vertices are made and kept, in the order the
+		// dense passes make them, so the mesh is the same. The dense arrays cost 48 MB zeroed and walked for a chunk of 64
+		// voxels: a mesh bound by memory, slower beside other meshes, and a load on the cache every other thread shares.
+		FDCSurfaceGrid Grid;
+		DetectCornerSigns(Request, Stride, GridDim, Grid);
+		SetupEnd = FPlatformTime::Seconds();
+		DetectSurfaceCrossings(Request, Stride, GridDim, Grid, ValidEdgeIndices);
+		CrossingsEnd = FPlatformTime::Seconds();
+		SolveSurfaceVertices(Request, Stride, GridDim, Grid);
+		VerticesEnd = FPlatformTime::Seconds();
+		GenerateSurfaceQuads(Request, Stride, GridDim, Grid, ValidEdgeIndices, OutMeshData, TriangleCount);
+	}
 
 	// Calculate stats
 	const double EndTime = FPlatformTime::Seconds();
+	OutStats.SetupTimeMs = static_cast<float>((SetupEnd - StartTime) * 1000.0);
+	OutStats.CrossingsTimeMs = static_cast<float>((CrossingsEnd - SetupEnd) * 1000.0);
+	OutStats.VerticesTimeMs = static_cast<float>((VerticesEnd - CrossingsEnd) * 1000.0);
+	OutStats.QuadsTimeMs = static_cast<float>((EndTime - VerticesEnd) * 1000.0);
 	OutStats.VertexCount = OutMeshData.Positions.Num();
 	OutStats.IndexCount = OutMeshData.Indices.Num();
 	OutStats.FaceCount = TriangleCount;
@@ -166,10 +203,8 @@ void FVoxelCPUDualContourMesher::DetectEdgeCrossings(
 	TArray<int32>& OutValidEdgeIndices)
 {
 	const int32 ChunkSize = Request.ChunkSize;
-	const float VoxelSize = Request.VoxelSize;
 	const float IsoLevel = Config.IsoLevel;
 	const int32 GridSize = ChunkSize / Stride;
-	auto DensityFn = [&](int32 X, int32 Y, int32 Z) { return GetDensityAt(Request, X, Y, Z); };
 
 	for (int32 CZ = -1; CZ <= GridSize; CZ++)
 	{
@@ -197,49 +232,67 @@ void FVoxelCPUDualContourMesher::DetectEdgeCrossings(
 
 					if (bSolid0 != bSolid1)
 					{
-						float t = (IsoLevel - D0) / (D1 - D0);
-						t = FMath::Clamp(t, 0.0f, 1.0f);
-
-						const FVector3f P0(static_cast<float>(VX) * VoxelSize,
-							static_cast<float>(VY) * VoxelSize,
-							static_cast<float>(VZ) * VoxelSize);
-						const FVector3f P1(static_cast<float>(NX) * VoxelSize,
-							static_cast<float>(NY) * VoxelSize,
-							static_cast<float>(NZ) * VoxelSize);
-
 						const int32 EIdx = EdgeIndex(CX, CY, CZ, Axis, GridDim);
-						FDCEdgeCrossing& Crossing = OutEdgeCrossings[EIdx];
-						// At a stride, LOD 0's crossing on the edge and the fitted gradient's normal there (G62's shading
-						// normal: exact for a plane, so the QEF's vertex lies on it; the central difference tilts with the
-						// voxel phase, and a strided cell spreads that tilt over a stride; G80).
-						Crossing.Position = (Stride > 1)
-							? VoxelLODCrossing::FindVoxelCrossing(DensityFn, VX, VY, VZ, Axis, Stride, IsoLevel) * VoxelSize
-							: P0 + (P1 - P0) * t;
-						Crossing.bValid = true;
-						// The solid endpoint's material: the cells around the edge vote with it (soft borders, VP2-O4)
-						Crossing.bSolidAtStart = bSolid0;
-						Crossing.SolidMaterial = bSolid0
-							? GetVoxelAt(Request, VX, VY, VZ).MaterialID
-							: GetVoxelAt(Request, NX, NY, NZ).MaterialID;
-
-						const float CrossVoxelX = Crossing.Position.X / VoxelSize;
-						const float CrossVoxelY = Crossing.Position.Y / VoxelSize;
-						const float CrossVoxelZ = Crossing.Position.Z / VoxelSize;
-						// LOD 0's vertex normal sums its crossings' shading normals (G62).
-						if (Stride == 1)
-						{
-							Crossing.ShadingNormal = CalculateShadingNormal(Request, CrossVoxelX, CrossVoxelY, CrossVoxelZ);
-						}
-						// The QEF's plane normal: the fitted gradient (G80 at a stride, G81 at stride 1).
-						Crossing.Normal = (Stride == 1)
-							? Crossing.ShadingNormal : CalculateShadingNormal(Request, CrossVoxelX, CrossVoxelY, CrossVoxelZ);
-
+						ComputeEdgeCrossing(Request, Stride, VX, VY, VZ, Axis, D0, D1, OutEdgeCrossings[EIdx]);
 						OutValidEdgeIndices.Add(EIdx);
 					}
 				}
 			}
 		}
 	}
+}
+
+void FVoxelCPUDualContourMesher::ComputeEdgeCrossing(
+	const FVoxelMeshingRequest& Request,
+	int32 Stride,
+	int32 VX, int32 VY, int32 VZ,
+	int32 Axis,
+	float D0, float D1,
+	FDCEdgeCrossing& Crossing) const
+{
+	const float VoxelSize = Request.VoxelSize;
+	const float IsoLevel = Config.IsoLevel;
+	auto DensityFn = [&](int32 X, int32 Y, int32 Z) { return GetDensityAt(Request, X, Y, Z); };
+	int32 NX = VX, NY = VY, NZ = VZ;
+	if (Axis == 0) NX += Stride;
+	else if (Axis == 1) NY += Stride;
+	else NZ += Stride;
+	const bool bSolid0 = (D0 >= IsoLevel);
+
+	float t = (IsoLevel - D0) / (D1 - D0);
+	t = FMath::Clamp(t, 0.0f, 1.0f);
+
+	const FVector3f P0(static_cast<float>(VX) * VoxelSize,
+		static_cast<float>(VY) * VoxelSize,
+		static_cast<float>(VZ) * VoxelSize);
+	const FVector3f P1(static_cast<float>(NX) * VoxelSize,
+		static_cast<float>(NY) * VoxelSize,
+		static_cast<float>(NZ) * VoxelSize);
+
+	// At a stride, LOD 0's crossing on the edge and the fitted gradient's normal there (G62's shading
+	// normal: exact for a plane, so the QEF's vertex lies on it; the central difference tilts with the
+	// voxel phase, and a strided cell spreads that tilt over a stride; G80).
+	Crossing.Position = (Stride > 1)
+		? VoxelLODCrossing::FindVoxelCrossing(DensityFn, VX, VY, VZ, Axis, Stride, IsoLevel) * VoxelSize
+		: P0 + (P1 - P0) * t;
+	Crossing.bValid = true;
+	// The solid endpoint's material: the cells around the edge vote with it (soft borders, VP2-O4)
+	Crossing.bSolidAtStart = bSolid0;
+	Crossing.SolidMaterial = bSolid0
+		? GetVoxelAt(Request, VX, VY, VZ).MaterialID
+		: GetVoxelAt(Request, NX, NY, NZ).MaterialID;
+
+	const float CrossVoxelX = Crossing.Position.X / VoxelSize;
+	const float CrossVoxelY = Crossing.Position.Y / VoxelSize;
+	const float CrossVoxelZ = Crossing.Position.Z / VoxelSize;
+	// LOD 0's vertex normal sums its crossings' shading normals (G62).
+	if (Stride == 1)
+	{
+		Crossing.ShadingNormal = CalculateShadingNormal(Request, CrossVoxelX, CrossVoxelY, CrossVoxelZ);
+	}
+	// The QEF's plane normal: the fitted gradient (G80 at a stride, G81 at stride 1).
+	Crossing.Normal = (Stride == 1)
+		? Crossing.ShadingNormal : CalculateShadingNormal(Request, CrossVoxelX, CrossVoxelY, CrossVoxelZ);
 }
 
 // ============================================================================
@@ -255,14 +308,6 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 {
 	const int32 ChunkSize = Request.ChunkSize;
 	const int32 GridSize = ChunkSize / Stride;
-	const float VoxelSize = Request.VoxelSize;
-	const float CellWorldSize = static_cast<float>(Stride) * VoxelSize;
-	const float SVDThreshold = Config.QEFSVDThreshold;
-	const float BiasStrength = Config.QEFBiasStrength;
-	// At a stride the crossings are LOD 0's with the fitted gradient's normals (G80), and the vertex normal sums them as
-	// LOD 0's does (AvgNormal: the cell's own crossings). LOD 0's shading normals are the fitted gradient at each crossing
-	// (G62), which G81 gives the QEF too.
-	const bool bCrossingShading = Stride == 1;
 
 	// 12 edges of a cube cell: 4 along each axis (the seams' ring recompute walks the same table)
 	const auto& CellEdges = VoxelDCTables::CellEdges;
@@ -289,61 +334,87 @@ void FVoxelCPUDualContourMesher::SolveCellVertices(
 		{
 			for (int32 CX = CellMin; CX < CellMaxEx; CX++)
 			{
-				FQEFSolver QEF;
-				FVector3f AvgNormal = FVector3f::ZeroVector;
-				FVector3f ShadingSum = FVector3f::ZeroVector;
-				VoxelDCMaterialBlend::FCellMaterialVote MaterialVote;
-
-				for (const auto& Edge : CellEdges)
+				const FDCEdgeCrossing* Crossings[12];
+				for (int32 Index = 0; Index < 12; ++Index)
 				{
-					const int32 EIdx = EdgeIndex(CX + Edge.DX, CY + Edge.DY, CZ + Edge.DZ, Edge.Axis, GridDim);
-					const FDCEdgeCrossing& Crossing = EdgeCrossings[EIdx];
-					if (Crossing.bValid)
-					{
-						const int32 EndDX = Edge.DX + ((Edge.Axis == 0 && !Crossing.bSolidAtStart) ? 1 : 0);
-						const int32 EndDY = Edge.DY + ((Edge.Axis == 1 && !Crossing.bSolidAtStart) ? 1 : 0);
-						const int32 EndDZ = Edge.DZ + ((Edge.Axis == 2 && !Crossing.bSolidAtStart) ? 1 : 0);
-						MaterialVote.Add(VoxelDCMaterialBlend::CornerIndex(EndDX, EndDY, EndDZ), Crossing.SolidMaterial);
-						QEF.Add(Crossing.Position, Crossing.Normal);
-						AvgNormal += Crossing.Normal;
-						if (bCrossingShading)
-						{
-							ShadingSum += Crossing.ShadingNormal;
-						}
-					}
+					const auto& Edge = CellEdges[Index];
+					const FDCEdgeCrossing& Crossing = EdgeCrossings[EdgeIndex(CX + Edge.DX, CY + Edge.DY, CZ + Edge.DZ, Edge.Axis, GridDim)];
+					Crossings[Index] = Crossing.bValid ? &Crossing : nullptr;
 				}
-
-				if (QEF.Count == 0)
-				{
-					continue;
-				}
-
-				const float MinX = static_cast<float>(CX * Stride) * VoxelSize;
-				const float MinY = static_cast<float>(CY * Stride) * VoxelSize;
-				const float MinZ = static_cast<float>(CZ * Stride) * VoxelSize;
-				const FBox3f CellBounds(
-					FVector3f(MinX, MinY, MinZ),
-					FVector3f(MinX + CellWorldSize, MinY + CellWorldSize, MinZ + CellWorldSize)
-				);
-
-				const int32 CIdx = CellIndex(CX, CY, CZ, GridDim);
-				FDCCellVertex& Vertex = OutCellVertices[CIdx];
-				Vertex.bValid = true;
-				Vertex.MeshVertexIndex = -1;  // SetNumZeroed zeroes this to 0; EmitVertex needs -1 to know it's unemitted
-				Vertex.Position = QEF.Solve(SVDThreshold, CellBounds, BiasStrength);
-
-				if (!AvgNormal.Normalize())
-				{
-					AvgNormal = FVector3f(0.0f, 0.0f, 1.0f);
-				}
-				Vertex.Normal = (bCrossingShading && ShadingSum.Normalize()) ? ShadingSum : AvgNormal;
-				// Material/biome are assigned per-quad in GenerateQuads (from the owned
-				// edge's solid endpoint) so triangles stay material-uniform; the cell's own
-				// material decides the quad's blend toward a neighbouring material (VP2-O4).
-				Vertex.CellMaterial = MaterialVote.Result();
+				SolveCellVertex(Request, Stride, CX, CY, CZ, Crossings, OutCellVertices[CellIndex(CX, CY, CZ, GridDim)]);
 			}
 		}
 	}
+}
+
+bool FVoxelCPUDualContourMesher::SolveCellVertex(
+	const FVoxelMeshingRequest& Request,
+	int32 Stride,
+	int32 CX, int32 CY, int32 CZ,
+	const FDCEdgeCrossing* const Crossings[12],
+	FDCCellVertex& Vertex) const
+{
+	const float VoxelSize = Request.VoxelSize;
+	const float CellWorldSize = static_cast<float>(Stride) * VoxelSize;
+	const float SVDThreshold = Config.QEFSVDThreshold;
+	const float BiasStrength = Config.QEFBiasStrength;
+	// At a stride the crossings are LOD 0's with the fitted gradient's normals (G80), and the vertex normal sums them as
+	// LOD 0's does (AvgNormal: the cell's own crossings). LOD 0's shading normals are the fitted gradient at each crossing
+	// (G62), which G81 gives the QEF too.
+	const bool bCrossingShading = Stride == 1;
+	const auto& CellEdges = VoxelDCTables::CellEdges;
+
+	FQEFSolver QEF;
+	FVector3f AvgNormal = FVector3f::ZeroVector;
+	FVector3f ShadingSum = FVector3f::ZeroVector;
+	VoxelDCMaterialBlend::FCellMaterialVote MaterialVote;
+
+	for (int32 Index = 0; Index < 12; ++Index)
+	{
+		if (const FDCEdgeCrossing* CrossingPtr = Crossings[Index])
+		{
+			const auto& Edge = CellEdges[Index];
+			const FDCEdgeCrossing& Crossing = *CrossingPtr;
+			const int32 EndDX = Edge.DX + ((Edge.Axis == 0 && !Crossing.bSolidAtStart) ? 1 : 0);
+			const int32 EndDY = Edge.DY + ((Edge.Axis == 1 && !Crossing.bSolidAtStart) ? 1 : 0);
+			const int32 EndDZ = Edge.DZ + ((Edge.Axis == 2 && !Crossing.bSolidAtStart) ? 1 : 0);
+			MaterialVote.Add(VoxelDCMaterialBlend::CornerIndex(EndDX, EndDY, EndDZ), Crossing.SolidMaterial);
+			QEF.Add(Crossing.Position, Crossing.Normal);
+			AvgNormal += Crossing.Normal;
+			if (bCrossingShading)
+			{
+				ShadingSum += Crossing.ShadingNormal;
+			}
+		}
+	}
+
+	if (QEF.Count == 0)
+	{
+		return false;
+	}
+
+	const float MinX = static_cast<float>(CX * Stride) * VoxelSize;
+	const float MinY = static_cast<float>(CY * Stride) * VoxelSize;
+	const float MinZ = static_cast<float>(CZ * Stride) * VoxelSize;
+	const FBox3f CellBounds(
+		FVector3f(MinX, MinY, MinZ),
+		FVector3f(MinX + CellWorldSize, MinY + CellWorldSize, MinZ + CellWorldSize)
+	);
+
+	Vertex.bValid = true;
+	Vertex.MeshVertexIndex = -1;  // A zeroed vertex has 0 here; EmitVertex needs -1 to know it is unemitted
+	Vertex.Position = QEF.Solve(SVDThreshold, CellBounds, BiasStrength);
+
+	if (!AvgNormal.Normalize())
+	{
+		AvgNormal = FVector3f(0.0f, 0.0f, 1.0f);
+	}
+	Vertex.Normal = (bCrossingShading && ShadingSum.Normalize()) ? ShadingSum : AvgNormal;
+	// Material/biome are assigned per-quad in GenerateQuads (from the owned
+	// edge's solid endpoint) so triangles stay material-uniform; the cell's own
+	// material decides the quad's blend toward a neighbouring material (VP2-O4).
+	Vertex.CellMaterial = MaterialVote.Result();
+	return true;
 }
 
 // ============================================================================
@@ -362,18 +433,6 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 {
 	const int32 ChunkSize = Request.ChunkSize;
 	const int32 GridSize = ChunkSize / Stride;
-	const float IsoLevel = Config.IsoLevel;
-
-	// Precomputed 4-cell offsets per axis (winding-correct)
-	struct FCellOffset { int32 DX, DY, DZ; };
-	static const FCellOffset AxisOffsets[3][4] = {
-		// Axis 0 (X-edge): vary Y,Z
-		{{0, 0, 0}, {0, -1, 0}, {0, -1, -1}, {0, 0, -1}},
-		// Axis 1 (Y-edge): vary Z,X (Z×X = +Y)
-		{{0, 0, 0}, {0, 0, -1}, {-1, 0, -1}, {-1, 0, 0}},
-		// Axis 2 (Z-edge): vary X,Y
-		{{0, 0, 0}, {-1, 0, 0}, {-1, -1, 0}, {0, -1, 0}},
-	};
 
 	// Duplicate-emission cache for cell vertices shared by quads of different
 	// materials: key = (cell index << 16) | (material << 8) | biome.
@@ -395,42 +454,11 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 		const int32 CY = ((CellLinear / GridDim) % GridDim) - 1;
 		const int32 CZ = (CellLinear / (GridDim * GridDim)) - 1;
 
-		const FCellOffset* Offsets = AxisOffsets[Axis];
-
-		// Edge ownership: the edge position itself must be in [0, GridSize).
-		// This ensures each physical edge is owned by exactly one chunk.
-		// Cell offsets (containing 0 and -1) access cells in [-1, GridSize-1],
-		// which SolveCellVertices already computes.
-		const bool bOwned = (CX >= 0 && CX < GridSize && CY >= 0 && CY < GridSize && CZ >= 0 && CZ < GridSize);
-		if (!bOwned)
+		if (!IsQuadEdge(CX, CY, CZ, Axis, GridSize, bInteriorDomain))
 		{
 			continue;
 		}
-
-		// Interior domain: skip any quad whose 4 cells are not all interior. (The surrounding
-		// cells sit at offsets 0/-1 from the edge, so this bounds-checks each against
-		// [0, GridSize-1) — boundary-layer cells were not solved in this domain.)
-		if (bInteriorDomain)
-		{
-			bool bAllCellsInterior = true;
-			for (int32 i = 0; i < 4; i++)
-			{
-				const int32 ACX = CX + Offsets[i].DX;
-				const int32 ACY = CY + Offsets[i].DY;
-				const int32 ACZ = CZ + Offsets[i].DZ;
-				if (ACX < 0 || ACX >= GridSize - 1 ||
-					ACY < 0 || ACY >= GridSize - 1 ||
-					ACZ < 0 || ACZ >= GridSize - 1)
-				{
-					bAllCellsInterior = false;
-					break;
-				}
-			}
-			if (!bAllCellsInterior)
-			{
-				continue;
-			}
-		}
+		const FDCCellOffset* Offsets = QuadCellOffsets[Axis];
 
 		// Look up the 4 cell vertices via flat array
 		FDCCellVertex* Verts[4];
@@ -455,73 +483,320 @@ void FVoxelCPUDualContourMesher::GenerateQuads(
 			continue;
 		}
 
-		// Determine winding order from density sign at the edge start
-		const float D0 = GetDensityAt(Request, CX * Stride, CY * Stride, CZ * Stride);
-		const bool bFlip = (D0 < IsoLevel);
+		EmitEdgeQuad(Request, Stride, CX, CY, CZ, Axis, Verts, CellIdxs, DuplicateVertexCache, OutMeshData, OutTriangleCount);
+	}
+}
 
-		// Per-quad material: the quad is dual to this sign-change edge, so its
-		// surface material is the material of the edge's SOLID endpoint (the voxel
-		// the surface bounds). All 4 vertices carry this ID — triangles must be
-		// material-uniform because the pixel shader rounds the hardware-interpolated
-		// UV1.x back to an integer atlas index; a triangle with mixed IDs sweeps
-		// through every intermediate index and stripes material borders.
-		int32 SolidX = CX * Stride, SolidY = CY * Stride, SolidZ = CZ * Stride;
-		if (bFlip) // edge start is empty — the solid endpoint is the +Axis end
+// Precomputed 4-cell offsets per axis (winding-correct)
+const FVoxelCPUDualContourMesher::FDCCellOffset FVoxelCPUDualContourMesher::QuadCellOffsets[3][4] = {
+	// Axis 0 (X-edge): vary Y,Z
+	{{0, 0, 0}, {0, -1, 0}, {0, -1, -1}, {0, 0, -1}},
+	// Axis 1 (Y-edge): vary Z,X (Z×X = +Y)
+	{{0, 0, 0}, {0, 0, -1}, {-1, 0, -1}, {-1, 0, 0}},
+	// Axis 2 (Z-edge): vary X,Y
+	{{0, 0, 0}, {-1, 0, 0}, {-1, -1, 0}, {0, -1, 0}},
+};
+
+bool FVoxelCPUDualContourMesher::IsQuadEdge(int32 CX, int32 CY, int32 CZ, int32 Axis, int32 GridSize, bool bInteriorDomain)
+{
+	// Edge ownership: the edge position itself must be in [0, GridSize).
+	// This ensures each physical edge is owned by exactly one chunk.
+	// Cell offsets (containing 0 and -1) access cells in [-1, GridSize-1],
+	// which SolveCellVertices already computes.
+	const bool bOwned = (CX >= 0 && CX < GridSize && CY >= 0 && CY < GridSize && CZ >= 0 && CZ < GridSize);
+	if (!bOwned)
+	{
+		return false;
+	}
+
+	// Interior domain: skip any quad whose 4 cells are not all interior. (The surrounding
+	// cells sit at offsets 0/-1 from the edge, so this bounds-checks each against
+	// [0, GridSize-1) — boundary-layer cells were not solved in this domain.)
+	if (bInteriorDomain)
+	{
+		const FDCCellOffset* Offsets = QuadCellOffsets[Axis];
+		for (int32 i = 0; i < 4; i++)
 		{
-			if (Axis == 0) { SolidX += Stride; }
-			else if (Axis == 1) { SolidY += Stride; }
-			else { SolidZ += Stride; }
-		}
-		const FVoxelData SolidVoxel = GetVoxelAt(Request, SolidX, SolidY, SolidZ);
-		const uint8 QuadMaterial = SolidVoxel.MaterialID;
-		const uint8 QuadBiome = SolidVoxel.BiomeID;
-
-		// Emit vertices with the quad's material and its blend toward a neighbouring cell's material (VP2-O4). A cell
-		// vertex already emitted with a different material or blend is duplicated (same position/normal) via the cache.
-		int32 Indices[4];
-		VoxelDCMaterialBlend::EmitQuadCells(Verts, CellIdxs, 4, QuadMaterial, QuadBiome, DuplicateVertexCache,
-			[&](const FDCCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint32 EmitBlend)
+			const int32 ACX = CX + Offsets[i].DX;
+			const int32 ACY = CY + Offsets[i].DY;
+			const int32 ACZ = CZ + Offsets[i].DZ;
+			if (ACX < 0 || ACX >= GridSize - 1 ||
+				ACY < 0 || ACY >= GridSize - 1 ||
+				ACZ < 0 || ACZ >= GridSize - 1)
 			{
-				return EmitVertex(Request, EmitCell, EmitMaterial, EmitBiome, EmitBlend, OutMeshData);
-			},
-			Indices);
-
-		// Split the quad along the diagonal that maximises the smaller of the two triangle
-		// areas (a max-min-area / Delaunay-like choice). A fixed 0-2 diagonal can produce a
-		// near-zero-area sliver on quads whose four vertices approach collinearity (the
-		// renderer drops such slivers, punching pinholes); choosing the better diagonal is
-		// cheap, leaves well-shaped quads untouched, and improves shading on skewed quads.
-		auto TriArea = [](const FVector3f& A, const FVector3f& B, const FVector3f& C) -> float
-		{
-			return 0.5f * FVector3f::CrossProduct(B - A, C - A).Size();
-		};
-		const FVector3f& P0 = Verts[0]->Position;
-		const FVector3f& P1 = Verts[1]->Position;
-		const FVector3f& P2 = Verts[2]->Position;
-		const FVector3f& P3 = Verts[3]->Position;
-		const float MinArea02 = FMath::Min(TriArea(P0, P1, P2), TriArea(P0, P2, P3));
-		const float MinArea13 = FMath::Min(TriArea(P1, P2, P3), TriArea(P1, P3, P0));
-		const bool bUse13 = MinArea13 > MinArea02;
-
-		auto AddTri = [&](int32 a, int32 b, int32 c)
-		{
-			OutMeshData.Indices.Add(Indices[a]);
-			OutMeshData.Indices.Add(Indices[b]);
-			OutMeshData.Indices.Add(Indices[c]);
-		};
-
-		if (bFlip)
-		{
-			if (bUse13) { AddTri(1, 2, 3); AddTri(1, 3, 0); }
-			else        { AddTri(0, 1, 2); AddTri(0, 2, 3); }
+				return false;
+			}
 		}
-		else
+	}
+	return true;
+}
+
+void FVoxelCPUDualContourMesher::EmitEdgeQuad(
+	const FVoxelMeshingRequest& Request,
+	int32 Stride,
+	int32 CX, int32 CY, int32 CZ,
+	int32 Axis,
+	FDCCellVertex* Verts[4],
+	const int32 CellIdxs[4],
+	TMap<uint64, int32>& DuplicateVertexCache,
+	FChunkMeshData& OutMeshData,
+	uint32& OutTriangleCount) const
+{
+	const float IsoLevel = Config.IsoLevel;
+
+	// Determine winding order from density sign at the edge start
+	const float D0 = GetDensityAt(Request, CX * Stride, CY * Stride, CZ * Stride);
+	const bool bFlip = (D0 < IsoLevel);
+
+	// Per-quad material: the quad is dual to this sign-change edge, so its
+	// surface material is the material of the edge's SOLID endpoint (the voxel
+	// the surface bounds). All 4 vertices carry this ID — triangles must be
+	// material-uniform because the pixel shader rounds the hardware-interpolated
+	// UV1.x back to an integer atlas index; a triangle with mixed IDs sweeps
+	// through every intermediate index and stripes material borders.
+	int32 SolidX = CX * Stride, SolidY = CY * Stride, SolidZ = CZ * Stride;
+	if (bFlip) // edge start is empty — the solid endpoint is the +Axis end
+	{
+		if (Axis == 0) { SolidX += Stride; }
+		else if (Axis == 1) { SolidY += Stride; }
+		else { SolidZ += Stride; }
+	}
+	const FVoxelData SolidVoxel = GetVoxelAt(Request, SolidX, SolidY, SolidZ);
+	const uint8 QuadMaterial = SolidVoxel.MaterialID;
+	const uint8 QuadBiome = SolidVoxel.BiomeID;
+
+	// Emit vertices with the quad's material and its blend toward a neighbouring cell's material (VP2-O4). A cell
+	// vertex already emitted with a different material or blend is duplicated (same position/normal) via the cache.
+	int32 Indices[4];
+	VoxelDCMaterialBlend::EmitQuadCells(Verts, CellIdxs, 4, QuadMaterial, QuadBiome, DuplicateVertexCache,
+		[&](const FDCCellVertex& EmitCell, uint8 EmitMaterial, uint8 EmitBiome, uint32 EmitBlend)
 		{
-			if (bUse13) { AddTri(1, 3, 2); AddTri(1, 0, 3); }
-			else        { AddTri(0, 2, 1); AddTri(0, 3, 2); }
+			return EmitVertex(Request, EmitCell, EmitMaterial, EmitBiome, EmitBlend, OutMeshData);
+		},
+		Indices);
+
+	// Split the quad along the diagonal that maximises the smaller of the two triangle
+	// areas (a max-min-area / Delaunay-like choice). A fixed 0-2 diagonal can produce a
+	// near-zero-area sliver on quads whose four vertices approach collinearity (the
+	// renderer drops such slivers, punching pinholes); choosing the better diagonal is
+	// cheap, leaves well-shaped quads untouched, and improves shading on skewed quads.
+	auto TriArea = [](const FVector3f& A, const FVector3f& B, const FVector3f& C) -> float
+	{
+		return 0.5f * FVector3f::CrossProduct(B - A, C - A).Size();
+	};
+	const FVector3f& P0 = Verts[0]->Position;
+	const FVector3f& P1 = Verts[1]->Position;
+	const FVector3f& P2 = Verts[2]->Position;
+	const FVector3f& P3 = Verts[3]->Position;
+	const float MinArea02 = FMath::Min(TriArea(P0, P1, P2), TriArea(P0, P2, P3));
+	const float MinArea13 = FMath::Min(TriArea(P1, P2, P3), TriArea(P1, P3, P0));
+	const bool bUse13 = MinArea13 > MinArea02;
+
+	auto AddTri = [&](int32 a, int32 b, int32 c)
+	{
+		OutMeshData.Indices.Add(Indices[a]);
+		OutMeshData.Indices.Add(Indices[b]);
+		OutMeshData.Indices.Add(Indices[c]);
+	};
+
+	if (bFlip)
+	{
+		if (bUse13) { AddTri(1, 2, 3); AddTri(1, 3, 0); }
+		else        { AddTri(0, 1, 2); AddTri(0, 2, 3); }
+	}
+	else
+	{
+		if (bUse13) { AddTri(1, 3, 2); AddTri(1, 0, 3); }
+		else        { AddTri(0, 2, 1); AddTri(0, 3, 2); }
+	}
+
+	OutTriangleCount += 2;
+}
+
+// ============================================================================
+// The same passes over the surface's cells only (G275)
+// ============================================================================
+
+void FVoxelCPUDualContourMesher::DetectCornerSigns(
+	const FVoxelMeshingRequest& Request,
+	int32 Stride,
+	int32 GridDim,
+	FDCSurfaceGrid& Grid) const
+{
+	const int32 GridSize = Request.ChunkSize / Stride;
+	const float IsoLevel = Config.IsoLevel;
+	const int32 TotalCells = GridDim * GridDim * GridDim;
+	Grid.CornerSolid.SetNumZeroed(TotalCells);
+	// Written before they are read: an edge's slot when its crossing is made, read only where the two corner signs differ.
+	Grid.EdgeSlots.SetNumUninitialized(TotalCells * 3);
+	Grid.CellSlots.Init(INDEX_NONE, TotalCells);
+	Grid.Crossings.Reserve(GridSize * GridSize * 6);
+	Grid.Vertices.Reserve(GridSize * GridSize * 3);
+
+	// Every corner the dense pass reads: an edge starts at a cell in [-1, GridSize] and ends one step along one axis, so
+	// a corner has at most one coordinate at GridSize + 1.
+	uint8* Solid = Grid.CornerSolid.GetData();
+	for (int32 CZ = -1; CZ <= GridSize + 1; CZ++)
+	{
+		for (int32 CY = -1; CY <= GridSize + 1; CY++)
+		{
+			const int32 OuterYZ = (CY > GridSize ? 1 : 0) + (CZ > GridSize ? 1 : 0);
+			if (OuterYZ > 1)
+			{
+				continue;
+			}
+			const int32 MaxX = (OuterYZ == 0) ? GridSize + 1 : GridSize;
+			int32 Index = CellIndex(-1, CY, CZ, GridDim);
+			for (int32 CX = -1; CX <= MaxX; CX++, Index++)
+			{
+				Solid[Index] = (GetDensityAt(Request, CX * Stride, CY * Stride, CZ * Stride) >= IsoLevel) ? 1 : 0;
+			}
+		}
+	}
+}
+
+void FVoxelCPUDualContourMesher::DetectSurfaceCrossings(
+	const FVoxelMeshingRequest& Request,
+	int32 Stride,
+	int32 GridDim,
+	FDCSurfaceGrid& Grid,
+	TArray<int32>& OutValidEdgeIndices) const
+{
+	const int32 GridSize = Request.ChunkSize / Stride;
+	const uint8* Solid = Grid.CornerSolid.GetData();
+	const int32 CornerStep[3] = { 1, GridDim, GridDim * GridDim };
+
+	// DetectEdgeCrossings' order: the valid edges, and so the quads, come out as they did.
+	for (int32 CZ = -1; CZ <= GridSize; CZ++)
+	{
+		for (int32 CY = -1; CY <= GridSize; CY++)
+		{
+			int32 Corner = CellIndex(-1, CY, CZ, GridDim);
+			for (int32 CX = -1; CX <= GridSize; CX++, Corner++)
+			{
+				const uint8 Solid0 = Solid[Corner];
+				if (Solid0 == Solid[Corner + CornerStep[0]] && Solid0 == Solid[Corner + CornerStep[1]] && Solid0 == Solid[Corner + CornerStep[2]])
+				{
+					continue;
+				}
+				const int32 VX = CX * Stride;
+				const int32 VY = CY * Stride;
+				const int32 VZ = CZ * Stride;
+				const float D0 = GetDensityAt(Request, VX, VY, VZ);
+				for (int32 Axis = 0; Axis < 3; Axis++)
+				{
+					if (Solid0 == Solid[Corner + CornerStep[Axis]])
+					{
+						continue;
+					}
+					const float D1 = GetDensityAt(Request, VX + (Axis == 0 ? Stride : 0), VY + (Axis == 1 ? Stride : 0), VZ + (Axis == 2 ? Stride : 0));
+					const int32 EIdx = Corner * 3 + Axis;
+					Grid.EdgeSlots[EIdx] = Grid.Crossings.AddDefaulted();
+					ComputeEdgeCrossing(Request, Stride, VX, VY, VZ, Axis, D0, D1, Grid.Crossings.Last());
+					OutValidEdgeIndices.Add(EIdx);
+				}
+			}
+		}
+	}
+}
+
+void FVoxelCPUDualContourMesher::SolveSurfaceVertices(
+	const FVoxelMeshingRequest& Request,
+	int32 Stride,
+	int32 GridDim,
+	FDCSurfaceGrid& Grid) const
+{
+	const int32 GridSize = Request.ChunkSize / Stride;
+	const auto& CellEdges = VoxelDCTables::CellEdges;
+	const uint8* Solid = Grid.CornerSolid.GetData();
+	const int32 StepY = GridDim;
+	const int32 StepZ = GridDim * GridDim;
+
+	// SolveCellVertices' domain (see there): the interior cells alone in the Interior domain.
+	const bool bInteriorDomain = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
+	const int32 CellMin = bInteriorDomain ? 0 : -1;
+	const int32 CellMaxEx = bInteriorDomain ? (GridSize - 1) : GridSize;
+	for (int32 CZ = CellMin; CZ < CellMaxEx; CZ++)
+	{
+		for (int32 CY = CellMin; CY < CellMaxEx; CY++)
+		{
+			int32 Corner = CellIndex(CellMin, CY, CZ, GridDim);
+			for (int32 CX = CellMin; CX < CellMaxEx; CX++, Corner++)
+			{
+				// A cell whose eight corners agree has no crossing on any of its twelve edges: nothing to solve.
+				const int32 Sum = Solid[Corner] + Solid[Corner + 1] + Solid[Corner + StepY] + Solid[Corner + StepY + 1]
+					+ Solid[Corner + StepZ] + Solid[Corner + StepZ + 1] + Solid[Corner + StepZ + StepY] + Solid[Corner + StepZ + StepY + 1];
+				if (Sum == 0 || Sum == 8)
+				{
+					continue;
+				}
+
+				const FDCEdgeCrossing* Crossings[12];
+				for (int32 Index = 0; Index < 12; ++Index)
+				{
+					const auto& Edge = CellEdges[Index];
+					const int32 Start = Corner + Edge.DX + Edge.DY * StepY + Edge.DZ * StepZ;
+					const int32 End = Start + (Edge.Axis == 0 ? 1 : (Edge.Axis == 1 ? StepY : StepZ));
+					Crossings[Index] = (Solid[Start] != Solid[End]) ? &Grid.Crossings[Grid.EdgeSlots[Start * 3 + Edge.Axis]] : nullptr;
+				}
+				FDCCellVertex Vertex;
+				if (SolveCellVertex(Request, Stride, CX, CY, CZ, Crossings, Vertex))
+				{
+					Grid.CellSlots[Corner] = Grid.Vertices.Add(Vertex);
+				}
+			}
+		}
+	}
+}
+
+void FVoxelCPUDualContourMesher::GenerateSurfaceQuads(
+	const FVoxelMeshingRequest& Request,
+	int32 Stride,
+	int32 GridDim,
+	FDCSurfaceGrid& Grid,
+	const TArray<int32>& ValidEdgeIndices,
+	FChunkMeshData& OutMeshData,
+	uint32& OutTriangleCount) const
+{
+	const int32 GridSize = Request.ChunkSize / Stride;
+	const bool bInteriorDomain = (Request.MeshCellDomain == EVoxelMeshCellDomain::Interior);
+	// GenerateQuads' cache, keyed by the cell's place in the grid as there.
+	TMap<uint64, int32> DuplicateVertexCache;
+
+	for (const int32 EIdx : ValidEdgeIndices)
+	{
+		const int32 Axis = EIdx % 3;
+		const int32 CellLinear = EIdx / 3;
+		const int32 CX = (CellLinear % GridDim) - 1;
+		const int32 CY = ((CellLinear / GridDim) % GridDim) - 1;
+		const int32 CZ = (CellLinear / (GridDim * GridDim)) - 1;
+		if (!IsQuadEdge(CX, CY, CZ, Axis, GridSize, bInteriorDomain))
+		{
+			continue;
+		}
+		const FDCCellOffset* Offsets = QuadCellOffsets[Axis];
+
+		FDCCellVertex* Verts[4];
+		int32 CellIdxs[4];
+		bool bAllValid = true;
+		for (int32 i = 0; i < 4; i++)
+		{
+			const int32 CIdx = CellIndex(CX + Offsets[i].DX, CY + Offsets[i].DY, CZ + Offsets[i].DZ, GridDim);
+			const int32 Slot = Grid.CellSlots[CIdx];
+			if (Slot == INDEX_NONE)
+			{
+				bAllValid = false;
+				break;
+			}
+			Verts[i] = &Grid.Vertices[Slot];
+			CellIdxs[i] = CIdx;
+		}
+		if (!bAllValid)
+		{
+			continue;
 		}
 
-		OutTriangleCount += 2;
+		EmitEdgeQuad(Request, Stride, CX, CY, CZ, Axis, Verts, CellIdxs, DuplicateVertexCache, OutMeshData, OutTriangleCount);
 	}
 }
 

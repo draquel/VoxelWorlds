@@ -191,6 +191,33 @@ struct FAsyncCollisionResult
 	bool bSuccess = false;
 	/** Meshing succeeded but produced no triangles (all-solid or all-air chunk). Implies bSuccess. */
 	bool bEmpty = false;
+	/** The cook's stages on its worker, in milliseconds (voxel.Collision.CookStats, G275). */
+	float WaitMs = 0.0f;
+	float CopyMs = 0.0f;
+	float SlicesMs = 0.0f;
+	float MeshMs = 0.0f;
+	float TriMeshMs = 0.0f;
+	float TotalMs = 0.0f;
+};
+
+/** What the collision cooks cost on their workers since the last reset, summed per stage (voxel.Collision.CookStats, G275). */
+struct FVoxelCollisionCookStats
+{
+	int64 Cooks = 0;
+	int64 EmptyCooks = 0;
+	int64 Triangles = 0;
+	/** Waiting for far-compressed snapshots to decode. */
+	double WaitMs = 0.0;
+	/** The chunk's voxels copied into the meshing request. */
+	double CopyMs = 0.0;
+	/** The neighbours' boundary slices extracted. */
+	double SlicesMs = 0.0;
+	/** The chunk meshed at the collision LOD. */
+	double MeshMs = 0.0;
+	/** The Chaos triangle mesh built from it. */
+	double TriMeshMs = 0.0;
+	double TotalMs = 0.0;
+	double MaxTotalMs = 0.0;
 };
 
 /**
@@ -327,6 +354,10 @@ public:
 
 	/** Re-cooks requested because a neighbour missing at cook time arrived (OnChunkVoxelDataAvailable), this session. */
 	int64 GetTotalNeighborRecooks() const { return TotalNeighborRecooks; }
+
+	/** The cooks' cost per stage since the last reset. */
+	const FVoxelCollisionCookStats& GetCookStats() const { return CookStats; }
+	void ResetCookStats() { CookStats = FVoxelCollisionCookStats(); }
 
 	/** Neighbour arrivals that needed no re-cook (air on both sides of the boundary), this session. */
 	int64 GetTotalNeighborArrivalsSkipped() const { return TotalNeighborArrivalsSkipped; }
@@ -750,6 +781,9 @@ protected:
 
 	/** Total collision meshes generated */
 	int64 TotalCollisionsGenerated = 0;
+
+	/** Summed from each completed cook's result on the game thread. */
+	FVoxelCollisionCookStats CookStats;
 
 	/** Total collision meshes removed */
 	int64 TotalCollisionsRemoved = 0;
