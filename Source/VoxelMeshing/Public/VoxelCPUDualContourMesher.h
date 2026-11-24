@@ -213,6 +213,102 @@ private:
 		TArray<int32>& OutValidEdgeIndices);
 
 	/**
+	 * One edge's crossing (pass 1's body): where the surface crosses it, the normals there and the solid endpoint's material.
+	 *
+	 * @param Request The meshing request
+	 * @param Stride The cell stride (1 << LOD)
+	 * @param VX, VY, VZ The edge's start voxel (chunk-local)
+	 * @param Axis The edge's axis; it ends Stride voxels along it
+	 * @param D0, D1 The densities at its start and its end, on either side of the iso level
+	 * @param Crossing The crossing written
+	 */
+	void ComputeEdgeCrossing(
+		const FVoxelMeshingRequest& Request,
+		int32 Stride,
+		int32 VX, int32 VY, int32 VZ,
+		int32 Axis,
+		float D0, float D1,
+		FDCEdgeCrossing& Crossing) const;
+
+	/**
+	 * One cell's vertex (pass 2's body) from the crossings on its twelve edges, in VoxelDCTables::CellEdges order.
+	 *
+	 * @param Request The meshing request
+	 * @param Stride The cell stride
+	 * @param CX, CY, CZ The cell
+	 * @param Crossings Its edges' crossings, null where an edge has none
+	 * @param Vertex The vertex written when the cell has a crossing
+	 * @return Whether the cell has a crossing
+	 */
+	bool SolveCellVertex(
+		const FVoxelMeshingRequest& Request,
+		int32 Stride,
+		int32 CX, int32 CY, int32 CZ,
+		const FDCEdgeCrossing* const Crossings[12],
+		FDCCellVertex& Vertex) const;
+
+	/** A cell around an edge, as an offset from the edge's cell. */
+	struct FDCCellOffset { int32 DX, DY, DZ; };
+
+	/** The four cells around an edge of each axis, in winding order. */
+	static const FDCCellOffset QuadCellOffsets[3][4];
+
+	/**
+	 * Whether a crossing edge gets a quad in this mesh (pass 3's tests): the chunk owns the edge, and in the Interior
+	 * domain its four cells are interior cells.
+	 */
+	static bool IsQuadEdge(int32 CX, int32 CY, int32 CZ, int32 Axis, int32 GridSize, bool bInteriorDomain);
+
+	/**
+	 * The quad dual to one crossing edge (pass 3's body) from its four cells' vertices: its material, its vertices
+	 * emitted (or reused), its diagonal and its two triangles.
+	 *
+	 * @param Verts The four cells' vertices in QuadCellOffsets order
+	 * @param CellIdxs The four cells' CellIndex (the duplicate cache's key)
+	 */
+	void EmitEdgeQuad(
+		const FVoxelMeshingRequest& Request,
+		int32 Stride,
+		int32 CX, int32 CY, int32 CZ,
+		int32 Axis,
+		FDCCellVertex* Verts[4],
+		const int32 CellIdxs[4],
+		TMap<uint64, int32>& DuplicateVertexCache,
+		FChunkMeshData& OutMeshData,
+		uint32& OutTriangleCount) const;
+
+	/**
+	 * The working memory of a chunk mesh made over the surface's cells only (G275): a sign per grid corner, and the
+	 * crossings and vertices that exist, found through a slot per edge and per cell. A few megabytes for a chunk of 64
+	 * voxels where an entry per edge and per cell is 48.
+	 */
+	struct FDCSurfaceGrid
+	{
+		/** Per grid corner (CellIndex): 1 where the density is at or above the iso level. */
+		TArray<uint8> CornerSolid;
+		/** Per edge (EdgeIndex): its crossing's index in Crossings; set only for the edges whose corner signs differ. */
+		TArray<int32> EdgeSlots;
+		/** Per cell (CellIndex): its vertex's index in Vertices, or INDEX_NONE. */
+		TArray<int32> CellSlots;
+		TArray<FDCEdgeCrossing> Crossings;
+		TArray<FDCCellVertex> Vertices;
+	};
+
+	/** The grid's arrays and the sign of every corner pass 1 reads, each density read once. */
+	void DetectCornerSigns(const FVoxelMeshingRequest& Request, int32 Stride, int32 GridDim, FDCSurfaceGrid& Grid) const;
+
+	/** Pass 1 over the edges whose corner signs differ, in DetectEdgeCrossings' order. */
+	void DetectSurfaceCrossings(const FVoxelMeshingRequest& Request, int32 Stride, int32 GridDim, FDCSurfaceGrid& Grid,
+		TArray<int32>& OutValidEdgeIndices) const;
+
+	/** Pass 2 over the cells whose corner signs differ, in SolveCellVertices' order and domain. */
+	void SolveSurfaceVertices(const FVoxelMeshingRequest& Request, int32 Stride, int32 GridDim, FDCSurfaceGrid& Grid) const;
+
+	/** Pass 3 over the grid's vertices, in GenerateQuads' order. */
+	void GenerateSurfaceQuads(const FVoxelMeshingRequest& Request, int32 Stride, int32 GridDim, FDCSurfaceGrid& Grid,
+		const TArray<int32>& ValidEdgeIndices, FChunkMeshData& OutMeshData, uint32& OutTriangleCount) const;
+
+	/**
 	 * Pass 2: Solve QEF for each cell that has edge crossings.
 	 * Collects hermite data from up to 12 edges touching the cell.
 	 */

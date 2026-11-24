@@ -679,6 +679,12 @@ struct VOXELMESHING_API FVoxelMeshingStats
 	/** Time taken to generate mesh in milliseconds */
 	float GenerationTimeMs = 0.0f;
 
+	/** Dual Contouring's passes (G275): the working arrays' setup, the edge crossings, the cells' vertices, the quads. */
+	float SetupTimeMs = 0.0f;
+	float CrossingsTimeMs = 0.0f;
+	float VerticesTimeMs = 0.0f;
+	float QuadsTimeMs = 0.0f;
+
 	/** Number of solid voxels processed */
 	uint32 SolidVoxelCount = 0;
 
