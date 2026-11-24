@@ -143,8 +143,20 @@ chunk meshes alone, a figure no buffer had: records older than G119 read low aga
   (before, all of them showed as one unnamed task). The parent project's `Scripts/qa/play_trace.py --workers`
   sets their load per second, in threads, beside the game thread's frame. On VoxelDemo a teleport onto fresh ground
   ran about six threads of them for 10 s, 3.3 cooking collision (a cook's median 72 ms), and the frame averaged 34
-  to 39 ms against 17 at rest; with `voxel.Collision.MaxAsyncTasks 1` it averaged 21 to 28 ms (G275, open: the
-  jobs' load slows the game thread, not only the work the game thread does for them).
+  to 39 ms against 17 at rest; with `voxel.Collision.MaxAsyncTasks 1` it averaged 21 to 28 ms (G275).
+- **A job's memory, not its thread, is what the game thread pays for** (G275, closed 2026-11-24). Every streaming job
+  is a background-priority task on the engine's background workers, and jobs that only compute cost the frame nothing
+  (six of them: 17.9 ms against 17.5). Jobs that move memory slow the game thread on its own core, through the cache
+  and the memory bus all cores share: the Dual Contouring mesher's dense working arrays (48 MB a chunk mesh) were the
+  burst's cost above, and the mesher now holds the surface's cells only (`DUAL_CONTOURING.md`, "Cost"). To tell which
+  it is for a new load: `voxel.Stream.Probe <tag>` records per tick the frame and the chunk manager's tick by the
+  clock and by the cycles the game thread spent on a processor (the same work longer with the same cycles: the thread
+  was off its processor; with more cycles: the processor ran it slower), a fixed piece of arithmetic, of scattered
+  memory reads and of allocation, a small `ParallelFor`, and the tick's sections; `voxel.Stream.ProbeLoad` runs
+  synthetic jobs of one kind (`spin`, `mem`, `alloc`, `churn`) where the streaming's jobs run; the parent project's
+  `Scripts/qa/stream_probe.py` runs both through a list of phases in one PIE and tables each phase, with the
+  collision's arrival after each teleport. `voxel.Collision.CookStats` gives a cook's stages on its worker. In an
+  Insights trace each section of the chunk manager's tick has a `VoxelTick_*` scope.
 
 ---
 

@@ -85,9 +85,24 @@ GridDim = GridSize + 3   (total entries per axis)
 GridSize = ChunkSize / Stride   (active cell count)
 ```
 
-Cell and edge indices are packed into flat arrays:
-- **Cell index**: `(CX+1) + (CY+1)*GridDim + (CZ+1)*GridDim*GridDim`
+Cells, grid corners and edges are numbered flat:
+- **Cell index** (and a corner's, the cell's minimum corner): `(CX+1) + (CY+1)*GridDim + (CZ+1)*GridDim*GridDim`
 - **Edge index**: `CellIndex * 3 + Axis` (3 edges per cell: +X, +Y, +Z)
+
+### The surface's cells only
+
+A chunk's surface crosses a few percent of its cells, so a chunk mesh keeps data only for those (G275;
+`FDCSurfaceGrid`). Before pass 1 every grid corner's density is read once and its sign kept, a byte a corner
+(`DetectCornerSigns`). Pass 1 makes a crossing for each edge whose two corners differ, into a compact array found
+through a slot per edge; pass 2 solves a vertex for each cell whose eight corners differ, into a compact array found
+through a slot per cell; pass 3 walks the valid edges as below. Each pass visits its edges and cells in the grid's
+order and computes each crossing, vertex and quad with one function (`ComputeEdgeCrossing`, `SolveCellVertex`,
+`EmitEdgeQuad`), so the mesh does not depend on how the working data is held.
+
+`voxel.Mesh.DCDenseArrays 1` holds it the way the mesher did before: an edge crossing for every edge and a vertex for
+every cell of the grid, zeroed, 48 MB for a 64-voxel chunk against about 7 MB. The two give the same mesh bit for bit
+(the mesh digest's lines; `VoxelWorlds.Meshing.DualContour.Bench` compares its meshes' CRCs between runs); the switch
+exists for measuring one against the other ([Cost](#cost)).
 
 ### Cell Domains
 
@@ -405,9 +420,25 @@ DC typically produces fewer triangles and vertices than MC for the same terrain:
 
 ### Cost
 
-Meshing runs on worker threads. The QEF solve is the most expensive pass (the iterative Jacobi decomposition per cell).
-The fitted shading normals (G62) and voxel-resolution crossings (G80) cost chunk-mesh worker time at LOD 1 and 2 in
-exchange for LOD 0's surface; the edge-crossing and cell arrays are temporaries of one job, sized `GridDim^3`.
+Meshing runs on worker threads. The fitted shading normals (G62) and voxel-resolution crossings (G80) cost chunk-mesh
+worker time at LOD 1 and 2 in exchange for LOD 0's surface.
+
+A chunk mesh's working memory is the cost that matters beyond its own time (G275, 2026-11-24;
+`Documentation/STREAMING_JOB_LOAD_PLAN.md` in the parent project). While the mesher kept a crossing for every edge and
+a vertex for every cell of the grid, a 64-voxel chunk's mesh took, zeroed and walked 48 MB: 27.8 ms alone and 39.6 ms
+with four at once on the bench (`VoxelWorlds.Meshing.DualContour.Bench`: a chunk of noise terrain, about 12,400
+triangles, on an i9-10900KF), and 67 to 73 ms of each 75 to 80 ms collision cook in VoxelDemo. Four cooks at once and
+the streamed chunks' meshes beside them moved enough memory to slow the game thread on its own core: after a teleport
+the frame fell from 17 ms to 34-39 ms for ten seconds, code that has nothing to do with the streaming included (Slate
+1.54 times slower), while the game thread never left its processor and waited no longer for its tasks. Busy workers
+alone do not do that (six jobs of arithmetic on the same workers: 17.9 ms); jobs that move memory do (three copying
+64 MB blocks: 41 ms). Over the surface's cells only the same mesh takes 9.9 ms alone and 11.5 ms with four at once
+(the corner signs and the arrays 2.2 ms, the crossings 4.4, the vertices 2.2, the quads 1.2), a cook 20 to 21 ms, and
+the same teleport's frame is 28, 25 and 21 ms in its first three seconds and near 19 after (37, 36, 32, 33, 29 with
+the dense arrays, alternated in one editor), with collision under the pawn after 0.35 s against 0.65. A mesher that
+allocates by the chunk's volume instead of its surface brings that cost back: keep a job's working memory proportional
+to what it produces, and check a change with the bench's four-at-once figure, which is where a memory-bound job
+shows.
 
 ---
 
