@@ -111,8 +111,9 @@ teleports a side between two sites 90 km apart (`Scripts/qa/stream_probe.py`): i
 against 5 to 12 %; collision under the pawn after 0.26 to 0.32 s against 0.31 to 0.39, 216 to 227 cooks a teleport
 against 282 to 307, the last cook after 7.5 to 8.3 s against 7.6 to 8.7, no fall-through. The ten seconds after are
 unchanged (a tick of 3.3 to 3.8 ms: the submits, the seams, the far field's walk of its tree), and so is when the window
-is full: a cap on those is a trade against how soon the terrain shows, left to the user as D196
-(`Documentation/FINDINGS.md`). `voxel.Stream.Probe` records per tick what waited; tests
+is full: their submits arrive at the rate the workers make them, and the submits' budget (`voxel.Stream.SubmitBudgetMs`) at
+1, 2 or 4 ms changed nothing, so a cap there measured as no trade (G282; a submit's own cost is G294 in
+`Documentation/FINDINGS.md`). `voxel.Stream.Probe` records per tick what waited; tests
 `VoxelWorlds.Streaming.TickBudget.*` and `VoxelWorlds.FarField.Plane.LaunchBudget` (the held far field settles to the
 free one's selection).
 
@@ -318,8 +319,7 @@ focus with a shell of its own (Further viewers and their ground windows, below).
 face slabs; the cook meshes the whole chunk with the main mesher at the collision LOD. On VoxelDemo (64-voxel
 chunks, Dual Contouring, LOD 0, four cooks at once) a cook takes 20 to 21 ms on its worker, 13.6 to 14.3 of them the
 mesh and 5 to 6 the Chaos triangle mesh (`voxel.Collision.CookStats`; 75 to 80 ms before G275's fix of the mesher's
-working memory, `DUAL_CONTOURING.md`, "Cost"), and a teleport onto fresh ground launches about 470 of them, 175 of
-chunks with no surface (G283).
+working memory, `DUAL_CONTOURING.md`, "Cost"). A teleport onto fresh ground launches about 335 of them (G283, below).
 
 The shell's radius grows with the focus's speed (`voxel.Collision.LeadSeconds`), and a focus that moves more than a chunk
 in one tick has jumped (a teleport, a respawn) and gives it no speed (`voxel.Collision.JumpIsCut`, G282). Taken as
@@ -336,6 +336,44 @@ buried wall). Arrivals around a chunk fold into one re-cook once no other missin
 re-cooks queue below every first cook; the old body stays live until the new one replaces it (G32; tests
 `Collision.{NeighborArrival,EditNeighbors}`). `voxel.Collision.AuditNeighbors`
 lists cooks that read a neighbour as air and are stale.
+
+**A chunk with no surface is not meshed** (G283). A cook that would read no surface, the chunk's voxels and every plane
+it reads of its 26 neighbours on one side, is ready-empty without the mesher: on the game thread when the chunk and its
+neighbours are held uniform with no edits (`TrySkipCookAtLaunch`), else on the cook's worker before the voxel copy
+(`UVoxelCollisionManager::PredictNoSurface`); `voxel.Collision.SkipNoSurface` (setting `bCollisionSkipNoSurface`, 0 = the
+old path). The side is the one every mesher reads: air below density 127, solid from 128. Density 127 itself (air to Dual
+Contouring and Marching Cubes, solid to the cubic mesher) and a solid voxel of a non-occluding material (the cubic mesher
+draws faces against leaves) are neither, and a missing neighbour is read as air, so a rock chunk beside one is cooked. A
+chunk that gains a surface later is cooked as before: an edit marks it dirty, and a neighbour's arrival re-cooks it unless
+both sides of the boundary are air. On VoxelDemo, teleports between G282's two sites with the old and the new path
+alternated in one editor (`Scripts/qa/stream_probe.py`, four a side): a teleport's ~335 cooks are ~236 first cooks, ~107
+of them empty, and ~98 neighbour re-cooks; 86 to 90 of the empty ones are not meshed (all on the worker: none had itself
+and all its neighbours held uniform), 6.4 to 6.9 thread-seconds a teleport against 7.0 to
+7.1; collision under the pawn after 0.27 to 0.31 s against 0.26 to 0.30, the same last cook, generations, mesh submits and
+moment the window is full. The prediction is never wrong: with `voxel.Collision.CookAudit 1` every cook is meshed anyway
+and compared, and no chunk predicted empty had a triangle; the 18 to 36 empty cooks a teleport it does not predict read a
+voxel of the other side (in a neighbour's plane, or of density 127) with no crossing the chunk's cells own. Tests `Collision.NoSurface.Prediction` (the
+three meshers on fixed cases and 300 random neighbourhoods) and `Collision.NoSurface.SameCollision` (a plane, a block
+world, a plane of Marching Cubes and a planet: every chunk's triangle mesh the same with the skip as without, and an edit
+that raises ground in a skipped chunk gives it a body).
+
+**The neighbour re-cooks are needed; waiting for the neighbours is a choice** (G283, D196). The audit hashes each cook's
+triangle mesh: 0 to 2 of a teleport's ~98 neighbour re-cooks built the mesh they replaced, so none can be dropped at the
+arrival. A rule that took an arrival whose planes are exactly the air read in their place (every density 0) was measured
+and dropped: 7 to 11 such arrivals a teleport, no re-cook fewer, each of those chunks having another neighbour to come.
+The re-cooks are cooks run before the neighbours had voxels, and only waiting saves them: with `voxel.Collision.NeighborWait`
+(off by default; decision D196, `Documentation/FINDINGS.md`) a first cook more than `voxel.Collision.NeighborWaitChunks`
+(2) chunk widths from every focus waits while a neighbour is being generated, at most `voxel.Collision.NeighborWaitMaxSeconds`
+(3 s) from its queueing; the path coverage, the re-cooks and the chunks near a focus (a server's other players are foci)
+never wait. On, alternated with off: 35 to 49 re-cooks a teleport against 98 to 99, 4.6 to 5.6 thread-seconds against 6.6
+to 7.0; the first collision within 2 chunk widths when it was, 2 to 3 widths out after 4.6 to 4.8 s on average against 2.7
+to 2.8, 3 to 5 widths out after 6.6 to 7.1 s against 4.5 to 5.0; the frame (19.7 to 20.8 ms) and the chunk manager's tick
+the same, and the same when the window is full. Running at 1,500 uu/s the re-cooks fall from 113 to 114 to 33 to 37 with
+no fall-through either way. Test `Collision.NeighborWait` (the same collision with the wait as without). What is left of the
+cooks' cost: each meshes its chunk again though a mesh job meshes the same voxels (G296).
+
+`voxel.Collision.CookStats` reports the cooks by kind, the skips, the wait's holds and, per distance band from the nearest
+focus, when the first collision arrived.
 
 **A chunk's collision is a static component.** Each cooked chunk is one `UVoxelCollisionComponent` at the chunk's
 corner, on the `VoxelCollisionContainer` actor the collision manager spawns (transient, not replicated: every machine

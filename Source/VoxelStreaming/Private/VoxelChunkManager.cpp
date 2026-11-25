@@ -278,7 +278,7 @@ static TAutoConsoleVariable<float> CVarStreamSubmitBudgetMs(
 	4.0f,
 	TEXT("Milliseconds a tick may spend submitting finished chunk meshes to the renderer (at least one a tick); ")
 	TEXT("the rest wait for the next tick. Before G282 a fixed 4 ms. A lower value spreads a burst's submits over more ticks, at ")
-	TEXT("the cost of the terrain showing later (D196)."),
+	TEXT("the cost of the terrain showing later; at 1, 2 or 4 ms a teleport's burst measured the same (G282; the submits' own cost is G294)."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarStreamMaxLoadPerFrame(
@@ -2085,6 +2085,23 @@ bool UVoxelChunkManager::IsChunkFarCompressed(const FIntVector& ChunkCoord) cons
 {
 	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
 	return State && State->Descriptor.Residency == EVoxelDataResidency::Compressed;
+}
+
+bool UVoxelChunkManager::GetUniformVoxel(const FIntVector& ChunkCoord, FVoxelData& OutValue) const
+{
+	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+	if (!State || State->Descriptor.Residency != EVoxelDataResidency::Uniform)
+	{
+		return false;
+	}
+	// Edits are kept beside the base voxels and merged into what readers get (GetVoxelSnapshot): an edited chunk is not
+	// its uniform value.
+	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
+	{
+		return false;
+	}
+	OutValue = State->Descriptor.UniformValue;
+	return true;
 }
 
 bool UVoxelChunkManager::IsChunkWaterSettled(const FIntVector& ChunkCoord) const

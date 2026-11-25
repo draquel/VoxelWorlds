@@ -680,6 +680,16 @@ public:
 	bool IsChunkFarCompressed(const FIntVector& ChunkCoord) const;
 
 	/**
+	 * A chunk held uniform (every voxel one value: EVoxelDataResidency::Uniform) with no edits (G283): what a reader of it
+	 * gets is that one voxel everywhere, known without its snapshot.
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @param OutValue Receives the voxel when the chunk is uniform
+	 * @return True if the chunk is tracked, held uniform and has no edits
+	 */
+	bool GetUniformVoxel(const FIntVector& ChunkCoord, FVoxelData& OutValue) const;
+
+	/**
 	 * Whether a chunk's water flags are in place: it has voxel data and has submitted a mesh since that data arrived, which
 	 * pulls the flags across its faces from its neighbours (PropagateWaterFromNeighbors; a chunk wholly under a heightmap
 	 * sea gets all of its water that way). Edit-driven water propagation reads a chunk only then (world modes review G58).
