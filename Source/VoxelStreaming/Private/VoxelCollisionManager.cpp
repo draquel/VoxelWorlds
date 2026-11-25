@@ -29,6 +29,8 @@
 #include "Chaos/TriangleMeshImplicitObject.h"
 #include "VoxelResidencyStats.h"
 #include "VoxelTickBudget.h"
+#include "VoxelMaterialRegistry.h"
+#include "Hash/CityHash.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelCollision, Log, All);
 
@@ -90,6 +92,54 @@ static TAutoConsoleVariable<int32> CVarCollisionLookAheadChunks(
 	     "chunk it is descending into — at top priority, so ground under imminent (incl. downhill) footfalls is "
 	     "cooked before entry. 0 disables path coverage."),
 	ECVF_Default);
+
+// ---- G283: the cooks a teleport repeats ----
+
+static TAutoConsoleVariable<int32> CVarCollisionSkipNoSurface(
+	TEXT("voxel.Collision.SkipNoSurface"),
+	1,
+	TEXT("G283: 1 = a chunk whose cook would read no surface (its voxels and the planes it reads of its 26 neighbours all air or ")
+	TEXT("all solid) is ready-empty without the mesher: on the game thread when it and its neighbours are held uniform, else on ")
+	TEXT("the cook's worker before the copy; 0 = every such chunk is meshed, as before. The project's value is ")
+	TEXT("UVoxelWorldsSettings::bCollisionSkipNoSurface; the cvar overrides it once set."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarCollisionCookAudit(
+	TEXT("voxel.Collision.CookAudit"),
+	0,
+	TEXT("G283 diagnostic: 1 = every cook works out whether it would find no surface and meshes anyway, counting where the ")
+	TEXT("prediction and the mesh disagree, and hashes its triangle mesh so a re-cook that builds the same one is counted ")
+	TEXT("(voxel.Collision.CookStats). Costs a hash a cook; 0 = off."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarCollisionNeighborWait(
+	TEXT("voxel.Collision.NeighborWait"),
+	0,
+	TEXT("G283, D196 (the user's decision; off by default): 1 = a chunk's first cook away from every focus waits while one of ")
+	TEXT("its 26 neighbours is still being generated, so it reads them instead of air and needs no re-cook when they arrive; ")
+	TEXT("the chunks near a focus and the path coverage never wait. The project's value is ")
+	TEXT("UVoxelWorldsSettings::bCollisionNeighborWait; the cvar overrides it once set."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarCollisionNeighborWaitChunks(
+	TEXT("voxel.Collision.NeighborWaitChunks"),
+	2.0f,
+	TEXT("G283, D196: with voxel.Collision.NeighborWait 1, a chunk whose centre is within this many chunk widths of a focus never ")
+	TEXT("waits for its neighbours. The project's value is UVoxelWorldsSettings::CollisionNeighborWaitChunks."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarCollisionNeighborWaitMaxSeconds(
+	TEXT("voxel.Collision.NeighborWaitMaxSeconds"),
+	3.0f,
+	TEXT("G283, D196: with voxel.Collision.NeighborWait 1, the longest a chunk's first cook waits for its neighbours, from when it ")
+	TEXT("was queued, in seconds. The project's value is UVoxelWorldsSettings::CollisionNeighborWaitMaxSeconds."),
+	ECVF_Default);
+
+namespace VoxelCollisionNoSurface
+{
+	/** The path coverage's boost (ForcePathCoverage): a request at or above half of it is a footfall's and never waits. */
+	constexpr float PathBoost = 1.0e6f;
+}
 
 // ==================== UVoxelCollisionComponent ====================
 
@@ -226,7 +276,9 @@ void UVoxelCollisionManager::Initialize(UVoxelWorldConfiguration* Config, UVoxel
 	TotalNeighborRecooks = 0;
 	TotalNeighborArrivalsSkipped = 0;
 	TotalNeighborArrivalsSkippedSolid = 0;
+	TotalSkippedAtLaunch = 0;
 	PendingNeighborRecooks.Empty();
+	ResetCookStats();
 
 	bIsInitialized = true;
 
@@ -384,6 +436,7 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 
 	bWasStationary = FocusSpeed <= StationarySpeedThreshold;
 	LastFocusPosition = FocusPosition;
+	LastUpdateFocus = FocusPosition;
 
 	// Tier 1: guarantee the ground under the pawn and the chunks it is about to enter — including the
 	// one it is descending into — are cooked FIRST, overriding their center-distance priority (a
@@ -497,7 +550,7 @@ void UVoxelCollisionManager::ForcePathCoverage(const FVector& FocusPosition, con
 
 	// Boost path priorities far above the distance-based ones (which max at ~CurrentEffectiveRadius),
 	// so imminent-footfall chunks cook first. RequestCollision re-prioritizes an already-queued chunk.
-	constexpr float PathBoost = 1.0e6f;
+	constexpr float PathBoost = VoxelCollisionNoSurface::PathBoost;
 
 	// Local down and the heading across it come from the world mode: world -Z and the horizontal velocity in heightmap
 	// modes, the radius and the tangent on a planet (SP-C4).
@@ -672,6 +725,36 @@ namespace VoxelCollisionNeighbors
 		}
 		return bSolid ? ESlab::Solid : ESlab::Air;
 	}
+
+	/**
+	 * Call Visit for each voxel position of the region a cook reads of a neighbour (G283), in the neighbour's own
+	 * coordinates: across each axis Offset is not zero on, the Depth planes next to the shared face (Offset +1: the
+	 * neighbour's low planes; -1: its high ones), the whole range along the others. Stops when Visit returns false.
+	 *
+	 * @return False if Visit stopped it
+	 */
+	template <typename TVisit>
+	bool ForEachNeighborRegionVoxel(const FIntVector& Offset, int32 ChunkSize, int32 Depth, TVisit&& Visit)
+	{
+		const int32 D = FMath::Clamp(Depth, 1, ChunkSize);
+		int32 Min[3], Max[3];
+		for (int32 Axis = 0; Axis < 3; ++Axis)
+		{
+			const int32 O = Offset[Axis];
+			Min[Axis] = O < 0 ? ChunkSize - D : 0;
+			Max[Axis] = O > 0 ? D - 1 : ChunkSize - 1;
+		}
+		for (int32 Z = Min[2]; Z <= Max[2]; ++Z)
+		for (int32 Y = Min[1]; Y <= Max[1]; ++Y)
+		for (int32 X = Min[0]; X <= Max[0]; ++X)
+		{
+			if (!Visit(X, Y, Z))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
 }
 
 int32 UVoxelCollisionManager::OnChunkVoxelDataAvailable(const FIntVector& ChunkCoord)
@@ -838,6 +921,243 @@ void UVoxelCollisionManager::ProcessNeighborRecooks()
 		}
 		It.RemoveCurrent();
 	}
+}
+
+// ==================== No surface (G283) ====================
+
+const FVoxelMaterialTable* UVoxelCollisionManager::GetMesherMaterials(const IVoxelMesher& Mesher)
+{
+	// A mesher without a table of its own reads the defaults (the cubic mesher's GetMaterials), where leaves are non-occluding.
+	const TSharedPtr<const FVoxelMaterialTable>& Table = Mesher.GetConfig().Materials;
+	return Table.IsValid() ? Table.Get() : &FVoxelMaterialTable::Defaults();
+}
+
+EVoxelSurfaceSide UVoxelCollisionManager::GetSurfaceSide(const FVoxelData& Voxel, const FVoxelMaterialTable* Materials)
+{
+	// Dual Contouring and Marching Cubes put the surface at 0.5 of 255 (127.5: density 127 is air to them), the cubic
+	// mesher at VOXEL_SURFACE_THRESHOLD (127 is solid to it). Below 127 both read air, from 128 both read solid.
+	static_assert(VOXEL_SURFACE_THRESHOLD == 127, "the meshers' shared air and solid ranges assume the threshold 127");
+	if (Voxel.Density < VOXEL_SURFACE_THRESHOLD)
+	{
+		return EVoxelSurfaceSide::Air;
+	}
+	if (Voxel.Density == VOXEL_SURFACE_THRESHOLD)
+	{
+		return EVoxelSurfaceSide::Mixed;
+	}
+	// The cubic mesher draws a face between two solid voxels when either is non-occluding (leaves, glass).
+	if (Materials && Materials->IsNonOccluding(Voxel.MaterialID))
+	{
+		return EVoxelSurfaceSide::Mixed;
+	}
+	return EVoxelSurfaceSide::Solid;
+}
+
+EVoxelSurfaceSide UVoxelCollisionManager::GetVolumeSide(const TArray<FVoxelData>& Voxels, int32 ChunkSize, const FVoxelMaterialTable* Materials)
+{
+	const int32 Total = ChunkSize * ChunkSize * ChunkSize;
+	if (ChunkSize <= 0 || Voxels.Num() < Total)
+	{
+		return EVoxelSurfaceSide::Mixed;
+	}
+	const EVoxelSurfaceSide Side = GetSurfaceSide(Voxels[0], Materials);
+	if (Side == EVoxelSurfaceSide::Mixed)
+	{
+		return Side;
+	}
+	// The other corners and the centre first: a chunk the surface crosses almost always differs between them, so it costs
+	// a few reads instead of a scan.
+	const int32 L = ChunkSize - 1;
+	const int32 H = ChunkSize / 2;
+	const FIntVector Probes[] = { {L, 0, 0}, {0, L, 0}, {L, L, 0}, {0, 0, L}, {L, 0, L}, {0, L, L}, {L, L, L}, {H, H, H} };
+	for (const FIntVector& P : Probes)
+	{
+		if (GetSurfaceSide(Voxels[P.X + P.Y * ChunkSize + P.Z * ChunkSize * ChunkSize], Materials) != Side)
+		{
+			return EVoxelSurfaceSide::Mixed;
+		}
+	}
+	const FVoxelData* Data = Voxels.GetData();
+	for (int32 Index = 1; Index < Total; ++Index)
+	{
+		if (GetSurfaceSide(Data[Index], Materials) != Side)
+		{
+			return EVoxelSurfaceSide::Mixed;
+		}
+	}
+	return Side;
+}
+
+bool UVoxelCollisionManager::IsNeighborRegionOnSide(const FIntVector& Offset, int32 ChunkSize, int32 Depth, EVoxelSurfaceSide Side,
+	const FVoxelCollisionNeighborView& Neighbor, const FVoxelMaterialTable* Materials)
+{
+	if (Side == EVoxelSurfaceSide::Mixed)
+	{
+		return false;
+	}
+	if (Neighbor.IsMissing())
+	{
+		// Read as air (Dual Contouring and the cubic mesher; Marching Cubes reads the chunk's own voxel, which is on Side
+		// whenever the chunk is, so taking it as air is the safe reading for it too).
+		return Side == EVoxelSurfaceSide::Air;
+	}
+	if (Neighbor.Full && Neighbor.Full->Num() < ChunkSize * ChunkSize * ChunkSize)
+	{
+		return false;
+	}
+	return VoxelCollisionNeighbors::ForEachNeighborRegionVoxel(Offset, ChunkSize, Depth,
+		[&Neighbor, ChunkSize, Side, Materials](int32 X, int32 Y, int32 Z)
+		{
+			return GetSurfaceSide(Neighbor.Get(X, Y, Z, ChunkSize), Materials) == Side;
+		});
+}
+
+bool UVoxelCollisionManager::PredictNoSurface(EVoxelSurfaceSide OwnSide, int32 ChunkSize, int32 Depth,
+	TFunctionRef<FVoxelCollisionNeighborView(const FIntVector&)> GetNeighbor, const FVoxelMaterialTable* Materials)
+{
+	if (OwnSide == EVoxelSurfaceSide::Mixed)
+	{
+		return false;
+	}
+	for (int32 DZ = -1; DZ <= 1; ++DZ)
+	for (int32 DY = -1; DY <= 1; ++DY)
+	for (int32 DX = -1; DX <= 1; ++DX)
+	{
+		const FIntVector Offset(DX, DY, DZ);
+		if (Offset == FIntVector::ZeroValue)
+		{
+			continue;
+		}
+		if (!IsNeighborRegionOnSide(Offset, ChunkSize, Depth, OwnSide, GetNeighbor(Offset), Materials))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+bool UVoxelCollisionManager::TrySkipCookAtLaunch(const FIntVector& ChunkCoord)
+{
+	if (!ChunkManager)
+	{
+		return false;
+	}
+	const IVoxelMesher* MesherPtr = ChunkManager->GetMesherPtr();
+	const FVoxelMaterialTable* Materials = MesherPtr ? GetMesherMaterials(*MesherPtr) : nullptr;
+	FVoxelData Own;
+	if (!ChunkManager->GetUniformVoxel(ChunkCoord, Own))
+	{
+		return false;
+	}
+	const EVoxelSurfaceSide Side = GetSurfaceSide(Own, Materials);
+	if (Side == EVoxelSurfaceSide::Mixed)
+	{
+		return false;
+	}
+	uint32 MissingMask = 0;
+	for (int32 DZ = -1; DZ <= 1; ++DZ)
+	for (int32 DY = -1; DY <= 1; ++DY)
+	for (int32 DX = -1; DX <= 1; ++DX)
+	{
+		const FIntVector Offset(DX, DY, DZ);
+		if (Offset == FIntVector::ZeroValue)
+		{
+			continue;
+		}
+		const FIntVector NeighborCoord = ChunkCoord + Offset;
+		FVoxelData Value;
+		if (ChunkManager->GetUniformVoxel(NeighborCoord, Value))
+		{
+			if (GetSurfaceSide(Value, Materials) != Side)
+			{
+				return false;
+			}
+			continue;
+		}
+		if (ChunkManager->HasChunkVoxelData(NeighborCoord))
+		{
+			return false; // not uniform: the cook's worker reads its planes (PredictNoSurface)
+		}
+		// Missing: the cook would read it as air, so only an air chunk is still without a surface.
+		if (Side != EVoxelSurfaceSide::Air)
+		{
+			return false;
+		}
+		MissingMask |= GetNeighborBit(Offset);
+	}
+
+	FChunkCollisionData& Data = CollisionData.FindOrAdd(ChunkCoord);
+	Data.ChunkCoord = ChunkCoord;
+	Data.CollisionLODLevel = CollisionLODLevel;
+	Data.bNeedsUpdate = false;
+	Data.bNeighborRecookOnly = false;
+	Data.ArrivedNeighborMask = 0;
+	// As for a cook: a neighbour that arrives later re-cooks the chunk (OnChunkVoxelDataAvailable) unless air on both sides.
+	Data.MissingNeighborMask = MissingMask;
+	++TotalSkippedAtLaunch;
+	++CookStats.SkippedAtLaunch;
+	ApplyEmptyCollisionResult(ChunkCoord);
+	return true;
+}
+
+void UVoxelCollisionManager::NoteFirstReady(const FIntVector& ChunkCoord)
+{
+	if (!Configuration)
+	{
+		return;
+	}
+	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+	if (ChunkWorldSize <= 0.0f)
+	{
+		return;
+	}
+	const FVector ChunkCenter = Configuration->WorldOrigin + FVector(ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
+	const float Chunks = GetNearestFocusDistance(ChunkCenter, LastUpdateFocus) / ChunkWorldSize;
+	const int32 Band = Chunks < 1.0f ? 0 : (Chunks < 2.0f ? 1 : (Chunks < 3.0f ? 2 : (Chunks < 5.0f ? 3 : 4)));
+	const double Seconds = FPlatformTime::Seconds() - CookStats.ResetSeconds;
+	++CookStats.BandFirstReady[Band];
+	CookStats.BandFirstReadySumSeconds[Band] += Seconds;
+	CookStats.BandFirstReadyLastSeconds[Band] = FMath::Max(CookStats.BandFirstReadyLastSeconds[Band], Seconds);
+}
+
+bool UVoxelCollisionManager::ShouldWaitForNeighbors(const FCollisionCookRequest& Request, const FVector& FirstFocus, double Now) const
+{
+	if (!ChunkManager || !Configuration || Request.Priority >= VoxelCollisionNoSurface::PathBoost * 0.5f)
+	{
+		return false; // the path coverage's footfalls never wait
+	}
+	const FChunkCollisionData* Data = CollisionData.Find(Request.ChunkCoord);
+	if (Data && Data->HasLiveCollision())
+	{
+		return false; // a re-cook: the old body stands meanwhile, and re-cooks already queue below every first cook
+	}
+	const UVoxelWorldsSettings& Settings = UVoxelWorldsSettings::Get();
+	if (Now - Request.QueuedSeconds > VoxelSettings::Resolve(CVarCollisionNeighborWaitMaxSeconds, Settings.CollisionNeighborWaitMaxSeconds))
+	{
+		return false;
+	}
+	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+	const FVector ChunkCenter = Configuration->WorldOrigin + FVector(Request.ChunkCoord) * ChunkWorldSize + FVector(ChunkWorldSize * 0.5f);
+	const float NearChunks = FMath::Max(0.0f, VoxelSettings::Resolve(CVarCollisionNeighborWaitChunks, Settings.CollisionNeighborWaitChunks));
+	if (GetNearestFocusDistance(ChunkCenter, FirstFocus) <= NearChunks * ChunkWorldSize)
+	{
+		return false;
+	}
+	for (int32 DZ = -1; DZ <= 1; ++DZ)
+	for (int32 DY = -1; DY <= 1; ++DY)
+	for (int32 DX = -1; DX <= 1; ++DX)
+	{
+		if (DX == 0 && DY == 0 && DZ == 0)
+		{
+			continue;
+		}
+		const EChunkState State = ChunkManager->GetChunkState(Request.ChunkCoord + FIntVector(DX, DY, DZ));
+		if (State == EChunkState::PendingGeneration || State == EChunkState::Generating)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 void UVoxelCollisionManager::AuditNeighborCooks(int32& OutCooked, int32& OutWithMissing, int32& OutStale, int32& OutAwaiting,
@@ -1154,13 +1474,42 @@ void UVoxelCollisionManager::ProcessCookingQueue()
 	// Launch async tasks from the queue up to the concurrency limit (cvar override for Tier 1 headroom).
 	const int32 AsyncOverride = CVarCollisionMaxAsyncTasks.GetValueOnGameThread();
 	const int32 MaxAsync = AsyncOverride > 0 ? FMath::Clamp(AsyncOverride, 1, 8) : MaxAsyncCollisionTasks;
-	while (CookingQueue.Num() > 0 &&
-		AsyncCollisionInProgress.Num() < MaxAsync)
+	// A chunk ready-empty at its launch (TrySkipCookAtLaunch, G283) takes no slot: at most this many a tick, so a queue of
+	// them is not all worked in one.
+	constexpr int32 MaxLaunchesPerTick = 64;
+	const bool bNeighborWait = VoxelSettings::Resolve(CVarCollisionNeighborWait, UVoxelWorldsSettings::Get().bCollisionNeighborWait ? 1 : 0) != 0;
+	const double Now = FPlatformTime::Seconds();
+	int32 Launches = 0;
+	int32 Held = 0;
+	for (int32 Index = CookingQueue.Num() - 1; Index >= 0 && AsyncCollisionInProgress.Num() < MaxAsync && Launches < MaxLaunchesPerTick; --Index)
 	{
-		// Pop highest priority from the back (O(1) — queue sorted ascending, highest at back)
-		FCollisionCookRequest Request = MoveTemp(CookingQueue.Last());
-		CookingQueue.Pop();
+		// A chunk ready-empty at its launch broadcasts OnCollisionReady at once, and a listener may queue or drop requests:
+		// the index stays within the queue (a request it moves past waits for the next tick).
+		Index = FMath::Min(Index, CookingQueue.Num() - 1);
+		if (Index < 0)
+		{
+			break;
+		}
+		// The neighbour wait (G283, D196): a first cook away from every focus waits while a neighbour is being generated.
+		// Held ones stay where they are; at most MaxLaunchesPerTick of them are looked at a tick.
+		if (bNeighborWait && ShouldWaitForNeighbors(CookingQueue[Index], LastUpdateFocus, Now))
+		{
+			++CookStats.NeighborWaitHolds;
+			bool bAlreadyHeld = false;
+			NeighborWaitHeld.Add(CookingQueue[Index].ChunkCoord, &bAlreadyHeld);
+			CookStats.NeighborWaitChunks += bAlreadyHeld ? 0 : 1;
+			if (++Held >= MaxLaunchesPerTick)
+			{
+				break;
+			}
+			continue;
+		}
+
+		// The highest priority left, from the back (the queue is sorted ascending)
+		FCollisionCookRequest Request = MoveTemp(CookingQueue[Index]);
+		CookingQueue.RemoveAt(Index, EAllowShrinking::No);
 		CookingQueueSet.Remove(Request.ChunkCoord);
+		++Launches;
 
 		// Launch async mesh generation + trimesh construction
 		LaunchAsyncCollisionCook(Request);
@@ -1170,6 +1519,27 @@ void UVoxelCollisionManager::ProcessCookingQueue()
 void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookRequest& Request)
 {
 	if (!ChunkManager || !Configuration)
+	{
+		return;
+	}
+
+	const UVoxelWorldsSettings& Settings = UVoxelWorldsSettings::Get();
+	const bool bSkipNoSurface = VoxelSettings::Resolve(CVarCollisionSkipNoSurface, Settings.bCollisionSkipNoSurface ? 1 : 0) != 0;
+	const bool bAudit = CVarCollisionCookAudit.GetValueOnGameThread() != 0;
+
+	// What this cook is, for the stats (G283): a chunk's first, a neighbour's re-cook or another (an edit's).
+	EVoxelCollisionCookKind Kind = EVoxelCollisionCookKind::First;
+	if (const FChunkCollisionData* Existing = CollisionData.Find(Request.ChunkCoord))
+	{
+		if (Existing->HasLiveCollision())
+		{
+			Kind = Existing->bNeighborRecookOnly ? EVoxelCollisionCookKind::NeighborRecook : EVoxelCollisionCookKind::OtherRecook;
+		}
+	}
+
+	// A chunk and neighbours held uniform on one side have no surface: ready-empty with no cook (G283). Not under the audit,
+	// which meshes every chunk to check the prediction.
+	if (bSkipNoSurface && !bAudit && TrySkipCookAtLaunch(Request.ChunkCoord))
 	{
 		return;
 	}
@@ -1234,7 +1604,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	LastPrepMs += static_cast<float>((FPlatformTime::Seconds() - PrepT0) * 1000.0);
 
 	// Launch async task: mesh generation + Chaos trimesh construction on thread pool
-	Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(ChunkManager->GetWorkerJobs()), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), NeighborShells = MoveTemp(NeighborShells), ChunkCoord, LODLevel, ChunkSizeCapture, SnapshotDecodes = MoveTemp(SnapshotDecodes)]() mutable
+	Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(ChunkManager->GetWorkerJobs()), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), NeighborShells = MoveTemp(NeighborShells), ChunkCoord, LODLevel, ChunkSizeCapture, SnapshotDecodes = MoveTemp(SnapshotDecodes), Kind, bSkipNoSurface, bAudit]() mutable
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_Collision);
 		const double CookStart = FPlatformTime::Seconds();
@@ -1255,6 +1625,45 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 		Result.ChunkCoord = ChunkCoord;
 		Result.LODLevel = LODLevel;
 		Result.WaitMs = EndStage();
+		Result.Kind = static_cast<uint8>(Kind);
+
+		// No surface (G283): the chunk's voxels and every plane it reads of its neighbours on one side make no triangle in
+		// any mesher. Worked out before the copy, so a skipped cook costs a scan of the snapshot it already holds.
+		if ((bSkipNoSurface || bAudit) && SharedVoxels.IsValid())
+		{
+			const FVoxelMaterialTable* Materials = UVoxelCollisionManager::GetMesherMaterials(*MesherPtr);
+			const EVoxelSurfaceSide OwnSide = UVoxelCollisionManager::GetVolumeSide(*SharedVoxels, ChunkSizeCapture, Materials);
+			const int32 Depth = VoxelNeighborSlices::GetNeighborDepth(LODLevel, ChunkSizeCapture);
+			Result.bPredictedEmpty = UVoxelCollisionManager::PredictNoSurface(OwnSide, ChunkSizeCapture, Depth,
+				[&NeighborShells, &NeighborSnapshots, &ChunkCoord](const FIntVector& Offset)
+				{
+					FVoxelCollisionNeighborView View;
+					const FIntVector NeighborCoord = ChunkCoord + Offset;
+					if (const TSharedPtr<const FVoxelFaceSlabs>* Shell = NeighborShells.Find(NeighborCoord))
+					{
+						View.Shell = Shell->Get();
+					}
+					else if (const TSharedPtr<const TArray<FVoxelData>>* Snapshot = NeighborSnapshots.Find(NeighborCoord))
+					{
+						View.Full = Snapshot->Get();
+					}
+					return View;
+				}, Materials);
+			Result.bPredictionComputed = true;
+			if (Result.bPredictedEmpty && bSkipNoSurface && !bAudit)
+			{
+				Result.bSuccess = true;
+				Result.bEmpty = true;
+				Result.bSkippedMesh = true;
+				Result.MeshMs = EndStage();
+				Result.TotalMs = static_cast<float>((FPlatformTime::Seconds() - CookStart) * 1000.0);
+				if (UVoxelCollisionManager* This = WeakThis.Get())
+				{
+					This->CompletedCollisionQueue.Enqueue(MoveTemp(Result));
+				}
+				return;
+			}
+		}
 
 		// Materialize the shared voxel snapshot into the request off the game thread (the
 		// snapshot outlives cache eviction via this ref; see PrepareCollisionMeshRequest).
@@ -1323,6 +1732,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 			// re-cooked 11,340 times in a single session, holding a cook slot the whole time).
 			Result.bSuccess = true;
 			Result.bEmpty = true;
+			Result.bHasHash = bAudit; // the empty mesh's hash is 0
 		}
 		else if (bMeshSuccess && MeshData.IsValid())
 		{
@@ -1344,6 +1754,16 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 
 			// Render winding -> physics winding, without the triangles of no area (see BuildPhysicsTriangles).
 			BuildPhysicsTriangles(Indices, Vertices, ChaosTriangles);
+
+			// The audit's hash of the triangle mesh: a re-cook that builds the same one is counted (G283).
+			if (bAudit)
+			{
+				const uint64 VertexHash = CityHash64(reinterpret_cast<const char*>(ChaosVertices.GetData()),
+					static_cast<uint32>(ChaosVertices.Num() * sizeof(Chaos::TVec3<Chaos::FRealSingle>)));
+				Result.Hash = CityHash64WithSeed(reinterpret_cast<const char*>(ChaosTriangles.GetData()),
+					static_cast<uint32>(ChaosTriangles.Num() * sizeof(Chaos::TVector<int32, 3>)), VertexHash);
+				Result.bHasHash = true;
+			}
 
 			// Create the Chaos trimesh implicit object (thread-safe — pure data construction)
 			TRefCountPtr<Chaos::FTriangleMeshImplicitObject> TriMesh = new Chaos::FTriangleMeshImplicitObject(
@@ -1386,7 +1806,22 @@ void UVoxelCollisionManager::ProcessCompletedCollisionCooks()
 		AsyncCollisionInProgress.Remove(Result.ChunkCoord);
 
 		++CookStats.Cooks;
-		CookStats.EmptyCooks += (Result.bSuccess && Result.bEmpty) ? 1 : 0;
+		const bool bResultEmpty = Result.bSuccess && Result.bEmpty;
+		CookStats.EmptyCooks += bResultEmpty ? 1 : 0;
+		const EVoxelCollisionCookKind Kind = static_cast<EVoxelCollisionCookKind>(Result.Kind);
+		CookStats.FirstCooks += Kind == EVoxelCollisionCookKind::First ? 1 : 0;
+		CookStats.FirstEmpty += (Kind == EVoxelCollisionCookKind::First && bResultEmpty) ? 1 : 0;
+		CookStats.NeighborRecooks += Kind == EVoxelCollisionCookKind::NeighborRecook ? 1 : 0;
+		CookStats.OtherRecooks += Kind == EVoxelCollisionCookKind::OtherRecook ? 1 : 0;
+		CookStats.PredictedEmpty += Result.bPredictedEmpty ? 1 : 0;
+		CookStats.SkippedOnWorker += Result.bSkippedMesh ? 1 : 0;
+		CookStats.PredictedEmptyWrong += (Result.bPredictedEmpty && Result.bSuccess && !Result.bEmpty) ? 1 : 0;
+		CookStats.EmptyNotPredicted += (Result.bPredictionComputed && bResultEmpty && !Result.bPredictedEmpty) ? 1 : 0;
+		if (Result.bPredictedEmpty && Result.bSuccess && !Result.bEmpty)
+		{
+			UE_LOG(LogVoxelCollision, Warning, TEXT("Chunk (%d,%d,%d): its cook was predicted to find no surface and made %d triangles (voxel.Collision.CookAudit)"),
+				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z, Result.NumTriangles);
+		}
 		CookStats.Triangles += Result.NumTriangles;
 		CookStats.WaitMs += Result.WaitMs;
 		CookStats.CopyMs += Result.CopyMs;
@@ -1404,6 +1839,22 @@ void UVoxelCollisionManager::ProcessCompletedCollisionCooks()
 			UE_LOG(LogVoxelCollision, Verbose, TEXT("Chunk (%d,%d,%d) async collision discarded - chunk removed"),
 				Result.ChunkCoord.X, Result.ChunkCoord.Y, Result.ChunkCoord.Z);
 			return false;
+		}
+
+		// The audit: a re-cook that built the same triangle mesh as the one it replaces was not needed (G283).
+		if (Result.bSuccess && Result.bHasHash)
+		{
+			if (Data->bHasCookHash && Data->LastCookHash == Result.Hash)
+			{
+				CookStats.NeighborRecooksSame += Kind == EVoxelCollisionCookKind::NeighborRecook ? 1 : 0;
+				CookStats.OtherRecooksSame += Kind == EVoxelCollisionCookKind::OtherRecook ? 1 : 0;
+			}
+			Data->LastCookHash = Result.Hash;
+			Data->bHasCookHash = true;
+		}
+		else
+		{
+			Data->bHasCookHash = false;
 		}
 
 		if (Result.bSuccess && Result.bEmpty)
@@ -1474,6 +1925,7 @@ void UVoxelCollisionManager::ApplyEmptyCollisionResult(const FIntVector& ChunkCo
 	{
 		return;
 	}
+	const bool bFirstReady = !Data->HasLiveCollision();
 
 	// An edit can hollow a chunk out completely: drop the body that described the old surface.
 	if (Data->CollisionComponent)
@@ -1490,6 +1942,10 @@ void UVoxelCollisionManager::ApplyEmptyCollisionResult(const FIntVector& ChunkCo
 	Data->bIsCooking = false;
 	Data->bEmpty = true;
 	Data->EstimatedBytes = 0;
+	if (bFirstReady)
+	{
+		NoteFirstReady(ChunkCoord);
+	}
 
 	// Waiters (spawn settle, NPC ground checks) treat "nothing to collide with" as ready too.
 	OnCollisionReady.Broadcast(ChunkCoord);
@@ -1508,6 +1964,8 @@ void UVoxelCollisionManager::ApplyCollisionResult(FAsyncCollisionResult& Result)
 	{
 		return;
 	}
+
+	const bool bFirstReady = !Data->HasLiveCollision();
 
 	// Create or reuse BodySetup
 	if (!Data->BodySetup)
@@ -1567,6 +2025,10 @@ void UVoxelCollisionManager::ApplyCollisionResult(FAsyncCollisionResult& Result)
 	if (Data->CollisionComponent)
 	{
 		++TotalCollisionsGenerated;
+		if (bFirstReady)
+		{
+			NoteFirstReady(Result.ChunkCoord);
+		}
 		OnCollisionReady.Broadcast(Result.ChunkCoord);
 
 		UE_LOG(LogVoxelCollision, Log, TEXT("Created collision for chunk (%d,%d,%d) (%d verts, %d tris)"),
@@ -1601,11 +2063,13 @@ void UVoxelCollisionManager::RequestCollision(const FIntVector& ChunkCoord, floa
 			{
 				if (Priority > CookingQueue[i].Priority)
 				{
+					const double QueuedSeconds = CookingQueue[i].QueuedSeconds;
 					CookingQueue.RemoveAt(i);
 					FCollisionCookRequest Bumped;
 					Bumped.ChunkCoord = ChunkCoord;
 					Bumped.LODLevel = CollisionLODLevel;
 					Bumped.Priority = Priority;
+					Bumped.QueuedSeconds = QueuedSeconds;
 					const int32 BumpIdx = Algo::LowerBound(CookingQueue, Bumped);
 					CookingQueue.Insert(Bumped, BumpIdx);
 				}
@@ -1620,6 +2084,7 @@ void UVoxelCollisionManager::RequestCollision(const FIntVector& ChunkCoord, floa
 	Request.ChunkCoord = ChunkCoord;
 	Request.LODLevel = CollisionLODLevel;
 	Request.Priority = Priority;
+	Request.QueuedSeconds = FPlatformTime::Seconds();
 
 	// Add to tracking set
 	CookingQueueSet.Add(ChunkCoord);

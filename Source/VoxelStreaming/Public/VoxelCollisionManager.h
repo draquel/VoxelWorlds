@@ -4,12 +4,15 @@
 
 #include "CoreMinimal.h"
 #include "VoxelCoreTypes.h"
+#include "VoxelFaceSlabs.h"
 #include "Containers/Queue.h"
 #include "Components/PrimitiveComponent.h"
 #include "Chaos/TriangleMeshImplicitObject.h"
 #include "VoxelCollisionManager.generated.h"
 
 struct FVoxelTickBudget;
+class IVoxelMesher;
+class FVoxelMaterialTable;
 
 class UVoxelWorldConfiguration;
 class UVoxelChunkManager;
@@ -109,6 +112,12 @@ struct FChunkCollisionData
 	 */
 	bool bNeighborRecookOnly = false;
 
+	/** A hash of the last applied cook's triangle mesh (voxel.Collision.CookAudit, G283): a re-cook compares its own with it. */
+	uint64 LastCookHash = 0;
+
+	/** LastCookHash holds the last applied cook's hash */
+	bool bHasCookHash = false;
+
 	/** Distance from viewer when last updated (for prioritization) */
 	float LastDistance = 0.0f;
 
@@ -152,6 +161,9 @@ struct FCollisionCookRequest
 	/** Priority for processing (higher = sooner) */
 	float Priority = 0.0f;
 
+	/** When the chunk was first queued (FPlatformTime::Seconds): the neighbour wait's cap counts from it (G283, D196) */
+	double QueuedSeconds = 0.0;
+
 	/** Comparison for priority queue (lower priority value = earlier in array, highest at back) */
 	bool operator<(const FCollisionCookRequest& Other) const
 	{
@@ -193,6 +205,17 @@ struct FAsyncCollisionResult
 	bool bSuccess = false;
 	/** Meshing succeeded but produced no triangles (all-solid or all-air chunk). Implies bSuccess. */
 	bool bEmpty = false;
+	/** What the cook was (EVoxelCollisionCookKind as a byte, G283) */
+	uint8 Kind = 0;
+	/** The voxels the cook read hold no surface (PredictNoSurface; computed when the skip or the audit is on, G283) */
+	bool bPredictedEmpty = false;
+	/** bPredictedEmpty was worked out */
+	bool bPredictionComputed = false;
+	/** The mesher was not run: the prediction said no surface and the skip is on (voxel.Collision.SkipNoSurface) */
+	bool bSkippedMesh = false;
+	/** A hash of the triangle mesh (voxel.Collision.CookAudit) */
+	uint64 Hash = 0;
+	bool bHasHash = false;
 	/** The cook's stages on its worker, in milliseconds (voxel.Collision.CookStats, G275). */
 	float WaitMs = 0.0f;
 	float CopyMs = 0.0f;
@@ -202,12 +225,94 @@ struct FAsyncCollisionResult
 	float TotalMs = 0.0f;
 };
 
+/** What a collision cook is (G283): a chunk's first, a re-cook for a neighbour's arrival, or another re-cook (an edit). */
+enum class EVoxelCollisionCookKind : uint8
+{
+	First,
+	NeighborRecook,
+	OtherRecook,
+};
+
+/** A voxel's side of the surface as every mesher reads it, or both for a volume or region (G283). */
+enum class EVoxelSurfaceSide : uint8
+{
+	Air,
+	Solid,
+	Mixed,
+};
+
+/**
+ * What a collision cook holds of one of its 26 neighbours (G283): the neighbour's face slabs, its whole voxels, or
+ * neither when it had no voxel data (read as air).
+ */
+struct FVoxelCollisionNeighborView
+{
+	/** The neighbour's face slabs (the cook's usual input, G69) */
+	const FVoxelFaceSlabs* Shell = nullptr;
+
+	/** The neighbour's whole ChunkSize^3 voxels (when the cook's depth is too deep for slabs) */
+	const TArray<FVoxelData>* Full = nullptr;
+
+	/** @return True when the cook had nothing of the neighbour */
+	bool IsMissing() const { return Shell == nullptr && Full == nullptr; }
+
+	/**
+	 * Read the neighbour's voxel at its own chunk-local position, as the cook reads it.
+	 *
+	 * @param X, Y, Z The position (each 0..ChunkSize-1)
+	 * @param ChunkSize Voxels per chunk axis
+	 * @return The voxel; air when missing or not held
+	 */
+	FVoxelData Get(int32 X, int32 Y, int32 Z, int32 ChunkSize) const
+	{
+		if (Shell)
+		{
+			return Shell->Get(X, Y, Z);
+		}
+		if (Full)
+		{
+			const int32 Index = X + Y * ChunkSize + Z * ChunkSize * ChunkSize;
+			return Full->IsValidIndex(Index) ? (*Full)[Index] : FVoxelData::Air();
+		}
+		return FVoxelData::Air();
+	}
+};
+
 /** What the collision cooks cost on their workers since the last reset, summed per stage (voxel.Collision.CookStats, G275). */
 struct FVoxelCollisionCookStats
 {
+	/** Distance bands of the first collision's arrival, in chunk widths from the nearest focus: [0,1), [1,2), [2,3), [3,5), 5 and more. */
+	static constexpr int32 NumBands = 5;
+
 	int64 Cooks = 0;
 	int64 EmptyCooks = 0;
 	int64 Triangles = 0;
+	/** The cooks by kind (G283) */
+	int64 FirstCooks = 0;
+	int64 NeighborRecooks = 0;
+	int64 OtherRecooks = 0;
+	/** First cooks that found no surface */
+	int64 FirstEmpty = 0;
+	/** Re-cooks whose triangle mesh hashed the same as the one it replaced (voxel.Collision.CookAudit) */
+	int64 NeighborRecooksSame = 0;
+	int64 OtherRecooksSame = 0;
+	/** Cooks the prediction said had no surface; of them, the mesh not run (the skip) */
+	int64 PredictedEmpty = 0;
+	int64 SkippedOnWorker = 0;
+	/** Chunks ready-empty without a cook launched: the chunk and its neighbours uniform on one side (G283) */
+	int64 SkippedAtLaunch = 0;
+	/** The audit's disagreements: predicted empty but triangles, and empty but not predicted (the second is allowed) */
+	int64 PredictedEmptyWrong = 0;
+	int64 EmptyNotPredicted = 0;
+	/** Launches the neighbour wait held back (a tick each), and the chunks it held at least once (G283, D196) */
+	int64 NeighborWaitHolds = 0;
+	int64 NeighborWaitChunks = 0;
+	/** When the stats were reset (FPlatformTime::Seconds) */
+	double ResetSeconds = 0.0;
+	/** A chunk's first collision (a body or ready-empty) per distance band: how many, and the seconds after the reset (sum, last) */
+	int64 BandFirstReady[NumBands] = {};
+	double BandFirstReadySumSeconds[NumBands] = {};
+	double BandFirstReadyLastSeconds[NumBands] = {};
 	/** Waiting for far-compressed snapshots to decode. */
 	double WaitMs = 0.0;
 	/** The chunk's voxels copied into the meshing request. */
@@ -367,7 +472,75 @@ public:
 
 	/** The cooks' cost per stage since the last reset. */
 	const FVoxelCollisionCookStats& GetCookStats() const { return CookStats; }
-	void ResetCookStats() { CookStats = FVoxelCollisionCookStats(); }
+	void ResetCookStats() { CookStats = FVoxelCollisionCookStats(); CookStats.ResetSeconds = FPlatformTime::Seconds(); NeighborWaitHeld.Reset(); }
+
+	// ==================== No surface (G283) ====================
+
+	/**
+	 * The material table a mesher reads (its own, else the built-in defaults): the no-surface prediction asks it which
+	 * materials the cubic mesher draws faces against.
+	 *
+	 * @param Mesher The mesher
+	 * @return Its table (never null)
+	 */
+	static const FVoxelMaterialTable* GetMesherMaterials(const IVoxelMesher& Mesher);
+
+	/**
+	 * A voxel's side of the surface as every mesher reads it: air below density 127 (Dual Contouring and Marching Cubes
+	 * put the surface at 0.5 of 255, the cubic mesher at VOXEL_SURFACE_THRESHOLD, 127), solid from 128; 127 itself is
+	 * read as air by the first two and solid by the cubic mesher, so it is Mixed. A solid voxel of a material the cubic
+	 * mesher draws faces against (non-occluding: leaves, glass) is Mixed too.
+	 *
+	 * @param Voxel The voxel
+	 * @param Materials The mesher's material table (null: no material is non-occluding)
+	 * @return Air, Solid or Mixed
+	 */
+	static EVoxelSurfaceSide GetSurfaceSide(const FVoxelData& Voxel, const FVoxelMaterialTable* Materials);
+
+	/**
+	 * The side of a whole chunk's voxels: a few voxels first (a chunk with a surface usually differs between its corners),
+	 * then all of them, stopping at the first that differs.
+	 *
+	 * @param Voxels The chunk's ChunkSize^3 voxels
+	 * @param ChunkSize Voxels per chunk axis
+	 * @param Materials The mesher's material table (null: none non-occluding)
+	 * @return Air or Solid when every voxel is on that side, else Mixed
+	 */
+	static EVoxelSurfaceSide GetVolumeSide(const TArray<FVoxelData>& Voxels, int32 ChunkSize, const FVoxelMaterialTable* Materials);
+
+	/**
+	 * Whether every voxel a cook reads of one neighbour is on a side: the neighbour's planes next to the face, edge or
+	 * corner it shares with the chunk (Depth deep across each axis Offset is not zero on, the whole range along the others).
+	 *
+	 * @param Offset The neighbour's offset from the chunk (each component -1..1, not all zero)
+	 * @param ChunkSize Voxels per chunk axis
+	 * @param Depth Planes the cook reads across a face (VoxelNeighborSlices::GetNeighborDepth)
+	 * @param Side Air or Solid
+	 * @param Neighbor What the cook holds of the neighbour (missing: read as air)
+	 * @param Materials The mesher's material table (null: none non-occluding)
+	 * @return True when every voxel of the region is on Side
+	 */
+	static bool IsNeighborRegionOnSide(const FIntVector& Offset, int32 ChunkSize, int32 Depth, EVoxelSurfaceSide Side,
+		const FVoxelCollisionNeighborView& Neighbor, const FVoxelMaterialTable* Materials);
+
+	/**
+	 * Whether a cook would find no surface (G283): the chunk's voxels on one side and every voxel it reads of its 26
+	 * neighbours on the same side, a missing neighbour read as air (Dual Contouring's rule; Marching Cubes reads the
+	 * chunk's own voxel there, which this takes as air too, so a solid chunk with a missing neighbour is never predicted
+	 * empty). With no sign change anywhere in what it reads, no mesher makes a triangle.
+	 *
+	 * @param OwnSide The chunk's side (GetVolumeSide)
+	 * @param ChunkSize Voxels per chunk axis
+	 * @param Depth Planes the cook reads across a face
+	 * @param GetNeighbor What the cook holds of the neighbour at an offset
+	 * @param Materials The mesher's material table (null: none non-occluding)
+	 * @return True when the cook's mesh would be empty
+	 */
+	static bool PredictNoSurface(EVoxelSurfaceSide OwnSide, int32 ChunkSize, int32 Depth,
+		TFunctionRef<FVoxelCollisionNeighborView(const FIntVector&)> GetNeighbor, const FVoxelMaterialTable* Materials);
+
+	/** @return Chunks marked ready-empty without a cook, this session (voxel.Collision.SkipNoSurface, G283) */
+	int64 GetTotalSkippedAtLaunch() const { return TotalSkippedAtLaunch; }
 
 	/** Neighbour arrivals that needed no re-cook (air on both sides of the boundary), this session. */
 	int64 GetTotalNeighborArrivalsSkipped() const { return TotalNeighborArrivalsSkipped; }
@@ -625,6 +798,35 @@ protected:
 	void ProcessCookingQueue();
 
 	/**
+	 * The neighbour wait (G283, D196; voxel.Collision.NeighborWait, off by default): whether a queued chunk's first cook
+	 * waits this tick for neighbours still being generated, so it reads them instead of air and needs no re-cook when they
+	 * arrive. Only a first cook away from every focus (beyond voxel.Collision.NeighborWaitChunks chunk widths) below the
+	 * path coverage's priority waits, and not past voxel.Collision.NeighborWaitMaxSeconds since it was queued.
+	 *
+	 * @param Request The queued request
+	 * @param FirstFocus The first focus's position
+	 * @param Now FPlatformTime::Seconds this tick
+	 * @return True to leave it in the queue this tick
+	 */
+	bool ShouldWaitForNeighbors(const FCollisionCookRequest& Request, const FVector& FirstFocus, double Now) const;
+
+	/**
+	 * Mark a chunk ready-empty without launching its cook when what the cook would read is known on the game thread to
+	 * hold no surface (G283): the chunk and every neighbour held uniform with no edits, all on one side, a missing
+	 * neighbour taken as air. The neighbours still missing are recorded, so their arrival re-cooks it as for a cook.
+	 *
+	 * @param ChunkCoord The chunk about to be cooked
+	 * @return True if the chunk was marked ready-empty (no cook launched)
+	 */
+	bool TrySkipCookAtLaunch(const FIntVector& ChunkCoord);
+
+	/** Count a chunk's first collision (a body or ready-empty) in its distance band since the stats' reset (CookStats). */
+	void NoteFirstReady(const FIntVector& ChunkCoord);
+
+	/** The first focus's position at the last Update (the stats' distance bands read it). */
+	FVector LastUpdateFocus = FVector::ZeroVector;
+
+	/**
 	 * Launch async collision cook for a chunk on the thread pool.
 	 * Performs mesh generation + Chaos trimesh construction off the game thread.
 	 *
@@ -839,4 +1041,10 @@ protected:
 
 	/** Chunks with neighbours arrived since their cook (FChunkCollisionData::ArrivedNeighborMask), awaiting ProcessNeighborRecooks */
 	TSet<FIntVector> PendingNeighborRecooks;
+
+	/** Chunks marked ready-empty without a cook (TrySkipCookAtLaunch), this session */
+	int64 TotalSkippedAtLaunch = 0;
+
+	/** Chunks the neighbour wait has held since the stats' reset (to count each once) */
+	TSet<FIntVector> NeighborWaitHeld;
 };

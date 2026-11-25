@@ -54,6 +54,29 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "0", ClampMax = "8"))
 	int32 CollisionLookAheadChunks = 2;
 
+	/**
+	 * A chunk whose cook would read no surface (its voxels and the planes it reads of its neighbours all air or all solid)
+	 * is ready-empty without the mesher; off = every such chunk is meshed, as before G283 (voxel.Collision.SkipNoSurface)
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Collision")
+	bool bCollisionSkipNoSurface = true;
+
+	/**
+	 * Decision D196 (open, the user's): a chunk's first cook away from every focus waits while a neighbour is still being
+	 * generated, trading when its collision arrives for the re-cook it saves; off = no chunk waits, as before G283
+	 * (voxel.Collision.NeighborWait)
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Collision")
+	bool bCollisionNeighborWait = false;
+
+	/** With the neighbour wait, chunks within this many chunk widths of a focus never wait (voxel.Collision.NeighborWaitChunks) */
+	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "0"))
+	float CollisionNeighborWaitChunks = 2.0f;
+
+	/** With the neighbour wait, the longest a first cook waits for its neighbours, in seconds from its queueing (voxel.Collision.NeighborWaitMaxSeconds) */
+	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "0"))
+	float CollisionNeighborWaitMaxSeconds = 3.0f;
+
 	// ==================== Surface navigation ====================
 
 	/** Surface navigation grid cell size (uu); changing it drops the height cache (voxel.Nav.CellSize) */
