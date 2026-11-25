@@ -1,6 +1,6 @@
 # Surface Navigation (VoxelNavigation module)
 
-> State as of 2026-11-15 (the hydrology plan's H5: the cost query; G73: the search's cost at scale). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-24 (G281: a search spread over frames; the hydrology plan's H5: the cost query; G73: the search's cost at scale). Terms: `Documentation/GLOSSARY.md`.
 
 Pathfinding over the voxel terrain without an engine navmesh. Built for surface NPCs (game feature 10), usable by
 anything that needs "how do I walk from A to B over the terrain" — on loaded chunks and beyond them.
@@ -68,11 +68,41 @@ times the cells per area); since G73 a block search costs less than a smooth one
   generated surface where the chunk is not loaded), so the cap bounds a cold search's hitch at about 20-25 ms (at 2,048 one took 45 ms; searches that need more than
   1,024 fresh cells are rare: none to three in a 20 s bench at up to 96 NPCs).
 
+### A search over frames (G281)
+
+A walk on `VoxelDemo` (2026-11-24: ten minutes from a fresh world, the weather locked, `voxel.Nav.LogSlowSearchMs 2`) ran
+25 searches of 2 ms or more, two of them over 5 ms (6.2 and 11.6 ms; the profiling that filed G281 had one of 16 ms in a
+frame): every one an NPC's wander or flee leg of 9 to 66 m over ground no search had sampled, 93 to 97% of its time
+spent sampling cells (about 13 µs a cell, up to 857 cells). The node work is small; the frame's cost is the cold cells.
+
+So a search may go on over frames. `FVoxelSurfacePathfinder::BeginSearch`, `AdvanceSearch` (with a test asked after
+each node) and `GetSearchResult` are `FindPath` in three steps, and `FindPath` is the three with nothing to stop the
+search: a search stopped between two nodes keeps its cells, costs, parents and open list, and taken up again it expands
+the same nodes in the same order, so it ends with the same route. The subsystem's `StartPathSearch` runs a search at once
+while the frame's budget lasts (`voxel.Nav.SearchBudgetMs`, 2 ms: every search of the frame together, those that run to
+their end in `FindPathWithStats` counted too); one not ended waits, and the subsystem's tick takes the waiting searches up
+in the next frames, in the order they began (a new search waits behind them), each within what is left of its frame's
+budget. `PollPathSearch` hands a search's route over once it has ended; `CancelPathSearch` drops one. A search keeps its
+sampling cap over all its frames; one whose region's cache was dropped in between (the cell size changed,
+`InvalidateAll`, a planet region expired) begins again. The cells it samples in a later frame are sampled later: on a live
+world what a search begun then would read. VoxelCharacterPlugin's NPCs search this way (`UVCVoxelPathProvider::StartPath`;
+what an NPC does meanwhile: `CHARACTER_SYSTEM.md`, "NPCs"); `FindPath` and `FindPathWithStats` (the roads, the console's
+benches) still run to their end at once.
+
+The walk again, the budget 0 (every search at once, as before) and 2 ms by turns in one editor, two runs of five minutes
+a side: the longest frame of a search 6.17 and 3.23 ms against 2.07 and 2.04 (the longest search 7.25 ms, over three
+frames); 18 of 1,096 searches carried (10 and 8 a run), 21 frames of waiting in all, none over three frames.
+`voxel.Nav.Stats` gives the counters (`FVoxelSurfaceNavCounters::SearchesCarried`, `FramesCarried`),
+`voxel.Nav.LogSlowSearchMs` a line for each slow search.
+
 ### Subsystem API
 
 - `FindPath(From, To, OutPoints)` / `FindPathWithStats(...)`: synchronous, budgeted (`voxel.Nav.MaxNodes`, 4096;
   `voxel.Nav.MaxSamplesPerSearch`, 1024). Spread requests over frames (an NPC repaths a few times a second at most, and
   waits after a partial route: `AVCNPCAIController::PartialRepathSeconds`).
+- `StartPathSearch(From, To)`, `PollPathSearch(Handle, ...)` (`EVoxelPathSearchState`: Running, Done, Unknown),
+  `CancelPathSearch(Handle)`, `GetRunningPathSearchCount()`: the same search within the frame's search budget, carried to
+  the next frames (G281, above; C++ only).
 - `GetCounters()`: the searches, nodes, cells sampled and the seconds spent searching, sampling and in
   `ProjectToSurface` / `IsWalkableAt` since the world began (`FVoxelSurfaceNavCounters`; the game module's
   `vox.NPCBench` reads them per frame).
@@ -84,9 +114,10 @@ times the cells per area); since G73 a block search costs less than a smooth one
 ### CVars
 
 `voxel.Nav.CellSize` (150), `voxel.Nav.MaxNodes` (4096), `voxel.Nav.MaxStepRise` (100), `voxel.Nav.MaxWadeDepth`
-(60), `voxel.Nav.MaxRadius` (20000), `voxel.Nav.MaxSamplesPerSearch` (1024), `voxel.Nav.Debug` (0). Commands:
+(60), `voxel.Nav.MaxRadius` (20000), `voxel.Nav.MaxSamplesPerSearch` (1024), `voxel.Nav.SearchBudgetMs` (2; the A/B of
+G281: 0 = every search at once), `voxel.Nav.LogSlowSearchMs` (0), `voxel.Nav.Debug` (0). Commands:
 `voxel.Nav.Path` (a route from the player, drawn), `voxel.Nav.Bench [routes] [distance] [seed]` (routes from the player,
-each cold then warm, timed; a `[NavBench]` line).
+each cold then warm, timed; a `[NavBench]` line), `voxel.Nav.Stats` (the counters; a `[NavStats]` line).
 
 ### Costs
 
@@ -138,13 +169,16 @@ tangent plane.
 
 ### Tests
 
-`VoxelWorlds.Navigation.Flat`, `CliffDetour`, `Water`, `BudgetAndBlocks`, `WorldBounds`, `PocketAndSampleCap`
-(`Tests/VoxelNavigationTests.cpp`): pure pathfinder over lambda heightfields (`PocketAndSampleCap`: a goal on a pillar
+`VoxelWorlds.Navigation.Flat`, `CliffDetour`, `Water`, `BudgetAndBlocks`, `WorldBounds`, `PocketAndSampleCap`,
+`SearchInSteps` (a search stopped after every node, or every seven, gives `FindPath`'s route and stats round a wall, to a
+pocket, past the node budget, across cells with no height, with a cost query; G281) (`Tests/VoxelNavigationTests.cpp`): pure pathfinder over lambda heightfields (`PocketAndSampleCap`: a goal on a pillar
 stops the search at the pocket check, a goal behind a long wall does not, NaN cells are left out); `WorldBounds` blocks the cells outside an island footprint over flat dry ground
 (water off), as the subsystem does. On planets (`Tests/VoxelNavigationPlanetTests.cpp`): `Navigation.Planet.RegionFrames`
 (round trips, cells within 2% of their size 33 km out), `.Path` (at 45° and across a cube-face edge: waypoints on the
 surface, the goal reached, the region cache reused, walkability by the sea sphere), `.Blocks`, `.PathAtScale`;
-`Navigation.Plane.SubsystemUnchanged`, `Navigation.Plane.SeaWithOrigin`; `Navigation.Cubic.BlockSteps`
+`Navigation.Plane.SubsystemUnchanged`, `Navigation.Plane.SeaWithOrigin`, `Navigation.Plane.SearchOverFrames` (six searches
+at one node a frame end in the order they began with the routes found at once; a cancelled search is gone; the budget 0
+ends a search where it begins); `Navigation.Cubic.BlockSteps`
 (`Tests/VoxelNavigationCubicTests.cpp`).
 
 ### Related streaming fix
@@ -156,7 +190,8 @@ through. The sweep now also re-runs periodically while stationary.
 
 ### Not built
 
-Async searches on a worker (tile sampling must stay on the game thread for the edit-merged query), hierarchical
+Searches on a worker (tile sampling must stay on the game thread for the edit-merged query; a search spreads over frames
+on the game thread instead, G281), hierarchical
 search for routes beyond `MaxSearchRadius`, jump / drop links, swimming. A coarser block search (150 uu cells with
 block-aware edges sampling the columns between, G73's first idea): not needed once a block search cost less than a smooth
 one had; it would remove the threefold nodes, at the price of a second step rule to keep in agreement with movement.

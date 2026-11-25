@@ -107,6 +107,23 @@ struct VOXELNAVIGATION_API FVoxelSurfaceNavCounters
 
 	/** Seconds in them. */
 	double QuerySeconds = 0.0;
+
+	/** Searches StartPathSearch began that were carried to a later frame by the frame's search budget (G281). */
+	int64 SearchesCarried = 0;
+
+	/** Frames those searches were carried over, summed (a search carried over two frames counts two). */
+	int64 FramesCarried = 0;
+};
+
+/** Where a search StartPathSearch began stands (G281). */
+enum class EVoxelPathSearchState : uint8
+{
+	/** Still searching: ask again in a later frame. */
+	Running,
+	/** Ended: its route (or that there is none) was handed over and its handle freed. */
+	Done,
+	/** No search has this handle (never begun, cancelled, or already handed over). */
+	Unknown
 };
 
 /**
@@ -165,6 +182,36 @@ public:
 	/** FindPath with the search statistics. */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Navigation")
 	bool FindPathWithStats(const FVector& From, const FVector& To, TArray<FVector>& OutPoints, FVoxelSurfacePathStats& OutStats);
+
+	/**
+	 * Begin a path search that may go on over the next frames (G281): it runs at once while this frame's search budget
+	 * (voxel.Nav.SearchBudgetMs) lasts, and the subsystem's tick takes the searches still running up in the next frames,
+	 * in the order they began, within each frame's budget. A search spread over frames ends with FindPathWithStats' route.
+	 * With the budget 0 every search runs to its end here, as FindPathWithStats does.
+	 *
+	 * @param From Start (world)
+	 * @param To   Goal (world)
+	 * @return The search's handle for PollPathSearch and CancelPathSearch; 0 when no search can run (no voxel world yet):
+	 *         a failed search
+	 */
+	int32 StartPathSearch(const FVector& From, const FVector& To);
+
+	/**
+	 * Where a search stands; once it has ended, its route, and the handle is freed.
+	 *
+	 * @param Handle     StartPathSearch's handle
+	 * @param OutPoints  The route, as FindPathWithStats gives it (empty unless Done and found)
+	 * @param OutStats   The search's statistics (when Done)
+	 * @param bOutFound  Whether a route was produced (when Done)
+	 * @return Running, Done, or Unknown for a handle no search has
+	 */
+	EVoxelPathSearchState PollPathSearch(int32 Handle, TArray<FVector>& OutPoints, FVoxelSurfacePathStats& OutStats, bool& bOutFound);
+
+	/** Drop a search (running or ended and not yet handed over). @param Handle StartPathSearch's handle */
+	void CancelPathSearch(int32 Handle);
+
+	/** @return The searches still running, carried to a later frame (G281) */
+	int32 GetRunningPathSearchCount() const { return PathSearchQueue.Num(); }
 
 	/** Surface Z under / over a point (edit-merged when loaded, analytic otherwise). @return False without a chunk manager. */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Navigation")
@@ -336,6 +383,66 @@ private:
 	FVoxelWaterLevelRange RegionWater(const FRegionCache& Region) const;
 	FVoxelCubeSphereGrid RegionGrid;
 	TArray<FTempSphere> TempSpheres;
+
+	/** A search StartPathSearch began (G281): its pathfinder, in the frame of its start's region, kept between frames. */
+	struct FPathSearch
+	{
+		FVector From = FVector::ZeroVector;
+		FVector To = FVector::ZeroVector;
+		/** The region it searches in, and its cache as it was when the search began (a dropped cache begins it again). */
+		FIntPoint RegionKey = FIntPoint::ZeroValue;
+		FRegionCache* Region = nullptr;
+		TUniquePtr<FVoxelSurfacePathfinder> Pathfinder;
+		/** Cells it may still sample (voxel.Nav.MaxSamplesPerSearch over the whole search, whatever the frames). */
+		int32 SamplesLeft = 0;
+		bool bDone = false;
+		bool bFound = false;
+		TArray<FVector> Points;
+		FVoxelSurfacePathStats Stats;
+		double Seconds = 0.0;
+		double SampleSeconds = 0.0;
+		double LongestStepSeconds = 0.0;
+		int32 Steps = 0;
+		/** When it ended (an ended search nobody asks for is dropped after a while). */
+		double DoneSeconds = 0.0;
+	};
+
+	/** The region key of a world position (the zero cell on a heightmap world). */
+	FIntPoint RegionKeyOf(const FVector& World) const;
+
+	/** A pathfinder in a region's frame with the subsystem's sampler (the per-search sampling cap) and blocked query. */
+	TUniquePtr<FVoxelSurfacePathfinder> MakePathfinder(FRegionCache& Region, int32& SamplesLeft);
+
+	/** Make a search's pathfinder in its start's region and begin it; a search whose ends have no frame ends with no route. */
+	void BeginPathSearch(FPathSearch& Search);
+
+	/**
+	 * Take a search on: within the frame's budget left (all of it with the budget 0), from where it stopped.
+	 * @return True when it has ended
+	 */
+	bool StepPathSearch(FPathSearch& Search);
+
+	/** A search's route from its pathfinder, back in the world (its search has ended); the pathfinder is released. */
+	void FinishPathSearch(FPathSearch& Search);
+
+	/** A search that has ended: the last stats, the counters, the slow-search log and the debug drawing. */
+	void RecordSearch(const FPathSearch& Search);
+
+	/** The tick's part: the searches carried from earlier frames, in the order they began, within the frame's budget. */
+	void AdvancePathSearches();
+
+	/** The frame's search budget left (seconds; the largest double with the budget 0). */
+	double SearchBudgetLeft();
+
+	/** Count time spent searching against this frame's budget. */
+	void SpendSearchBudget(double Seconds);
+
+	TMap<int32, TUniquePtr<FPathSearch>> PathSearches;
+	/** The searches still running, in the order they began. */
+	TArray<int32> PathSearchQueue;
+	int32 NextPathSearchHandle = 1;
+	uint64 SearchBudgetFrame = TNumericLimits<uint64>::Max();
+	double SearchBudgetSpent = 0.0;
 
 	FVoxelSurfacePathStats LastStats;
 	int32 SearchCount = 0;

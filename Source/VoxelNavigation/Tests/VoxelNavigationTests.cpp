@@ -323,4 +323,125 @@ bool FVoxelNavCellCostTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// A search in steps (G281): stopped after every node, or every few, and taken up again, it gives the route and the stats of
+// the same search run at once, on open ground, round a wall, to a goal in a pocket, to a goal past the node budget (a
+// partial route), across cells with no height, and with a cost query; a trivial search ends at its beginning; a new
+// search drops one in progress.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNavStepsTest, "VoxelWorlds.Navigation.SearchInSteps", VOXEL_NAV_TEST_FLAGS)
+bool FVoxelNavStepsTest::RunTest(const FString& Parameters)
+{
+	// Hills, a wall with a gap, a pillar and a band with no height, all on one field.
+	auto Field = [](double X, double Y)
+	{
+		const int32 CX = FMath::FloorToInt(X / 100.0), CY = FMath::FloorToInt(Y / 100.0);
+		if (CX == 10 && CY >= -40 && CY <= 40 && CY != 25)
+		{
+			return 1000.f; // a wall with a gap at y = 25
+		}
+		if (CX >= 30 && CX <= 32 && CY >= 0 && CY <= 2)
+		{
+			return 300.f; // a pillar
+		}
+		if (CX == 18 && CY >= -5 && CY <= 5)
+		{
+			return std::numeric_limits<float>::quiet_NaN(); // no height
+		}
+		return static_cast<float>(40.0 * FMath::Sin(X * 0.002) * FMath::Cos(Y * 0.0017));
+	};
+	auto Cost = [](const FIntPoint& Cell) { return Cell.X == 22 && Cell.Y > -10 && Cell.Y < 10 ? 500.f : 0.f; };
+	FVoxelSurfaceNavParams P = VoxelNavTest::Params();
+	P.MaxSearchRadius = 8000.f;
+	FVoxelSurfaceNavParams Small = P;
+	Small.MaxNodes = 300;
+
+	struct FCase
+	{
+		const TCHAR* Name;
+		FVector From;
+		FVector To;
+		bool bSmallBudget;
+		bool bCost;
+	};
+	const FCase Cases[] = {
+		{ TEXT("open ground"), FVector(-2950, -1950, 0), FVector(-450, 1550, 0), false, false },
+		{ TEXT("round the wall"), FVector(550, 50, 0), FVector(1550, 50, 0), false, false },
+		{ TEXT("a goal in a pocket"), FVector(1550, 150, 0), FVector(3150, 150, 0), false, false },
+		{ TEXT("past the node budget"), FVector(550, 50, 0), FVector(4550, -2050, 0), true, false },
+		{ TEXT("across cells with no height"), FVector(1250, 50, 0), FVector(2550, 50, 0), false, false },
+		{ TEXT("with a cost query"), FVector(1250, 50, 0), FVector(2950, -50, 0), false, true },
+		{ TEXT("in one cell"), FVector(1210, 20, 0), FVector(1260, 70, 0), false, false },
+		{ TEXT("from a wall's top"), FVector(1050, 0, 0), FVector(1550, 50, 0), false, false },
+	};
+	for (const FCase& Case : Cases)
+	{
+		const FVoxelSurfaceNavParams& CaseParams = Case.bSmallBudget ? Small : P;
+		FVoxelSurfacePathfinder::FCostQuery CaseCost = Case.bCost ? FVoxelSurfacePathfinder::FCostQuery(Cost) : nullptr;
+		FVoxelSurfacePathfinder AtOnce(CaseParams, Field, nullptr, CaseCost);
+		TArray<FVector> Expected;
+		FVoxelSurfacePathStats ExpectedStats;
+		const bool bExpected = AtOnce.FindPath(Case.From, Case.To, Expected, &ExpectedStats);
+
+		for (const int32 Every : { 1, 7 })
+		{
+			FVoxelSurfacePathfinder InSteps(CaseParams, Field, nullptr, CaseCost);
+			InSteps.BeginSearch(Case.From, Case.To);
+			int32 Calls = 0;
+			int32 Nodes = 0;
+			bool bEnded = InSteps.IsSearchDone();
+			while (!bEnded && Calls < 100000)
+			{
+				++Calls;
+				bEnded = InSteps.AdvanceSearch([&Nodes, Every] { return ++Nodes % Every == 0; });
+			}
+			TArray<FVector> Got;
+			FVoxelSurfacePathStats GotStats;
+			const bool bGot = InSteps.GetSearchResult(Got, &GotStats);
+			const FString Name = FString::Printf(TEXT("%s, every %d node(s)"), Case.Name, Every);
+			TestEqual(*(Name + TEXT(": found as at once")), bGot, bExpected);
+			TestTrue(*(Name + TEXT(": the same route, point for point")), Got == Expected);
+			TestEqual(*(Name + TEXT(": the same nodes")), GotStats.NodesExpanded, ExpectedStats.NodesExpanded);
+			TestEqual(*(Name + TEXT(": the same samples")), GotStats.HeightSamples, ExpectedStats.HeightSamples);
+			TestEqual(*(Name + TEXT(": the same raw cells")), GotStats.RawCells, ExpectedStats.RawCells);
+			TestEqual(*(Name + TEXT(": partial as at once")), GotStats.bPartial, ExpectedStats.bPartial);
+			TestEqual(*(Name + TEXT(": pocket as at once")), GotStats.bGoalInPocket, ExpectedStats.bGoalInPocket);
+			TestEqual(*(Name + TEXT(": capped as at once")), GotStats.bSamplesCapped, ExpectedStats.bSamplesCapped);
+			TestEqual(*(Name + TEXT(": snapped as at once")), GotStats.bGoalSnapped, ExpectedStats.bGoalSnapped);
+			if (Every == 1 && ExpectedStats.NodesExpanded > 2)
+			{
+				TestTrue(*(Name + TEXT(": it did stop between nodes")), Calls > 1);
+			}
+		}
+	}
+
+	// The cases above meant what they say.
+	{
+		FVoxelSurfacePathfinder Check(P, Field);
+		TArray<FVector> Points;
+		FVoxelSurfacePathStats Stats;
+		Check.FindPath(FVector(1550, 150, 0), FVector(3150, 150, 0), Points, &Stats);
+		TestTrue(TEXT("The pillar's goal is in a pocket"), Stats.bGoalInPocket);
+		FVoxelSurfacePathfinder CheckSmall(Small, Field);
+		CheckSmall.FindPath(FVector(550, 50, 0), FVector(4550, -2050, 0), Points, &Stats);
+		TestTrue(TEXT("The far goal is past the small budget"), Stats.bPartial && Stats.NodesExpanded >= Small.MaxNodes);
+		Check.FindPath(FVector(1250, 50, 0), FVector(2550, 50, 0), Points, &Stats);
+		TestTrue(TEXT("The band has no height"), Stats.bSamplesCapped);
+	}
+
+	// A search not ended has no route; a new one drops it.
+	FVoxelSurfacePathfinder Dropped(P, Field);
+	Dropped.BeginSearch(FVector(-2950, -1950, 0), FVector(-450, 1550, 0));
+	Dropped.AdvanceSearch([] { return true; });
+	TArray<FVector> None;
+	TestFalse(TEXT("Not ended: no route yet"), Dropped.IsSearchDone() || Dropped.GetSearchResult(None));
+	TArray<FVector> Again, Fresh;
+	Dropped.BeginSearch(FVector(550, 50, 0), FVector(1550, 50, 0));
+	Dropped.AdvanceSearch([] { return false; });
+	FVoxelSurfacePathfinder Clean(P, Field);
+	TestTrue(TEXT("Begun again: the new search's route"), Dropped.GetSearchResult(Again) && Clean.FindPath(FVector(550, 50, 0), FVector(1550, 50, 0), Fresh)
+		&& Again == Fresh);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

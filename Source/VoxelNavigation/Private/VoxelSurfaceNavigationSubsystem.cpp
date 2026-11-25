@@ -9,6 +9,7 @@
 #include "EngineUtils.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/ScopeExit.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "VoxelChunkManager.h"
 #include "VoxelWaterLevels.h"
 #include "VoxelCoordinates.h"
@@ -34,6 +35,10 @@ static TAutoConsoleVariable<float> CVarNavMaxRadius(TEXT("voxel.Nav.MaxRadius"),
 	TEXT("Cells farther than this from the start are never expanded."));
 static TAutoConsoleVariable<int32> CVarNavMaxSamplesPerSearch(TEXT("voxel.Nav.MaxSamplesPerSearch"), 1024,
 	TEXT("Cells one path search may sample from the chunk manager (the rest it has no height for are left out of it, and a later search samples them); 0 = no cap. Bounds a cold search's hitch (G73)."));
+static TAutoConsoleVariable<float> CVarNavSearchBudgetMs(TEXT("voxel.Nav.SearchBudgetMs"), 2.f,
+	TEXT("Milliseconds a frame the path searches StartPathSearch begins may take together; a search that has not ended goes on in the next frames, in the order the searches began, and ends with the route it would have had in one frame (G281). 0 = every search runs to its end in the frame it begins (before G281). The project's value is UVoxelWorldsSettings::NavSearchBudgetMs; the cvar overrides it once set."));
+static TAutoConsoleVariable<float> CVarNavLogSlowSearchMs(TEXT("voxel.Nav.LogSlowSearchMs"), 0.f,
+	TEXT("Log every path search that takes at least this many milliseconds, with what it was made of (nodes, cells sampled and their time, the route's end); 0 = off (G281)."));
 static TAutoConsoleVariable<int32> CVarNavDebug(TEXT("voxel.Nav.Debug"), 0,
 	TEXT("1 = draw the walkability grid around the debug focus and recent routes."));
 
@@ -77,6 +82,8 @@ void UVoxelSurfaceNavigationSubsystem::Deinitialize()
 			ChunkMgr->GetEditManager()->OnChunkEdited.Remove(EditHandle);
 		}
 	}
+	PathSearches.Reset();
+	PathSearchQueue.Reset();
 	Regions.Reset();
 	Super::Deinitialize();
 }
@@ -89,6 +96,12 @@ UVoxelSurfaceNavigationSubsystem* UVoxelSurfaceNavigationSubsystem::Get(const UO
 
 void UVoxelSurfaceNavigationSubsystem::Tick(float DeltaTime)
 {
+	// The path searches carried from earlier frames (G281), before anything here drops a region they search in.
+	if (PathSearchQueue.Num() > 0 || PathSearches.Num() > 0)
+	{
+		AdvancePathSearches();
+	}
+
 	// Expire temporary blocks.
 	if (TempBlocks.Num() > 0)
 	{
@@ -307,6 +320,34 @@ static FORCEINLINE int32 FloorDiv(int32 A, int32 B)
 // Queries
 // ---------------------------------------------------------------------------
 
+TUniquePtr<FVoxelSurfacePathfinder> UVoxelSurfaceNavigationSubsystem::MakePathfinder(FRegionCache& Region, int32& SamplesLeft)
+{
+	// A cold search samples at most MaxSamplesPerSearch cells (a few microseconds to tens each); the cells past the cap get
+	// no height (NaN) and are left out of this search, and the next one samples them (G73: one search to a goal out of
+	// reach sampled 14,760 block columns, 200 ms). The cap counts the whole search, over however many frames it runs.
+	const int32 MaxSamples = CVarNavMaxSamplesPerSearch.GetValueOnGameThread();
+	SamplesLeft = MaxSamples > 0 ? MaxSamples : TNumericLimits<int32>::Max();
+	FRegionCache* RegionPtr = &Region;
+	int32* SamplesLeftPtr = &SamplesLeft;
+	return MakeUnique<FVoxelSurfacePathfinder>(ParamsIn(Region),
+		[this, RegionPtr, SamplesLeftPtr](double X, double Y)
+		{
+			const FIntPoint Cell = CellOf(FVector(X, Y, 0.0));
+			float Height;
+			if (CachedHeightForCell(*RegionPtr, Cell, Height))
+			{
+				return Height;
+			}
+			if (*SamplesLeftPtr <= 0)
+			{
+				return std::numeric_limits<float>::quiet_NaN();
+			}
+			--*SamplesLeftPtr;
+			return HeightForCell(*RegionPtr, Cell);
+		},
+		[this, RegionPtr](const FIntPoint& Cell) { return IsCellBlocked(*RegionPtr, Cell); });
+}
+
 bool UVoxelSurfaceNavigationSubsystem::FindPathWithStats(const FVector& From, const FVector& To, TArray<FVector>& OutPoints, FVoxelSurfacePathStats& OutStats)
 {
 	OutPoints.Reset();
@@ -315,63 +356,285 @@ bool UVoxelSurfaceNavigationSubsystem::FindPathWithStats(const FVector& From, co
 	{
 		return false;
 	}
+	// The same steps as a search StartPathSearch begins, run to their end in this frame.
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelNav_FindPath);
 	const uint64 StartCycles = FPlatformTime::Cycles64();
+	const double SampleSecondsBefore = Counters.SampleSeconds;
 	ApplyCVars();
-	bool bOk = false;
+	FPathSearch Search;
+	Search.From = From;
+	Search.To = To;
+	BeginPathSearch(Search);
+	if (!Search.bDone)
+	{
+		Search.Pathfinder->AdvanceSearch([] { return false; });
+		FinishPathSearch(Search);
+	}
+	const double Seconds = FPlatformTime::ToSeconds64(FPlatformTime::Cycles64() - StartCycles);
+	SpendSearchBudget(Seconds);
+	Search.Seconds = Seconds;
+	Search.LongestStepSeconds = Seconds;
+	Search.Steps = 1;
+	Search.SampleSeconds = Counters.SampleSeconds - SampleSecondsBefore;
+	++Counters.Searches;
+	RecordSearch(Search);
+	OutPoints = MoveTemp(Search.Points);
+	OutStats = Search.Stats;
+	return Search.bFound;
+}
+
+FIntPoint UVoxelSurfaceNavigationSubsystem::RegionKeyOf(const FVector& World) const
+{
+	return bPlanet ? RegionGrid.CellOfDirection((World - PlanetCenter).GetSafeNormal()) : FIntPoint::ZeroValue;
+}
+
+void UVoxelSurfaceNavigationSubsystem::BeginPathSearch(FPathSearch& Search)
+{
 	// The search runs in the frame of the region its start lies in (the identity on a heightmap world; on a planet the
 	// region's tangent frame, altitudes for heights and the sea as the altitude plane WaterRadius - PlanetRadius, exactly
 	// the sea sphere's depth along local up).
-	FRegionCache& Region = RegionFor(From);
+	FRegionCache& Region = RegionFor(Search.From);
+	Search.RegionKey = RegionKeyOf(Search.From);
+	Search.Region = &Region;
+	Search.Pathfinder.Reset();
+	Search.Points.Reset();
+	Search.Stats = FVoxelSurfacePathStats();
+	Search.bFound = false;
+	Search.bDone = false;
 	FVector FrameFrom, FrameTo;
-	if (Region.Frame.ToFrame(From, FrameFrom) && Region.Frame.ToFrame(To, FrameTo))
+	if (!Region.Frame.ToFrame(Search.From, FrameFrom) || !Region.Frame.ToFrame(Search.To, FrameTo))
 	{
-		// A cold search samples at most MaxSamplesPerSearch cells (a few microseconds to tens each); the cells past the cap
-		// get no height (NaN) and are left out of this search, and the next one samples them (G73: one search to a goal out
-		// of reach sampled 14,760 block columns, 200 ms).
-		const int32 MaxSamples = CVarNavMaxSamplesPerSearch.GetValueOnGameThread();
-		int32 SamplesLeft = MaxSamples > 0 ? MaxSamples : TNumericLimits<int32>::Max();
-		FVoxelSurfacePathfinder Pathfinder(ParamsIn(Region),
-			[this, &Region, &SamplesLeft](double X, double Y)
-			{
-				const FIntPoint Cell = CellOf(FVector(X, Y, 0.0));
-				float Height;
-				if (CachedHeightForCell(Region, Cell, Height))
-				{
-					return Height;
-				}
-				if (SamplesLeft <= 0)
-				{
-					return std::numeric_limits<float>::quiet_NaN();
-				}
-				--SamplesLeft;
-				return HeightForCell(Region, Cell);
-			},
-			[this, &Region](const FIntPoint& Cell) { return IsCellBlocked(Region, Cell); });
-		TArray<FVector> FramePoints;
-		bOk = Pathfinder.FindPath(FrameFrom, FrameTo, FramePoints, &OutStats);
-		for (const FVector& FramePoint : FramePoints)
+		Search.bDone = true;
+		return;
+	}
+	Search.Pathfinder = MakePathfinder(Region, Search.SamplesLeft);
+	Search.Pathfinder->BeginSearch(FrameFrom, FrameTo);
+}
+
+void UVoxelSurfaceNavigationSubsystem::FinishPathSearch(FPathSearch& Search)
+{
+	TArray<FVector> FramePoints;
+	Search.bFound = Search.Pathfinder->GetSearchResult(FramePoints, &Search.Stats);
+	for (const FVector& FramePoint : FramePoints)
+	{
+		Search.Points.Add(Search.Region->Frame.ToWorld(FramePoint));
+	}
+	Search.bDone = true;
+	Search.Pathfinder.Reset(); // its cells back to the pool now, not when the route is asked for
+}
+
+double UVoxelSurfaceNavigationSubsystem::SearchBudgetLeft()
+{
+	const float BudgetMs = VoxelSettings::Resolve(CVarNavSearchBudgetMs, UVoxelWorldsSettings::Get().NavSearchBudgetMs);
+	if (BudgetMs <= 0.f)
+	{
+		return TNumericLimits<double>::Max();
+	}
+	if (SearchBudgetFrame != GFrameCounter)
+	{
+		SearchBudgetFrame = GFrameCounter;
+		SearchBudgetSpent = 0.0;
+	}
+	return BudgetMs * 0.001 - SearchBudgetSpent;
+}
+
+void UVoxelSurfaceNavigationSubsystem::SpendSearchBudget(double Seconds)
+{
+	if (SearchBudgetFrame != GFrameCounter)
+	{
+		SearchBudgetFrame = GFrameCounter;
+		SearchBudgetSpent = 0.0;
+	}
+	SearchBudgetSpent += Seconds;
+}
+
+bool UVoxelSurfaceNavigationSubsystem::StepPathSearch(FPathSearch& Search)
+{
+	if (Search.bDone)
+	{
+		return true;
+	}
+	const double Left = SearchBudgetLeft();
+	if (Left <= 0.0)
+	{
+		return false;
+	}
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelNav_SearchStep);
+	const uint64 StartCycles = FPlatformTime::Cycles64();
+	const double SampleSecondsBefore = Counters.SampleSeconds;
+	// Its region's cache dropped since it began (the cell size changed, InvalidateAll, a planet region expired): the cells
+	// it sampled may be stale, so it begins again with the region as it is now.
+	const TUniquePtr<FRegionCache>* Current = Regions.Find(Search.RegionKey);
+	if (!Current || Current->Get() != Search.Region)
+	{
+		BeginPathSearch(Search);
+	}
+	else
+	{
+		Search.Region->LastUsedSeconds = FPlatformTime::Seconds();
+	}
+	if (!Search.bDone)
+	{
+		const bool bEnded = Search.Pathfinder->AdvanceSearch([StartCycles, Left]
 		{
-			OutPoints.Add(Region.Frame.ToWorld(FramePoint));
+			// After each node: the frame's budget is spent once this step has used what was left of it.
+			return FPlatformTime::ToSeconds64(FPlatformTime::Cycles64() - StartCycles) >= Left;
+		});
+		if (bEnded)
+		{
+			FinishPathSearch(Search);
 		}
 	}
-	LastStats = OutStats;
+	const double Seconds = FPlatformTime::ToSeconds64(FPlatformTime::Cycles64() - StartCycles);
+	SpendSearchBudget(Seconds);
+	Search.Seconds += Seconds;
+	Search.SampleSeconds += Counters.SampleSeconds - SampleSecondsBefore;
+	Search.LongestStepSeconds = FMath::Max(Search.LongestStepSeconds, Seconds);
+	++Search.Steps;
+	if (Search.bDone)
+	{
+		Search.DoneSeconds = FPlatformTime::Seconds();
+		RecordSearch(Search);
+	}
+	return Search.bDone;
+}
+
+void UVoxelSurfaceNavigationSubsystem::RecordSearch(const FPathSearch& Search)
+{
+	const FVoxelSurfacePathStats& Stats = Search.Stats;
+	LastStats = Stats;
 	++SearchCount;
-	++Counters.Searches;
-	Counters.NodesExpanded += OutStats.NodesExpanded;
-	Counters.SearchSeconds += FPlatformTime::ToSeconds64(FPlatformTime::Cycles64() - StartCycles);
+	Counters.NodesExpanded += Stats.NodesExpanded;
+	Counters.SearchSeconds += Search.Seconds;
+	if (Search.Steps > 1)
+	{
+		++Counters.SearchesCarried;
+		Counters.FramesCarried += Search.Steps - 1;
+	}
+	const float LogSlowMs = CVarNavLogSlowSearchMs.GetValueOnGameThread();
+	if (LogSlowMs > 0.f && (Search.Seconds * 1000.0 >= LogSlowMs || Search.LongestStepSeconds * 1000.0 >= LogSlowMs))
+	{
+		UE_LOG(LogVoxelNavigation, Log, TEXT("[NavSlow] %.2f ms (sampling %.2f) in %d step(s), the longest %.2f: %s, %.0f uu, %d nodes, %d samples%s%s%s%s%s"),
+			Search.Seconds * 1000.0, Search.SampleSeconds * 1000.0, Search.Steps, Search.LongestStepSeconds * 1000.0,
+			Search.bFound ? TEXT("ok") : TEXT("failed"), FVector::Dist(Search.From, Search.To), Stats.NodesExpanded, Stats.HeightSamples,
+			Stats.bPartial ? TEXT(" partial") : TEXT(""), Stats.bGoalInPocket ? TEXT(" pocket") : TEXT(""),
+			Stats.bSamplesCapped ? TEXT(" capped") : TEXT(""), Stats.bGoalSnapped ? TEXT(" snapped") : TEXT(""),
+			Stats.NodesExpanded >= Params.MaxNodes ? TEXT(" budget") : TEXT(""));
+	}
 	if (CVarNavDebug.GetValueOnGameThread() > 0)
 	{
-		if (bOk)
+		if (Search.bFound)
 		{
-			TArray<FVector> Drawn = OutPoints;
-			Drawn.Insert(From, 0);
-			DrawPath(Drawn, 6.f, OutStats.bPartial ? FLinearColor::Yellow : FLinearColor::Green);
+			TArray<FVector> Drawn = Search.Points;
+			Drawn.Insert(Search.From, 0);
+			DrawPath(Drawn, 6.f, Stats.bPartial ? FLinearColor::Yellow : FLinearColor::Green);
 		}
 		UE_LOG(LogVoxelNavigation, Verbose, TEXT("FindPath %s -> %s: %s, %d nodes, %d samples, %d raw cells -> %d points%s"),
-			*From.ToCompactString(), *To.ToCompactString(), bOk ? TEXT("ok") : TEXT("FAILED"), OutStats.NodesExpanded,
-			OutStats.HeightSamples, OutStats.RawCells, OutPoints.Num(), OutStats.bPartial ? TEXT(" (partial)") : TEXT(""));
+			*Search.From.ToCompactString(), *Search.To.ToCompactString(), Search.bFound ? TEXT("ok") : TEXT("FAILED"), Stats.NodesExpanded,
+			Stats.HeightSamples, Stats.RawCells, Search.Points.Num(), Stats.bPartial ? TEXT(" (partial)") : TEXT(""));
 	}
-	return bOk;
+}
+
+int32 UVoxelSurfaceNavigationSubsystem::StartPathSearch(const FVector& From, const FVector& To)
+{
+	if (!ResolveChunkManager() || !IsReady())
+	{
+		return 0;
+	}
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelNav_StartPathSearch);
+	ApplyCVars();
+	const int32 Handle = NextPathSearchHandle;
+	NextPathSearchHandle = NextPathSearchHandle >= TNumericLimits<int32>::Max() ? 1 : NextPathSearchHandle + 1;
+	FPathSearch& Search = *PathSearches.Add(Handle, MakeUnique<FPathSearch>());
+	Search.From = From;
+	Search.To = To;
+	++Counters.Searches;
+	const uint64 StartCycles = FPlatformTime::Cycles64();
+	const double SampleSecondsBefore = Counters.SampleSeconds;
+	// Its start and goal found and its open list seeded (the cells that takes are sampled now, whatever the budget).
+	BeginPathSearch(Search);
+	Search.Seconds = FPlatformTime::ToSeconds64(FPlatformTime::Cycles64() - StartCycles);
+	Search.SampleSeconds = Counters.SampleSeconds - SampleSecondsBefore;
+	SpendSearchBudget(Search.Seconds);
+	if (Search.bDone)
+	{
+		Search.Steps = 1;
+		Search.LongestStepSeconds = Search.Seconds;
+		Search.DoneSeconds = FPlatformTime::Seconds();
+		RecordSearch(Search);
+		return Handle;
+	}
+	// It goes on at once unless searches that began before it still wait for the budget: those go first, in the order
+	// they began (the tick takes them up, then this one).
+	if (PathSearchQueue.Num() == 0)
+	{
+		StepPathSearch(Search);
+	}
+	if (!Search.bDone)
+	{
+		PathSearchQueue.Add(Handle);
+	}
+	return Handle;
+}
+
+EVoxelPathSearchState UVoxelSurfaceNavigationSubsystem::PollPathSearch(int32 Handle, TArray<FVector>& OutPoints, FVoxelSurfacePathStats& OutStats,
+	bool& bOutFound)
+{
+	OutPoints.Reset();
+	bOutFound = false;
+	TUniquePtr<FPathSearch>* Found = PathSearches.Find(Handle);
+	if (!Found || !*Found)
+	{
+		return EVoxelPathSearchState::Unknown;
+	}
+	FPathSearch& Search = **Found;
+	if (!Search.bDone)
+	{
+		return EVoxelPathSearchState::Running;
+	}
+	OutPoints = MoveTemp(Search.Points);
+	OutStats = Search.Stats;
+	bOutFound = Search.bFound;
+	PathSearches.Remove(Handle);
+	return EVoxelPathSearchState::Done;
+}
+
+void UVoxelSurfaceNavigationSubsystem::CancelPathSearch(int32 Handle)
+{
+	PathSearches.Remove(Handle);
+	PathSearchQueue.Remove(Handle);
+}
+
+void UVoxelSurfaceNavigationSubsystem::AdvancePathSearches()
+{
+	// The searches carried from earlier frames, in the order they began, while the frame's budget lasts.
+	int32 Index = 0;
+	while (Index < PathSearchQueue.Num())
+	{
+		TUniquePtr<FPathSearch>* Found = PathSearches.Find(PathSearchQueue[Index]);
+		if (!Found || !*Found || (*Found)->bDone)
+		{
+			PathSearchQueue.RemoveAt(Index);
+			continue;
+		}
+		if (!StepPathSearch(**Found))
+		{
+			break; // the budget is spent: the rest wait, in their order
+		}
+		PathSearchQueue.RemoveAt(Index);
+	}
+	// Ended searches nobody asked for (their walker gone) are dropped after a while.
+	if (PathSearches.Num() > PathSearchQueue.Num())
+	{
+		const double Now = FPlatformTime::Seconds();
+		for (auto It = PathSearches.CreateIterator(); It; ++It)
+		{
+			if (!It.Value() || (It.Value()->bDone && Now - It.Value()->DoneSeconds > 30.0))
+			{
+				It.RemoveCurrent();
+			}
+		}
+	}
 }
 
 bool UVoxelSurfaceNavigationSubsystem::FindPath(const FVector& From, const FVector& To, TArray<FVector>& OutPoints)

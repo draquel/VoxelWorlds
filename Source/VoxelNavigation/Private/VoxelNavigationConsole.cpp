@@ -194,6 +194,24 @@ namespace VoxelNavigationConsole
 	}
 }
 
+static FAutoConsoleCommandWithWorldAndArgs GVoxelNavStatsCmd(
+	TEXT("voxel.Nav.Stats"),
+	TEXT("Log the surface navigation's counters since the world began: searches, those carried to later frames by voxel.Nav.SearchBudgetMs and the frames they were carried over (G281), nodes, cells sampled, seconds; prints a [NavStats] line"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* InWorld)
+	{
+		UWorld* World = VoxelNavigationConsole::FindPlayWorld(InWorld);
+		const UVoxelSurfaceNavigationSubsystem* Nav = World ? World->GetSubsystem<UVoxelSurfaceNavigationSubsystem>() : nullptr;
+		if (!Nav)
+		{
+			UE_LOG(LogVoxelNavigation, Warning, TEXT("voxel.Nav.Stats: no PIE/Game world surface navigation subsystem."));
+			return;
+		}
+		const FVoxelSurfaceNavCounters& C = Nav->GetCounters();
+		UE_LOG(LogVoxelNavigation, Display, TEXT("[NavStats] searches=%lld carried=%lld framesCarried=%lld running=%d nodes=%lld sampled=%lld searchS=%.3f sampleS=%.3f queries=%lld queryS=%.3f"),
+			C.Searches, C.SearchesCarried, C.FramesCarried, Nav->GetRunningPathSearchCount(), C.NodesExpanded, C.CellsSampled, C.SearchSeconds,
+			C.SampleSeconds, C.Queries, C.QuerySeconds);
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GVoxelNavBenchCmd(
 	TEXT("voxel.Nav.Bench"),
 	TEXT("Time surface path searches from the player: voxel.Nav.Bench [routes=24] [distance=6000] [seed=1]; each route cold (height cache dropped) then warm; prints a [NavBench] line"),

@@ -68,6 +68,13 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Navigation", meta = (ClampMin = "0"))
 	float NavMaxRadius = 20000.0f;
 
+	/**
+	 * Milliseconds a frame the path searches begun with StartPathSearch take together; a search that has not ended goes on
+	 * in the next frames, with the same route; 0 = each runs to its end at once (voxel.Nav.SearchBudgetMs, G281)
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Navigation", meta = (ClampMin = "0"))
+	float NavSearchBudgetMs = 2.0f;
+
 	// ==================== Rendering ====================
 
 	/** Crossfade duration of a chunk mesh swap, in seconds (voxel.MeshFade.Duration) */
@@ -83,6 +90,13 @@ public:
 	/** A scatter HISM applies its held instance changes at most this often, in seconds; 0 = at once (voxel.Scatter.HISMBatchSeconds) */
 	UPROPERTY(config, EditAnywhere, Category = "Scatter", meta = (ClampMin = "0"))
 	float ScatterHISMBatchSeconds = 0.1f;
+
+	/**
+	 * Milliseconds a tick the due scatter HISM batches may take, the rest waiting for the next tick (the overdue, then the
+	 * nearest first); one compaction a tick at most; 0 = every due batch at once (voxel.Scatter.HISMWriteBudgetMs, G281)
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Scatter", meta = (ClampMin = "0"))
+	float ScatterHISMWriteBudgetMs = 2.0f;
 
 	/** A scatter HISM whose pooled (released) instances reach this and outweigh its live ones is compacted (voxel.Scatter.HISMCompactMinPooled) */
 	UPROPERTY(config, EditAnywhere, Category = "Scatter", meta = (ClampMin = "0"))
