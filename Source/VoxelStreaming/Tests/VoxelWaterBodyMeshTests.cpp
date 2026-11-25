@@ -678,6 +678,11 @@ namespace VoxelWaterBodyMeshTest
 		W.SetViewer(Site + Up * 600.0);
 		W.Tick();
 		const FVoxelWaterBodyMeshOwner& Meshes = Manager->GetWaterBodyMeshes();
+		// With the tick budget (G282) the meshes build on the thread pool and get their components in the next ticks.
+		for (int32 Ticks = 0; Meshes.Num() < 2 && Ticks < 2000; ++Ticks)
+		{
+			W.Tick();
+		}
 		Test.TestEqual(*FString::Printf(TEXT("%s: a mesh a body"), *Name), Meshes.Num(), 2);
 		UProceduralMeshComponent* LakeMesh = Meshes.Find(61);
 		UProceduralMeshComponent* ReachMesh = Meshes.Find(62);

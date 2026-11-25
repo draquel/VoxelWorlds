@@ -23,6 +23,7 @@
 #include "VoxelConditioningSources.h"
 #include "VoxelWaterBodySources.h"
 #include "VoxelWaterLevels.h"
+#include "VoxelTickBudget.h"
 #include <atomic>
 #include "VoxelChunkManager.generated.h"
 
@@ -312,6 +313,16 @@ struct VOXELSTREAMING_API FVoxelFarFieldStats
 
 	/** Game-thread time of its last update (ms). */
 	float UpdateMs = 0.0f;
+
+	/**
+	 * Of UpdateMs (G282): the selection (FVoxelFarField::Update: builds taken, patches selected, builds launched) and the
+	 * components (the presenter: patches built made into components, shown and hidden); the edge patches whose covered
+	 * state the selection worked out again, and the chunk lookups that took.
+	 */
+	float SelectMs = 0.0f;
+	float ApplyMs = 0.0f;
+	int32 CoveredTests = 0;
+	int32 CoveredChunkLookups = 0;
 
 	/** Patches in its trees, and the ones drawn (outside the voxel window's hole). */
 	int32 Patches = 0;
@@ -1773,6 +1784,17 @@ public:
 		float HydrologyMs = 0.0f;
 		float WaterBodyMeshMs = 0.0f;
 		float FarFieldMs = 0.0f;
+		// The far field's update split (G282; FVoxelFarFieldStats): the selection and the components, and the covered tests.
+		float FarFieldSelectMs = 0.0f;
+		float FarFieldApplyMs = 0.0f;
+		int32 FarFieldCoveredTests = 0;
+		int32 FarFieldCoveredLookups = 0;
+		// The tick budget (G282): its milliseconds (0: none) and what waited for the next tick: far-field build launches,
+		// lake and river reach meshes still to build, collision components of chunks that left the shell still to destroy.
+		float TickBudgetMs = 0.0f;
+		int32 FarFieldLaunchesHeld = 0;
+		int32 WaterBodiesPending = 0;
+		int32 CollisionDestroysPending = 0;
 
 		// Generation sub-phases (GenerationMs = launch + poll + apply). Added to attribute the
 		// residual game-thread generation cost after the post-passes moved to the GPU.
@@ -3354,6 +3376,15 @@ private:
 	/** Whether the meshes were ever gathered, and where the viewer stood then */
 	bool bWaterBodyMeshesGathered = false;
 	FVector WaterBodyMeshGatherPosition = FVector::ZeroVector;
+
+	/**
+	 * The last gather's bodies while some are still to build (the tick budget ran out, G282): handed to the owner again
+	 * each tick until every one is drawn, unless the bodies are gathered again first
+	 */
+	TArray<FVoxelWaterBody> WaterBodiesToFinish;
+
+	/** This tick's budget (G282; voxel.Stream.TickBudgetMs): set at the tick's start, read by the sections that can wait */
+	FVoxelTickBudget TickBudget;
 
 	/**
 	 * Each tick: gather the bodies to draw again when they changed or the viewer moved far enough, hand them to the

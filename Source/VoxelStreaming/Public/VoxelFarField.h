@@ -741,6 +741,12 @@ struct VOXELSTREAMING_API FVoxelFarFieldView
 	 * edge patches near the window's edge stay. Negative: never
 	 */
 	double ReleaseDelay = 10.0;
+
+	/**
+	 * The chunk manager's tick budget (G282): builds launch, nearest first, while it has time left, the first always; the
+	 * rest launch in the next updates. Null: every free slot is filled (as before)
+	 */
+	const struct FVoxelTickBudget* Budget = nullptr;
 };
 
 /** What an update changed, for the owner to apply to its components. */
@@ -1027,6 +1033,16 @@ public:
 		return bHasUndrawnChunk;
 	}
 
+	/**
+	 * The last update's covered tests (G282): edge patches whose covered state was worked out again (their cached answer
+	 * stale), and the chunk lookups those tests made.
+	 */
+	int32 GetCoveredTests() const { return CoveredTests; }
+
+	/** The last update's builds that had a free slot and waited for the tick budget (G282, FVoxelFarFieldView::Budget). */
+	int32 GetLaunchesHeld() const { return LaunchesHeld; }
+	int32 GetCoveredChunkLookups() const { return CoveredChunkLookups; }
+
 	/** Patches built in all, and their total build time (ms, on the build threads). */
 	int64 GetTotalBuilt() const { return TotalBuilt; }
 	double GetTotalBuildMs() const { return TotalBuildMs; }
@@ -1181,6 +1197,9 @@ private:
 	bool bSynchronousBuilds = false;
 
 	int32 DrawnPatchCount = 0;
+	int32 CoveredTests = 0;
+	int32 LaunchesHeld = 0;
+	int32 CoveredChunkLookups = 0;
 	int32 BuiltSinceRead = 0;
 	int64 TotalBuilt = 0;
 	int64 TotalReleased = 0;

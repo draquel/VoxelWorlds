@@ -1,6 +1,10 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelWorldComponentOwners.h"
+#include "VoxelTickBudget.h"
+#include "Algo/StableSort.h"
+#include "Async/Async.h"
+#include <atomic>
 #include "VoxelStreaming.h"
 #include "VoxelWorldBoundary.h"
 #include "ChunkRenderData.h"
@@ -368,18 +372,57 @@ namespace VoxelWaterBodyMeshPrivate
 	}
 }
 
+struct FVoxelWaterBodyMeshOwner::FBuildSlot
+{
+	std::atomic<bool> bDone{ false };
+	bool bBuilt = false;
+	FVoxelWaterBodyMesh Mesh;
+};
+
+void FVoxelWaterBodyMeshOwner::AddEntry(AActor* Owner, const FVoxelWaterBody& Body, const FVoxelWaterFrame& Frame, const FVoxelWaterBodyMesh& Mesh,
+	UMaterialInterface* LakeMaterial, UMaterialInterface* RiverMaterial, bool bVisible)
+{
+	using namespace VoxelWaterBodyMeshPrivate;
+	UProceduralMeshComponent* Component = VoxelFarOceanManagerPrivate::MakeComponent(Owner,
+		*FString::Printf(TEXT("VoxelWaterBody_%u_%d"), Body.Id, Serial++), Mesh.Origin);
+	const TArray<FVector2D> NoUV;
+	Component->CreateMeshSection(0, Mesh.Top.Positions, Mesh.Top.Triangles, Mesh.Top.Normals, Mesh.Top.UV0, Mesh.Top.UV1, NoUV, NoUV,
+		Mesh.Top.Colors, MakeTangents(Mesh.Top.Tangents), /*bCreateCollision=*/false);
+	Component->CreateMeshSection(1, Mesh.Underside.Positions, Mesh.Underside.Triangles, Mesh.Underside.Normals, Mesh.Underside.UV0,
+		Mesh.Underside.UV1, NoUV, NoUV, Mesh.Underside.Colors, MakeTangents(Mesh.Underside.Tangents), /*bCreateCollision=*/false);
+	UMaterialInterface* Material = (Body.Kind == EVoxelWaterBodyKind::Reach && RiverMaterial) ? RiverMaterial : LakeMaterial;
+	if (Material)
+	{
+		Component->SetMaterial(0, Material);
+		Component->SetMaterial(1, Material);
+	}
+	Component->SetVisibility(bVisible);
+
+	FEntry& Entry = Entries.AddDefaulted_GetRef();
+	Entry.Body = Body;
+	Entry.Levels = FVoxelWaterLevels::Make(FVoxelSeaSurface(), Frame, Body.Bounds, { Body });
+	Entry.Quads = Mesh.Quads;
+	// Hidden until the viewer is found under it.
+	Entry.bUndersideShown = false;
+	Component->SetMeshSectionVisible(1, false);
+	Components.Add(Component);
+}
+
 FVoxelWaterBodyMeshOwner::FUpdateResult FVoxelWaterBodyMeshOwner::Update(AActor* Owner, TConstArrayView<FVoxelWaterBody> Bodies,
 	const FVoxelWaterFrame& Frame, double VoxelSize, UMaterialInterface* LakeMaterial, UMaterialInterface* RiverMaterial, bool bVisible,
-	const FVector& ViewerPosition)
+	const FVector& ViewerPosition, const FVoxelTickBudget* Budget)
 {
 	using namespace VoxelWaterBodyMeshPrivate;
 	FUpdateResult Result;
+	const auto IsHandedOver = [&Bodies](const FVoxelWaterBody& Body)
+	{
+		return Bodies.ContainsByPredicate([&](const FVoxelWaterBody& Other) { return IsSameBody(Other, Body); });
+	};
 
 	// What is no longer handed over goes (a body whose record changed counts as another body).
 	for (int32 Index = Entries.Num() - 1; Index >= 0; --Index)
 	{
-		const bool bStill = Bodies.ContainsByPredicate([&](const FVoxelWaterBody& Body) { return IsSameBody(Body, Entries[Index].Body); });
-		if (!bStill)
+		if (!IsHandedOver(Entries[Index].Body))
 		{
 			if (IsValid(Components[Index]))
 			{
@@ -390,50 +433,100 @@ FVoxelWaterBodyMeshOwner::FUpdateResult FVoxelWaterBodyMeshOwner::Update(AActor*
 			++Result.Removed;
 		}
 	}
+	// A body's mesh building on the thread pool and no longer wanted: its job finishes into its own slot, which nothing reads.
+	Building.RemoveAll([&](const FBuildJob& Job) { return !IsHandedOver(Job.Body); });
+	Unbuildable.RemoveAll([&](const FVoxelWaterBody& Body) { return !IsHandedOver(Body); });
 
 	if (!Owner)
 	{
 		return Result;
 	}
+	const auto IsDrawn = [this](const FVoxelWaterBody& Body)
+	{
+		return Entries.ContainsByPredicate([&](const FEntry& Entry) { return IsSameBody(Entry.Body, Body); });
+	};
+
+	if (Budget && Budget->IsLimited())
+	{
+		// With a tick budget (G282): the meshes built on the thread pool, the built ones given their components nearest the
+		// viewer first within the budget (one body's mesh took 10 to 14 ms of one tick on VoxelDemo).
+		const auto DistanceOf = [&ViewerPosition](const FVoxelWaterBody& Body) { return Body.Bounds.ComputeSquaredDistanceToPoint(ViewerPosition); };
+		Algo::StableSortBy(Building, [&](const FBuildJob& Job) { return DistanceOf(Job.Body); });
+		int32 Applied = 0;
+		for (int32 Index = 0; Index < Building.Num();)
+		{
+			FBuildSlot& Slot = *Building[Index].Slot;
+			if (!Slot.bDone.load(std::memory_order_acquire))
+			{
+				++Index;
+				continue;
+			}
+			if (!Budget->MayContinue(Applied))
+			{
+				break;
+			}
+			if (Slot.bBuilt)
+			{
+				AddEntry(Owner, Building[Index].Body, Frame, Slot.Mesh, LakeMaterial, RiverMaterial, bVisible);
+				++Result.Built;
+			}
+			else
+			{
+				Unbuildable.Add(Building[Index].Body);
+			}
+			++Applied;
+			Building.RemoveAt(Index);
+		}
+		for (const FVoxelWaterBody& Body : Bodies)
+		{
+			if (Body.Kind == EVoxelWaterBodyKind::Sea)
+			{
+				continue;
+			}
+			if (IsDrawn(Body))
+			{
+				++Result.Kept;
+				continue;
+			}
+			if (Building.ContainsByPredicate([&](const FBuildJob& Job) { return IsSameBody(Job.Body, Body); })
+				|| Unbuildable.ContainsByPredicate([&](const FVoxelWaterBody& Other) { return IsSameBody(Other, Body); }))
+			{
+				continue;
+			}
+			FBuildJob& Job = Building.AddDefaulted_GetRef();
+			Job.Body = Body;
+			Job.Slot = MakeShared<FBuildSlot, ESPMode::ThreadSafe>();
+			Async(EAsyncExecution::ThreadPool, [Slot = Job.Slot, Body, Frame, VoxelSize]()
+			{
+				TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_WaterBodyMesh);
+				Slot->bBuilt = FVoxelWaterBodyMesh::Build(Body, Frame, VoxelSize, Slot->Mesh);
+				Slot->bDone.store(true, std::memory_order_release);
+			});
+		}
+		Result.Pending = Building.Num();
+		UpdateUndersides(ViewerPosition);
+		return Result;
+	}
+
+	// Without one: every body not drawn yet built here, in the order given (as before G282).
 	for (const FVoxelWaterBody& Body : Bodies)
 	{
 		if (Body.Kind == EVoxelWaterBodyKind::Sea)
 		{
 			continue;
 		}
-		if (Entries.ContainsByPredicate([&](const FEntry& Entry) { return IsSameBody(Entry.Body, Body); }))
+		if (IsDrawn(Body))
 		{
 			++Result.Kept;
 			continue;
 		}
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWaterBody_BuildOne);
 		FVoxelWaterBodyMesh Mesh;
 		if (!FVoxelWaterBodyMesh::Build(Body, Frame, VoxelSize, Mesh))
 		{
 			continue;
 		}
-		UProceduralMeshComponent* Component = VoxelFarOceanManagerPrivate::MakeComponent(Owner,
-			*FString::Printf(TEXT("VoxelWaterBody_%u_%d"), Body.Id, Serial++), Mesh.Origin);
-		const TArray<FVector2D> NoUV;
-		Component->CreateMeshSection(0, Mesh.Top.Positions, Mesh.Top.Triangles, Mesh.Top.Normals, Mesh.Top.UV0, Mesh.Top.UV1, NoUV, NoUV,
-			Mesh.Top.Colors, MakeTangents(Mesh.Top.Tangents), /*bCreateCollision=*/false);
-		Component->CreateMeshSection(1, Mesh.Underside.Positions, Mesh.Underside.Triangles, Mesh.Underside.Normals, Mesh.Underside.UV0,
-			Mesh.Underside.UV1, NoUV, NoUV, Mesh.Underside.Colors, MakeTangents(Mesh.Underside.Tangents), /*bCreateCollision=*/false);
-		UMaterialInterface* Material = (Body.Kind == EVoxelWaterBodyKind::Reach && RiverMaterial) ? RiverMaterial : LakeMaterial;
-		if (Material)
-		{
-			Component->SetMaterial(0, Material);
-			Component->SetMaterial(1, Material);
-		}
-		Component->SetVisibility(bVisible);
-
-		FEntry& Entry = Entries.AddDefaulted_GetRef();
-		Entry.Body = Body;
-		Entry.Levels = FVoxelWaterLevels::Make(FVoxelSeaSurface(), Frame, Body.Bounds, { Body });
-		Entry.Quads = Mesh.Quads;
-		// Hidden until the viewer is found under it.
-		Entry.bUndersideShown = false;
-		Component->SetMeshSectionVisible(1, false);
-		Components.Add(Component);
+		AddEntry(Owner, Body, Frame, Mesh, LakeMaterial, RiverMaterial, bVisible);
 		++Result.Built;
 	}
 	UpdateUndersides(ViewerPosition);
@@ -442,6 +535,8 @@ FVoxelWaterBodyMeshOwner::FUpdateResult FVoxelWaterBodyMeshOwner::Update(AActor*
 
 void FVoxelWaterBodyMeshOwner::Destroy()
 {
+	Building.Reset();
+	Unbuildable.Reset();
 	for (UProceduralMeshComponent* Component : Components)
 	{
 		if (IsValid(Component))
@@ -601,7 +696,7 @@ namespace VoxelFarFieldManagerPrivate
 }
 
 void FVoxelFarFieldPresenter::Apply(FVoxelFarField& FarField, const FVoxelFarFieldChanges& Changes, AActor* Owner,
-	UMaterialInterface* TerrainMaterial, UMaterialInterface* WaterMaterial, bool bUnderSea)
+	UMaterialInterface* TerrainMaterial, UMaterialInterface* WaterMaterial, bool bUnderSea, const FVoxelTickBudget* Budget)
 {
 	using namespace VoxelFarFieldManagerPrivate;
 	const FVoxelFarFieldSettings& Settings = FarField.GetSettings();
@@ -618,13 +713,23 @@ void FVoxelFarFieldPresenter::Apply(FVoxelFarField& FarField, const FVoxelFarFie
 		}
 		RayTracingMode = Mode;
 	}
+	const bool bDeferDestroys = Budget && Budget->IsLimited();
 	for (const uint64 Key : Changes.Removed)
 	{
 		if (TObjectPtr<UVoxelFarFieldPatchComponent>* Found = Components.Find(Key))
 		{
 			if (IsValid(*Found))
 			{
-				(*Found)->DestroyComponent();
+				if (bDeferDestroys)
+				{
+					// Hidden now, destroyed within the tick budget below (G282).
+					(*Found)->SetVisibility(false);
+					PendingDestroys.Add(*Found);
+				}
+				else
+				{
+					(*Found)->DestroyComponent();
+				}
 			}
 			Components.Remove(Key);
 		}
@@ -714,10 +819,30 @@ void FVoxelFarFieldPresenter::Apply(FVoxelFarField& FarField, const FVoxelFarFie
 			ApplyVisibility(Pair.Key);
 		}
 	});
+
+	// The hidden components of removed patches, within what is left of the tick, the first always (G282); the oldest first.
+	int32 Destroyed = 0;
+	while (PendingDestroys.Num() > Destroyed && (!Budget || Budget->MayContinue(Destroyed)))
+	{
+		if (IsValid(PendingDestroys[Destroyed]))
+		{
+			PendingDestroys[Destroyed]->DestroyComponent();
+		}
+		++Destroyed;
+	}
+	PendingDestroys.RemoveAt(0, Destroyed, EAllowShrinking::No);
 }
 
 void FVoxelFarFieldPresenter::Destroy()
 {
+	for (UVoxelFarFieldPatchComponent* Component : PendingDestroys)
+	{
+		if (IsValid(Component))
+		{
+			Component->DestroyComponent();
+		}
+	}
+	PendingDestroys.Reset();
 	for (TPair<uint64, TObjectPtr<UVoxelFarFieldPatchComponent>>& Pair : Components)
 	{
 		if (IsValid(Pair.Value))

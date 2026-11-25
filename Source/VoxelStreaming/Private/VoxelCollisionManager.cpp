@@ -28,6 +28,7 @@
 // Chaos physics includes (UE5 always uses Chaos)
 #include "Chaos/TriangleMeshImplicitObject.h"
 #include "VoxelResidencyStats.h"
+#include "VoxelTickBudget.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelCollision, Log, All);
 
@@ -51,6 +52,14 @@ static TAutoConsoleVariable<float> CVarCollisionResweepSeconds(
 	1.0f,
 	TEXT("Re-run the collision decision sweep at least this often (seconds) even when the focus is stationary, so ")
 	TEXT("chunks that finish loading around a pawn that stopped after a teleport still get collision. 0 = movement only."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarCollisionJumpIsCut(
+	TEXT("voxel.Collision.JumpIsCut"),
+	1,
+	TEXT("G282: 1 = a focus that moves more than a chunk in one tick has jumped (a teleport, a respawn): the shell takes no speed ")
+	TEXT("from it, so its radius does not reach back over the place left; 0 = the jump counts as speed, as before. The project's ")
+	TEXT("value is UVoxelWorldsSettings::bCollisionJumpIsCut; the cvar overrides it once set."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarCollisionMoveUpdateThreshold(
@@ -246,7 +255,8 @@ void UVoxelCollisionManager::Shutdown()
 		while (CompletedCollisionQueue.Dequeue(Stale)) {}
 	}
 
-	// Release all collision data and components
+	// Release all collision data and components (those waiting to be destroyed too, G282)
+	DestroyPendingComponents(nullptr);
 	for (auto& Pair : CollisionData)
 	{
 		if (Pair.Value.CollisionComponent)
@@ -280,7 +290,7 @@ void UVoxelCollisionManager::Shutdown()
 
 // ==================== Per-Frame Update ====================
 
-void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTime)
+void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTime, const FVoxelTickBudget* Budget)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_Collision);
 	if (!bIsInitialized)
@@ -291,6 +301,8 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 	// Reset per-tick sub-phase attribution (accumulated by cook launches + result applies below).
 	LastPrepMs = 0.0f;
 	LastApplyMs = 0.0f;
+	// With a tick budget the sweep leaves the components of chunks that left the shell to DestroyPendingComponents (G282).
+	bDeferSweepDestroys = Budget && Budget->IsLimited();
 
 	// 1. Always drain completed async results first (lightweight game-thread work)
 	ProcessCompletedCollisionCooks();
@@ -308,7 +320,18 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 	// so a teleport spike doesn't blow the radius out for a frame.
 	FVector FocusVelocity = FVector::ZeroVector;
 	float FocusSpeed = 0.0f;
-	if (DeltaTime > SMALL_NUMBER && LastFocusPosition.X != FLT_MAX)
+	// A jump of more than a chunk in one tick (a teleport, a respawn) is a cut, not speed (G282): taken as speed it grew
+	// the radius to the whole world for a second (877,518 uu after a teleport of 90 km on VoxelDemo), so the sweep queued
+	// every chunk still loaded at the place left and dropped them again a second later.
+	const bool bJumpIsCut = VoxelSettings::Resolve(CVarCollisionJumpIsCut, UVoxelWorldsSettings::Get().bCollisionJumpIsCut ? 1 : 0) != 0;
+	const bool bJumped = bJumpIsCut && Configuration && LastFocusPosition.X != FLT_MAX
+		&& FVector::DistSquared(FocusPosition, LastFocusPosition) > FMath::Square(Configuration->GetChunkWorldSize());
+	if (bJumped)
+	{
+		SmoothedFocusSpeed = 0.0f;
+		++TotalFocusJumps;
+	}
+	else if (DeltaTime > SMALL_NUMBER && LastFocusPosition.X != FLT_MAX)
 	{
 		FocusVelocity = (FocusPosition - LastFocusPosition) / DeltaTime;
 		const float InstHorizSpeed = FVector2D(FocusVelocity.X, FocusVelocity.Y).Size();
@@ -379,6 +402,49 @@ void UVoxelCollisionManager::Update(const FVector& ViewerPosition, float DeltaTi
 
 	// 4. Launch async tasks from queue (no mesh gen here, just dispatch)
 	ProcessCookingQueue();
+
+	// 5. The components of chunks that left the shell, within what is left of the tick (G282)
+	DestroyPendingComponents(Budget);
+}
+
+int32 UVoxelCollisionManager::DestroyPendingComponents(const FVoxelTickBudget* Budget)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_Collision_DestroyPendingComponents);
+	int32 Destroyed = 0;
+	for (auto It = PendingDestroys.CreateIterator(); It; ++It)
+	{
+		if (Budget && !Budget->MayContinue(Destroyed))
+		{
+			break;
+		}
+		if (UPrimitiveComponent* Component = It.Value().Component.Get())
+		{
+			Component->DestroyComponent();
+		}
+		if (UBodySetup* BodySetup = It.Value().BodySetup.Get())
+		{
+			BodySetup->MarkAsGarbage();
+		}
+		It.RemoveCurrent();
+		++Destroyed;
+	}
+	return Destroyed;
+}
+
+void UVoxelCollisionManager::DestroyPendingComponent(const FIntVector& ChunkCoord)
+{
+	FPendingDestroy Pending;
+	if (PendingDestroys.RemoveAndCopyValue(ChunkCoord, Pending))
+	{
+		if (UPrimitiveComponent* Component = Pending.Component.Get())
+		{
+			Component->DestroyComponent();
+		}
+		if (UBodySetup* BodySetup = Pending.BodySetup.Get())
+		{
+			BodySetup->MarkAsGarbage();
+		}
+	}
 }
 
 FVector UVoxelCollisionManager::ResolveFocusPosition(const FVector& FallbackViewerPosition) const
@@ -980,6 +1046,7 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 	{
 		return;
 	}
+	const double SweepStart = FPlatformTime::Seconds();
 
 	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
 	// Tier 0: use the speed-expanded effective radius (CurrentEffectiveRadius is refreshed each
@@ -1027,6 +1094,7 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 	}
 
 	// Request collision for chunks that need it but don't have it
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelCollision_SweepRequests);
 	for (const FIntVector& ChunkCoord : ChunksNeedingCollision)
 	{
 		FChunkCollisionData* Data = CollisionData.Find(ChunkCoord);
@@ -1065,9 +1133,18 @@ void UVoxelCollisionManager::UpdateCollisionDecisions(const FVector& ViewerPosit
 		}
 	}
 
+	// Out of every focus's shell: with a tick budget the components go within it, a few a tick (G282); the data at once.
 	for (const FIntVector& ChunkCoord : ChunksToRemove)
 	{
-		RemoveCollision(ChunkCoord);
+		RemoveCollision(ChunkCoord, bDeferSweepDestroys);
+	}
+	// A sweep over 2 ms says what it swept (G282: a teleport taken as speed swept 1,014 chunks in 24 ms).
+	const double SweepMs = (FPlatformTime::Seconds() - SweepStart) * 1000.0;
+	if (SweepMs > 2.0)
+	{
+		UE_LOG(LogVoxelCollision, Log, TEXT("Slow collision sweep: %.2f ms, radius %.0f (speed %.0f), %d loaded, %d need collision, %d removed, queue %d, cooking %d"),
+			SweepMs, EffectiveRadius, SmoothedFocusSpeed, LoadedChunks.Num(), ChunksNeedingCollision.Num(), ChunksToRemove.Num(),
+			CookingQueue.Num(), AsyncCollisionInProgress.Num());
 	}
 }
 
@@ -1390,6 +1467,8 @@ int32 UVoxelCollisionManager::BuildPhysicsTriangles(const TArray<uint32>& Render
 
 void UVoxelCollisionManager::ApplyEmptyCollisionResult(const FIntVector& ChunkCoord)
 {
+	DestroyPendingComponent(ChunkCoord); // an old component of this chunk waiting to go (G282) goes now
+
 	FChunkCollisionData* Data = CollisionData.Find(ChunkCoord);
 	if (!Data)
 	{
@@ -1479,6 +1558,9 @@ void UVoxelCollisionManager::ApplyCollisionResult(FAsyncCollisionResult& Result)
 		Data->CollisionComponent = nullptr;
 	}
 
+	// A component of this chunk still waiting to be destroyed (it left the shell and came back, G282) goes first.
+	DestroyPendingComponent(Result.ChunkCoord);
+
 	// Create collision component to register with physics (game thread only, ~0.5ms)
 	Data->CollisionComponent = CreateCollisionComponent(Result.ChunkCoord, BS);
 
@@ -1500,6 +1582,9 @@ void UVoxelCollisionManager::ApplyCollisionResult(FAsyncCollisionResult& Result)
 
 void UVoxelCollisionManager::RequestCollision(const FIntVector& ChunkCoord, float Priority)
 {
+	// Wanted again before its old component went (G282): that one goes now, the chunk is cooked afresh as before.
+	DestroyPendingComponent(ChunkCoord);
+
 	// Already cooking — can't reprioritize an in-flight task.
 	if (AsyncCollisionInProgress.Contains(ChunkCoord))
 	{
@@ -1554,7 +1639,7 @@ void UVoxelCollisionManager::RequestCollision(const FIntVector& ChunkCoord, floa
 		ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, Priority, CookingQueue.Num());
 }
 
-void UVoxelCollisionManager::RemoveCollision(const FIntVector& ChunkCoord)
+void UVoxelCollisionManager::RemoveCollision(const FIntVector& ChunkCoord, bool bDeferDestroy)
 {
 	// Remove from queue if pending
 	if (CookingQueueSet.Remove(ChunkCoord))
@@ -1576,15 +1661,24 @@ void UVoxelCollisionManager::RemoveCollision(const FIntVector& ChunkCoord)
 	// Remove collision data and component
 	if (FChunkCollisionData* Data = CollisionData.Find(ChunkCoord))
 	{
-		// Destroy collision component first
-		if (Data->CollisionComponent)
+		// Destroy collision component first (or leave it to DestroyPendingComponents, G282)
+		if (bDeferDestroy && (Data->CollisionComponent || Data->BodySetup))
 		{
-			Data->CollisionComponent->DestroyComponent();
+			DestroyPendingComponent(ChunkCoord);
+			PendingDestroys.Add(ChunkCoord, { Data->CollisionComponent.Get(), Data->BodySetup.Get() });
 			Data->CollisionComponent = nullptr;
 		}
-		if (Data->BodySetup)
+		else
 		{
-			Data->BodySetup->MarkAsGarbage();
+			if (Data->CollisionComponent)
+			{
+				Data->CollisionComponent->DestroyComponent();
+				Data->CollisionComponent = nullptr;
+			}
+			if (Data->BodySetup)
+			{
+				Data->BodySetup->MarkAsGarbage();
+			}
 		}
 		CollisionData.Remove(ChunkCoord);
 		++TotalCollisionsRemoved;

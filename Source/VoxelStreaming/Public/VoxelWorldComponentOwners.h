@@ -181,6 +181,8 @@ struct VOXELSTREAMING_API FVoxelWaterBodyMeshOwner
 		int32 Built = 0;
 		int32 Removed = 0;
 		int32 Kept = 0;
+		/** Bodies still to build: the tick budget ran out (G282); the next Update with the same bodies builds them */
+		int32 Pending = 0;
 	};
 
 	/**
@@ -194,10 +196,16 @@ struct VOXELSTREAMING_API FVoxelWaterBodyMeshOwner
 	 * @param RiverMaterial  A river reach's material (null: the lake's)
 	 * @param bVisible       Whether the meshes are shown (voxel.Water.BodyMeshes)
 	 * @param ViewerPosition The viewer: decides each underside's first state
-	 * @return What was built, kept and removed
+	 * @param Budget         The chunk manager's tick budget (G282): with one, the meshes of the bodies not drawn yet are built
+	 *                       on the thread pool (one body's mesh took 10 to 14 ms on VoxelDemo), and the built ones get their
+	 *                       components nearest the viewer first while the budget has time left, the first always; the rest
+	 *                       are left Pending for the next Update with the same bodies. Null builds them all here, in the
+	 *                       order given (as before)
+	 * @return What was built, kept, removed and left pending
 	 */
 	FUpdateResult Update(AActor* Owner, TConstArrayView<FVoxelWaterBody> Bodies, const FVoxelWaterFrame& Frame, double VoxelSize,
-		UMaterialInterface* LakeMaterial, UMaterialInterface* RiverMaterial, bool bVisible, const FVector& ViewerPosition);
+		UMaterialInterface* LakeMaterial, UMaterialInterface* RiverMaterial, bool bVisible, const FVector& ViewerPosition,
+		const struct FVoxelTickBudget* Budget = nullptr);
 
 	/** Destroy every component. */
 	void Destroy();
@@ -241,6 +249,24 @@ private:
 
 	/** Counts the components made, for their names */
 	int32 Serial = 0;
+
+	/** A body's mesh built on the thread pool (G282): written by the job, read once bDone is set. */
+	struct FBuildSlot;
+	struct FBuildJob
+	{
+		FVoxelWaterBody Body;
+		TSharedPtr<FBuildSlot, ESPMode::ThreadSafe> Slot;
+	};
+
+	/** The bodies whose meshes are building on the thread pool or are built and wait for their components (G282) */
+	TArray<FBuildJob> Building;
+
+	/** Bodies whose mesh came out empty on the thread pool: not built again while handed over (G282) */
+	TArray<FVoxelWaterBody> Unbuildable;
+
+	/** Make a built body's component and entry. */
+	void AddEntry(AActor* Owner, const FVoxelWaterBody& Body, const FVoxelWaterFrame& Frame, const struct FVoxelWaterBodyMesh& Mesh,
+		UMaterialInterface* LakeMaterial, UMaterialInterface* RiverMaterial, bool bVisible);
 };
 
 /**
@@ -265,9 +291,14 @@ struct VOXELSTREAMING_API FVoxelFarFieldPresenter
 	 * @param TerrainMaterial  The terrain's material (section 0)
 	 * @param WaterMaterial    The water's material (sections 1 and 2)
 	 * @param bUnderSea        Whether the camera is under the sea (the undersides show)
+	 * @param Budget           The chunk manager's tick budget (G282): with one, a removed patch's component is hidden at once
+	 *                         and destroyed within the budget, the first each update always; null destroys it at once
 	 */
 	void Apply(FVoxelFarField& FarField, const FVoxelFarFieldChanges& Changes, AActor* Owner, UMaterialInterface* TerrainMaterial,
-		UMaterialInterface* WaterMaterial, bool bUnderSea);
+		UMaterialInterface* WaterMaterial, bool bUnderSea, const struct FVoxelTickBudget* Budget = nullptr);
+
+	/** @return Components of removed patches, hidden, still waiting to be destroyed (G282) */
+	int32 GetPendingDestroyCount() const { return PendingDestroys.Num(); }
 
 	/** Destroy every component. */
 	void Destroy();
@@ -299,4 +330,11 @@ private:
 
 	/** The ray tracing mode the components were given (voxel.World.FarFieldRayTracing; -1 before the first update, G117) */
 	int32 RayTracingMode = -1;
+
+	/**
+	 * Components of removed patches, hidden, to be destroyed within the tick budget (G282): a teleport removes the place
+	 * left's patches together, about 500 on VoxelDemo, whose destroys took 12 ms of one update
+	 */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UVoxelFarFieldPatchComponent>> PendingDestroys;
 };

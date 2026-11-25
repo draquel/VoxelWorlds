@@ -93,6 +93,29 @@ a camera cut of more than a chunk it updates the far field and runs the streamin
 frame renders with (F4.3, MP1). Each step is
 timed into `FVoxelTimingStats`, which the streaming bench reports.
 
+**The tick budget** (G282, `FVoxelTickBudget`, `voxel.Stream.TickBudgetMs`, 4 ms; 0 = the tick before G282). Each
+section has a cap of its own, and after a teleport onto fresh ground they added up: on VoxelDemo the tick averaged 8 ms
+in the first second and its longest was 27 to 37 ms, made of single pieces of work. The work the player stands on and
+sees is not held: the collision cooks' applies and launches and the cooks under and ahead of the pawn, and the meshes'
+submits to the renderer, which keep their own caps (the submits 4 ms, the applies `voxel.Collision.MaxAppliesPerFrame`).
+What can wait a tick draws on what is left of the tick's budget, at least one piece a section a tick and nearest first,
+so the world settles as it does without it: the far field's build launches (each gathers its patch's conditioning and
+water on the game thread, 1 to 2 ms a patch; six at once were updates of 5 to 13 ms about once a second, also at rest),
+the far field's components of removed patches (hidden at once, destroyed later: a teleport removes the place left's 500
+patches, 12 ms of one update), the lakes' and river reaches' meshes (built on the thread pool, their components made
+within the budget: one valley river's mesh alone took 10 to 14 ms of a tick) and the collision components of chunks that
+left the shell (their data dropped at once). The collision manager also takes a jump of more than a chunk in one tick
+as a cut, not speed (Collision cooking, below). Measured with the old and the new path alternated in one editor, six
+teleports a side between two sites 90 km apart (`Scripts/qa/stream_probe.py`): in the first two seconds the longest tick
+11 to 18 ms against 27 to 34, the mean tick 5.4 to 6.2 ms against 6.4 to 7.0, the time in frames over 33.3 ms 0 to 7 %
+against 5 to 12 %; collision under the pawn after 0.26 to 0.32 s against 0.31 to 0.39, 216 to 227 cooks a teleport
+against 282 to 307, the last cook after 7.5 to 8.3 s against 7.6 to 8.7, no fall-through. The ten seconds after are
+unchanged (a tick of 3.3 to 3.8 ms: the submits, the seams, the far field's walk of its tree), and so is when the window
+is full: a cap on those is a trade against how soon the terrain shows, left to the user as D196
+(`Documentation/FINDINGS.md`). `voxel.Stream.Probe` records per tick what waited; tests
+`VoxelWorlds.Streaming.TickBudget.*` and `VoxelWorlds.FarField.Plane.LaunchBudget` (the held far field settles to the
+free one's selection).
+
 ### Generation
 
 `ProcessGenerationQueue` builds a request per chunk (`BuildChunkGenerationRequest`: the world mode, the conditioning
@@ -297,6 +320,14 @@ chunks, Dual Contouring, LOD 0, four cooks at once) a cook takes 20 to 21 ms on 
 mesh and 5 to 6 the Chaos triangle mesh (`voxel.Collision.CookStats`; 75 to 80 ms before G275's fix of the mesher's
 working memory, `DUAL_CONTOURING.md`, "Cost"), and a teleport onto fresh ground launches about 470 of them, 175 of
 chunks with no surface (G283).
+
+The shell's radius grows with the focus's speed (`voxel.Collision.LeadSeconds`), and a focus that moves more than a chunk
+in one tick has jumped (a teleport, a respawn) and gives it no speed (`voxel.Collision.JumpIsCut`, G282). Taken as
+speed, a teleport of 90 km grew the radius to 877,518 uu for about a second: the sweep queued every chunk still loaded at
+the place left (776 sorted inserts, 24 ms of one tick), cooks were launched there, and the next sweep dropped them and
+destroyed the old place's components (13 ms). Now the old place loses its collision data in the jump's tick and its
+components go within the tick budget (above); a teleport launches about a quarter fewer cooks and the ground under the
+pawn arrives sooner. Tests `TickBudget.Collision.Jump`, `TickBudget.Collision.DeferredDestroys`.
 
 A neighbour without voxel data at cook time is read as air. The cook records those neighbours
 (`FChunkCollisionData::MissingNeighborMask`); when one arrives (`OnChunkVoxelDataAvailable`, from
