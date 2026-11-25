@@ -200,7 +200,9 @@ bool FVoxelScatterSkeletalTest::RunTest(const FString& Parameters)
 		Static.Settle();
 		StaticTrees = Static.DrawnTrees();
 		TestEqual(TEXT("A static definition makes no skinned component"), Static.Renderer()->GetSkinnedComponentCount(), 0);
-		TestFalse(TEXT("... and requests no load"), Static.Renderer()->IsDefinitionLoadRequested(TreeID));
+		// A static definition's assets load ahead too with voxel.Scatter.PreloadAssets (G287), not before it
+		TestEqual(TEXT("... and requests a load ahead only with voxel.Scatter.PreloadAssets"), Static.Renderer()->IsDefinitionLoadRequested(TreeID),
+			UVoxelScatterRenderer::IsPreloadingStaticAssets());
 		TestEqual(TEXT("... and no collision component"), Static.Renderer()->GetCollisionComponentCount(), 0);
 	}
 	if (!TestTrue(TEXT("The plane grows trees"), StaticTrees.Num() > 4))

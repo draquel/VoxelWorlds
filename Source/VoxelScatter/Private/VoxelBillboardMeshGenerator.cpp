@@ -15,6 +15,7 @@
 #endif
 
 TMap<int64, TWeakObjectPtr<UStaticMesh>> FVoxelBillboardMeshGenerator::CachedMeshes;
+const TCHAR* const FVoxelBillboardMeshGenerator::BillboardMaterialPath = TEXT("/VoxelWorlds/Materials/M_Billboard_Master.M_Billboard_Master");
 
 int64 FVoxelBillboardMeshGenerator::MakeCacheKey(float Width, float Height)
 {
@@ -215,10 +216,10 @@ UMaterialInstanceDynamic* FVoxelBillboardMeshGenerator::CreateBillboardMaterial(
 		return nullptr;
 	}
 
-	// Try to load user-provided billboard master material first
-	static const FString BillboardMaterialPath = TEXT("/VoxelWorlds/Materials/M_Billboard_Master");
+	// Try to load user-provided billboard master material first (found, not loaded, once the scatter renderer has loaded
+	// it ahead, G287)
 	UMaterialInterface* BaseMaterial = Cast<UMaterialInterface>(
-		StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, *BillboardMaterialPath));
+		StaticLoadObject(UMaterialInterface::StaticClass(), nullptr, BillboardMaterialPath));
 
 	if (!BaseMaterial)
 	{
