@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelFarField.h"
+#include "VoxelTickBudget.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelPlanetOcean.h"
 #include "VoxelSurfaceQuery.h"
@@ -1491,10 +1492,12 @@ bool FVoxelFarField::UpdateCovered(FPatchState& Patch)
 	}
 	const TArray<FIntVector>& Chunks = Patch.bBuilt ? Patch.SurfaceChunks : Patch.SampleChunks;
 	bool bCovered = Chunks.Num() > 0 && ChunkDrawn != nullptr;
+	++CoveredTests;
 	if (bCovered)
 	{
 		for (const FIntVector& Chunk : Chunks)
 		{
+			++CoveredChunkLookups;
 			if (!(*ChunkDrawn)(Chunk))
 			{
 				bCovered = false;
@@ -1910,9 +1913,12 @@ void FVoxelFarField::DrainBuilds(FVoxelFarFieldChanges& OutChanges)
 
 void FVoxelFarField::LaunchBuilds()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelFarField_LaunchBuilds);
 	Requests.Sort([](const FBuildRequest& A, const FBuildRequest& B) { return A.Priority < B.Priority; });
 	int32 Slots = MaxBuildsInFlight - BuildsInFlight;
 	int32 Waiting = 0;
+	int32 Launched = 0;
+	LaunchesHeld = 0;
 	TSharedPtr<const FVoxelFarFieldSurface> SharedSurface = Surface;
 	for (const FBuildRequest& Request : Requests)
 	{
@@ -1926,12 +1932,21 @@ void FVoxelFarField::LaunchBuilds()
 			++Waiting;
 			continue;
 		}
+		// Each launch gathers the patch's conditioning and water here, on the game thread (1 to 2 ms a patch on VoxelDemo):
+		// within the tick budget, nearest first, the first always (G282).
+		if (View.Budget && !View.Budget->MayContinue(Launched))
+		{
+			++Waiting;
+			++LaunchesHeld;
+			continue;
+		}
 		// The water over the patch, where a lake or a river reach lies there: with what is at hand, as the conditioning
 		// (a patch's region is too wide to wait for a body; it is rebuilt when one arrives). The sea alone needs no
 		// snapshot of its own: the surface's serves.
 		TSharedPtr<const FVoxelWaterLevels> PatchWater;
 		if (WaterGatherer && Frame.TakesZones(*Patch))
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelFarField_GatherWater);
 			FVoxelWaterLevels Gathered = WaterGatherer(Frame.RegionOf(*Patch));
 			if (!Gathered.IsSeaAlone())
 			{
@@ -1941,6 +1956,7 @@ void FVoxelFarField::LaunchBuilds()
 		FVoxelConditioning Conditioning;
 		if (ConditioningGatherer && Frame.TakesZones(*Patch))
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelFarField_GatherConditioning);
 			// The patch samples the surface every vertex spacing: it takes every line as at least 0.71 of that wide, for
 			// the height and for the band, and gathers over its footprint grown by as much, so a line just outside it
 			// whose widened band reaches in is not missed.
@@ -1953,6 +1969,7 @@ void FVoxelFarField::LaunchBuilds()
 		const uint32 Serial = ++Patch->BuildSerial;
 		++BuildsInFlight;
 		--Slots;
+		++Launched;
 		const FVoxelFarFieldPatchKey Key = Patch->Key;
 		TSharedPtr<FBuildSink, ESPMode::ThreadSafe> TaskSink = Sink;
 		auto Build = [TaskSink, BuildSettings = Settings, SharedSurface, Conditioning = MoveTemp(Conditioning), PatchWater, Key, Serial]()
@@ -1999,14 +2016,23 @@ void FVoxelFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef<bool(
 	UnreadyCoveredEdge = 0;
 	UnreadyUncoveredEdge = 0;
 	bHasUndrawnChunk = false;
+	CoveredTests = 0;
+	CoveredChunkLookups = 0;
 
-	DrainBuilds(OutChanges);
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelFarField_DrainBuilds);
+		DrainBuilds(OutChanges);
+	}
 
 	Requests.Reset();
-	UpdateRoots(OutChanges);
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelFarField_Select);
+		UpdateRoots(OutChanges);
+	}
 
 	// Release the components of patches hidden a while (a parent under drawn children, a covered edge patch inside the
 	// window): they build again when they are needed. Roots and edge patches near the window's edge stay.
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelFarField_ReleaseAndVisibility);
 	if (View.ReleaseDelay >= 0.0)
 	{
 		for (TPair<uint64, TUniquePtr<FPatchState>>& Pair : Patches)

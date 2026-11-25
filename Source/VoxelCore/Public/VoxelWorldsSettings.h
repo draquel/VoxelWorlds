@@ -38,6 +38,14 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "1"))
 	float CollisionMoveUpdateThreshold = 200.0f;
 
+	/**
+	 * A focus that moves more than a chunk in one tick has jumped (a teleport, a respawn): the collision shell takes no
+	 * speed from the jump, so its radius stays its own instead of reaching back over the place left; off = the jump counts
+	 * as speed, as before G282 (voxel.Collision.JumpIsCut)
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Collision")
+	bool bCollisionJumpIsCut = true;
+
 	/** Most cooked collision meshes registered with physics per frame, 1 to 16 (voxel.Collision.MaxAppliesPerFrame) */
 	UPROPERTY(config, EditAnywhere, Category = "Collision", meta = (ClampMin = "1", ClampMax = "16"))
 	int32 CollisionMaxAppliesPerFrame = 4;
@@ -76,6 +84,17 @@ public:
 	float NavSearchBudgetMs = 2.0f;
 
 	// ==================== Rendering ====================
+
+	// ==================== Streaming ====================
+
+	/**
+	 * Milliseconds a chunk manager tick may take before the work that can wait a tick waits (FVoxelTickBudget, G282): the
+	 * far field's build launches, the lakes' and river reaches' meshes, the collision components of chunks that left the
+	 * shell, each at least one piece a tick, nearest first; the collision cooks and the meshes' submits are not held by it;
+	 * 0 = no budget (voxel.Stream.TickBudgetMs)
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Streaming", meta = (ClampMin = "0"))
+	float StreamTickBudgetMs = 4.0f;
 
 	/** Crossfade duration of a chunk mesh swap, in seconds (voxel.MeshFade.Duration) */
 	UPROPERTY(config, EditAnywhere, Category = "Rendering", meta = (ClampMin = "0"))

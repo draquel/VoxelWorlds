@@ -264,6 +264,23 @@ static TAutoConsoleVariable<int32> CVarStreamGroundWindows(
 	TEXT("ground on the server). A client and a standalone game have one viewer either way."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<float> CVarStreamTickBudgetMs(
+	TEXT("voxel.Stream.TickBudgetMs"),
+	4.0f,
+	TEXT("G282: milliseconds a chunk manager tick may take before the work that can wait a tick waits: the far field's build ")
+	TEXT("launches, the lakes' and river reaches' meshes, the collision components of chunks that left the shell (each at least ")
+	TEXT("one a tick, nearest first). The collision cooks and the meshes' submits are not held by it. 0 = no budget, every ")
+	TEXT("section as before G282. The project's value is UVoxelWorldsSettings::StreamTickBudgetMs; the cvar overrides it once set."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarStreamSubmitBudgetMs(
+	TEXT("voxel.Stream.SubmitBudgetMs"),
+	4.0f,
+	TEXT("Milliseconds a tick may spend submitting finished chunk meshes to the renderer (at least one a tick); ")
+	TEXT("the rest wait for the next tick. Before G282 a fixed 4 ms. A lower value spreads a burst's submits over more ticks, at ")
+	TEXT("the cost of the terrain showing later (D196)."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarStreamMaxLoadPerFrame(
 	TEXT("voxel.Stream.MaxLoadPerFrame"),
 	0,
@@ -641,6 +658,9 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	VoxelStreamProbe::BeginTick(*this);
 	const double TickStartTime = FPlatformTime::Seconds();
 	FVoxelTimingStats Timing;
+	// The tick's budget (G282): what can wait a tick draws on what is left of it, after what the player stands on and sees.
+	Timing.TickBudgetMs = VoxelSettings::Resolve(CVarStreamTickBudgetMs, UVoxelWorldsSettings::Get().StreamTickBudgetMs);
+	TickBudget = FVoxelTickBudget(Timing.TickBudgetMs);
 
 	// === Adaptive Throttling: update smoothed frame time ===
 	{
@@ -876,7 +896,8 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	SubmitWaterSecondsThisTick = 0.0;
 	SubmitsThisTick = 0;
 	const int32 MaxRenderSubmitsPerFrame = ResolveMaxLoadPerFrame();
-	constexpr double RenderSubmitBudgetSec = 0.004; // 4ms budget — leaves headroom for other systems
+	// 4 ms by default, leaving headroom for other systems (voxel.Stream.SubmitBudgetMs; a fixed 4 ms before G282).
+	const double RenderSubmitBudgetSec = FMath::Max(0.0f, CVarStreamSubmitBudgetMs.GetValueOnGameThread()) / 1000.0;
 	if (PendingMeshQueue.Num() > 0)
 	{
 		int32 RenderSubmitCount = 0;
@@ -939,6 +960,7 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	SectionStart = FPlatformTime::Seconds();
 	UpdateWaterBodyMeshes();
 	Timing.WaterBodyMeshMs = VoxelTickTiming::MsSince(SectionStart);
+	Timing.WaterBodiesPending = WaterBodiesToFinish.Num();
 
 	// === Planet far field (spherical Phase 6, WM-BP9) ===
 	// After this tick's generation results, meshes and unloads: an edge patch shows in the tick its chunks leave and
@@ -948,6 +970,11 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		SectionStart = FPlatformTime::Seconds();
 		UpdateFarField(CurrentCameraPosition, CurrentViewerPosition, Context.FieldOfView);
 		Timing.FarFieldMs = VoxelTickTiming::MsSince(SectionStart);
+		Timing.FarFieldSelectMs = FarFieldStats.SelectMs;
+		Timing.FarFieldApplyMs = FarFieldStats.ApplyMs;
+		Timing.FarFieldCoveredTests = FarFieldStats.CoveredTests;
+		Timing.FarFieldCoveredLookups = FarFieldStats.CoveredChunkLookups;
+		Timing.FarFieldLaunchesHeld = FarField->GetLaunchesHeld();
 	}
 
 	// === Water propagation (bounded BFS per frame) ===
@@ -1008,9 +1035,10 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	SectionStart = FPlatformTime::Seconds();
 	if (CollisionManager && Configuration && Configuration->bGenerateCollision)
 	{
-		CollisionManager->Update(Context.ViewerPosition, DeltaTime);
+		CollisionManager->Update(Context.ViewerPosition, DeltaTime, &TickBudget);
 		Timing.CollisionPrepMs = CollisionManager->LastPrepMs;
 		Timing.CollisionApplyMs = CollisionManager->LastApplyMs;
+		Timing.CollisionDestroysPending = CollisionManager->GetPendingDestroyCount();
 	}
 	Timing.CollisionMs = VoxelTickTiming::MsSince(SectionStart);
 
@@ -1741,6 +1769,7 @@ void UVoxelChunkManager::Shutdown()
 	DestroyFarField();
 	PlanetOcean.Destroy();
 	WaterBodyMeshes.Destroy();
+	WaterBodiesToFinish.Reset();
 	bWaterBodyMeshesGathered = false;
 	bWaterBodyMeshesDirty = false;
 	StopHydrology();
@@ -4245,6 +4274,7 @@ void UVoxelChunkManager::UpdateWaterBodyMeshes()
 		if (WaterBodyMeshes.Num() > 0)
 		{
 			WaterBodyMeshes.Destroy();
+			WaterBodiesToFinish.Reset();
 		}
 		return;
 	}
@@ -4259,6 +4289,7 @@ void UVoxelChunkManager::UpdateWaterBodyMeshes()
 		if (WaterBodyMeshes.Num() > 0)
 		{
 			WaterBodyMeshes.Destroy();
+			WaterBodiesToFinish.Reset();
 			bWaterBodyMeshesGathered = false;
 		}
 		return;
@@ -4283,9 +4314,24 @@ void UVoxelChunkManager::UpdateWaterBodyMeshes()
 	}
 	const bool bMovedFar = bWaterBodyMeshesGathered
 		&& FVector::DistSquared(CurrentViewerPosition, WaterBodyMeshGatherPosition) > FMath::Square(FMath::Min(LakeReach, RiverReach) / 8.0);
-	if (bWaterBodyMeshesDirty || !bWaterBodyMeshesGathered || bMovedFar)
+	if (!bWaterBodyMeshesDirty && bWaterBodyMeshesGathered && !bMovedFar && WaterBodiesToFinish.Num() > 0)
+	{
+		// The last gather's bodies not built yet (the tick budget ran out, G282): the same list again, the nearest first.
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWaterBody_Finish);
+		const FVoxelWaterBodyMeshOwner::FUpdateResult Result = WaterBodyMeshes.Update(Owner, WaterBodiesToFinish, GetWaterLevels().GetFrame(),
+			Configuration->VoxelSize, LakeMaterial ? LakeMaterial : RiverMaterial, RiverMaterial, CVarWaterBodyMeshes.GetValueOnGameThread() != 0,
+			CurrentCameraPosition, &TickBudget);
+		if (Result.Pending == 0)
+		{
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Water body meshes: %d drawn, the last %d of the gather built (%d quads)"),
+				WaterBodyMeshes.Num(), Result.Built, WaterBodyMeshes.GetNumQuads());
+			WaterBodiesToFinish.Reset();
+		}
+	}
+	else if (bWaterBodyMeshesDirty || !bWaterBodyMeshesGathered || bMovedFar)
 	{
 		const double StartTime = FPlatformTime::Seconds();
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWaterBody_GatherAndUpdate);
 		const FVoxelWaterFrame Frame = GetWaterLevels().GetFrame();
 		// The bodies at hand within the reach: a source that works one out later announces it, and they are gathered again.
 		TArray<FVoxelWaterBody> Bodies;
@@ -4346,16 +4392,24 @@ void UVoxelChunkManager::UpdateWaterBodyMeshes()
 				Bodies.RemoveAt(Index);
 			}
 		}
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWaterBody_Owner);
 		const FVoxelWaterBodyMeshOwner::FUpdateResult Result = WaterBodyMeshes.Update(Owner, Bodies, Frame, Configuration->VoxelSize,
-			LakeMaterial ? LakeMaterial : RiverMaterial, RiverMaterial, CVarWaterBodyMeshes.GetValueOnGameThread() != 0, CurrentCameraPosition);
+			LakeMaterial ? LakeMaterial : RiverMaterial, RiverMaterial, CVarWaterBodyMeshes.GetValueOnGameThread() != 0, CurrentCameraPosition,
+			&TickBudget);
+		// Some left for the next ticks (G282): kept to hand over again.
+		WaterBodiesToFinish.Reset();
+		if (Result.Pending > 0)
+		{
+			WaterBodiesToFinish = MoveTemp(Bodies);
+		}
 		bWaterBodyMeshesDirty = false;
 		bWaterBodyMeshesGathered = true;
 		WaterBodyMeshGatherPosition = CurrentViewerPosition;
 		if (Result.Built > 0 || Result.Removed > 0)
 		{
 			UE_LOG(LogVoxelStreaming, Log,
-				TEXT("Water body meshes: %d drawn (%d built, %d removed, %d kept; %d quads) within %.0f uu of the viewer, in %.2f ms"),
-				WaterBodyMeshes.Num(), Result.Built, Result.Removed, Result.Kept, WaterBodyMeshes.GetNumQuads(), Reach,
+				TEXT("Water body meshes: %d drawn (%d built, %d removed, %d kept, %d to build in the next ticks; %d quads) within %.0f uu of the viewer, in %.2f ms"),
+				WaterBodyMeshes.Num(), Result.Built, Result.Removed, Result.Kept, Result.Pending, WaterBodyMeshes.GetNumQuads(), Reach,
 				(FPlatformTime::Seconds() - StartTime) * 1000.0);
 		}
 	}
@@ -4745,20 +4799,31 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	static IConsoleVariable* FadeDuration = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.MeshFade.Duration"));
 	View.HideDelay = FMath::Max(0.0f, VoxelSettings::IsOverridden(FadeDuration) ? FadeDuration->GetFloat() : UVoxelWorldsSettings::Get().MeshFadeDuration) + 0.1;
 	View.ChunkStateVersion = ChunkStateVersion;
+	// The build launches gather on the game thread: within what is left of the tick (G282).
+	View.Budget = &TickBudget;
 
 	FarField->SetMaxBuildsInFlight(VoxelSettings::Resolve(CVarFarFieldMaxBuilds, Configuration->FarFieldMaxBuilds));
 	FVoxelFarFieldChanges Changes;
+	const double SelectStart = FPlatformTime::Seconds();
 	FarField->Update(View, [this](const FIntVector& Coord) { return IsChunkDrawnForFarField(Coord); }, Changes);
+	const double ApplyStart = FPlatformTime::Seconds();
 
 	// Apply: components go with their patches, are (re)filled when a patch is built, and show what the selection drew.
 	AActor* Owner = GetOwner();
 	UMaterialInterface* TerrainMaterial = MeshRenderer ? MeshRenderer->GetSurfaceMaterial() : nullptr;
 	UMaterialInterface* WaterMaterial = Configuration->WaterMeshMaterial.Get();
 	const bool bUnderSea = Settings.bSea && FarField->GetFrame().IsUnderSea(CameraPosition);
-	FarFieldPresenter.Apply(*FarField, Changes, Owner, TerrainMaterial, WaterMaterial, bUnderSea);
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelFarField_Present);
+		FarFieldPresenter.Apply(*FarField, Changes, Owner, TerrainMaterial, WaterMaterial, bUnderSea, &TickBudget);
+	}
 
 	// Figures for the bench and vox.Planet.
 	FVoxelFarFieldStats& Stats = FarFieldStats;
+	Stats.SelectMs = static_cast<float>((ApplyStart - SelectStart) * 1000.0);
+	Stats.ApplyMs = static_cast<float>((FPlatformTime::Seconds() - ApplyStart) * 1000.0);
+	Stats.CoveredTests = FarField->GetCoveredTests();
+	Stats.CoveredChunkLookups = FarField->GetCoveredChunkLookups();
 	Stats.bActive = true;
 	Stats.bDrawsSea = Settings.bSea;
 	Stats.Patches = FarField->GetPatchCount();

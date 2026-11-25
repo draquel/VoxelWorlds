@@ -22,6 +22,7 @@
 #include "IVoxelWorldMode.h"
 #include "DistanceBandLODStrategy.h"
 #include "VoxelFarFieldTestRig.h"
+#include "VoxelTickBudget.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -1689,6 +1690,75 @@ bool FFarFieldPlaneConditioningLineBandTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("A point sample alone breaks the band at some level (non-vacuous)"), bSomePointSampleBroke);
 	Biomes->RemoveFromRoot();
+	return true;
+}
+
+namespace VoxelHeightmapFarFieldTestUtils
+{
+	/** A clock that moves a second each time it is read: a tick budget on it has no time left after its start (G282). */
+	double GLaunchBudgetClock = 0.0;
+	double LaunchBudgetClock()
+	{
+		GLaunchBudgetClock += 1.0;
+		return GLaunchBudgetClock;
+	}
+}
+
+/**
+ * G282: the build launches within the chunk manager's tick budget. Two far fields over the same plane and view, one free and
+ * one whose every update has a budget with no time left: the held one launches one build an update (the nearest), holds the
+ * rest, and settles to the same selection as the free one (every patch, resident or not, and what each draws).
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldPlaneLaunchBudgetTest,
+	"VoxelWorlds.FarField.Plane.LaunchBudget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFarFieldPlaneLaunchBudgetTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelHeightmapFarFieldTestUtils;
+
+	const FVector2D Site = GetSites()[1];
+	FRig Free(MakePlaneConfig(), 64, 150000.0, /*bSea=*/true);
+	FRig Held(MakePlaneConfig(), 64, 150000.0, /*bSea=*/true);
+	const FVector Viewer = Free.SurfacePoint(Site) + FVector(0.0, 0.0, 300.0);
+	const FVoxelFarFieldView FreeView = Free.MakeView(Viewer);
+	auto FreeLoaded = [&Free, &FreeView](const FIntVector& Coord) { return Free.InWindow(FreeView, Coord, ViewDistance); };
+	TestTrue(TEXT("The free far field settles"), Free.Converge(FreeView, FreeLoaded) > 0);
+
+	const FVoxelTickBudget Spent(1.0, &LaunchBudgetClock);
+	FVoxelFarFieldView HeldView = Held.MakeView(Viewer);
+	HeldView.Budget = &Spent;
+	auto HeldLoaded = [&Held, &HeldView](const FIntVector& Coord) { return Held.InWindow(HeldView, Coord, ViewDistance); };
+	FVoxelFarFieldChanges Changes;
+	Held.FarField.Update(HeldView, HeldLoaded, Changes);
+	TestEqual(TEXT("The held far field's first update launches one build"), Held.FarField.GetBuildsInFlight(), 1);
+	TestTrue(*FString::Printf(TEXT("... and holds the rest for the next updates (%d)"), Held.FarField.GetLaunchesHeld()), Held.FarField.GetLaunchesHeld() > 0);
+	Held.FarField.Update(HeldView, HeldLoaded, Changes);
+	TestEqual(TEXT("... the first one built is a root (the nearest-first order: roots before every other patch)"),
+		Held.FarField.GetTotalBuilt() == 1 && Changes.Built.Num() == 1 ? FVoxelFarFieldPatchKey::Unpack(Changes.Built[0]).Level : -1, 0);
+	TestTrue(TEXT("The held far field settles"), Held.Converge(HeldView, HeldLoaded, 5000) > 0);
+
+	// The same selection: every patch, whether it is resident, and what it draws.
+	TMap<uint64, int32> FreeState;
+	Free.FarField.ForEachPatch([&FreeState](const FVoxelFarField::FPatchState& Patch)
+	{
+		FreeState.Add(Patch.Key.Pack(), (Patch.bResident ? 1 : 0) | (Patch.bDrawTerrain ? 2 : 0) | (Patch.bDrawSea ? 4 : 0));
+	});
+	int32 Same = 0, Different = 0, Missing = 0;
+	Held.FarField.ForEachPatch([&](const FVoxelFarField::FPatchState& Patch)
+	{
+		const int32* State = FreeState.Find(Patch.Key.Pack());
+		if (!State)
+		{
+			++Missing;
+			return;
+		}
+		(*State == ((Patch.bResident ? 1 : 0) | (Patch.bDrawTerrain ? 2 : 0) | (Patch.bDrawSea ? 4 : 0)) ? Same : Different) += 1;
+	});
+	TestTrue(*FString::Printf(TEXT("Both have the same patches (%d and %d; non-vacuous)"), FreeState.Num(), Held.FarField.GetPatchCount()),
+		FreeState.Num() == Held.FarField.GetPatchCount() && FreeState.Num() > 4);
+	TestEqual(TEXT("No patch of the held one is missing from the free one"), Missing, 0);
+	TestEqual(*FString::Printf(TEXT("Each patch is resident and drawn alike (%d the same)"), Same), Different, 0);
 	return true;
 }
 

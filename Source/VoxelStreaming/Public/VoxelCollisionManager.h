@@ -9,6 +9,8 @@
 #include "Chaos/TriangleMeshImplicitObject.h"
 #include "VoxelCollisionManager.generated.h"
 
+struct FVoxelTickBudget;
+
 class UVoxelWorldConfiguration;
 class UVoxelChunkManager;
 class UBodySetup;
@@ -286,8 +288,16 @@ public:
 	 *
 	 * @param ViewerPosition Current viewer/camera position
 	 * @param DeltaTime Time since last update
+	 * @param Budget The chunk manager's tick budget (G282): the components of chunks that left the shell are destroyed
+	 *        within it, the first each tick always (null: all at once, as before)
 	 */
-	void Update(const FVector& ViewerPosition, float DeltaTime);
+	void Update(const FVector& ViewerPosition, float DeltaTime, const FVoxelTickBudget* Budget = nullptr);
+
+	/** @return Collision components of chunks that left the shell still waiting to be destroyed (G282) */
+	int32 GetPendingDestroyCount() const { return PendingDestroys.Num(); }
+
+	/** @return Jumps of the focus taken as cuts rather than speed in all (G282, voxel.Collision.JumpIsCut) */
+	int64 GetFocusJumps() const { return TotalFocusJumps; }
 
 	/**
 	 * The shell's further foci for the next Update (G217): the pawns of a server's other players. A chunk gets collision
@@ -648,8 +658,21 @@ protected:
 	 * Remove collision data for a chunk.
 	 *
 	 * @param ChunkCoord Chunk coordinate
+	 * @param bDeferDestroy Leave its component to DestroyPendingComponents (a chunk that left the shell, G282) instead of
+	 *        destroying it now
 	 */
-	void RemoveCollision(const FIntVector& ChunkCoord);
+	void RemoveCollision(const FIntVector& ChunkCoord, bool bDeferDestroy = false);
+
+	/**
+	 * Destroy the components RemoveCollision left (G282): within the budget, the first always; all without one.
+	 *
+	 * @param Budget The tick budget, or null for all
+	 * @return The components destroyed
+	 */
+	int32 DestroyPendingComponents(const FVoxelTickBudget* Budget);
+
+	/** Destroy a chunk's component left by RemoveCollision now, if it has one (its chunk gets collision again). */
+	void DestroyPendingComponent(const FIntVector& ChunkCoord);
 
 	/**
 	 * Create a new BodySetup for a chunk.
@@ -753,6 +776,23 @@ protected:
 
 	/** Smoothed focus speed (uu/s); drives the speed-aware radius lead. */
 	float SmoothedFocusSpeed = 0.0f;
+
+	/** Jumps of the focus taken as cuts (more than a chunk in one tick: no speed from them; G282) */
+	int64 TotalFocusJumps = 0;
+
+	/**
+	 * The components of chunks that left the shell, waiting to be destroyed within the tick budget (G282), by chunk; each
+	 * with its body setup. Far from every focus by the sweep's rule, so they collide with nothing that matters meanwhile.
+	 */
+	struct FPendingDestroy
+	{
+		TWeakObjectPtr<UPrimitiveComponent> Component;
+		TWeakObjectPtr<UBodySetup> BodySetup;
+	};
+	TMap<FIntVector, FPendingDestroy> PendingDestroys;
+
+	/** This Update's sweep leaves the components it removes to DestroyPendingComponents (a tick budget is set, G282) */
+	bool bDeferSweepDestroys = false;
 
 	/** Collision radius actually used this frame (CollisionRadius + speed lead). Refreshed in Update(). */
 	float CurrentEffectiveRadius = 5000.0f;

@@ -453,7 +453,9 @@ drawn by one mesh of its own, made from its record, with an underside; the sea's
   (`OnWaterBodiesChanged`'s cause) and when the viewer has moved an eighth of that distance, a body whose record is
   the same keeps its component, and one beyond the distance loses it. Nothing is made on a dedicated server, in an
   editor world, or with neither material set (`UVoxelChunkManager::DrawsWaterBodies`). `voxel.Water.BodyMeshes 0`
-  hides them; `voxel.Water.Stats` counts them.
+  hides them; `voxel.Water.Stats` counts them. With the chunk manager's tick budget (G282, `voxel.Stream.TickBudgetMs`) a body's mesh is built on the thread
+  pool and its component made within the budget, the nearest first (one valley river's mesh took 10 to 14 ms of a tick on
+  VoxelDemo); without one, in the tick as before.
 - **The tiles stay the sea's.** A tile's column mask takes a chunk's flagged columns; where the chunk has water
   columns of its own (a body may reach it), a column counts only when its level is the sea's
   (`UpdateWaterTileContribution`), so no tile draws under a lake or a river and the sea's tile beside a river mouth is
