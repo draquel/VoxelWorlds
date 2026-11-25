@@ -617,7 +617,8 @@ renderer differs in four things:
   and minutes cold (F2). The manager asks the renderer to load every skeletal definition's mesh and override materials
   asynchronously as the definitions load (`PreloadDefinition`, from `Initialize` and `AddScatterDefinition`), and a
   skeletal definition's queued instances wait in the queue, the entries behind them going on, until its load has
-  finished (`IsDefinitionLoaded`); the component then takes the loaded mesh (`Get`, never a load).
+  finished (`IsDefinitionLoaded`); the component then takes the loaded mesh (`Get`, never a load). Since G287 a static
+  definition's assets load ahead the same way ([Assets loaded ahead](#assets-loaded-ahead-g287)).
 
 #### Collision (G149)
 
@@ -663,6 +664,46 @@ instances, provider and ticking count, and the collision capsules with their rad
 components per type. The costs and the decision (the skinned instances everywhere, no near range, the static bakes
 retired) are the foliage and bolt plan's F2 and F3 results (`Plugins/WorldWeatherPlugin/Documentation/WEATHER_SYSTEM.md`
 section 10). Test `VoxelWorlds.Scatter.Skeletal`.
+
+### Assets loaded ahead (G287)
+
+Every definition's assets load in the background as the definitions load, a static one's as a skeletal one's
+(above): `UVoxelScatterRenderer::PreloadDefinition`, called by the manager's `Initialize` for every configured
+definition and by `AddScatterDefinition` for one it adds or replaces, asks the renderer's streamable manager for
+`GatherDefinitionAssets`: the mesh (its materials and their textures are its references and come with it; for a
+skeletal definition the skeletal mesh and its assembly parts; for a billboard its texture, or its atlas, and
+`M_Billboard_Master` instead, the cross mesh being made at runtime) and the override materials. A type's queued
+instances wait in the add queue until its load is in (`IsDefinitionLoaded` in `FlushPendingInstanceAdds`), the entries
+behind them going on; meanwhile they count as the chunk's instances (`GetChunkInstanceCount`, which the digest's
+`caches:` line and the residency audit read), so nothing that reads the scatter sees a type missing: the spawn points,
+the exclusion volumes, the saves' felled trees and the edits never depended on a HISM, and a harvest query finds an
+instance once it is drawn, as it did for an instance waiting in the add budget. The handles carry no delegate (the
+queue asks them), so a world torn down or a PIE stopped with a load pending calls nothing back: `Shutdown` cancels the
+handles and empties the queue. A load that fails counts as done: the HISM's make then finds no mesh and drops the
+type's instances with a warning, as before. `CreateHISMComponent` and `ApplyOverrideMaterials` still go through
+`LoadSynchronous`, which finds the loaded asset; a caller of `GetOrCreateHISM` outside the add queue (tests) still loads
+on the spot. Every machine loads them, a dedicated server included (its HISMs are the trees' collision). The renderer's
+log line for a new HISM or skinned component gives the world's time and when its assets were asked for and in, and how
+many ticks its instances were held; `voxel.Scatter.Stats` gives the loads pending and the queue's waits.
+A test that pumps the manager inside one engine tick (a simple automation test) never lets the async loader run, so a type whose assets were not already resident stays queued there; a test that reads the drawn instances calls `WaitForDefinitionLoads` (in the suite only `VoxelWorlds.Scatter.Cleanup.AsyncPipelineGeneratesScatter`, the first cubic test, now draws none of its billboards, `M_Billboard_Master` not yet loaded; it reads the spawn points). `voxel.Scatter.PreloadAssets 0` is the path before G287 (a static definition's assets loaded synchronously with its
+first HISM); a skeletal definition's always load ahead.
+
+**Measured (2026-11-25, `Scripts/qa/first_use_trace.py`, a fresh editor per run, `VoxelDemo`).** Before, the first
+instances of the stylized spruce pack's types loaded their meshes, materials and textures inside the scatter's flush
+(`VoxelScatter_FlushInstanceAdds`): on the base build (three runs) one frame of 77 to 133 ms 1.4 to 1.6 s after the
+pawn appeared, 58 to 107 ms of it the load (`MI_Meshes` 26 ms, `M_Foliage` 7, the textures 2 to 10 ms each) with 37 to
+44 ms of the editor's shader map work nested in it (`FMaterialResource::BuildShaderMapIdOverride`, `FinishCacheShaders`),
+then two frames of 24 to 67 ms for the plants and the mushrooms (6 to 25 ms of load each). With the cvar 1 and 0 by
+turns, a fresh editor each (three runs a side): the load under the flush 0 ms against 75 to 88 ms a session, the
+frames that load inside the flush none against three (75 to 91 ms, 25 to 33, 25 to 31); what is left of the scatter's assets in the frames is the editor's own
+(its async loader runs on the game thread there): the pack's master material and material instance posted in one or two
+frames 0.9 to 1.0 s after the pawn, 42 to 74 ms, most of it the same shader map work, which a cooked game does not do
+(its async loader serializes on its own thread, and the shader maps are cooked). When the types show: every load was
+in before its type's first instances were queued (two more runs with the held ticks logged: every load in at 0.19 to 0.28 s of
+the world's time, the first instances queued from 0.67 s, held 0 ticks), and each type's first HISM came at the same time as before,
+the grass, plants and mushrooms 0.92 to 1.01 s of the world's time against 0.89 to 1.02, the spruces 0.67 to 0.74 s
+against 0.63 to 0.68 (a few frames, within one second's hitches of the editor's start); no trade, so the new path is the
+default and no decision was opened.
 
 ### Debug Stats
 

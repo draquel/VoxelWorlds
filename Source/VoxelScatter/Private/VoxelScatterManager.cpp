@@ -406,8 +406,9 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 	UE_LOG(LogVoxelScatter, Log, TEXT("Scatter HISM regions: %d chunks along an edge (0 = one region)"), ScatterRegions.RegionChunks);
 	ScatterRenderer->Initialize(this, World);
 
-	// The skeletal definitions' meshes and assembly parts start loading now, asynchronously (the foliage and bolt plan's
-	// D68): a region's first instance never loads them on the game thread
+	// Every definition's assets start loading now, asynchronously (the foliage and bolt plan's D68 for the skeletal ones,
+	// G287 for the static ones, voxel.Scatter.PreloadAssets): a type's first instances never load them on the game thread,
+	// they wait in the renderer's add queue until the assets are in
 	for (const FScatterDefinition& Def : ScatterDefinitions)
 	{
 		ScatterRenderer->PreloadDefinition(Def);

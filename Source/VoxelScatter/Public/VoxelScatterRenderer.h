@@ -92,10 +92,15 @@ struct FSkinnedInstanceSet
  *
  * A skeletal definition (FScatterDefinition::IsSkeletal, the foliage and bolt plan's D68) is drawn through one
  * UInstancedSkinnedMeshComponent per type and region instead, with the Dynamic Wind transform provider and its tick off,
- * its instances added and removed by id (FSkinnedInstanceSet); its mesh, and the assembly parts the mesh references, are
- * loaded ahead asynchronously (PreloadDefinition), and its instances wait in the add queue until they are. With
+ * its instances added and removed by id (FSkinnedInstanceSet). With
  * bEnableCollision a hidden collision-only UInstancedStaticMeshComponent per type and region holds a capsule per instance
  * (G149), added and removed with the skinned instances.
+ *
+ * Every definition's assets (the mesh, and for a skeletal one the assembly parts it references; the override materials; a
+ * billboard's texture and material) are loaded ahead asynchronously as the definitions load (PreloadDefinition), and a
+ * type's queued instances wait in the add queue until they are in (IsDefinitionLoaded): a type's first component never
+ * loads them on the game thread (D68 for the skeletal definitions, G287 for the static ones; voxel.Scatter.PreloadAssets 0
+ * loads a static definition's with its first HISM, as before G287).
  *
  * Key responsibilities:
  * - Create and configure HISM components per scatter type
@@ -272,20 +277,22 @@ public:
 	 */
 	int32 GetHISMCount() const { return HISMComponents.Num(); }
 
-	// ==================== Skeletal Definitions (the foliage and bolt plan's D68) ====================
+	// ==================== Assets Loaded Ahead (D68, G287) ====================
 
 	/**
-	 * Start loading a skeletal definition's mesh (its assembly parts are its references and load with it) and override
-	 * materials asynchronously, so its first component never loads them on the game thread. The manager calls it for every
-	 * definition as the definitions load; a static definition, or one already requested for the same mesh, is left alone.
+	 * Start loading a definition's assets asynchronously (GatherDefinitionAssets), so its first component never loads them
+	 * on the game thread. The manager calls it for every definition as the definitions load (Initialize, and
+	 * AddScatterDefinition, also when it replaces one). Left alone: a definition already requested for the same assets, and
+	 * a static one with voxel.Scatter.PreloadAssets 0 (its first HISM loads them, as before G287).
 	 *
 	 * @param Definition The definition
 	 */
 	void PreloadDefinition(const FScatterDefinition& Definition);
 
 	/**
-	 * Whether a skeletal definition's assets are loaded (its queued instances wait until they are). Requests the load when
-	 * nothing has. A static definition is always loaded.
+	 * Whether a definition's assets are loaded (its queued instances wait in the add queue until they are). Requests the
+	 * load when nothing has. A static definition with voxel.Scatter.PreloadAssets 0 is always loaded; a load that failed
+	 * counts as done (the component's make reports the missing asset and the type's instances are dropped, as before).
 	 *
 	 * @param Definition The definition
 	 * @return True when its components can be made now
@@ -293,15 +300,44 @@ public:
 	bool IsDefinitionLoaded(const FScatterDefinition& Definition);
 
 	/**
-	 * Whether a load was requested for a skeletal definition (PreloadDefinition), for tests.
+	 * Whether a load was requested for a definition (PreloadDefinition), for tests.
 	 *
 	 * @param ScatterTypeID Scatter type ID
 	 * @return True once requested
 	 */
 	bool IsDefinitionLoadRequested(int32 ScatterTypeID) const { return DefinitionLoads.Contains(ScatterTypeID); }
 
-	/** Block until every requested definition load has finished, for tests and tools (the scatter itself never waits). */
+	/** Block until every requested definition load has finished, stalled ones started, for tests and tools (the scatter itself never waits). */
 	void WaitForDefinitionLoads();
+
+	/** @return The definition loads requested and not finished yet */
+	int32 GetPendingDefinitionLoadCount() const;
+
+	/** Times an add queue entry waited a tick for its definition's assets (each entry each tick), for tests and the stats. */
+	int64 GetTotalDefinitionLoadWaits() const { return TotalDefinitionLoadWaits; }
+
+	/**
+	 * Start the loads requested from now on stalled, held until this is called with false (which starts them), for tests:
+	 * a type whose assets are not in yet, made on demand with assets that are always resident.
+	 *
+	 * @param bStalled Hold the loads requested from now on
+	 */
+	void SetDefinitionLoadsStalled(bool bStalled);
+
+	/**
+	 * The assets a definition loads ahead: its mesh (the skeletal mesh for a skeletal one; for a billboard its texture and
+	 * the billboard material instead), and its override materials. A mesh's own materials and textures, and a skeletal
+	 * mesh's assembly parts, are its references and load with it.
+	 *
+	 * @param Definition The definition
+	 * @param OutPaths The assets' paths, emptied first
+	 */
+	static void GatherDefinitionAssets(const FScatterDefinition& Definition, TArray<FSoftObjectPath>& OutPaths);
+
+	/** @return Whether static definitions' assets load ahead (voxel.Scatter.PreloadAssets, G287) */
+	static bool IsPreloadingStaticAssets();
+
+	// ==================== Skeletal Definitions (the foliage and bolt plan's D68) ====================
 
 	/**
 	 * Get or create the skinned component of a skeletal definition in a render region (at the region's origin). Never loads
@@ -554,15 +590,41 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UStaticMesh> CollisionCapsuleMesh;
 
-	/** A skeletal definition's asynchronous load (PreloadDefinition): the mesh it is for and the handle keeping it loaded */
+	/**
+	 * A definition's asynchronous load (PreloadDefinition): the assets it is for, the handle keeping them loaded for the
+	 * world, when (the world's seconds) it was asked for and seen done (-1 until then; looked at every tick while loads are
+	 * pending), and how many ticks the type's instances waited for it
+	 */
 	struct FDefinitionLoad
 	{
-		FSoftObjectPath MeshPath;
+		TArray<FSoftObjectPath> Paths;
 		TSharedPtr<FStreamableHandle> Handle;
+		double RequestedAt = 0.0;
+		double LoadedAt = -1.0;
+		/** Ticks in which some of the type's queued instances waited for the load */
+		int32 HeldTicks = 0;
 	};
 
-	/** The skeletal definitions' loads, by ScatterID */
+	/** The definitions' loads, by ScatterID */
 	TMap<int32, FDefinitionLoad> DefinitionLoads;
+
+	/** Loads requested start stalled (SetDefinitionLoadsStalled, tests) */
+	bool bStallDefinitionLoads = false;
+
+	/** Add queue waits for a definition's assets (GetTotalDefinitionLoadWaits) */
+	int64 TotalDefinitionLoadWaits = 0;
+
+	/** Whether a definition's assets load ahead: a skeletal one's always, a static one's with voxel.Scatter.PreloadAssets */
+	static bool IsLoadedAhead(const FScatterDefinition& Definition);
+
+	/** A definition's load for the log: when it was asked for and in, the ticks its instances were held, or how its assets load */
+	FString DescribeDefinitionLoad(int32 ScatterTypeID) const;
+
+	/** Loads requested and not yet seen done (UpdateDefinitionLoads stamps them; 0 skips its walk) */
+	int32 DefinitionLoadsInFlight = 0;
+
+	/** Stamp the loads that finished since the last tick with the world's time (each tick while any is in flight) */
+	void UpdateDefinitionLoads();
 
 	/** The streamable manager the loads go through (made at Initialize) */
 	TSharedPtr<FStreamableManager> Streamable;

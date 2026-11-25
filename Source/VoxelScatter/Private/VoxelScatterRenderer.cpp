@@ -62,8 +62,54 @@ static TAutoConsoleVariable<float> CVarVoxelScatterLogSlowApplyMs(
 	TEXT("HISM's write); 0 = off (G281)."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarVoxelScatterPreloadAssets(
+	TEXT("voxel.Scatter.PreloadAssets"),
+	1,
+	TEXT("1 = every scatter definition's assets (the mesh, the override materials, a billboard's texture and material) load in\n")
+	TEXT("the background as the definitions load, a type's queued instances waiting in the add queue until they are in (G287).\n")
+	TEXT("0 = a static definition's assets load synchronously on the game thread when its first HISM is made (before G287).\n")
+	TEXT("A skeletal definition's always load ahead (D68)."),
+	ECVF_Default);
+
 UVoxelScatterRenderer::UVoxelScatterRenderer()
 {
+}
+
+bool UVoxelScatterRenderer::IsPreloadingStaticAssets()
+{
+	return CVarVoxelScatterPreloadAssets.GetValueOnGameThread() != 0;
+}
+
+void UVoxelScatterRenderer::GatherDefinitionAssets(const FScatterDefinition& Definition, TArray<FSoftObjectPath>& OutPaths)
+{
+	OutPaths.Reset();
+	if (Definition.IsSkeletal())
+	{
+		// The mesh pulls its assembly parts (the skeletal meshes on its bones) along as its references
+		OutPaths.Add(Definition.SkeletalMesh.ToSoftObjectPath());
+	}
+	else if (Definition.MeshType == EScatterMeshType::CrossBillboard)
+	{
+		// The cross mesh is made at runtime; its texture and the billboard material are assets (CreateHISMComponent)
+		const TSoftObjectPtr<UTexture2D>& Texture = Definition.bUseBillboardAtlas ? Definition.BillboardAtlasTexture : Definition.BillboardTexture;
+		if (!Texture.IsNull())
+		{
+			OutPaths.Add(Texture.ToSoftObjectPath());
+		}
+		OutPaths.Add(FSoftObjectPath(FVoxelBillboardMeshGenerator::BillboardMaterialPath));
+	}
+	else if (!Definition.Mesh.IsNull())
+	{
+		// The mesh's materials and their textures are its references and load with it
+		OutPaths.Add(Definition.Mesh.ToSoftObjectPath());
+	}
+	for (const TSoftObjectPtr<UMaterialInterface>& Material : Definition.OverrideMaterials)
+	{
+		if (!Material.IsNull())
+		{
+			OutPaths.AddUnique(Material.ToSoftObjectPath());
+		}
+	}
 }
 
 // ==================== Lifecycle ====================
@@ -125,6 +171,9 @@ void UVoxelScatterRenderer::Tick(const FVector& ViewerPosition, float /*DeltaTim
 	}
 	LastViewerPosition = ViewerPosition;
 
+	// When each definition's assets came in, for the log (the add queue asks the handles themselves)
+	UpdateDefinitionLoads();
+
 	// Flush deferred instance additions within the per-frame budget. Every scatter update —
 	// new chunks, supplemental streaming, edits, and per-chunk regen — flows through this one
 	// budgeted path. There are no deferred whole-type rebuilds, so nothing needs to be gated on
@@ -179,7 +228,8 @@ void UVoxelScatterRenderer::Shutdown()
 	AllCollisionComponents.Empty();
 	CollisionCapsuleMesh = nullptr;
 
-	// The skeletal definitions' loads go with the components that wanted them
+	// The definitions' loads go with the components that wanted them: cancelled (no delegate is bound, so nothing is
+	// called back), the handles released with the streamable manager
 	for (auto& Pair : DefinitionLoads)
 	{
 		if (Pair.Value.Handle.IsValid())
@@ -189,6 +239,8 @@ void UVoxelScatterRenderer::Shutdown()
 	}
 	DefinitionLoads.Empty();
 	Streamable.Reset();
+	bStallDefinitionLoads = false;
+	DefinitionLoadsInFlight = 0;
 	SkeletalWarnings.Empty();
 
 	// Destroy container actor
@@ -549,8 +601,9 @@ void UVoxelScatterRenderer::ClearAllInstances()
 		return;
 	}
 
-	// Held writes go with the instances
+	// Held writes and queued adds go with the instances (the adds of a type still waiting for its assets among them)
 	PendingHISMWrites.Empty();
+	PendingInstanceAdds.Empty();
 	LastHISMWriteSeconds.Empty();
 
 	// Clear all HISM components
@@ -1194,7 +1247,7 @@ FString UVoxelScatterRenderer::GetDebugStats() const
 	const int32 ActiveInstances = TotalAllocated - TotalPooled;
 	const float Utilization = TotalAllocated > 0 ? (static_cast<float>(ActiveInstances) / TotalAllocated * 100.0f) : 0.0f;
 
-	return FString::Printf(TEXT("ScatterRenderer: %d HISM, %d instances (Active: %d, Pooled: %d, Util: %.0f%%), %d skinned (%d instances, %d capsules), %d chunks, Pending: %d adds; %lld HISM batches (%lld compactions, %lld left for a later tick by the write budget)"),
+	return FString::Printf(TEXT("ScatterRenderer: %d HISM, %d instances (Active: %d, Pooled: %d, Util: %.0f%%), %d skinned (%d instances, %d capsules), %d chunks, Pending: %d adds; %lld HISM batches (%lld compactions, %lld left for a later tick by the write budget); asset loads %d of %d pending (%lld add waits)"),
 		HISMComponents.Num(),
 		TotalAllocated,
 		ActiveInstances,
@@ -1207,7 +1260,10 @@ FString UVoxelScatterRenderer::GetDebugStats() const
 		PendingInstanceAdds.Num(),
 		TotalHISMWriteBatches,
 		TotalHISMCompactions,
-		TotalHISMBatchesLeft);
+		TotalHISMBatchesLeft,
+		GetPendingDefinitionLoadCount(),
+		DefinitionLoads.Num(),
+		TotalDefinitionLoadWaits);
 }
 
 // ==================== Internal Methods ====================
@@ -1256,7 +1312,8 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComp
 	}
 	else
 	{
-		// Load mesh synchronously (TSoftObjectPtr)
+		// Loaded ahead with voxel.Scatter.PreloadAssets (IsDefinitionLoaded held the instances until it was in), so this
+		// finds it; with 0, or for a caller of GetOrCreateHISM outside the add queue, it loads on the game thread (G287)
 		Mesh = Definition.Mesh.LoadSynchronous();
 		if (!Mesh)
 		{
@@ -1337,8 +1394,10 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComp
 	// Register with world
 	HISM->RegisterComponent();
 
-	UE_LOG(LogVoxelScatter, Log, TEXT("Created HISM component for: %s (ID: %d, MeshType: %d)"),
-		*Definition.Name, Definition.ScatterID, static_cast<int32>(Definition.MeshType));
+	// When a type's first instances can show, against when its assets were asked for (G287: the world's seconds)
+	UE_LOG(LogVoxelScatter, Log, TEXT("Created HISM component for: %s (ID: %d, MeshType: %d) at %.2f s, %s"),
+		*Definition.Name, Definition.ScatterID, static_cast<int32>(Definition.MeshType), CachedWorld ? CachedWorld->GetTimeSeconds() : 0.0,
+		*DescribeDefinitionLoad(Definition.ScatterID));
 
 	return HISM;
 }
@@ -1447,49 +1506,64 @@ UClass* UVoxelScatterRenderer::GetSkinnedTransformProviderClass()
 	return Cached.Get();
 }
 
+bool UVoxelScatterRenderer::IsLoadedAhead(const FScatterDefinition& Definition)
+{
+	return Definition.IsSkeletal() || IsPreloadingStaticAssets();
+}
+
 void UVoxelScatterRenderer::PreloadDefinition(const FScatterDefinition& Definition)
 {
-	if (!Definition.IsSkeletal() || !Streamable)
+	if (!IsLoadedAhead(Definition) || !Streamable)
 	{
 		return;
 	}
-	const FSoftObjectPath MeshPath = Definition.SkeletalMesh.ToSoftObjectPath();
-	if (const FDefinitionLoad* Existing = DefinitionLoads.Find(Definition.ScatterID); Existing && Existing->MeshPath == MeshPath)
+	TArray<FSoftObjectPath> Paths;
+	GatherDefinitionAssets(Definition, Paths);
+	if (const FDefinitionLoad* Existing = DefinitionLoads.Find(Definition.ScatterID); Existing && Existing->Paths == Paths)
 	{
 		return;
-	}
-	// The mesh pulls its assembly parts (the skeletal meshes on its bones) along as its references
-	TArray<FSoftObjectPath> Paths = { MeshPath };
-	for (const TSoftObjectPtr<UMaterialInterface>& Material : Definition.OverrideMaterials)
-	{
-		if (!Material.IsNull())
-		{
-			Paths.AddUnique(Material.ToSoftObjectPath());
-		}
 	}
 	FDefinitionLoad& Load = DefinitionLoads.Add(Definition.ScatterID);
-	Load.MeshPath = MeshPath;
-	Load.Handle = Streamable->RequestAsyncLoad(MoveTemp(Paths), FStreamableDelegateWithHandle(), FStreamableManager::AsyncLoadHighPriority,
-		/*bManageActiveHandle=*/false, /*bStartStalled=*/false, FString::Printf(TEXT("VoxelScatter %s"), *Definition.Name));
-	UE_LOG(LogVoxelScatter, Log, TEXT("Scatter type %d (%s): loading the skeletal mesh %s ahead%s"), Definition.ScatterID, *Definition.Name,
-		*MeshPath.ToString(), (Load.Handle.IsValid() && Load.Handle->HasLoadCompleted()) ? TEXT(" (already loaded)") : TEXT(""));
+	Load.Paths = Paths;
+	Load.RequestedAt = CachedWorld ? CachedWorld->GetTimeSeconds() : 0.0;
+	Load.LoadedAt = -1.0;
+	Load.HeldTicks = 0;
+	++DefinitionLoadsInFlight;
+	if (Paths.Num() > 0)
+	{
+		// No delegate: the add queue asks the handle (IsDefinitionLoaded), so a load outliving the world calls nothing back;
+		// Shutdown cancels the handles still loading
+		Load.Handle = Streamable->RequestAsyncLoad(MoveTemp(Paths), FStreamableDelegateWithHandle(), FStreamableManager::AsyncLoadHighPriority,
+			/*bManageActiveHandle=*/false, /*bStartStalled=*/bStallDefinitionLoads, FString::Printf(TEXT("VoxelScatter %s"), *Definition.Name));
+	}
+	if (Load.Paths.Num() == 0)
+	{
+		return; // no asset named (a debug-only definition): nothing to wait for
+	}
+	const bool bAlready = !Load.Handle.IsValid() || Load.Handle->HasLoadCompleted();
+	UE_LOG(LogVoxelScatter, Log, TEXT("Scatter type %d (%s): loading its %d assets ahead (%s)%s"), Definition.ScatterID, *Definition.Name,
+		Load.Paths.Num(), *Load.Paths[0].ToString(), bAlready ? TEXT(", already loaded") : TEXT(""));
 }
 
 bool UVoxelScatterRenderer::IsDefinitionLoaded(const FScatterDefinition& Definition)
 {
-	if (!Definition.IsSkeletal())
+	if (!IsLoadedAhead(Definition))
 	{
+		// Before G287 (voxel.Scatter.PreloadAssets 0): a static definition's HISM loads them as it is made
 		return true;
 	}
-	const FSoftObjectPath MeshPath = Definition.SkeletalMesh.ToSoftObjectPath();
-	const FDefinitionLoad* Load = DefinitionLoads.Find(Definition.ScatterID);
-	if (!Load || Load->MeshPath != MeshPath)
+	// Requested when the definitions load (the manager's Initialize, and AddScatterDefinition, which asks again when a
+	// replaced definition names other assets); here only when nothing has (the cvar turned on during play)
+	FDefinitionLoad* Load = DefinitionLoads.Find(Definition.ScatterID);
+	if (!Load)
 	{
 		PreloadDefinition(Definition);
 		Load = DefinitionLoads.Find(Definition.ScatterID);
 	}
-	// No handle: nothing could be requested (no streamable manager, an empty path); the component's make reports it
-	return !Load || !Load->Handle.IsValid() || Load->Handle->HasLoadCompleted();
+	// No handle: nothing could be requested (no streamable manager, no asset named); the component's make reports it. A
+	// handle that failed or was cancelled has completed too: the component's make finds the asset missing and reports it.
+	const bool bLoaded = !Load || !Load->Handle.IsValid() || Load->Handle->HasLoadCompleted() || Load->Handle->WasCanceled();
+	return bLoaded;
 }
 
 void UVoxelScatterRenderer::WaitForDefinitionLoads()
@@ -1498,9 +1572,76 @@ void UVoxelScatterRenderer::WaitForDefinitionLoads()
 	{
 		if (Pair.Value.Handle.IsValid() && !Pair.Value.Handle->HasLoadCompleted())
 		{
-			Pair.Value.Handle->WaitUntilComplete();
+			Pair.Value.Handle->WaitUntilComplete(/*Timeout=*/0.0f, /*bStartStalledHandles=*/true);
 		}
 	}
+}
+
+void UVoxelScatterRenderer::UpdateDefinitionLoads()
+{
+	if (DefinitionLoadsInFlight <= 0)
+	{
+		return;
+	}
+	const double Now = CachedWorld ? CachedWorld->GetTimeSeconds() : 0.0;
+	int32 InFlight = 0;
+	for (auto& Pair : DefinitionLoads)
+	{
+		FDefinitionLoad& Load = Pair.Value;
+		if (Load.LoadedAt >= 0.0)
+		{
+			continue;
+		}
+		if (!Load.Handle.IsValid() || Load.Handle->HasLoadCompleted() || Load.Handle->WasCanceled())
+		{
+			Load.LoadedAt = Now;
+		}
+		else
+		{
+			++InFlight;
+		}
+	}
+	DefinitionLoadsInFlight = InFlight;
+}
+
+int32 UVoxelScatterRenderer::GetPendingDefinitionLoadCount() const
+{
+	int32 Pending = 0;
+	for (const auto& Pair : DefinitionLoads)
+	{
+		Pending += (Pair.Value.Handle.IsValid() && !Pair.Value.Handle->HasLoadCompleted() && !Pair.Value.Handle->WasCanceled()) ? 1 : 0;
+	}
+	return Pending;
+}
+
+void UVoxelScatterRenderer::SetDefinitionLoadsStalled(bool bStalled)
+{
+	bStallDefinitionLoads = bStalled;
+	if (!bStalled)
+	{
+		for (auto& Pair : DefinitionLoads)
+		{
+			if (Pair.Value.Handle.IsValid() && Pair.Value.Handle->IsStalled())
+			{
+				Pair.Value.Handle->StartStalledHandle();
+			}
+		}
+	}
+}
+
+FString UVoxelScatterRenderer::DescribeDefinitionLoad(int32 ScatterTypeID) const
+{
+	const FDefinitionLoad* Load = DefinitionLoads.Find(ScatterTypeID);
+	if (!Load)
+	{
+		return IsPreloadingStaticAssets() ? TEXT("not loaded ahead") : TEXT("loaded with its first HISM (voxel.Scatter.PreloadAssets 0)");
+	}
+	if (Load->LoadedAt < 0.0)
+	{
+		return FString::Printf(TEXT("assets requested at %.2f s, loading (its instances held %d ticks)"), Load->RequestedAt, Load->HeldTicks);
+	}
+	return FString::Printf(TEXT("assets requested at %.2f s, in at %.2f s, its instances held %d ticks"), Load->RequestedAt, Load->LoadedAt,
+		Load->HeldTicks);
 }
 
 UInstancedSkinnedMeshComponent* UVoxelScatterRenderer::GetOrCreateSkinnedComponent(int32 ScatterTypeID, const FIntVector& Region)
@@ -1590,8 +1731,9 @@ UInstancedSkinnedMeshComponent* UVoxelScatterRenderer::CreateSkinnedComponent(co
 	ApplyOverrideMaterials(Component, Definition);
 
 	Component->RegisterComponent();
-	UE_LOG(LogVoxelScatter, Log, TEXT("Created skinned component for: %s (ID: %d, %s, %s)"), *Definition.Name, Definition.ScatterID,
-		*Mesh->GetName(), Component->GetTransformProvider() ? *Component->GetTransformProvider()->GetClass()->GetName() : TEXT("no transform provider: drawn at rest"));
+	UE_LOG(LogVoxelScatter, Log, TEXT("Created skinned component for: %s (ID: %d, %s, %s) at %.2f s, %s"), *Definition.Name, Definition.ScatterID,
+		*Mesh->GetName(), Component->GetTransformProvider() ? *Component->GetTransformProvider()->GetClass()->GetName() : TEXT("no transform provider: drawn at rest"),
+		CachedWorld ? CachedWorld->GetTimeSeconds() : 0.0, *DescribeDefinitionLoad(Definition.ScatterID));
 	return Component;
 }
 
@@ -1813,7 +1955,7 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 	}
 
 	int32 InstanceBudget = MaxInstanceAddsPerFrame;
-	// Entries done this frame: removed after the walk. A skeletal definition's entries wait in place while its assets load
+	// Entries done this frame: removed after the walk. A definition's entries wait in place while its assets load
 	// (IsDefinitionLoaded), and the entries behind them go on.
 	TArray<bool> Done;
 	Done.SetNumZeroed(PendingInstanceAdds.Num());
@@ -1826,6 +1968,9 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 
 	// Track which HISMs need render state marked dirty after batch updates
 	TSet<UHierarchicalInstancedStaticMeshComponent*> DirtyHISMs;
+
+	// The types whose entries waited for their assets this tick (each load's HeldTicks, for the log)
+	TSet<int32, DefaultKeyFuncs<int32>, TInlineSetAllocator<8>> HeldTypes;
 
 	for (int32 i = 0; i < PendingInstanceAdds.Num() && InstanceBudget > 0; ++i)
 	{
@@ -1841,14 +1986,20 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 		// The chunk's region's HISM of the type (WM-BP7)
 		const FIntVector Region = Regions.GetRegion(PendingAdd.ChunkCoord);
 
-		// A skeletal definition (D68): into its region's skinned component by id once its assets are in, under the same budget
+		// A definition whose assets are still loading in the background (D68's skeletal ones; every one with
+		// voxel.Scatter.PreloadAssets, G287) keeps its entries in place, its instances counted as the chunk's
+		// (GetChunkInstanceCount), and the entries behind them go on
 		const FScatterDefinition* Definition = ScatterManager ? ScatterManager->GetScatterDefinition(PendingAdd.ScatterTypeID) : nullptr;
+		if (Definition && !IsDefinitionLoaded(*Definition))
+		{
+			++TotalDefinitionLoadWaits;
+			HeldTypes.Add(PendingAdd.ScatterTypeID);
+			continue;
+		}
+
+		// A skeletal definition (D68): into its region's skinned component by id, under the same budget
 		if (Definition && Definition->IsSkeletal())
 		{
-			if (!IsDefinitionLoaded(*Definition))
-			{
-				continue;
-			}
 			const int32 ToAdd = FMath::Min(PendingAdd.Transforms.Num(), InstanceBudget);
 			if (!AddSkinnedInstances(FVoxelScatterHISMKey{ PendingAdd.ScatterTypeID, Region }, PendingAdd.ChunkCoord,
 				MakeArrayView(PendingAdd.Transforms.GetData(), ToAdd)))
@@ -1958,6 +2109,14 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 		{
 			// Partial batch: remove processed transforms, keep rest for next frame
 			PendingAdd.Transforms.RemoveAt(0, ToProcess);
+		}
+	}
+
+	for (const int32 HeldType : HeldTypes)
+	{
+		if (FDefinitionLoad* Load = DefinitionLoads.Find(HeldType))
+		{
+			++Load->HeldTicks;
 		}
 	}
 

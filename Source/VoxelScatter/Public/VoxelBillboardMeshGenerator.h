@@ -42,6 +42,9 @@ public:
 	 */
 	static UMaterialInstanceDynamic* CreateBillboardMaterial(UTexture2D* Texture, UObject* Outer);
 
+	/** The billboard master material CreateBillboardMaterial uses when it exists (the scatter renderer loads it ahead, G287) */
+	static const TCHAR* const BillboardMaterialPath;
+
 private:
 	/** Cache key from width/height */
 	static int64 MakeCacheKey(float Width, float Height);

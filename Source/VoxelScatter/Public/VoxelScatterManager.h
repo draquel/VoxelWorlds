@@ -124,8 +124,9 @@ public:
 	void ValidateScatterDistances() const;
 
 	/**
-	 * Start loading a skeletal definition's assets ahead (UVoxelScatterRenderer::PreloadDefinition) once the renderer is
-	 * up; Initialize does every configured definition, AddScatterDefinition the one it adds.
+	 * Start loading a definition's assets ahead (UVoxelScatterRenderer::PreloadDefinition: every definition's, a static
+	 * one's with voxel.Scatter.PreloadAssets, G287) once the renderer is up; Initialize does every configured definition,
+	 * AddScatterDefinition the one it adds or replaces.
 	 *
 	 * @param Definition The definition
 	 */
