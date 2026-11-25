@@ -685,7 +685,7 @@ type's instances with a warning, as before. `CreateHISMComponent` and `ApplyOver
 on the spot. Every machine loads them, a dedicated server included (its HISMs are the trees' collision). The renderer's
 log line for a new HISM or skinned component gives the world's time and when its assets were asked for and in, and how
 many ticks its instances were held; `voxel.Scatter.Stats` gives the loads pending and the queue's waits.
-`voxel.Scatter.PreloadAssets 0` is the path before G287 (a static definition's assets loaded synchronously with its
+A test that pumps the manager inside one engine tick (a simple automation test) never lets the async loader run, so a type whose assets were not already resident stays queued there; a test that reads the drawn instances calls `WaitForDefinitionLoads` (in the suite only `VoxelWorlds.Scatter.Cleanup.AsyncPipelineGeneratesScatter`, the first cubic test, now draws none of its billboards, `M_Billboard_Master` not yet loaded; it reads the spawn points). `voxel.Scatter.PreloadAssets 0` is the path before G287 (a static definition's assets loaded synchronously with its
 first HISM); a skeletal definition's always load ahead.
 
 **Measured (2026-11-25, `Scripts/qa/first_use_trace.py`, a fresh editor per run, `VoxelDemo`).** Before, the first
