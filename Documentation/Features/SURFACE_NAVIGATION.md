@@ -91,7 +91,11 @@ benches) still run to their end at once.
 
 The walk again, the budget 0 (every search at once, as before) and 2 ms by turns in one editor, two runs of five minutes
 a side: the longest frame of a search 6.17 and 3.23 ms against 2.07 and 2.04 (the longest search 7.25 ms, over three
-frames); 18 of 1,096 searches carried (10 and 8 a run), 21 frames of waiting in all, none over three frames.
+frames); 18 of 1,096 searches carried (10 and 8 a run), 21 frames of waiting in all, none over three frames. On the
+block world's chase (`npc_bench.py --cubic --counts=96 --ring=700`: 96 wolves 4 to 10 m out) the searches toward a
+player the wolves cannot reach, 10 to 13 ms and 4,700 to 8,800 nodes each, ran over six or seven frames of 2.0 to 2.2 ms,
+where with the budget 0 a frame's searches took up to 7.8 ms; the game thread's P50 and P99 at 12 to 96 NPCs on either
+world were no worse with the budget than without.
 `voxel.Nav.Stats` gives the counters (`FVoxelSurfaceNavCounters::SearchesCarried`, `FramesCarried`),
 `voxel.Nav.LogSlowSearchMs` a line for each slow search.
 
