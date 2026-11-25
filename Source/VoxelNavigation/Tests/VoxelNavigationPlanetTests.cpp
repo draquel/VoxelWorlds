@@ -9,6 +9,8 @@
 #include "VoxelSurfaceQuery.h"
 #include "VoxelEditManager.h"
 #include "Testing/VoxelTestChunkWorld.h"
+#include "HAL/IConsoleManager.h"
+#include "Misc/ScopeExit.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -22,6 +24,7 @@
 // - Blocks: a 3D blocked box and a temporary block on the planet are routed around.
 // - Plane.SubsystemUnchanged: on a plane the subsystem's routes equal FVoxelSurfacePathfinder over the old samplers,
 //   bit for bit.
+// - Plane.SearchOverFrames: searches carried over frames by the search budget end with the routes found at once (G281).
 // ---------------------------------------------------------------------------
 
 namespace VoxelNavPlanetTest
@@ -403,6 +406,130 @@ bool FVoxelNavPlaneSeaWithOriginTest::RunTest(const FString& Parameters)
 		}
 		W.Stop();
 	}
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Plane.SearchOverFrames (G281): over a streamed plane, searches StartPathSearch begins with a budget of one node a frame
+// (voxel.Nav.SearchBudgetMs 0.0001) go on over many frames, several at once in the order they began, and each ends with
+// FindPathWithStats' route and stats from the same cold cache; with the budget 0 a search ends where it begins; a cancelled
+// search is gone.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelNavPlaneSearchOverFramesTest,
+	"VoxelWorlds.Navigation.Plane.SearchOverFrames",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelNavPlaneSearchOverFramesTest::RunTest(const FString& Parameters)
+{
+	VoxelTesting::FTestChunkWorld W;
+	W.Create(TEXT("VoxelNavPlaneSearchOverFrames"));
+	W.ConfigureSmallPlane();
+	W.StartManager();
+	W.SetViewer(FVector(0.0, 0.0, 600.0));
+	UVoxelSurfaceNavigationSubsystem* Nav = W.World->GetSubsystem<UVoxelSurfaceNavigationSubsystem>();
+	IConsoleVariable* Budget = IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Nav.SearchBudgetMs"));
+	if (TestNotNull(TEXT("The game world has navigation"), Nav) && TestNotNull(TEXT("The budget's variable"), Budget)
+		&& TestTrue(TEXT("Streaming settles"), W.Settle()))
+	{
+		Nav->SetChunkManager(W.Manager);
+		const FString SavedBudget = Budget->GetString();
+		ON_SCOPE_EXIT { Budget->Set(*SavedBudget, ECVF_SetByConsole); };
+
+		// The routes, each at once from a cold cache.
+		FRandomStream Random(29);
+		TArray<TPair<FVector, FVector>> Ends;
+		TArray<TArray<FVector>> Expected;
+		TArray<FVoxelSurfacePathStats> ExpectedStats;
+		TArray<bool> ExpectedFound;
+		for (int32 i = 0; i < 6; ++i)
+		{
+			const FVector From(Random.FRandRange(-2500.0, 2500.0), Random.FRandRange(-2500.0, 2500.0), 0.0);
+			const FVector To(Random.FRandRange(-2500.0, 2500.0), Random.FRandRange(-2500.0, 2500.0), 0.0);
+			Ends.Emplace(From, To);
+			Nav->InvalidateAll();
+			FVoxelSurfacePathStats Stats;
+			ExpectedFound.Add(Nav->FindPathWithStats(From, To, Expected.AddDefaulted_GetRef(), Stats));
+			ExpectedStats.Add(Stats);
+		}
+
+		// One node a frame: all six begun in one frame from a cold cache, then frames until each has ended.
+		Budget->Set(TEXT("0.0001"), ECVF_SetByConsole);
+		Nav->InvalidateAll();
+		const int64 CarriedBefore = Nav->GetCounters().SearchesCarried;
+		TArray<int32> Handles;
+		for (const TPair<FVector, FVector>& End : Ends)
+		{
+			Handles.Add(Nav->StartPathSearch(End.Key, End.Value));
+		}
+		TestTrue(TEXT("Searches are carried to later frames"), Nav->GetRunningPathSearchCount() > 0);
+		TArray<TArray<FVector>> Got;
+		Got.SetNum(Ends.Num());
+		TArray<FVoxelSurfacePathStats> GotStats;
+		GotStats.SetNum(Ends.Num());
+		TArray<bool> GotFound, Ended, EndedOutOfOrder;
+		GotFound.Init(false, Ends.Num());
+		Ended.Init(false, Ends.Num());
+		int32 Frames = 0;
+		bool bOutOfOrder = false;
+		while (Ended.Contains(false) && Frames < 200000)
+		{
+			++GFrameCounter; // a new frame: a new budget
+			++Frames;
+			Nav->Tick(0.0f);
+			for (int32 i = 0; i < Handles.Num(); ++i)
+			{
+				if (!Ended[i])
+				{
+					const EVoxelPathSearchState State = Nav->PollPathSearch(Handles[i], Got[i], GotStats[i], GotFound[i]);
+					Ended[i] = State != EVoxelPathSearchState::Running;
+					TestTrue(*FString::Printf(TEXT("Route %d: known while it runs"), i), State != EVoxelPathSearchState::Unknown);
+					// In the order they began: none ends while one begun before it still runs.
+					for (int32 j = 0; Ended[i] && j < i; ++j)
+					{
+						bOutOfOrder |= !Ended[j] && GotStats[i].NodesExpanded > 0;
+					}
+				}
+			}
+		}
+		AddInfo(FString::Printf(TEXT("six searches at one node a frame: %d frames; %lld carried"), Frames,
+			Nav->GetCounters().SearchesCarried - CarriedBefore));
+		TestFalse(TEXT("They end in the order they began"), bOutOfOrder);
+		int32 LongerThanANode = 0;
+		for (const FVoxelSurfacePathStats& S : ExpectedStats)
+		{
+			LongerThanANode += S.NodesExpanded > 1 ? 1 : 0;
+		}
+		TestTrue(TEXT("Scenario: most routes take more than a node"), LongerThanANode >= 4);
+		TestTrue(TEXT("Each search of more than a node was carried"), Nav->GetCounters().SearchesCarried - CarriedBefore >= LongerThanANode);
+		for (int32 i = 0; i < Ends.Num(); ++i)
+		{
+			TestTrue(*FString::Printf(TEXT("Route %d: ended"), i), Ended[i]);
+			TestEqual(*FString::Printf(TEXT("Route %d: found as at once"), i), GotFound[i], ExpectedFound[i]);
+			TestTrue(*FString::Printf(TEXT("Route %d: the route found at once, point for point"), i), Got[i] == Expected[i]);
+			TestEqual(*FString::Printf(TEXT("Route %d: the same nodes"), i), GotStats[i].NodesExpanded, ExpectedStats[i].NodesExpanded);
+			TestEqual(*FString::Printf(TEXT("Route %d: the same samples"), i), GotStats[i].HeightSamples, ExpectedStats[i].HeightSamples);
+			TestEqual(*FString::Printf(TEXT("Route %d: partial as at once"), i), GotStats[i].bPartial, ExpectedStats[i].bPartial);
+		}
+		TestEqual(TEXT("None left running"), Nav->GetRunningPathSearchCount(), 0);
+
+		// A cancelled search is gone; a handle asked for twice is unknown the second time.
+		const int32 Cancelled = Nav->StartPathSearch(Ends[0].Key, Ends[0].Value);
+		Nav->CancelPathSearch(Cancelled);
+		TArray<FVector> Points;
+		FVoxelSurfacePathStats Stats;
+		bool bFound = false;
+		TestTrue(TEXT("Cancelled: unknown"), Nav->PollPathSearch(Cancelled, Points, Stats, bFound) == EVoxelPathSearchState::Unknown);
+		TestEqual(TEXT("Cancelled: not running"), Nav->GetRunningPathSearchCount(), 0);
+
+		// The budget 0: a search ends in the frame it begins, with the route at once.
+		Budget->Set(TEXT("0"), ECVF_SetByConsole);
+		Nav->InvalidateAll();
+		const int32 AtOnce = Nav->StartPathSearch(Ends[1].Key, Ends[1].Value);
+		TestTrue(TEXT("Budget 0: ended where it began"), Nav->PollPathSearch(AtOnce, Points, Stats, bFound) == EVoxelPathSearchState::Done);
+		TestTrue(TEXT("Budget 0: the route at once"), bFound == ExpectedFound[1] && Points == Expected[1]);
+		TestTrue(TEXT("Budget 0: asked again, unknown"), Nav->PollPathSearch(AtOnce, Points, Stats, bFound) == EVoxelPathSearchState::Unknown);
+	}
+	W.Stop();
 	return true;
 }
 

@@ -244,6 +244,37 @@ public:
 	 */
 	bool FindPath(const FVector& From, const FVector& To, TArray<FVector>& OutPoints, FVoxelSurfacePathStats* OutStats = nullptr) const;
 
+	/**
+	 * A search in steps (G281): BeginSearch, then AdvanceSearch until it returns true, then GetSearchResult. FindPath is the
+	 * three with nothing stopping the search, and a search stopped between nodes and taken up again expands the same nodes
+	 * in the same order, so it gives FindPath's route (the cells it samples later are sampled later: on a live world the
+	 * same as a search started later). A new BeginSearch (or FindPath, or ClearCache) drops the search in progress.
+	 *
+	 * @param From Start (world; its cell must be walkable or snap within GoalSnapCells)
+	 * @param To   Goal (world)
+	 */
+	void BeginSearch(const FVector& From, const FVector& To) const;
+
+	/**
+	 * Expand nodes until the search ends or ShouldYield, asked after each node that leaves nodes to expand, returns true.
+	 *
+	 * @param ShouldYield Whether to stop until the next call
+	 * @return True when the search has ended (its result is ready), false when it stopped to go on later
+	 */
+	bool AdvanceSearch(TFunctionRef<bool()> ShouldYield) const;
+
+	/** Whether the search begun last has ended. */
+	bool IsSearchDone() const { return Search.bDone; }
+
+	/**
+	 * The route of the search begun last, once it has ended (FindPath's result for the same start and goal).
+	 *
+	 * @param OutPoints Waypoints, as FindPath's
+	 * @param OutStats  Optional search statistics
+	 * @return True when a route (complete or allowed-partial) was produced; false also while the search has not ended
+	 */
+	bool GetSearchResult(TArray<FVector>& OutPoints, FVoxelSurfacePathStats* OutStats = nullptr) const;
+
 	/** Drop intermediate cells wherever the straight run between the kept cells is walkable. */
 	void SimplifyPath(TArray<FIntPoint>& Cells) const;
 
@@ -312,6 +343,34 @@ private:
 	mutable FCellGrid Cells;
 	mutable int32 SampleCount = 0;
 	mutable bool bSamplesCapped = false;
+
+	/** An entry of the open list (a binary heap by F). */
+	struct FOpenNode
+	{
+		FIntPoint Cell;
+		float F;
+		bool operator<(const FOpenNode& Other) const { return F < Other.F; }
+	};
+
+	/** Where the search begun last stands between two AdvanceSearch calls. */
+	struct FSearchState
+	{
+		FIntPoint Start = FIntPoint::ZeroValue;
+		FIntPoint Goal = FIntPoint::ZeroValue;
+		FIntPoint Closest = FIntPoint::ZeroValue;
+		float ClosestH = 0.f;
+		float RadiusCellsSq = 0.f;
+		FVoxelSurfacePathStats Stats;
+		/** Start and goal found walkable and the open list seeded. */
+		bool bStarted = false;
+		/** Start and goal in one cell: a route of that cell. */
+		bool bSameCell = false;
+		bool bReached = false;
+		bool bDone = false;
+	};
+
+	mutable TArray<FOpenNode> Open;
+	mutable FSearchState Search;
 
 	/** A cell's record with its height sampled and its walkability decided (above water, not blocked). */
 	const FCell& Sampled(const FIntPoint& Cell) const;

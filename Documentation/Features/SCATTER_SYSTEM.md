@@ -1,6 +1,6 @@
 # Scatter System
 
-> State as of 2026-11-02 (code review CR5). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-02 (code review CR5); the HISM writes' budget as of 2026-11-24 (G281). Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelScatter
 **Dependencies**: VoxelCore, VoxelGeneration (the surface queries); the chunk manager (VoxelStreaming) drives it
@@ -535,14 +535,37 @@ scene (frames up to 51 ms). Writes are now batched per HISM:
 - **Smaller regions than the renderer's.** `voxel.Scatter.RegionChunks` sizes the regions the HISMs are kept per: -1
   (default) = 4 chunks in every world mode (planets since G42, heightmap worlds since world modes review WM-MP5), 0 = the
   render regions (`voxel.Render.RegionChunks`, 16), N > 0 = N chunks.
+- **A budget a tick (G281).** The batches due in a tick are written within `voxel.Scatter.HISMWriteBudgetMs` (2 ms):
+  those held `HISMMaxHoldSeconds` first, then the nearest a viewer (the HISM's instance bounds against the viewer and a
+  server's further viewers, `UVoxelScatterManager::GetViewerDistance`), and once the budget is spent the rest stay held
+  for the next tick (the first batch of a tick is always written, so a tick takes at most the budget and one HISM's
+  write). A tick compacts one HISM at most, as its first write; a HISM due for a compaction later in the tick takes its
+  batch as it is and is compacted at a later batch. Nothing new is queued: the held writes already are the queue every
+  release path writes into (an unload's or an edit's zero scale lands in the same held entry), so a chunk unloaded, edited
+  or cleared while its writes wait is drawn as it would be had they been written. 0 = every due batch in the tick it is
+  due, compactions as they come (before G281).
 - Queries see held writes: `FindNearestInstance` (harvest) reads each instance through them and also scans held
   placements and new instances; `GetTotalInstanceCount` counts held new instances. `FlushHISMWrites` applies every held
-  write now.
+  write now, whatever the budget.
 
 The instances drawn are the same as with every write made at once (`voxel.Scatter.HISMBatchSeconds 0`, the behaviour
-before G42, for A/B runs): `VoxelWorlds.Scatter.HISMBatch.{SameInstances,InPlaceRelease,Regions}`. The bench logs
-`ScatBatchN` and `ScatCompactN` per sample, and the scatter section's steps (`ScatApplyMs`, `ScatLaunchMs`,
-`ScatDistMs`, `ScatFlushMs`).
+before G42, for A/B runs): `VoxelWorlds.Scatter.HISMBatch.{SameInstances,InPlaceRelease,Regions,WriteBudget}`
+(`WriteBudget`: with regions of one chunk and a budget of one batch a tick, the scenario pumped by ticks alone, a chunk
+unloaded and a radius cleared while their writes wait included, draws at every stop the instances written at once, as
+the budget 0 does; of four HISMs due in one tick the nearest the viewer is written and the others draw their trees until
+later ticks). The bench logs `ScatBatchN` and `ScatCompactN` per sample, and the scatter section's steps
+(`ScatApplyMs`, `ScatLaunchMs`, `ScatDistMs`, `ScatFlushMs`); `voxel.Scatter.Stats` counts the batches left for a later
+tick, and `voxel.Scatter.LogSlowApplyMs` logs each slow tick's writes (`[ScatterApplySlow]`).
+
+**What a tick's writes cost (G281, 2026-11-24).** A batch costs its HISM's instances, not its changes: its first
+placement or new instance starts the HISM's tree build, whose set-up copies every instance on the game thread (0.1 to
+0.25 µs an instance, 1.4 to 2.3 ms for the demo's grass HISMs of 5,000 to 16,000), and a compaction clears and adds them
+all again, about twice that (4.8 ms for 8,600). On a ten-minute walk of `VoxelDemo` (a fresh world, the weather locked)
+46 ticks took 2 ms or more, two of them over 5 ms (7.3 and 9.6 ms): each with compactions, the 9.6 ms tick two grass
+HISMs compacted together; without one the longest was 4.1 ms (two HISMs of 13,000 to 16,000 instances). With the budget
+and 0 by turns in one editor (two five-minute walks a side): the longest tick 6.31 and 4.68 ms against 3.39 and 3.37, ticks
+of 4 ms or more 3 against 0; 39 and 19 batches left for a later tick of 3,581 and 5,276, about one every ten seconds;
+compactions 78 and 63 against 28 and 40.
 
 ### Dynamic materials (the foliage and bolt plan's D67)
 

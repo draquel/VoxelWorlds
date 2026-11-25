@@ -21,13 +21,6 @@ namespace
 	 */
 	constexpr float GTieBreakWeight = 1.001f;
 
-	struct FOpenNode
-	{
-		FIntPoint Cell;
-		float F;
-		bool operator<(const FOpenNode& Other) const { return F < Other.F; }
-	};
-
 	using FPagePool = TArray<TUniquePtr<uint8[]>>;
 
 	/** Pages the grids of this thread have released, for the next search to reuse. */
@@ -96,6 +89,8 @@ FVoxelSurfacePathfinder::FVoxelSurfacePathfinder(const FVoxelSurfaceNavParams& I
 void FVoxelSurfacePathfinder::ClearCache() const
 {
 	Cells.Reset();
+	Open.Reset();
+	Search = FSearchState();
 }
 
 FIntPoint FVoxelSurfacePathfinder::WorldToCell(const FVector& World) const
@@ -323,56 +318,63 @@ void FVoxelSurfacePathfinder::SimplifyPath(TArray<FIntPoint>& Path) const
 
 bool FVoxelSurfacePathfinder::FindPath(const FVector& From, const FVector& To, TArray<FVector>& OutPoints, FVoxelSurfacePathStats* OutStats) const
 {
-	OutPoints.Reset();
+	// The three steps of a search with nothing to stop it between nodes: a search spread over frames (G281) runs the same
+	// steps, so it ends with this route.
+	BeginSearch(From, To);
+	AdvanceSearch([] { return false; });
+	return GetSearchResult(OutPoints, OutStats);
+}
+
+void FVoxelSurfacePathfinder::BeginSearch(const FVector& From, const FVector& To) const
+{
 	Cells.Reset();
+	Open.Reset();
 	SampleCount = 0;
 	bSamplesCapped = false;
-	FVoxelSurfacePathStats Stats;
-	ON_SCOPE_EXIT
-	{
-		// Whichever way the search ends (the start or goal could be the cells left out).
-		if (OutStats)
-		{
-			OutStats->bSamplesCapped = bSamplesCapped;
-		}
-	};
+	Search = FSearchState();
 
-	FIntPoint Start, Goal;
-	if (!SnapToWalkable(WorldToCell(From), Start))
+	if (!SnapToWalkable(WorldToCell(From), Search.Start))
 	{
-		if (OutStats) { *OutStats = Stats; }
-		return false;
+		Search.bDone = true;
+		return;
 	}
 	const FIntPoint RawGoal = WorldToCell(To);
-	if (!SnapToWalkable(RawGoal, Goal))
+	if (!SnapToWalkable(RawGoal, Search.Goal))
 	{
-		Stats.HeightSamples = SampleCount;
-		if (OutStats) { *OutStats = Stats; }
-		return false;
+		Search.Stats.HeightSamples = SampleCount;
+		Search.bDone = true;
+		return;
 	}
-	Stats.bGoalSnapped = Goal != RawGoal;
+	Search.Stats.bGoalSnapped = Search.Goal != RawGoal;
 
-	if (Start == Goal)
+	if (Search.Start == Search.Goal)
 	{
-		OutPoints.Add(CellToWorld(Goal));
-		Stats.RawCells = 1;
-		Stats.HeightSamples = SampleCount;
-		if (OutStats) { *OutStats = Stats; }
-		return true;
+		Search.Closest = Search.Goal;
+		Search.bReached = true;
+		Search.bSameCell = true;
+		Search.bDone = true;
+		return;
 	}
 
 	const float RadiusCells = Params.MaxSearchRadius / Params.CellSize;
-	const float RadiusCellsSq = RadiusCells * RadiusCells;
-
-	TArray<FOpenNode> Open; // binary heap by F
-	FCell& StartRec = Cells.Get(Start);
+	Search.RadiusCellsSq = RadiusCells * RadiusCells;
+	FCell& StartRec = Cells.Get(Search.Start);
 	StartRec.G = 0.f;
-	Open.HeapPush(FOpenNode{Start, GTieBreakWeight * Heuristic(Start, Goal, Params.CellSize)});
+	Open.HeapPush(FOpenNode{Search.Start, GTieBreakWeight * Heuristic(Search.Start, Search.Goal, Params.CellSize)});
+	Search.Closest = Search.Start;
+	Search.ClosestH = Heuristic(Search.Start, Search.Goal, Params.CellSize);
+	Search.bStarted = true;
+}
 
-	FIntPoint Closest = Start;
-	float ClosestH = Heuristic(Start, Goal, Params.CellSize);
-	bool bReached = false;
-
+bool FVoxelSurfacePathfinder::AdvanceSearch(TFunctionRef<bool()> ShouldYield) const
+{
+	if (Search.bDone)
+	{
+		return true;
+	}
+	const FIntPoint Start = Search.Start;
+	const FIntPoint Goal = Search.Goal;
+	FVoxelSurfacePathStats& Stats = Search.Stats;
 	while (Open.Num() > 0)
 	{
 		FOpenNode Node;
@@ -387,8 +389,8 @@ bool FVoxelSurfacePathfinder::FindPath(const FVector& From, const FVector& To, T
 
 		if (Node.Cell == Goal)
 		{
-			bReached = true;
-			Closest = Goal;
+			Search.bReached = true;
+			Search.Closest = Goal;
 			break;
 		}
 		if (Stats.NodesExpanded >= Params.MaxNodes)
@@ -438,7 +440,7 @@ bool FVoxelSurfacePathfinder::FindPath(const FVector& From, const FVector& To, T
 			const FIntPoint Next = Node.Cell + GNeighbourOffsets[k];
 			const float DX = static_cast<float>(Next.X - Start.X);
 			const float DY = static_cast<float>(Next.Y - Start.Y);
-			if (DX * DX + DY * DY > RadiusCellsSq)
+			if (DX * DX + DY * DY > Search.RadiusCellsSq)
 			{
 				continue;
 			}
@@ -458,29 +460,64 @@ bool FVoxelSurfacePathfinder::FindPath(const FVector& From, const FVector& To, T
 				NextRec.bHasParent = true;
 				const float H = Heuristic(Next, Goal, Params.CellSize);
 				Open.HeapPush(FOpenNode{Next, NewG + GTieBreakWeight * H});
-				if (H < ClosestH)
+				if (H < Search.ClosestH)
 				{
-					ClosestH = H;
-					Closest = Next;
+					Search.ClosestH = H;
+					Search.Closest = Next;
 				}
 			}
 		}
+
+		// Between two nodes, and only with nodes left to expand: the search goes on from here at the next call, with
+		// every cell, cost and parent it has (G281).
+		if (Open.Num() > 0 && ShouldYield())
+		{
+			return false;
+		}
+	}
+	Search.bDone = true;
+	return true;
+}
+
+bool FVoxelSurfacePathfinder::GetSearchResult(TArray<FVector>& OutPoints, FVoxelSurfacePathStats* OutStats) const
+{
+	OutPoints.Reset();
+	FVoxelSurfacePathStats Stats = Search.Stats;
+	ON_SCOPE_EXIT
+	{
+		// Whichever way the search ends (the start or goal could be the cells left out).
+		if (OutStats)
+		{
+			*OutStats = Stats;
+			OutStats->bSamplesCapped = bSamplesCapped;
+		}
+	};
+	if (!Search.bDone || (!Search.bStarted && !Search.bSameCell))
+	{
+		// Not finished, or no walkable cell to start or end at.
+		return false;
+	}
+	if (Search.bSameCell)
+	{
+		OutPoints.Add(CellToWorld(Search.Goal));
+		Stats.RawCells = 1;
+		Stats.HeightSamples = SampleCount;
+		return true;
 	}
 
 	Stats.HeightSamples = SampleCount;
-	if (!bReached)
+	if (!Search.bReached)
 	{
 		Stats.bPartial = true;
-		if (!Params.bAllowPartial || Closest == Start)
+		if (!Params.bAllowPartial || Search.Closest == Search.Start)
 		{
-			if (OutStats) { *OutStats = Stats; }
 			return false;
 		}
 	}
 
 	// Walk the parents back from the end cell.
 	TArray<FIntPoint> Path;
-	for (FIntPoint Cell = Closest;;)
+	for (FIntPoint Cell = Search.Closest;;)
 	{
 		Path.Add(Cell);
 		const FCell& Rec = Cells.Get(Cell);
@@ -501,8 +538,7 @@ bool FVoxelSurfacePathfinder::FindPath(const FVector& From, const FVector& To, T
 	}
 	if (OutPoints.Num() == 0)
 	{
-		OutPoints.Add(CellToWorld(Closest));
+		OutPoints.Add(CellToWorld(Search.Closest));
 	}
-	if (OutStats) { *OutStats = Stats; }
 	return true;
 }

@@ -37,6 +37,11 @@
 //   applies one batch per HISM however many chunks released.
 // - Regions: with regions of one chunk (a HISM per chunk and type) the instances drawn are the transforms of one region
 //   per type, to 0.01 uu.
+// - WriteBudget (G281): with a write budget so small that each tick writes one batch (voxel.Scatter.HISMWriteBudgetMs) and
+//   regions of one chunk (twelve HISMs), the scenario pumped by ticks alone (no flush: the batches left wait for later
+//   ticks) draws at every stop the instances written at once, a chunk unloaded and a radius cleared while their writes
+//   wait included; so does the budget 0 (every due batch in its tick, before G281); of four HISMs due in one tick (the
+//   trees released) the tick writes the nearest the viewer, the others drawing their trees until later ticks.
 // ---------------------------------------------------------------------------
 
 namespace VoxelScatterHISMBatchTestUtils
@@ -129,8 +134,12 @@ namespace VoxelScatterHISMBatchTestUtils
 
 		void Submit(const FIntVector& Coord) { Manager->HandOffChunkVoxels(Coord, MakeChunk(Coord), ChunkSize, VoxelSize); }
 
-		/** Move the viewer, pump until the extractions are done and the distance spawn and the renderer have run, then land held writes. */
-		void Settle(const FVector& InViewer)
+		/**
+		 * Move the viewer, pump until the extractions are done and the distance spawn and the renderer have run, then land
+		 * held writes: at once (FlushHISMWrites), or with bFlush false by more ticks until none is held (each tick within the
+		 * write budget, as in play).
+		 */
+		void Settle(const FVector& InViewer, bool bFlush = true)
 		{
 			Viewer = InViewer;
 			const double Start = FPlatformTime::Seconds();
@@ -148,9 +157,17 @@ namespace VoxelScatterHISMBatchTestUtils
 				Update();
 				FPlatformProcess::Sleep(0.005f);
 			}
-			if (UVoxelScatterRenderer* R = Renderer())
+			UVoxelScatterRenderer* R = Renderer();
+			if (R && bFlush)
 			{
 				R->FlushHISMWrites();
+			}
+			const double TicksStart = FPlatformTime::Seconds();
+			while (R && !bFlush && (R->GetPendingHISMWriteCount() > 0 || R->GetPendingInstanceAddCount() > 0)
+				&& FPlatformTime::Seconds() < TicksStart + 30.0)
+			{
+				Update();
+				FPlatformProcess::Sleep(0.005f);
 			}
 		}
 
@@ -279,7 +296,8 @@ namespace VoxelScatterHISMBatchTestUtils
 	}
 
 	/** The SameInstances scenario: the drawn instances at each stop, and whether they matched the spawn points per type. */
-	TArray<TArray<FString>> RunScenario(FAutomationTestBase& Test, const TCHAR* Label, TArray<FString>& OutNotes, int64* OutCompactions = nullptr)
+	TArray<TArray<FString>> RunScenario(FAutomationTestBase& Test, const TCHAR* Label, TArray<FString>& OutNotes, int64* OutCompactions = nullptr,
+		bool bFlush = true, int64* OutLeft = nullptr)
 	{
 		const TArray<FIntVector> Coords = { FIntVector(0, 0, 0), FIntVector(1, 0, 0), FIntVector(0, 1, 0), FIntVector(1, 1, 0) };
 		const FIntVector Target(1, 0, 0);
@@ -305,26 +323,41 @@ namespace VoxelScatterHISMBatchTestUtils
 			{
 				*OutCompactions = Harness.Renderer()->GetTotalHISMCompactions();
 			}
+			if (OutLeft)
+			{
+				*OutLeft = Harness.Renderer()->GetTotalHISMBatchesLeft();
+			}
 		};
 		for (const FIntVector& Coord : Coords)
 		{
 			Harness.Submit(Coord);
 		}
-		Harness.Settle(Near);
+		Harness.Settle(Near, bFlush);
 		Stop(TEXT("near"));
-		Harness.Settle(Far);
+		Harness.Settle(Far, bFlush);
 		Stop(TEXT("far (trees released)"));
 		Harness.Manager->OnChunkUnloaded(Target);
-		Harness.Settle(Far);
+		Harness.Settle(Far, bFlush);
 		Stop(TEXT("a chunk unloaded"));
 		Harness.Submit(Target);
-		Harness.Settle(Near);
+		Harness.Settle(Near, bFlush);
 		Stop(TEXT("reloaded near"));
 		const FVector ClearAt(ChunkCenter(Target).X, ChunkCenter(Target).Y,
 			TiltedPlane().GetTerrainHeightAt(ChunkCenter(Target).X, ChunkCenter(Target).Y, FVoxelNoiseParams()));
 		Harness.Manager->ClearScatterInRadius(ClearAt, 300.0f);
-		Harness.Settle(Near);
+		Harness.Settle(Near, bFlush);
 		Stop(TEXT("a cleared radius"));
+		// A chunk unloaded and another cleared while their writes wait for the budget: the reload's placements still held
+		Harness.Submit(Target);
+		for (int32 i = 0; i < 40; ++i)
+		{
+			Harness.Update();
+			FPlatformProcess::Sleep(0.005f);
+		}
+		Harness.Manager->OnChunkUnloaded(Target);
+		Harness.Manager->ClearScatterInRadius(ClearAt + FVector(-ChunkWorldSize, 0.0, 0.0), 300.0f);
+		Harness.Settle(Near, bFlush);
+		Stop(TEXT("unloaded and cleared while held"));
 		return Stops;
 	}
 }
@@ -488,6 +521,156 @@ bool FVoxelScatterHISMBatchRegionsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("As many instances drawn"), Split.Num(), OneRegion.Num());
 	TestEqual(TEXT("Every instance of one region drawn by the split regions, to 0.01 uu"), CountUnmatched(OneRegion, Split, 0.01), 0);
 	TestEqual(TEXT("and every instance of the split regions by one region"), CountUnmatched(Split, OneRegion, 0.01), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterHISMBatchWriteBudgetTest,
+	"VoxelWorlds.Scatter.HISMBatch.WriteBudget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterHISMBatchWriteBudgetTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterHISMBatchTestUtils;
+
+	TArray<FString> Notes;
+	// Regions of one chunk: twelve HISMs, so a tick has several batches due and the budget has something to order.
+	TArray<TArray<FString>> Immediate;
+	{
+		FScopedCVars CVars;
+		CVars.Set(TEXT("voxel.Scatter.RegionChunks"), TEXT("1"));
+		CVars.Set(TEXT("voxel.Scatter.HISMBatchSeconds"), TEXT("0"));
+		Immediate = RunScenario(*this, TEXT("written at once"), Notes);
+	}
+	TArray<TArray<FString>> Unbudgeted;
+	{
+		FScopedCVars CVars;
+		CVars.Set(TEXT("voxel.Scatter.RegionChunks"), TEXT("1"));
+		CVars.Set(TEXT("voxel.Scatter.HISMBatchSeconds"), TEXT("0.1"));
+		CVars.Set(TEXT("voxel.Scatter.HISMWriteBudgetMs"), TEXT("0"));
+		Unbudgeted = RunScenario(*this, TEXT("budget 0, by ticks"), Notes, nullptr, /*bFlush=*/false);
+	}
+	TArray<TArray<FString>> Budgeted;
+	int64 Left = 0;
+	int64 Compactions = 0;
+	{
+		FScopedCVars CVars;
+		CVars.Set(TEXT("voxel.Scatter.RegionChunks"), TEXT("1"));
+		CVars.Set(TEXT("voxel.Scatter.HISMBatchSeconds"), TEXT("0.1"));
+		CVars.Set(TEXT("voxel.Scatter.HISMWriteBudgetMs"), TEXT("0.0001"));
+		CVars.Set(TEXT("voxel.Scatter.HISMCompactMinPooled"), TEXT("1"));
+		Budgeted = RunScenario(*this, TEXT("one batch a tick, by ticks"), Notes, &Compactions, /*bFlush=*/false, &Left);
+	}
+	for (const FString& Note : Notes)
+	{
+		AddInfo(Note);
+	}
+	TestTrue(TEXT("Scenario: instances are drawn near"), Immediate.Num() > 0 && Immediate[0].Num() > 0);
+	TestTrue(TEXT("Scenario: the budget left batches for later ticks"), Left > 0);
+	TestTrue(TEXT("Scenario: the budgeted run rewrote HISMs"), Compactions > 0);
+	auto Compare = [&](const TCHAR* Label, const TArray<TArray<FString>>& Run)
+	{
+		TestEqual(FString::Printf(TEXT("%s: stops as often as the run written at once"), Label), Run.Num(), Immediate.Num());
+		for (int32 i = 0; i < FMath::Min(Run.Num(), Immediate.Num()); ++i)
+		{
+			int32 Differ = 0;
+			for (int32 j = 0; j < FMath::Max(Run[i].Num(), Immediate[i].Num()); ++j)
+			{
+				Differ += (!Run[i].IsValidIndex(j) || !Immediate[i].IsValidIndex(j) || Run[i][j] != Immediate[i][j]) ? 1 : 0;
+			}
+			TestEqual(FString::Printf(TEXT("%s, stop %d: draws the instances written at once (%d against %d, %d keys differ)"), Label, i,
+				Run[i].Num(), Immediate[i].Num(), Differ), Differ, 0);
+		}
+	};
+	Compare(TEXT("Budget 0"), Unbudgeted);
+	Compare(TEXT("One batch a tick"), Budgeted);
+
+	// Tick by tick: the four chunks' trees released in one tick (the viewer gone far east) are four HISMs due at once; a
+	// tick writes one, the nearest the viewer (an east chunk's), and the others draw their trees until their tick comes.
+	{
+		FScopedCVars CVars;
+		CVars.Set(TEXT("voxel.Scatter.RegionChunks"), TEXT("1"));
+		CVars.Set(TEXT("voxel.Scatter.HISMBatchSeconds"), TEXT("0.1"));
+		CVars.Set(TEXT("voxel.Scatter.HISMCompactMinPooled"), TEXT("0"));
+		CVars.Set(TEXT("voxel.Scatter.HISMWriteBudgetMs"), TEXT("0"));
+		const TArray<FIntVector> Coords = { FIntVector(0, 0, 0), FIntVector(1, 0, 0), FIntVector(0, 1, 0), FIntVector(1, 1, 0) };
+		const FVector Near = ChunkCenter(FIntVector(1, 1, 0));
+		const FVector Far = Near + FVector(40000.0, 0.0, 0.0);
+		FHarness Harness(TEXT("VoxelScatterHISMBatchTestWorld"));
+		for (const FIntVector& Coord : Coords)
+		{
+			Harness.Submit(Coord);
+		}
+		Harness.Settle(Near);
+		UVoxelScatterRenderer* R = Harness.Renderer();
+		TArray<TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>> TreeHISMs;
+		R->GetTypeHISMs(TreeID, TreeHISMs);
+		auto DrawsTrees = [](const UHierarchicalInstancedStaticMeshComponent* HISM)
+		{
+			for (int32 i = 0; i < HISM->GetInstanceCount(); ++i)
+			{
+				FTransform Xf;
+				if (HISM->GetInstanceTransform(i, Xf, /*bWorldSpace=*/false) && !Xf.GetScale3D().IsNearlyZero())
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+		TSet<FIntVector> HadTrees;
+		for (const TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>& Pair : TreeHISMs)
+		{
+			if (DrawsTrees(Pair.Value))
+			{
+				HadTrees.Add(Pair.Key);
+			}
+		}
+		const int32 WithTrees = HadTrees.Num();
+		TestTrue(TEXT("Tick by tick: trees in more than one region"), WithTrees >= 2);
+
+		CVars.Set(TEXT("voxel.Scatter.HISMWriteBudgetMs"), TEXT("0.0001"));
+		FPlatformProcess::Sleep(0.25f); // past the batch interval since the HISMs' last writes
+		Harness.Viewer = Far;
+		const int64 BatchesBefore = R->GetTotalHISMWriteBatches();
+		Harness.Manager->Update(Far, 0.3f); // past the distance interval: the cleanup releases every chunk's trees, then the renderer ticks
+		const int32 InTick = static_cast<int32>(R->GetTotalHISMWriteBatches() - BatchesBefore);
+		TArray<FIntVector> Written;
+		int32 StillDrawn = 0;
+		for (const TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>& Pair : TreeHISMs)
+		{
+			if (!HadTrees.Contains(Pair.Key))
+			{
+				continue;
+			}
+			if (DrawsTrees(Pair.Value))
+			{
+				++StillDrawn;
+			}
+			else
+			{
+				Written.Add(Pair.Key);
+			}
+		}
+		AddInfo(FString::Printf(TEXT("tick by tick: %d tree HISMs with trees before; the release tick wrote %d batch(es), %d tree HISM(s) cleared, %d still drawn; %lld batches left so far"),
+			WithTrees, InTick, Written.Num(), StillDrawn, R->GetTotalHISMBatchesLeft()));
+		TestEqual(TEXT("Tick by tick: the release tick writes one batch"), InTick, 1);
+		TestEqual(TEXT("Tick by tick: one tree HISM cleared in it"), Written.Num(), 1);
+		const int32 EastX = R->GetRenderRegions().GetRegion(FIntVector(1, 0, 0)).X;
+		bool bEastHadTrees = false;
+		for (const FIntVector& Region : HadTrees)
+		{
+			bEastHadTrees |= Region.X == EastX;
+		}
+		TestTrue(TEXT("Scenario: an east region had trees"), bEastHadTrees);
+		TestTrue(TEXT("Tick by tick: the nearest the viewer (an east chunk's region)"), Written.Num() == 1 && Written[0].X == EastX);
+		TestTrue(TEXT("Tick by tick: the others still draw their trees, held"), StillDrawn == WithTrees - 1 && R->GetPendingHISMWriteCount() > 0);
+		Harness.Settle(Far, /*bFlush=*/false);
+		int32 AfterAll = 0;
+		for (const TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>& Pair : TreeHISMs)
+		{
+			AfterAll += DrawsTrees(Pair.Value) ? 1 : 0;
+		}
+		TestEqual(TEXT("Tick by tick: later ticks release the rest"), AfterAll, 0);
+	}
 	return true;
 }
 

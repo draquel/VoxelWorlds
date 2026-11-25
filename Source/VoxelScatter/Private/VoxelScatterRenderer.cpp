@@ -21,6 +21,8 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "GameFramework/Actor.h"
 #include "HAL/IConsoleManager.h"
+#include "Misc/ScopeExit.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 static TAutoConsoleVariable<float> CVarVoxelScatterHISMBatchSeconds(
 	TEXT("voxel.Scatter.HISMBatchSeconds"),
@@ -41,6 +43,23 @@ static TAutoConsoleVariable<int32> CVarVoxelScatterHISMCompactMinPooled(
 	1024,
 	TEXT("Scatter HISM writes: a HISM taking a batch whose pooled (released, zero-scaled) instances are at\n")
 	TEXT("least this many and outnumber its live ones is rewritten with its live instances only. 0 = never (pools only grow)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarVoxelScatterHISMWriteBudgetMs(
+	TEXT("voxel.Scatter.HISMWriteBudgetMs"),
+	2.0f,
+	TEXT("Scatter HISM writes: milliseconds a tick the due batches may take; the batches left wait, held, for the next tick,\n")
+	TEXT("the overdue (HISMMaxHoldSeconds) first, then the nearest a viewer, and the first of a tick is always written; a tick\n")
+	TEXT("rewrites (compacts) one HISM at most, as its first write (G281). 0 = every due batch in the tick it is due, compactions\n")
+	TEXT("as they come (before G281). The project's value is UVoxelWorldsSettings::ScatterHISMWriteBudgetMs; the cvar overrides it once set."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarVoxelScatterLogSlowApplyMs(
+	TEXT("voxel.Scatter.LogSlowApplyMs"),
+	0.0f,
+	TEXT("Log every frame whose held HISM writes take at least this many milliseconds to apply, with what they were made of\n")
+	TEXT("(the HISMs written and compacted, the updates and new instances, the instances the written HISMs hold, the longest\n")
+	TEXT("HISM's write); 0 = off (G281)."),
 	ECVF_Default);
 
 UVoxelScatterRenderer::UVoxelScatterRenderer()
@@ -98,12 +117,13 @@ void UVoxelScatterRenderer::Initialize(UVoxelScatterManager* Manager, UWorld* Wo
 	UE_LOG(LogVoxelScatter, Log, TEXT("ScatterRenderer initialized"));
 }
 
-void UVoxelScatterRenderer::Tick(const FVector& /*ViewerPosition*/, float /*DeltaTime*/)
+void UVoxelScatterRenderer::Tick(const FVector& ViewerPosition, float /*DeltaTime*/)
 {
 	if (!bIsInitialized || !ScatterManager)
 	{
 		return;
 	}
+	LastViewerPosition = ViewerPosition;
 
 	// Flush deferred instance additions within the per-frame budget. Every scatter update —
 	// new chunks, supplemental streaming, edits, and per-chunk regen — flows through this one
@@ -763,8 +783,37 @@ void UVoxelScatterRenderer::ApplyPendingHISMWrites(bool bAll)
 	}
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_ApplyHISMWrites);
 	const double Now = FPlatformTime::Seconds();
+	// What the writes of this call were made of, for voxel.Scatter.LogSlowApplyMs
+	const uint64 StartCycles = FPlatformTime::Cycles64();
+	int32 LogWritten = 0, LogCompacted = 0, LogUpdates = 0, LogGrows = 0, LogHeld = PendingHISMWrites.Num(), LogLeft = 0;
+	int64 LogInstances = 0;
+	double LogLongestMs = 0.0;
+	int32 LogLongestInstances = 0, LogLongestType = -1;
+	ON_SCOPE_EXIT
+	{
+		const float LogSlowMs = CVarVoxelScatterLogSlowApplyMs.GetValueOnGameThread();
+		const double Ms = FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - StartCycles);
+		if (LogSlowMs > 0.f && Ms >= LogSlowMs)
+		{
+			UE_LOG(LogVoxelScatter, Log, TEXT("[ScatterApplySlow] %.2f ms: %d of %d held HISMs written (%d compacted, %d due left for the next tick), %d updates, %d new, %lld instances in them; longest %.2f ms (type %d, %d instances)"),
+				Ms, LogWritten, LogHeld, LogCompacted, LogLeft, LogUpdates, LogGrows, LogInstances, LogLongestMs, LogLongestType, LogLongestInstances);
+		}
+	};
 	const double Interval = FMath::Max(0.0f, VoxelSettings::Resolve(CVarVoxelScatterHISMBatchSeconds, UVoxelWorldsSettings::Get().ScatterHISMBatchSeconds));
 	const double MaxHold = FMath::Max(Interval, static_cast<double>(CVarVoxelScatterHISMMaxHoldSeconds.GetValueOnGameThread()));
+	const float BudgetMs = bAll ? 0.0f : VoxelSettings::Resolve(CVarVoxelScatterHISMWriteBudgetMs, UVoxelWorldsSettings::Get().ScatterHISMWriteBudgetMs);
+	const bool bBudgeted = BudgetMs > 0.0f;
+
+	// The HISMs whose batch is due: at most once per interval, and not while the last batch's tree builds (a change during
+	// the build would throw it away and start another), unless the writes have waited too long.
+	struct FDue
+	{
+		FVoxelScatterHISMKey Key;
+		UHierarchicalInstancedStaticMeshComponent* HISM = nullptr;
+		bool bOverdue = false;
+		double DistanceSq = 0.0;
+	};
+	TArray<FDue> Due;
 	for (auto It = PendingHISMWrites.CreateIterator(); It; ++It)
 	{
 		UHierarchicalInstancedStaticMeshComponent* HISM = nullptr;
@@ -777,46 +826,98 @@ void UVoxelScatterRenderer::ApplyPendingHISMWrites(bool bAll)
 			It.RemoveCurrent();
 			continue;
 		}
-		if (!bAll)
+		const double* Last = LastHISMWriteSeconds.Find(It.Key());
+		const double Since = Last ? Now - *Last : TNumericLimits<double>::Max();
+		if (!bAll && (Since < Interval || (HISM->IsAsyncBuilding() && Since < MaxHold)))
 		{
-			// At most once per interval, and not while the last batch's tree builds: a change during the build would throw
-			// it away and start another, unless the writes have waited too long
-			const double* Last = LastHISMWriteSeconds.Find(It.Key());
-			const double Since = Last ? Now - *Last : TNumericLimits<double>::Max();
-			if (Since < Interval || (HISM->IsAsyncBuilding() && Since < MaxHold))
-			{
-				continue;
-			}
+			continue;
 		}
-		// A HISM whose pool outweighs its live instances is rewritten with the live ones, which lands its writes too
-		const int32 MinPooled = VoxelSettings::Resolve(CVarVoxelScatterHISMCompactMinPooled, UVoxelWorldsSettings::Get().ScatterHISMCompactMinPooled);
-		if (FHISMInstancePool* Pool = InstancePools.Find(It.Key()); Pool && MinPooled > 0)
+		FDue& Entry = Due.AddDefaulted_GetRef();
+		Entry.Key = It.Key();
+		Entry.HISM = HISM;
+		Entry.bOverdue = Since >= MaxHold;
+	}
+	if (bBudgeted && Due.Num() > 1)
+	{
+		// Within the tick's budget (G281) the batches go in this order: those that have waited MaxHold first, then the
+		// nearest a viewer (the HISM's instances' bounds, its origin before it has any), so what waits a tick is far away.
+		for (FDue& Entry : Due)
+		{
+			const FVector Point = Entry.HISM->GetInstanceCount() > 0
+				? Entry.HISM->Bounds.GetBox().GetClosestPointTo(LastViewerPosition)
+				: Entry.HISM->GetComponentLocation();
+			const float Distance = ScatterManager ? ScatterManager->GetViewerDistance(Point) : static_cast<float>(FVector::Dist(Point, LastViewerPosition));
+			Entry.DistanceSq = FMath::Square(static_cast<double>(Distance));
+		}
+		Due.Sort([](const FDue& A, const FDue& B)
+		{
+			return A.bOverdue != B.bOverdue ? A.bOverdue : A.DistanceSq < B.DistanceSq;
+		});
+	}
+
+	const int32 MinPooled = VoxelSettings::Resolve(CVarVoxelScatterHISMCompactMinPooled, UVoxelWorldsSettings::Get().ScatterHISMCompactMinPooled);
+	for (int32 DueIndex = 0; DueIndex < Due.Num(); ++DueIndex)
+	{
+		const FDue& Entry = Due[DueIndex];
+		// The budget spent: the batches left wait, held, for the next tick. The first batch of a tick is always written.
+		if (bBudgeted && LogWritten > 0 && FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - StartCycles) >= BudgetMs)
+		{
+			LogLeft = Due.Num() - DueIndex;
+			TotalHISMBatchesLeft += LogLeft;
+			break;
+		}
+		FPendingHISMWrites* Writes = PendingHISMWrites.Find(Entry.Key);
+		if (!Writes)
+		{
+			continue;
+		}
+		UHierarchicalInstancedStaticMeshComponent* HISM = Entry.HISM;
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_WriteHISM);
+		const uint64 HISMStartCycles = FPlatformTime::Cycles64();
+		ON_SCOPE_EXIT
+		{
+			const double HISMMs = FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - HISMStartCycles);
+			++LogWritten;
+			LogInstances += HISM->GetInstanceCount();
+			if (HISMMs > LogLongestMs)
+			{
+				LogLongestMs = HISMMs;
+				LogLongestInstances = HISM->GetInstanceCount();
+				LogLongestType = Entry.Key.ScatterTypeID;
+			}
+		};
+		// A HISM whose pool outweighs its live instances is rewritten with the live ones, which lands its writes too. A
+		// rewrite costs about twice a batch, so a budgeted tick makes one at most, as its first write (G281: two in one
+		// frame took 9.6 ms); the others take their batch as it is and are rewritten at a later batch.
+		if (FHISMInstancePool* Pool = InstancePools.Find(Entry.Key); Pool && MinPooled > 0 && (!bBudgeted || LogWritten == 0))
 		{
 			const int32 Pooled = Pool->FreeIndices.Num();
-			if (Pooled >= MinPooled && Pooled > GetEffectiveInstanceCount(It.Key(), HISM) - Pooled)
+			if (Pooled >= MinPooled && Pooled > GetEffectiveInstanceCount(Entry.Key, HISM) - Pooled)
 			{
-				CompactHISM(It.Key(), HISM, *Pool);
-				LastHISMWriteSeconds.Add(It.Key(), Now);
+				++LogCompacted;
+				CompactHISM(Entry.Key, HISM, *Pool);
+				LastHISMWriteSeconds.Add(Entry.Key, Now);
 				++TotalHISMWriteBatches;
-				It.RemoveCurrent();
+				PendingHISMWrites.Remove(Entry.Key);
 				continue;
 			}
 		}
-		FPendingHISMWrites& Writes = It.Value();
-		for (const TPair<int32, FTransform>& Update : Writes.Updates)
+		LogUpdates += Writes->Updates.Num();
+		LogGrows += Writes->Grows.Num();
+		for (const TPair<int32, FTransform>& Update : Writes->Updates)
 		{
 			HISM->UpdateInstanceTransform(Update.Key, Update.Value, /*bWorldSpace=*/false, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
 		}
-		if (Writes.Grows.Num() > 0)
+		if (Writes->Grows.Num() > 0)
 		{
-			HISM->AddInstances(Writes.Grows, /*bShouldReturnIndices=*/false, /*bWorldSpace=*/false);
+			HISM->AddInstances(Writes->Grows, /*bShouldReturnIndices=*/false, /*bWorldSpace=*/false);
 		}
 		// No MarkRenderStateDirty: the HISM sends the changed instances to its scene proxy itself (in-place zero scales at
 		// once; placements and new instances drawn unbuilt until its tree build lands, which recreates the proxy). Marking it
 		// dirty recreated the proxy, and every instance's distance-field object, a second time per batch.
-		LastHISMWriteSeconds.Add(It.Key(), Now);
+		LastHISMWriteSeconds.Add(Entry.Key, Now);
 		++TotalHISMWriteBatches;
-		It.RemoveCurrent();
+		PendingHISMWrites.Remove(Entry.Key);
 	}
 }
 
@@ -1093,7 +1194,7 @@ FString UVoxelScatterRenderer::GetDebugStats() const
 	const int32 ActiveInstances = TotalAllocated - TotalPooled;
 	const float Utilization = TotalAllocated > 0 ? (static_cast<float>(ActiveInstances) / TotalAllocated * 100.0f) : 0.0f;
 
-	return FString::Printf(TEXT("ScatterRenderer: %d HISM, %d instances (Active: %d, Pooled: %d, Util: %.0f%%), %d skinned (%d instances, %d capsules), %d chunks, Pending: %d adds"),
+	return FString::Printf(TEXT("ScatterRenderer: %d HISM, %d instances (Active: %d, Pooled: %d, Util: %.0f%%), %d skinned (%d instances, %d capsules), %d chunks, Pending: %d adds; %lld HISM batches (%lld compactions, %lld left for a later tick by the write budget)"),
 		HISMComponents.Num(),
 		TotalAllocated,
 		ActiveInstances,
@@ -1103,7 +1204,10 @@ FString UVoxelScatterRenderer::GetDebugStats() const
 		GetSkinnedInstanceCount(),
 		GetSkinnedCollisionCount(),
 		ChunksWithInstances,
-		PendingInstanceAdds.Num());
+		PendingInstanceAdds.Num(),
+		TotalHISMWriteBatches,
+		TotalHISMCompactions,
+		TotalHISMBatchesLeft);
 }
 
 // ==================== Internal Methods ====================

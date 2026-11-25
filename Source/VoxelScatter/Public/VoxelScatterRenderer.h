@@ -224,8 +224,19 @@ public:
 	/** Writes held for HISMs right now (instances to place, release or add), for tests and the bench. */
 	int32 GetPendingHISMWriteCount() const;
 
+	/** @return The (chunk, type) instance adds still queued for the per-frame add budget */
+	int32 GetPendingInstanceAddCount() const { return PendingInstanceAdds.Num(); }
+
 	/** HISMs rewritten without their pooled instances since Initialize (voxel.Scatter.HISMCompactMinPooled), for tests and the bench. */
 	int64 GetTotalHISMCompactions() const { return TotalHISMCompactions; }
+
+	/**
+	 * HISM batches that were due in a tick and waited for a later one, the tick's write budget spent (G281,
+	 * voxel.Scatter.HISMWriteBudgetMs; a batch waiting two ticks counts twice).
+	 *
+	 * @return The batches left so far
+	 */
+	int64 GetTotalHISMBatchesLeft() const { return TotalHISMBatchesLeft; }
 
 	// ==================== HISM Management ====================
 
@@ -680,6 +691,12 @@ protected:
 
 	/** HISMs compacted (GetTotalHISMCompactions) */
 	int64 TotalHISMCompactions = 0;
+
+	/** Due batches left for a later tick by the write budget (GetTotalHISMBatchesLeft) */
+	int64 TotalHISMBatchesLeft = 0;
+
+	/** The viewer Tick was last given: the due batches are written nearest it first (G281) */
+	FVector LastViewerPosition = FVector::ZeroVector;
 
 	// ==================== References ====================
 
