@@ -608,6 +608,8 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFarFieldIncrementalChangedChunksTest,
 bool FFarFieldIncrementalChangedChunksTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelFarFieldIncrementalTestUtils;
+	// The checking mode's warning for the change not told below, on the plane and the planet.
+	AddExpectedMessage(TEXT("voxel.World.FarFieldCheck: the covered answer kept"), EAutomationExpectedMessageFlags::Contains, 0);
 
 	for (const bool bPlanet : { false, true })
 	{
@@ -728,6 +730,8 @@ bool FFarFieldIncrementalChunkManagerTest::RunTest(const FString& Parameters)
 
 	const FScopedCVar FarFieldVar(TEXT("voxel.World.FarField"), TEXT("1"));
 	const FScopedCVar IncrementalVar(TEXT("voxel.World.FarFieldIncremental"), TEXT("1"));
+	// The zone each world adds after streaming (to invalidate its patches) is registered late on purpose.
+	AddExpectedMessage(TEXT("A conditioning zone was registered after this world had built"), EAutomationExpectedMessageFlags::Contains, 0);
 	enum class EKind : uint8 { Plane, Island, Cubic, Planet };
 	for (const EKind Kind : { EKind::Plane, EKind::Island, EKind::Cubic, EKind::Planet })
 	{
