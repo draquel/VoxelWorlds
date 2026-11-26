@@ -543,14 +543,37 @@ scene (frames up to 51 ms). Writes are now batched per HISM:
   batch as it is and is compacted at a later batch. Nothing new is queued: the held writes already are the queue every
   release path writes into (an unload's or an edit's zero scale lands in the same held entry), so a chunk unloaded, edited
   or cleared while its writes wait is drawn as it would be had they been written. 0 = every due batch in the tick it is
-  due, compactions as they come (before G281).
+  due, compactions as they come (before G281). Since G292 the budget also counts what a batch will cost before writing
+  it: a batch that starts a tree build is estimated at its HISM's instances times what the writes so far took an instance
+  (`GetEstimatedWriteNsPerInstance`, a moving average over the batches on HISMs of 1,000 instances or more, 200 ns to
+  start), and one whose estimate would overrun the budget waits for a later tick, where it is first; a batch of releases
+  alone (zero scales in place, no build) is estimated at nothing. A tick is then the budget or one HISM's write, not the
+  budget and one more write.
+- **One tree build a batch (G292).** The HISM's own `UpdateInstanceTransform` starts its tree build at the batch's first
+  placement, and every later change of the batch throws that build away (`bConcurrentChanges`), which copies every instance
+  again when it lands, in a later frame. `WriteHISMBatch` writes the in-place changes (a release's zero scale) through the
+  HISM's own call, which builds nothing, the placements through the instanced mesh's call with the HISM's bookkeeping
+  (`WriteInstanceUnbuilt`: the tree out of date, the instance's bounds among the unbuilt ones) and the new instances last,
+  whose `AddInstances` starts the batch's one build. `voxel.Scatter.HISMWritePath 0` is the path before G292 (each change
+  through the HISM's own call, the budget checked after each write); `voxel.Scatter.Stats` counts the builds started.
+- **The dense types' regions (G292, D198).** `voxel.Scatter.DenseRegionChunks` N > 0 keeps the HISMs of the dense types in
+  regions of N chunks, the others in the regions above: a static type is dense when its `Density` times a chunk's surface
+  points ((chunk size / surface point spacing)^2) is at least `voxel.Scatter.DenseMinPerChunk` (256), decided the first
+  time the renderer asks for the type and kept for the session (`GetTypeRegions`; a skeletal type keeps the render
+  regions). A dense HISM holds a quarter (N = 2) or a sixteenth (N = 1) of the instances on a heightmap world, so each of
+  its writes copies that many. 0 (the default) = every type in the same regions, as before; the trade is D198.
 - Queries see held writes: `FindNearestInstance` (harvest) reads each instance through them and also scans held
   placements and new instances; `GetTotalInstanceCount` counts held new instances. `FlushHISMWrites` applies every held
   write now, whatever the budget.
 
 The instances drawn are the same as with every write made at once (`voxel.Scatter.HISMBatchSeconds 0`, the behaviour
-before G42, for A/B runs): `VoxelWorlds.Scatter.HISMBatch.{SameInstances,InPlaceRelease,Regions,WriteBudget}`
-(`WriteBudget`: with regions of one chunk and a budget of one batch a tick, the scenario pumped by ticks alone, a chunk
+before G42, for A/B runs): `VoxelWorlds.Scatter.HISMBatch.{SameInstances,InPlaceRelease,Regions,WriteBudget}` and, since
+G292, `.OneTreeBuild` (a batch of placements and new instances starts one build and throws none away; the path before
+G292 throws its first away; the same instances on both), `.Compaction` (chunks unloaded, cleared and reloaded while the
+writes wait, then the compacting batch: the HISM holds its live instances alone, the same as the path before G292, a
+collision body at each), `.EstimateBudget` (with the estimate far over the budget a tick writes one batch that builds and
+every batch of releases) and `.DenseRegions` (the test grass dense in regions of one chunk, the other types in their
+shared region: the same transforms, and the scenario's stops the instances written at once). (`WriteBudget`: with regions of one chunk and a budget of one batch a tick, the scenario pumped by ticks alone, a chunk
 unloaded and a radius cleared while their writes wait included, draws at every stop the instances written at once, as
 the budget 0 does; of four HISMs due in one tick the nearest the viewer is written and the others draw their trees until
 later ticks). The bench logs `ScatBatchN` and `ScatCompactN` per sample, and the scatter section's steps
