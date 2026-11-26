@@ -615,6 +615,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
 	void SetSurfacePointSpacing(float Spacing);
 
+	/** @return The target spacing between surface sample points (SetSurfacePointSpacing) */
+	float GetSurfacePointSpacing() const { return SurfacePointSpacing; }
+
 	/**
 	 * Set the world seed for deterministic scatter.
 	 */

@@ -17,6 +17,8 @@
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelMaterialRegistry.h"
 #include "VoxelData.h"
+#include "Containers/Ticker.h"
+#include "PhysicsEngine/BodyInstance.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -106,7 +108,7 @@ namespace VoxelScatterHISMBatchTestUtils
 	{
 		FVector Viewer = FVector::ZeroVector;
 
-		explicit FHarness(const TCHAR* WorldName)
+		explicit FHarness(const TCHAR* WorldName, bool bTreeCollision = false)
 			: FScatterTestWorld(WorldName)
 		{
 			Config->ChunkSize = ChunkSize;
@@ -123,6 +125,7 @@ namespace VoxelScatterHISMBatchTestUtils
 					FScatterDefinition Copy = *Def;
 					Copy.Mesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Engine/BasicShapes/Cube.Cube")));
 					Copy.Density = ID == TreeID ? 0.3f : Copy.Density;
+					Copy.bEnableCollision = ID == TreeID ? bTreeCollision : Copy.bEnableCollision;
 					Manager->AddScatterDefinition(Copy);
 				}
 			}
@@ -670,6 +673,361 @@ bool FVoxelScatterHISMBatchWriteBudgetTest::RunTest(const FString& Parameters)
 			AfterAll += DrawsTrees(Pair.Value) ? 1 : 0;
 		}
 		TestEqual(TEXT("Tick by tick: later ticks release the rest"), AfterAll, 0);
+	}
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// G292: one HISM's write. A UE 5.8 HISM's own UpdateInstanceTransform starts a tree build at the batch's first placement
+// (its set-up copies every instance on the game thread) and each later change of the batch throws that build away, which
+// starts another when it lands; a compaction cleared and added every live instance. With voxel.Scatter.HISMWritePath 1:
+// - OneTreeBuild: a batch of placements and new instances starts one tree build, not thrown away (the HISM building and
+//   no change made during the build); with 0 a batch of several placements throws its first build away. Releases (zero
+//   scale where each instance stands) start none on either path.
+// - CompactInPlace: three of four chunks unloaded (the kept chunk's trees at the HISM's highest indices), one cleared and
+//   another reloaded while the writes wait, then the compacting batch: the tree HISM holds exactly its live instances,
+//   none zero-scaled, the same transforms the path before G292 draws, each chunk's count its spawn points, one tree build
+//   started and not thrown away; with the trees' collision on, a body per live instance at its transform.
+// - EstimateBudget: with the write estimate set far over the budget, a tick writes its first batch and leaves every other
+//   batch that would start a build (they are written first in later ticks), while batches of releases alone are written
+//   in the same tick; the instances drawn at the end are the ones written at once.
+// ---------------------------------------------------------------------------
+
+namespace VoxelScatterHISMBatchTestUtils
+{
+	/** Every HISM of the test's types. */
+	TArray<UHierarchicalInstancedStaticMeshComponent*> AllHISMs(const UVoxelScatterRenderer* R)
+	{
+		TArray<UHierarchicalInstancedStaticMeshComponent*> Out;
+		for (const int32 ID : TypeIDs)
+		{
+			TArray<TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>> HISMs;
+			R->GetTypeHISMs(ID, HISMs);
+			for (const TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>& Pair : HISMs)
+			{
+				Out.Add(Pair.Value);
+			}
+		}
+		return Out;
+	}
+
+	/**
+	 * Let the HISMs' tree builds land (20 s at most): a build's result is applied on the game thread by the core ticker
+	 * (ExecuteOnGameThread), which nothing ticks while a test runs, so the ticker is ticked here.
+	 */
+	bool WaitForTreeBuilds(const UVoxelScatterRenderer* R)
+	{
+		const double Start = FPlatformTime::Seconds();
+		while (FPlatformTime::Seconds() < Start + 20.0)
+		{
+			FTSTicker::GetCoreTicker().Tick(0.0f);
+			bool bBuilding = false;
+			for (const UHierarchicalInstancedStaticMeshComponent* HISM : AllHISMs(R))
+			{
+				bBuilding |= HISM->IsAsyncBuilding();
+			}
+			if (!bBuilding)
+			{
+				return true;
+			}
+			FPlatformProcess::Sleep(0.01f);
+		}
+		return false;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterHISMBatchOneTreeBuildTest,
+	"VoxelWorlds.Scatter.HISMBatch.OneTreeBuild",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterHISMBatchOneTreeBuildTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterHISMBatchTestUtils;
+
+	const TArray<FIntVector> Coords = { FIntVector(0, 0, 0), FIntVector(1, 0, 0), FIntVector(0, 1, 0), FIntVector(1, 1, 0) };
+	const FVector Near = ChunkCenter(FIntVector(1, 1, 0));
+	const FVector Far = Near + FVector(40000.0, 0.0, 0.0);
+	// Per path: the HISMs that started a build at the release flush, and at the placement flush those building and those
+	// whose build was thrown away (a change made while it ran)
+	struct FResult
+	{
+		int32 BuildingAfterRelease = 0;
+		int32 Building = 0;
+		int32 ThrownAway = 0;
+		int64 BuildsCounted = 0;
+		TArray<FString> Drawn;
+	};
+	auto Run = [&](const TCHAR* Path) -> FResult
+	{
+		FResult Result;
+		FScopedCVars CVars;
+		CVars.Set(TEXT("voxel.Scatter.HISMWritePath"), Path);
+		// Batched, but no tick writes a batch (the interval and the longest hold far away): only the flushes below do, so
+		// each HISM takes each stop's writes as one batch
+		CVars.Set(TEXT("voxel.Scatter.HISMBatchSeconds"), TEXT("1000"));
+		CVars.Set(TEXT("voxel.Scatter.HISMMaxHoldSeconds"), TEXT("1000"));
+		CVars.Set(TEXT("voxel.Scatter.HISMCompactMinPooled"), TEXT("0"));
+		FHarness Harness(TEXT("VoxelScatterHISMBatchTestWorld"));
+		for (const FIntVector& Coord : Coords)
+		{
+			Harness.Submit(Coord);
+		}
+		Harness.Settle(Near);
+		UVoxelScatterRenderer* R = Harness.Renderer();
+		TestTrue(FString::Printf(TEXT("Path %s: the first builds land"), Path), WaitForTreeBuilds(R));
+		Harness.Settle(Far); // the trees released: in place
+		for (const UHierarchicalInstancedStaticMeshComponent* HISM : AllHISMs(R))
+		{
+			Result.BuildingAfterRelease += HISM->IsAsyncBuilding() ? 1 : 0;
+		}
+		TestTrue(FString::Printf(TEXT("Path %s: the release's builds land"), Path), WaitForTreeBuilds(R));
+		const int64 BuildsBefore = R->GetTotalHISMTreeBuilds();
+		Harness.Settle(Near); // the trees placed again: recycled indices, each a placement
+		for (const UHierarchicalInstancedStaticMeshComponent* HISM : AllHISMs(R))
+		{
+			Result.Building += HISM->IsAsyncBuilding() ? 1 : 0;
+			Result.ThrownAway += HISM->IsAsyncBuilding() && HISM->bConcurrentChanges ? 1 : 0;
+		}
+		Result.BuildsCounted = R->GetTotalHISMTreeBuilds() - BuildsBefore;
+		WaitForTreeBuilds(R);
+		Result.Drawn = Harness.Drawn();
+		return Result;
+	};
+	const FResult Before = Run(TEXT("0"));
+	const FResult After = Run(TEXT("1"));
+	AddInfo(FString::Printf(TEXT("before G292: %d HISM(s) building after the release, %d after the placements, %d of them thrown away; G292: %d, %d, %d (%lld builds counted); %d and %d instances drawn"),
+		Before.BuildingAfterRelease, Before.Building, Before.ThrownAway, After.BuildingAfterRelease, After.Building, After.ThrownAway,
+		After.BuildsCounted, Before.Drawn.Num(), After.Drawn.Num()));
+	TestEqual(TEXT("A release (in place) starts no build"), After.BuildingAfterRelease, 0);
+	TestTrue(TEXT("Scenario: the placements started a build"), After.Building > 0);
+	TestTrue(TEXT("Scenario: before G292 a batch of placements throws its first build away"), Before.ThrownAway > 0);
+	TestEqual(TEXT("G292: no build thrown away"), After.ThrownAway, 0);
+	TestEqual(TEXT("G292: the builds counted are the HISMs building"), static_cast<int32>(After.BuildsCounted), After.Building);
+	TestTrue(TEXT("Scenario: instances drawn"), After.Drawn.Num() > 0);
+	TestTrue(TEXT("The same instances drawn on both paths"), After.Drawn == Before.Drawn);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterHISMBatchCompactInPlaceTest,
+	"VoxelWorlds.Scatter.HISMBatch.CompactInPlace",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterHISMBatchCompactInPlaceTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterHISMBatchTestUtils;
+
+	const TArray<FIntVector> Coords = { FIntVector(0, 0, 0), FIntVector(1, 0, 0), FIntVector(0, 1, 0), FIntVector(1, 1, 0) };
+	const FIntVector Kept(1, 1, 0);
+	const FIntVector Cleared(1, 0, 0);
+	const FVector Near = ChunkCenter(Kept);
+	struct FResult
+	{
+		TArray<FString> Drawn;
+		int32 TreeInstances = 0;
+		int32 TreeZeroScaled = 0;
+		int32 LiveTrees = 0;
+		int64 Compactions = 0;
+		int32 ThrownAway = 0;
+		int64 Builds = 0;
+		bool bPhysics = false;
+		int32 Bodies = 0;
+		int32 BodiesMisplaced = 0;
+		TMap<FIntVector, int32> ChunkCounts;
+		TMap<FIntVector, int32> ChunkSpawns;
+	};
+	auto Run = [&](const TCHAR* Path) -> FResult
+	{
+		FResult Result;
+		FScopedCVars CVars;
+		CVars.Set(TEXT("voxel.Scatter.HISMWritePath"), Path);
+		CVars.Set(TEXT("voxel.Scatter.HISMBatchSeconds"), TEXT("1000"));
+		CVars.Set(TEXT("voxel.Scatter.HISMMaxHoldSeconds"), TEXT("1000"));
+		CVars.Set(TEXT("voxel.Scatter.HISMCompactMinPooled"), TEXT("1"));
+		FHarness Harness(TEXT("VoxelScatterHISMBatchTestWorld"), /*bTreeCollision=*/true);
+		// One at a time, so the chunks' instances take the HISMs' indices in this order: the kept chunk's last
+		for (const FIntVector& Coord : Coords)
+		{
+			Harness.Submit(Coord);
+			Harness.Settle(Near);
+		}
+		UVoxelScatterRenderer* R = Harness.Renderer();
+		WaitForTreeBuilds(R);
+		const int64 CompactionsBefore = R->GetTotalHISMCompactions();
+		const int64 BuildsBefore = R->GetTotalHISMTreeBuilds();
+		// While the writes wait (no tick writes them): two chunks unloaded, the third's ground cleared round its centre, the
+		// first unloaded and reloaded (its placements held); then one flush, whose batches compact the HISMs
+		Harness.Manager->OnChunkUnloaded(FIntVector(0, 0, 0));
+		Harness.Manager->OnChunkUnloaded(FIntVector(0, 1, 0));
+		const FVector ClearAt(ChunkCenter(Cleared).X, ChunkCenter(Cleared).Y,
+			TiltedPlane().GetTerrainHeightAt(ChunkCenter(Cleared).X, ChunkCenter(Cleared).Y, FVoxelNoiseParams()));
+		Harness.Manager->ClearScatterInRadius(ClearAt, 600.0f);
+		Harness.Manager->OnChunkUnloaded(Cleared);
+		Harness.Submit(FIntVector(0, 0, 0));
+		Harness.Settle(Near);
+		Result.Compactions = R->GetTotalHISMCompactions() - CompactionsBefore;
+		Result.Builds = R->GetTotalHISMTreeBuilds() - BuildsBefore;
+		for (const UHierarchicalInstancedStaticMeshComponent* HISM : AllHISMs(R))
+		{
+			Result.ThrownAway += HISM->IsAsyncBuilding() && HISM->bConcurrentChanges ? 1 : 0;
+		}
+		WaitForTreeBuilds(R);
+		const TArray<FIntVector> Live = { FIntVector(0, 0, 0), Kept };
+		for (const FIntVector& Coord : Live)
+		{
+			Result.ChunkCounts.Add(Coord, R->GetChunkInstanceCount(Coord, TreeID));
+			Result.ChunkSpawns.Add(Coord, Harness.SpawnsPerType({ Coord }).FindRef(TreeID));
+			Result.LiveTrees += Result.ChunkSpawns[Coord];
+		}
+		TArray<TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>> TreeHISMs;
+		R->GetTypeHISMs(TreeID, TreeHISMs);
+		for (const TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>& Pair : TreeHISMs)
+		{
+			UHierarchicalInstancedStaticMeshComponent* HISM = Pair.Value;
+			Result.TreeInstances += HISM->GetInstanceCount();
+			Result.bPhysics |= HISM->IsPhysicsStateCreated();
+			const TArray<FBodyInstance*>& Bodies = HISM->GetInstanceBodies();
+			for (int32 i = 0; i < HISM->GetInstanceCount(); ++i)
+			{
+				FTransform Xf;
+				HISM->GetInstanceTransform(i, Xf, /*bWorldSpace=*/true);
+				if (Xf.GetScale3D().IsNearlyZero())
+				{
+					++Result.TreeZeroScaled;
+					continue;
+				}
+				if (Bodies.IsValidIndex(i) && Bodies[i] && Bodies[i]->IsValidBodyInstance())
+				{
+					++Result.Bodies;
+					Result.BodiesMisplaced += Bodies[i]->GetUnrealWorldTransform().GetLocation().Equals(Xf.GetLocation(), 0.1) ? 0 : 1;
+				}
+			}
+		}
+		Result.Drawn = Harness.Drawn();
+		return Result;
+	};
+	const FResult Before = Run(TEXT("0"));
+	const FResult After = Run(TEXT("1"));
+	for (const FResult* Res : { &Before, &After })
+	{
+		AddInfo(FString::Printf(TEXT("%s: %lld compaction(s), %lld build(s) counted, %d thrown away; trees: %d instances in the HISM (%d zero-scaled), %d live, %d bodies (%d misplaced, physics %d); %d instances drawn"),
+			Res == &Before ? TEXT("before G292") : TEXT("G292"), Res->Compactions, Res->Builds, Res->ThrownAway, Res->TreeInstances, Res->TreeZeroScaled,
+			Res->LiveTrees, Res->Bodies, Res->BodiesMisplaced, Res->bPhysics ? 1 : 0, Res->Drawn.Num()));
+	}
+	TestTrue(TEXT("Scenario: the batch compacted HISMs"), After.Compactions > 0 && Before.Compactions > 0);
+	TestTrue(TEXT("Scenario: trees live"), After.LiveTrees > 0);
+	TestEqual(TEXT("G292: the tree HISM holds its live instances only"), After.TreeInstances, After.LiveTrees);
+	TestEqual(TEXT("G292: none zero-scaled"), After.TreeZeroScaled, 0);
+	TestEqual(TEXT("G292: no build thrown away"), After.ThrownAway, 0);
+	TestTrue(TEXT("The same instances drawn on both paths"), After.Drawn == Before.Drawn);
+	for (const TPair<FIntVector, int32>& Pair : After.ChunkSpawns)
+	{
+		TestEqual(FString::Printf(TEXT("G292: chunk (%d,%d,%d) holds a tree per spawn point"), Pair.Key.X, Pair.Key.Y, Pair.Key.Z),
+			After.ChunkCounts.FindRef(Pair.Key), Pair.Value);
+	}
+	if (After.bPhysics)
+	{
+		TestEqual(TEXT("G292: a body per live tree"), After.Bodies, After.LiveTrees);
+		TestEqual(TEXT("G292: each body at its tree"), After.BodiesMisplaced, 0);
+		TestEqual(TEXT("As many bodies as before G292"), After.Bodies, Before.Bodies);
+	}
+	else
+	{
+		AddInfo(TEXT("The test world created no physics state: the bodies are not checked"));
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterHISMBatchEstimateBudgetTest,
+	"VoxelWorlds.Scatter.HISMBatch.EstimateBudget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterHISMBatchEstimateBudgetTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterHISMBatchTestUtils;
+
+	TArray<FString> Notes;
+	TArray<TArray<FString>> Immediate;
+	{
+		FScopedCVars CVars;
+		CVars.Set(TEXT("voxel.Scatter.RegionChunks"), TEXT("1"));
+		CVars.Set(TEXT("voxel.Scatter.HISMBatchSeconds"), TEXT("0"));
+		Immediate = RunScenario(*this, TEXT("written at once"), Notes);
+	}
+
+	FScopedCVars CVars;
+	CVars.Set(TEXT("voxel.Scatter.RegionChunks"), TEXT("1"));
+	CVars.Set(TEXT("voxel.Scatter.HISMWritePath"), TEXT("1"));
+	CVars.Set(TEXT("voxel.Scatter.HISMBatchSeconds"), TEXT("0.1"));
+	CVars.Set(TEXT("voxel.Scatter.HISMCompactMinPooled"), TEXT("0"));
+	CVars.Set(TEXT("voxel.Scatter.HISMWriteBudgetMs"), TEXT("1000"));
+	const TArray<FIntVector> Coords = { FIntVector(0, 0, 0), FIntVector(1, 0, 0), FIntVector(0, 1, 0), FIntVector(1, 1, 0) };
+	const FVector Near = ChunkCenter(FIntVector(1, 1, 0));
+	const FVector Far = Near + FVector(40000.0, 0.0, 0.0);
+	FHarness Harness(TEXT("VoxelScatterHISMBatchTestWorld"));
+	UVoxelScatterRenderer* R = Harness.Renderer();
+	// A write that starts a build estimated at a second an instance: over the 1,000 ms budget whatever is first
+	R->SetEstimatedWriteNsPerInstance(1e9);
+	for (const FIntVector& Coord : Coords)
+	{
+		Harness.Submit(Coord);
+	}
+	// Tick by tick until nothing is held: per tick the batches written and left
+	TArray<int32> WrittenPerTick;
+	TArray<int32> LeftPerTick;
+	auto Pump = [&](const FVector& Viewer)
+	{
+		Harness.Viewer = Viewer;
+		const double Start = FPlatformTime::Seconds();
+		int32 Quiet = 0;
+		while (FPlatformTime::Seconds() < Start + 30.0 && Quiet < 40)
+		{
+			const int64 Batches = R->GetTotalHISMWriteBatches();
+			const int64 Left = R->GetTotalHISMBatchesLeft();
+			Harness.Update();
+			WrittenPerTick.Add(static_cast<int32>(R->GetTotalHISMWriteBatches() - Batches));
+			LeftPerTick.Add(static_cast<int32>(R->GetTotalHISMBatchesLeft() - Left));
+			const bool bBusy = R->GetPendingHISMWriteCount() > 0 || R->GetPendingInstanceAddCount() > 0 || Harness.Manager->GetPendingGenerationCount() > 0;
+			Quiet = bBusy ? 0 : Quiet + 1;
+			FPlatformProcess::Sleep(0.005f);
+		}
+	};
+	Pump(Near);
+	int32 MostWrittenNear = 0;
+	int32 LeftNear = 0;
+	for (int32 i = 0; i < WrittenPerTick.Num(); ++i)
+	{
+		MostWrittenNear = FMath::Max(MostWrittenNear, WrittenPerTick[i]);
+		LeftNear += LeftPerTick[i];
+	}
+	const TArray<FString> DrawnNear = Harness.Drawn();
+	// Far: one distance pass releases every chunk's trees, batches of releases alone (no build), each tree HISM's due at
+	// once (their builds landed, the interval past): the tick writes them all, whatever the estimate
+	WaitForTreeBuilds(R);
+	FPlatformProcess::Sleep(0.25f);
+	Harness.Viewer = Far;
+	const int64 BatchesBefore = R->GetTotalHISMWriteBatches();
+	const int64 LeftBefore = R->GetTotalHISMBatchesLeft();
+	Harness.Manager->Update(Far, 0.3f); // past the distance interval: the cleanup runs, then the renderer ticks
+	const int32 WrittenFar = static_cast<int32>(R->GetTotalHISMWriteBatches() - BatchesBefore);
+	const int32 LeftFar = static_cast<int32>(R->GetTotalHISMBatchesLeft() - LeftBefore);
+	WrittenPerTick.Reset();
+	LeftPerTick.Reset();
+	Pump(Far);
+	const TArray<FString> DrawnFar = Harness.Drawn();
+	AddInfo(FString::Printf(TEXT("near: at most %d batch(es) a tick, %d left; the release tick far: %d written, %d left; %d and %d instances drawn"),
+		MostWrittenNear, LeftNear, WrittenFar, LeftFar, DrawnNear.Num(), DrawnFar.Num()));
+	for (const FString& Note : Notes)
+	{
+		AddInfo(Note);
+	}
+	TestEqual(TEXT("Near: a tick writes one batch that builds (the first), the others wait"), MostWrittenNear, 1);
+	TestTrue(TEXT("Near: batches were left for later ticks"), LeftNear > 0);
+	TestTrue(TEXT("Far: the releases' batches (no build) are written in one tick"), WrittenFar > 1 && LeftFar == 0);
+	TestTrue(TEXT("Scenario: the written-at-once run stopped near and far"), Immediate.Num() >= 2);
+	if (Immediate.Num() >= 2)
+	{
+		TestTrue(TEXT("Near: the instances written at once"), DrawnNear == Immediate[0]);
+		TestTrue(TEXT("Far: the instances written at once"), DrawnFar == Immediate[1]);
 	}
 	return true;
 }
