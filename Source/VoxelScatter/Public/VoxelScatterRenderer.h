@@ -293,10 +293,23 @@ public:
 	const FVoxelRenderRegions& GetRenderRegions() const { return Regions; }
 
 	/**
-	 * The regions a scatter type's HISMs are kept in: the render regions (GetRenderRegions), or for a dense type with
-	 * voxel.Scatter.DenseRegionChunks > 0 regions of that many chunks (G292, D198: a dense type's HISM holds fewer instances,
-	 * so each of its writes copies fewer). A type is dense when its definition is static and its density over a chunk's
-	 * surface points is at least voxel.Scatter.DenseMinPerChunk; decided the first time the type is asked for, then kept for
+	 * The dense types' regions (D198; the manager sets them before Initialize from the world configuration's
+	 * ScatterDenseRegionChunks and ScatterDenseMinPerChunk, voxel.Scatter.DenseRegionChunks and DenseMinPerChunk overriding
+	 * them once set). Without a call no type is dense.
+	 *
+	 * @param InRegionChunks Chunks along the edge of a dense type's regions; 0 = no type is dense
+	 * @param InMinPerChunk A type's instances a chunk at most (Density times a chunk's surface points) that make it dense
+	 */
+	void SetDenseTypeRegions(int32 InRegionChunks, float InMinPerChunk) { DenseRegionChunksSetting = InRegionChunks; DenseMinPerChunk = InMinPerChunk; }
+
+	/** @return Chunks along the edge of the dense types' regions (0 = no type is dense), as Initialize took them */
+	int32 GetDenseRegionChunks() const { return DenseRegions.RegionChunks; }
+
+	/**
+	 * The regions a scatter type's HISMs are kept in: the render regions (GetRenderRegions), or for a dense type regions of
+	 * the dense types' chunks (SetDenseTypeRegions; G292, D198, 2 chunks by default: a dense type's HISM holds fewer
+	 * instances, so each of its writes copies fewer). A type is dense when its definition is static and its density over a
+	 * chunk's surface points is at least the dense threshold; decided the first time the type is asked for, then kept for
 	 * the session (its HISMs' keys depend on it). Skeletal definitions keep the render regions.
 	 *
 	 * @param ScatterTypeID Scatter type ID
@@ -612,7 +625,13 @@ protected:
 	/** The render regions (SetRenderRegions); one at the world origin unless a planet splits them */
 	FVoxelRenderRegions Regions;
 
-	/** The dense types' regions (voxel.Scatter.DenseRegionChunks, read at Initialize; RegionChunks 0 = no type is dense, G292) */
+	/** The dense types' region edge in chunks (SetDenseTypeRegions; 0 = no type is dense), taken by Initialize */
+	int32 DenseRegionChunksSetting = 0;
+
+	/** A type's instances a chunk at most that make it dense (SetDenseTypeRegions) */
+	float DenseMinPerChunk = 256.0f;
+
+	/** The dense types' regions (DenseRegionChunksSetting at Initialize; RegionChunks 0 = no type is dense, G292, D198) */
 	FVoxelRenderRegions DenseRegions;
 
 	/** Whether each type asked for is dense (GetTypeRegions), decided once a session */

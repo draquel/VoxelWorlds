@@ -528,6 +528,23 @@ public:
 	int32 ScatterRegionChunks = -1;
 
 	/**
+	 * Chunks along the edge of a dense scatter type's HISM regions (D198): a static type whose density over a chunk's
+	 * surface points is at least ScatterDenseMinPerChunk keeps its HISMs in regions of this many chunks, so each HISM holds
+	 * fewer instances and each of its writes copies fewer (the engine's tree build copies them all); the other types keep
+	 * ScatterRegionChunks'. 0 = every type in ScatterRegionChunks' regions (voxel.Scatter.DenseRegionChunks; read when the
+	 * scatter manager initializes)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering", meta = (ClampMin = "0"))
+	int32 ScatterDenseRegionChunks = 2;
+
+	/**
+	 * The instances a chunk that makes a scatter type dense (ScatterDenseRegionChunks): its Density times a chunk's surface
+	 * points ((chunk size / surface point spacing)^2) at least this (voxel.Scatter.DenseMinPerChunk)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rendering", meta = (ClampMin = "0", EditCondition = "ScatterDenseRegionChunks > 0"))
+	float ScatterDenseMinPerChunk = 256.0f;
+
+	/**
 	 * Whether the terrain is drawn through Nanite (D158): Auto when the project uses virtual shadow maps, On for a world
 	 * built around Nanite content, Off never. Needs a platform with Nanite; never on a dedicated server.
 	 * voxel.Render.Nanite overrides it for every world (-1 = this setting).

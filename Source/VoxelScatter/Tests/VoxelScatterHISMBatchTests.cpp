@@ -13,6 +13,7 @@
 #include "VoxelScatterRenderer.h"
 #include "VoxelScatterTypes.h"
 #include "VoxelWorldConfiguration.h"
+#include "VoxelWorldsSettings.h"
 #include "IVoxelWorldMode.h"
 #include "InfinitePlaneWorldMode.h"
 #include "VoxelMaterialRegistry.h"
@@ -44,6 +45,9 @@
 //   ticks) draws at every stop the instances written at once, a chunk unloaded and a radius cleared while their writes
 //   wait included; so does the budget 0 (every due batch in its tick, before G281); of four HISMs due in one tick (the
 //   trees released) the tick writes the nearest the viewer, the others drawing their trees until later ticks.
+// The test grass (0.5 of a chunk's 256 surface points, 128) is under the dense threshold's default (256), so with the dense
+// types in regions of 2 chunks by default (D198) every test here but DenseRegions and DenseByDefault keeps every type in
+// the shared regions; those two make the grass dense on purpose.
 // ---------------------------------------------------------------------------
 
 namespace VoxelScatterHISMBatchTestUtils
@@ -108,13 +112,23 @@ namespace VoxelScatterHISMBatchTestUtils
 	{
 		FVector Viewer = FVector::ZeroVector;
 
-		explicit FHarness(const TCHAR* WorldName, bool bTreeCollision = false)
+		/**
+		 * @param bTreeCollision Whether the trees have collision
+		 * @param GrassDensity The grass's density (< 0: the test definition's, 0.5: 128 a chunk, not dense by default)
+		 * @param Configure Changes to the world configuration before the manager starts (nullptr: none)
+		 */
+		explicit FHarness(const TCHAR* WorldName, bool bTreeCollision = false, float GrassDensity = -1.0f,
+			TFunction<void(UVoxelWorldConfiguration&)> Configure = nullptr)
 			: FScatterTestWorld(WorldName)
 		{
 			Config->ChunkSize = ChunkSize;
 			Config->VoxelSize = VoxelSize;
 			Config->ScatterRadius = 100000.0f;
 			Config->MeshingMode = EMeshingMode::DualContouring;
+			if (Configure)
+			{
+				Configure(*Config);
+			}
 			StartManager(/*bSmoothDefinitions=*/true);
 			Manager->SetSurfacePointSpacing(VoxelSize);
 			UseWorldMode(TiltedPlaneMode());
@@ -124,7 +138,7 @@ namespace VoxelScatterHISMBatchTestUtils
 				{
 					FScatterDefinition Copy = *Def;
 					Copy.Mesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Engine/BasicShapes/Cube.Cube")));
-					Copy.Density = ID == TreeID ? 0.3f : Copy.Density;
+					Copy.Density = ID == TreeID ? 0.3f : (ID == 0 && GrassDensity >= 0.0f ? GrassDensity : Copy.Density);
 					Copy.bEnableCollision = ID == TreeID ? bTreeCollision : Copy.bEnableCollision;
 					Manager->AddScatterDefinition(Copy);
 				}
@@ -1034,8 +1048,9 @@ bool FVoxelScatterHISMBatchEstimateBudgetTest::RunTest(const FString& Parameters
 
 // DenseRegions (G292, D198): with voxel.Scatter.DenseRegionChunks 1 and the threshold between the test grass (0.5 of a
 // chunk's 256 surface points, 128) and the trees (77), the grass keeps a HISM per chunk and the other types their shared
-// region's; the instances drawn are the same transforms as without, to 0.01 uu, and through the SameInstances scenario
-// the same keys as every write made at once.
+// region's; with the override at 0 (every type in the shared regions, the behaviour before D198) a HISM per type; the
+// instances drawn are the same transforms either way, to 0.01 uu, and through the SameInstances scenario the same keys as
+// every write made at once.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterHISMBatchDenseRegionsTest,
 	"VoxelWorlds.Scatter.HISMBatch.DenseRegions",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -1106,6 +1121,123 @@ bool FVoxelScatterHISMBatchDenseRegionsTest::RunTest(const FString& Parameters)
 	{
 		TestTrue(FString::Printf(TEXT("Dense, stop %d: draws the instances written at once"), i), DenseRun[i] == Immediate[i]);
 	}
+	return true;
+}
+
+// DenseByDefault (D198, decided 2026-11-26: regions of 2 chunks): a world that sets nothing keeps a dense type's HISMs in
+// regions of 2 chunks. The grass made dense at the default threshold (density 1: 256 a chunk), the rocks (13) and the
+// trees (77) not; four chunks at (1..2, 1..2), one shared region of 4 chunks but four regions of 2: four grass HISMs, one
+// rock and one tree HISM. voxel.Scatter.DenseRegionChunks 0 (the override) and the world configuration's
+// ScatterDenseRegionChunks 0 each put the grass back in the shared region (a HISM per type), and every run draws the same
+// transforms, to 0.01 uu.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterHISMBatchDenseByDefaultTest,
+	"VoxelWorlds.Scatter.HISMBatch.DenseByDefault",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterHISMBatchDenseByDefaultTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterHISMBatchTestUtils;
+
+	const UVoxelWorldConfiguration* Defaults = GetDefault<UVoxelWorldConfiguration>();
+	TestEqual(TEXT("The world configuration's default: regions of 2 chunks"), Defaults->ScatterDenseRegionChunks, 2);
+	TestEqual(TEXT("The world configuration's default threshold: 256 a chunk"), Defaults->ScatterDenseMinPerChunk, 256.0f);
+
+	// A test that set the variables earlier in this session leaves them overridden (at the value it restored): a run that
+	// sets nothing then reads the variable, which is the default only while it holds the default's value.
+	auto VariableAtDefault = [](const TCHAR* Name) -> bool
+	{
+		IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(Name);
+		return Var && (!VoxelSettings::IsOverridden(Var) || Var->GetString() == Var->GetDefaultValue());
+	};
+	const bool bDefaults = VariableAtDefault(TEXT("voxel.Scatter.DenseRegionChunks")) && VariableAtDefault(TEXT("voxel.Scatter.DenseMinPerChunk"));
+	const bool bConfigRead = !VoxelSettings::IsOverridden(IConsoleManager::Get().FindConsoleVariable(TEXT("voxel.Scatter.DenseRegionChunks")));
+
+	const TArray<FIntVector> Coords = { FIntVector(1, 1, 0), FIntVector(2, 1, 0), FIntVector(1, 2, 0), FIntVector(2, 2, 0) };
+	const FVector Near = (ChunkCenter(FIntVector(1, 1, 0)) + ChunkCenter(FIntVector(2, 2, 0))) * 0.5;
+	struct FResult
+	{
+		int32 DenseChunks = -1;
+		int32 HISMs = 0;
+		int32 PerType[3] = { 0, 0, 0 };
+		TArray<int32> Dense;
+		TArray<TPair<int32, FTransform>> Drawn;
+	};
+	auto Run = [&](const TCHAR* Override, TFunction<void(UVoxelWorldConfiguration&)> Configure) -> FResult
+	{
+		FScopedCVars CVars;
+		if (Override)
+		{
+			CVars.Set(TEXT("voxel.Scatter.DenseRegionChunks"), Override);
+		}
+		FHarness Harness(TEXT("VoxelScatterHISMBatchTestWorld"), /*bTreeCollision=*/false, /*GrassDensity=*/1.0f, MoveTemp(Configure));
+		for (const FIntVector& Coord : Coords)
+		{
+			Harness.Submit(Coord);
+		}
+		Harness.Settle(Near);
+		FResult Result;
+		UVoxelScatterRenderer* R = Harness.Renderer();
+		Result.DenseChunks = R->GetDenseRegionChunks();
+		Result.HISMs = R->GetHISMCount();
+		for (int32 i = 0; i < 3; ++i)
+		{
+			TArray<TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>> HISMs;
+			R->GetTypeHISMs(TypeIDs[i], HISMs);
+			Result.PerType[i] = HISMs.Num();
+		}
+		Result.Dense = R->GetDenseTypes();
+		Result.Drawn = Harness.DrawnTransforms();
+		return Result;
+	};
+	auto Describe = [](const TCHAR* Label, const FResult& R)
+	{
+		return FString::Printf(TEXT("%s: dense regions %d chunks, %d HISMs (grass %d, rocks %d, trees %d), %d instances, dense types %s"), Label,
+			R.DenseChunks, R.HISMs, R.PerType[0], R.PerType[1], R.PerType[2], R.Drawn.Num(),
+			*FString::JoinBy(R.Dense, TEXT(","), [](int32 ID) { return FString::FromInt(ID); }));
+	};
+
+	// The default: nothing set
+	const FResult Default = Run(nullptr, nullptr);
+	AddInfo(Describe(TEXT("default"), Default));
+	if (bDefaults)
+	{
+		TestEqual(TEXT("Default: the dense types' regions of 2 chunks"), Default.DenseChunks, 2);
+		TestTrue(TEXT("Default: the grass alone is dense"), Default.Dense.Num() == 1 && Default.Dense[0] == 0);
+		TestEqual(TEXT("Default: a grass HISM per region of 2 chunks"), Default.PerType[0], 4);
+		TestEqual(TEXT("Default: one rock HISM (the shared region)"), Default.PerType[1], 1);
+		TestEqual(TEXT("Default: one tree HISM (the shared region)"), Default.PerType[2], 1);
+	}
+	else
+	{
+		AddWarning(TEXT("The dense variables were left overridden at another value than their default earlier in this session: the default run not checked"));
+	}
+
+	// The world configuration at 0, the variable not set (only while nothing in this session set it; before the override run, which sets it)
+	if (bConfigRead)
+	{
+		const FResult ConfigOff = Run(nullptr, [](UVoxelWorldConfiguration& C) { C.ScatterDenseRegionChunks = 0; });
+		AddInfo(Describe(TEXT("configuration 0"), ConfigOff));
+		TestEqual(TEXT("Configuration 0: no dense regions"), ConfigOff.DenseChunks, 0);
+		TestEqual(TEXT("Configuration 0: a HISM per type"), ConfigOff.HISMs, 3);
+		TestEqual(TEXT("Configuration 0: the same instances as by default"), CountUnmatched(ConfigOff.Drawn, Default.Drawn, 0.01), 0);
+		TestEqual(TEXT("and every instance drawn by default by the configuration's 0"), CountUnmatched(Default.Drawn, ConfigOff.Drawn, 0.01), 0);
+	}
+	else
+	{
+		AddInfo(TEXT("voxel.Scatter.DenseRegionChunks was set earlier in this session: the configuration's 0 not checked (the variable overrides it)"));
+	}
+
+	// The override at 0: the shared regions, as before D198
+	const FResult Off = Run(TEXT("0"), nullptr);
+	AddInfo(Describe(TEXT("override 0"), Off));
+	TestEqual(TEXT("Override 0: no dense regions"), Off.DenseChunks, 0);
+	TestEqual(TEXT("Override 0: no type dense"), Off.Dense.Num(), 0);
+	TestEqual(TEXT("Override 0: a HISM per type"), Off.HISMs, 3);
+
+	TestTrue(TEXT("Scenario: instances are drawn"), Default.Drawn.Num() > 0);
+	TestEqual(TEXT("As many instances drawn by default as in the shared regions"), Default.Drawn.Num(), Off.Drawn.Num());
+	TestEqual(TEXT("Every instance of the shared regions drawn by default, to 0.01 uu"), CountUnmatched(Off.Drawn, Default.Drawn, 0.01), 0);
+	TestEqual(TEXT("and every instance drawn by default by the shared regions"), CountUnmatched(Default.Drawn, Off.Drawn, 0.01), 0);
 	return true;
 }
 

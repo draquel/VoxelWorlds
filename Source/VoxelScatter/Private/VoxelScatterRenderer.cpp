@@ -64,22 +64,6 @@ static TAutoConsoleVariable<int32> CVarVoxelScatterHISMWritePath(
 	TEXT("the budget checked after each write."),
 	ECVF_Default);
 
-static TAutoConsoleVariable<int32> CVarVoxelScatterDenseRegionChunks(
-	TEXT("voxel.Scatter.DenseRegionChunks"),
-	0,
-	TEXT("Scatter HISMs of the dense types (G292, D198): N > 0 = a static type whose density over a chunk's surface points is\n")
-	TEXT("at least voxel.Scatter.DenseMinPerChunk keeps its HISMs in regions of N chunks, so each holds fewer instances and each\n")
-	TEXT("write copies fewer (more components). 0 = every type in the regions of voxel.Scatter.RegionChunks. Read when the scatter\n")
-	TEXT("renderer initializes."),
-	ECVF_Default);
-
-static TAutoConsoleVariable<float> CVarVoxelScatterDenseMinPerChunk(
-	TEXT("voxel.Scatter.DenseMinPerChunk"),
-	256.0f,
-	TEXT("Scatter HISMs (G292): a type is dense (voxel.Scatter.DenseRegionChunks) when its Density times a chunk's surface\n")
-	TEXT("points ((chunk size / surface point spacing)^2) is at least this."),
-	ECVF_Default);
-
 static TAutoConsoleVariable<float> CVarVoxelScatterLogSlowApplyMs(
 	TEXT("voxel.Scatter.LogSlowApplyMs"),
 	0.0f,
@@ -185,9 +169,9 @@ void UVoxelScatterRenderer::Initialize(UVoxelScatterManager* Manager, UWorld* Wo
 		return;
 	}
 
-	// The dense types' regions (G292, D198), on the same grid as the others
+	// The dense types' regions (G292, D198: SetDenseTypeRegions, regions of 2 chunks by default), on the same grid as the others
 	DenseRegions = Regions;
-	DenseRegions.RegionChunks = FMath::Max(0, CVarVoxelScatterDenseRegionChunks.GetValueOnGameThread());
+	DenseRegions.RegionChunks = FMath::Max(0, DenseRegionChunksSetting);
 	DenseTypeDecisions.Reset();
 
 	bIsInitialized = true;
@@ -733,7 +717,7 @@ const FVoxelRenderRegions& UVoxelScatterRenderer::GetTypeRegions(int32 ScatterTy
 	const FScatterDefinition* Definition = ScatterManager ? ScatterManager->GetScatterDefinition(ScatterTypeID) : nullptr;
 	const double Spacing = ScatterManager ? FMath::Max(1.0, static_cast<double>(ScatterManager->GetSurfacePointSpacing())) : 100.0;
 	const double PerChunk = Definition ? Definition->Density * FMath::Square(Regions.ChunkWorldSize / Spacing) : 0.0;
-	const bool bDense = Definition && !Definition->IsSkeletal() && PerChunk >= CVarVoxelScatterDenseMinPerChunk.GetValueOnGameThread();
+	const bool bDense = Definition && !Definition->IsSkeletal() && PerChunk >= DenseMinPerChunk;
 	DenseTypeDecisions.Add(ScatterTypeID, bDense);
 	if (Definition)
 	{
