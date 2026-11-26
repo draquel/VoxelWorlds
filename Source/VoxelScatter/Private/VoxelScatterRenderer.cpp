@@ -58,10 +58,10 @@ static TAutoConsoleVariable<int32> CVarVoxelScatterHISMWritePath(
 	TEXT("voxel.Scatter.HISMWritePath"),
 	1,
 	TEXT("Scatter HISM writes (G292). 1 = a batch starts one tree build, after all its changes (the HISM's own call starts one\n")
-	TEXT("at the first placement and each later change throws it away); a compaction moves the live instances into the free\n")
-	TEXT("indices and removes the rest from the end (one tree build of the live ones, about a batch); the write budget leaves a\n")
-	TEXT("batch whose estimated cost would overrun it for a later tick, where it is first. 0 = the path before G292: each change\n")
-	TEXT("through the HISM's own call, a compaction clears and adds every live instance, the budget checked after each write."),
+	TEXT("at the first placement and each later change throws it away, which copies every instance again when it lands); the\n")
+	TEXT("write budget leaves a batch whose estimated cost would overrun it for a later tick, where it is written first, so a\n")
+	TEXT("tick is the budget or one HISM's write, not both. 0 = the path before G292: each change through the HISM's own call,\n")
+	TEXT("the budget checked after each write."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarVoxelScatterDenseRegionChunks(
@@ -960,118 +960,6 @@ bool UVoxelScatterRenderer::WriteHISMBatch(UHierarchicalInstancedStaticMeshCompo
 	return false;
 }
 
-bool UVoxelScatterRenderer::CompactHISMInPlace(const FVoxelScatterHISMKey& Key, UHierarchicalInstancedStaticMeshComponent* HISM, FHISMInstancePool& Pool)
-{
-	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_CompactHISMInPlace);
-	const int32 Applied = HISM->GetInstanceCount();
-	const FPendingHISMWrites* Writes = PendingHISMWrites.Find(Key);
-
-	// The live instances: every chunk's indices. Those at or past the live count move into the free indices below it.
-	int32 Live = 0;
-	for (const TPair<FIntVector, TArray<int32>>& ChunkPair : Pool.ChunkInstanceIndices)
-	{
-		Live += ChunkPair.Value.Num();
-	}
-	++TotalHISMCompactions;
-	if (Live == 0)
-	{
-		HISM->ClearInstances();
-		Pool.FreeIndices.Reset();
-		Pool.TotalAllocated = 0;
-		return false;
-	}
-	TArray<int32> Holes;
-	for (const int32 Free : Pool.FreeIndices)
-	{
-		if (Free < Live)
-		{
-			Holes.Add(Free);
-		}
-	}
-	Holes.Sort();
-
-	// Each index below the live count as it will be: a hole takes a mover's transform, a live one keeps its own with its
-	// held write applied. Transforms read before anything is written.
-	TMap<int32, FTransform> Final;
-	Final.Reserve(Holes.Num() + (Writes ? Writes->Updates.Num() + Writes->Grows.Num() : 0));
-	int32 NextHole = 0;
-	for (TPair<FIntVector, TArray<int32>>& ChunkPair : Pool.ChunkInstanceIndices)
-	{
-		for (int32& Index : ChunkPair.Value)
-		{
-			FTransform Local(FQuat::Identity, FVector::ZeroVector, FVector::ZeroVector);
-			if (Index >= Live)
-			{
-				// An index the HISM cannot give back (none expected) stays hidden rather than drawn at the origin
-				GetEffectiveInstanceTransform(Key, HISM, Index, Local);
-				if (!ensure(Holes.IsValidIndex(NextHole)))
-				{
-					continue;
-				}
-				Index = Holes[NextHole++];
-				Final.Add(Index, Local);
-			}
-			else if (Index >= Applied || (Writes && Writes->Updates.Contains(Index)))
-			{
-				GetEffectiveInstanceTransform(Key, HISM, Index, Local);
-				Final.Add(Index, Local);
-			}
-		}
-	}
-
-	// The writes: below the instances the HISM holds, each changed index; past them, the new ones added; then the instances
-	// past the live count removed from the end (in descending order, so no instance moves). The last of these starts the
-	// one tree build.
-	bool bUnbuilt = false;
-	for (const TPair<int32, FTransform>& Pair : Final)
-	{
-		if (Pair.Key < Applied)
-		{
-			if (IsInPlaceChange(HISM, Pair.Key, Pair.Value))
-			{
-				HISM->UpdateInstanceTransform(Pair.Key, Pair.Value, /*bWorldSpace=*/false, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
-			}
-			else
-			{
-				WriteInstanceUnbuilt(HISM, Pair.Key, Pair.Value);
-				bUnbuilt = true;
-			}
-		}
-	}
-	bool bBuilt = false;
-	if (Live > Applied)
-	{
-		TArray<FTransform> Added;
-		Added.Reserve(Live - Applied);
-		for (int32 Index = Applied; Index < Live; ++Index)
-		{
-			const FTransform* Local = Final.Find(Index);
-			Added.Add(Local ? *Local : FTransform(FQuat::Identity, FVector::ZeroVector, FVector::ZeroVector));
-		}
-		HISM->AddInstances(Added, /*bShouldReturnIndices=*/false, /*bWorldSpace=*/false);
-		bBuilt = true;
-	}
-	else if (Live < Applied)
-	{
-		TArray<int32> Tail;
-		Tail.Reserve(Applied - Live);
-		for (int32 Index = Applied - 1; Index >= Live; --Index)
-		{
-			Tail.Add(Index);
-		}
-		HISM->RemoveInstances(Tail, /*bInstanceArrayAlreadySortedInReverseOrder=*/true);
-		bBuilt = true;
-	}
-	else if (bUnbuilt)
-	{
-		HISM->BuildTreeIfOutdated(/*Async=*/true, /*ForceUpdate=*/false);
-		bBuilt = true;
-	}
-	Pool.FreeIndices.Reset();
-	Pool.TotalAllocated = Live;
-	return bBuilt;
-}
-
 void UVoxelScatterRenderer::FlushHISMWrites()
 {
 	ApplyPendingHISMWrites(/*bAll=*/true);
@@ -1226,9 +1114,9 @@ void UVoxelScatterRenderer::ApplyPendingHISMWrites(bool bAll)
 				LogLongestType = Entry.Key.ScatterTypeID;
 				bLogLongestCompaction = bCompact;
 			}
-			// The estimate the budget uses: writes that started a build on a HISM large enough that its instances, not the
-			// call's fixed cost, make the time (G292)
-			if (bStartedBuild && Instances >= 1000)
+			// The estimate the budget uses: batches that started a build on a HISM large enough that its instances, not the
+			// call's fixed cost, make the time (G292; a compaction adds every instance, and is a tick's first write anyway)
+			if (bStartedBuild && !bCompact && Instances >= 1000)
 			{
 				EstimatedWriteNsPerInstance = FMath::Lerp(EstimatedWriteNsPerInstance, HISMMs * 1e6 / Instances, 0.25);
 			}
@@ -1236,15 +1124,11 @@ void UVoxelScatterRenderer::ApplyPendingHISMWrites(bool bAll)
 		if (bCompact)
 		{
 			++LogCompacted;
-			if (bG292)
-			{
-				bStartedBuild = CompactHISMInPlace(Entry.Key, HISM, *Pool);
-				TotalHISMTreeBuilds += bStartedBuild ? 1 : 0;
-			}
-			else
-			{
-				CompactHISM(Entry.Key, HISM, *Pool);
-			}
+			// Cleared and refilled with the live ones: one tree build on either path (G292 measured a rewrite in place, the live
+			// instances moved into the free indices and the rest removed from the end, at twice to three times this: each
+			// removal costs more than an add)
+			CompactHISM(Entry.Key, HISM, *Pool);
+			TotalHISMTreeBuilds += (bG292 && HISM->GetInstanceCount() > 0) ? 1 : 0;
 			LastHISMWriteSeconds.Add(Entry.Key, Now);
 			++TotalHISMWriteBatches;
 			PendingHISMWrites.Remove(Entry.Key);

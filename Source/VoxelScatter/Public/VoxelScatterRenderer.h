@@ -244,9 +244,9 @@ public:
 	int64 GetTotalHISMBatchesLeft() const { return TotalHISMBatchesLeft; }
 
 	/**
-	 * Tree builds the HISM writes started since Initialize (G292): with voxel.Scatter.HISMWritePath 1 one for each batch or
-	 * compaction that placed, added or removed instances; with 0 the HISM's own count is not known (each of a batch's
-	 * placements may start one, the later ones throwing it away), so 0 is kept.
+	 * Tree builds the HISM writes started since Initialize (G292): with voxel.Scatter.HISMWritePath 1 one for each batch that
+	 * placed or added instances and each compaction that left any; with 0 none is counted (each of a batch's placements may
+	 * start one, the later ones throwing it away).
 	 *
 	 * @return The tree builds started
 	 */
@@ -268,7 +268,7 @@ public:
 	 */
 	void SetEstimatedWriteNsPerInstance(double Ns) { EstimatedWriteNsPerInstance = Ns; }
 
-	/** @return Whether a HISM's writes go the G292 way (voxel.Scatter.HISMWritePath 1): one tree build a batch, compactions in place, writes budgeted by their estimated cost */
+	/** @return Whether a HISM's writes go the G292 way (voxel.Scatter.HISMWritePath 1): one tree build a batch, writes budgeted by their estimated cost */
 	static bool IsUsingG292WritePath();
 
 	// ==================== HISM Management ====================
@@ -810,20 +810,6 @@ protected:
 	 * @return Whether a tree build was started
 	 */
 	bool WriteHISMBatch(UHierarchicalInstancedStaticMeshComponent* HISM, const FPendingHISMWrites& Writes);
-
-	/**
-	 * Rewrite a HISM with its live instances only, in place (G292): the live instances beyond the live count moved into the
-	 * free indices below it, the held writes landed, the instances past the live count removed from the end, and one tree
-	 * build of the live ones. A compaction then costs about a batch of the compacted HISM, where clearing and adding every
-	 * live instance (CompactHISM) cost about twice a batch of the full one. Collision bodies stay: the moved instances' bodies
-	 * are moved, the removed (pooled, zero-scaled) ones' destroyed.
-	 *
-	 * @param Key The HISM's key
-	 * @param HISM The HISM
-	 * @param Pool Its pool (the moved instances' indices renumbered, its free list emptied)
-	 * @return Whether a tree build was started
-	 */
-	bool CompactHISMInPlace(const FVoxelScatterHISMKey& Key, UHierarchicalInstancedStaticMeshComponent* HISM, FHISMInstancePool& Pool);
 
 	/**
 	 * Write an instance's new transform as the HISM's UpdateInstanceTransform does for a change that is not in place (the

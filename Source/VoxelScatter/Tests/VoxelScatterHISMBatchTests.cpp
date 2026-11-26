@@ -680,14 +680,14 @@ bool FVoxelScatterHISMBatchWriteBudgetTest::RunTest(const FString& Parameters)
 // ---------------------------------------------------------------------------
 // G292: one HISM's write. A UE 5.8 HISM's own UpdateInstanceTransform starts a tree build at the batch's first placement
 // (its set-up copies every instance on the game thread) and each later change of the batch throws that build away, which
-// starts another when it lands; a compaction cleared and added every live instance. With voxel.Scatter.HISMWritePath 1:
+// starts another when it lands. With voxel.Scatter.HISMWritePath 1:
 // - OneTreeBuild: a batch of placements and new instances starts one tree build, not thrown away (the HISM building and
 //   no change made during the build); with 0 a batch of several placements throws its first build away. Releases (zero
 //   scale where each instance stands) start none on either path.
-// - CompactInPlace: three of four chunks unloaded (the kept chunk's trees at the HISM's highest indices), one cleared and
-//   another reloaded while the writes wait, then the compacting batch: the tree HISM holds exactly its live instances,
-//   none zero-scaled, the same transforms the path before G292 draws, each chunk's count its spawn points, one tree build
-//   started and not thrown away; with the trees' collision on, a body per live instance at its transform.
+// - Compaction: three of four chunks unloaded, one cleared and another reloaded while the writes wait, then the compacting
+//   batch: the tree HISM holds exactly its live instances, none zero-scaled, the same transforms the path before G292
+//   draws, each chunk's count its spawn points, no tree build thrown away; with the trees' collision on, a body per live
+//   instance at its transform.
 // - EstimateBudget: with the write estimate set far over the budget, a tick writes its first batch and leaves every other
 //   batch that would start a build (they are written first in later ticks), while batches of releases alone are written
 //   in the same tick; the instances drawn at the end are the ones written at once.
@@ -808,11 +808,11 @@ bool FVoxelScatterHISMBatchOneTreeBuildTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterHISMBatchCompactInPlaceTest,
-	"VoxelWorlds.Scatter.HISMBatch.CompactInPlace",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterHISMBatchCompactionTest,
+	"VoxelWorlds.Scatter.HISMBatch.Compaction",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FVoxelScatterHISMBatchCompactInPlaceTest::RunTest(const FString& Parameters)
+bool FVoxelScatterHISMBatchCompactionTest::RunTest(const FString& Parameters)
 {
 	using namespace VoxelScatterHISMBatchTestUtils;
 
@@ -1028,6 +1028,83 @@ bool FVoxelScatterHISMBatchEstimateBudgetTest::RunTest(const FString& Parameters
 	{
 		TestTrue(TEXT("Near: the instances written at once"), DrawnNear == Immediate[0]);
 		TestTrue(TEXT("Far: the instances written at once"), DrawnFar == Immediate[1]);
+	}
+	return true;
+}
+
+// DenseRegions (G292, D198): with voxel.Scatter.DenseRegionChunks 1 and the threshold between the test grass (0.5 of a
+// chunk's 256 surface points, 128) and the trees (77), the grass keeps a HISM per chunk and the other types their shared
+// region's; the instances drawn are the same transforms as without, to 0.01 uu, and through the SameInstances scenario
+// the same keys as every write made at once.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelScatterHISMBatchDenseRegionsTest,
+	"VoxelWorlds.Scatter.HISMBatch.DenseRegions",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelScatterHISMBatchDenseRegionsTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelScatterHISMBatchTestUtils;
+
+	const TArray<FIntVector> Coords = { FIntVector(0, 0, 0), FIntVector(1, 0, 0), FIntVector(0, 1, 0), FIntVector(1, 1, 0) };
+	const FVector Near = ChunkCenter(FIntVector(1, 1, 0));
+	auto Run = [&](const TCHAR* DenseChunks, int32& OutHISMs, int32& OutGrassHISMs, TArray<int32>& OutDense) -> TArray<TPair<int32, FTransform>>
+	{
+		FScopedCVars CVars;
+		CVars.Set(TEXT("voxel.Scatter.DenseRegionChunks"), DenseChunks);
+		CVars.Set(TEXT("voxel.Scatter.DenseMinPerChunk"), TEXT("100"));
+		FHarness Harness(TEXT("VoxelScatterHISMBatchTestWorld"));
+		for (const FIntVector& Coord : Coords)
+		{
+			Harness.Submit(Coord);
+		}
+		Harness.Settle(Near);
+		OutHISMs = Harness.Renderer()->GetHISMCount();
+		TArray<TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>> Grass;
+		Harness.Renderer()->GetTypeHISMs(0, Grass);
+		OutGrassHISMs = Grass.Num();
+		OutDense = Harness.Renderer()->GetDenseTypes();
+		return Harness.DrawnTransforms();
+	};
+	int32 SharedHISMs = 0, SharedGrass = 0, DenseHISMs = 0, DenseGrass = 0;
+	TArray<int32> SharedDense, Dense;
+	const TArray<TPair<int32, FTransform>> Shared = Run(TEXT("0"), SharedHISMs, SharedGrass, SharedDense);
+	const TArray<TPair<int32, FTransform>> Split = Run(TEXT("1"), DenseHISMs, DenseGrass, Dense);
+	AddInfo(FString::Printf(TEXT("shared regions: %d HISMs (%d grass), %d instances; the grass dense in regions of one chunk: %d HISMs (%d grass), %d instances, dense types %s"),
+		SharedHISMs, SharedGrass, Shared.Num(), DenseHISMs, DenseGrass, Split.Num(),
+		*FString::JoinBy(Dense, TEXT(","), [](int32 ID) { return FString::FromInt(ID); })));
+	TestEqual(TEXT("Off: no type dense"), SharedDense.Num(), 0);
+	TestTrue(TEXT("On: the grass alone is dense"), Dense.Num() == 1 && Dense[0] == 0);
+	TestEqual(TEXT("Off: a HISM per type"), SharedHISMs, 3);
+	TestEqual(TEXT("On: a grass HISM per chunk"), DenseGrass, 4);
+	TestEqual(TEXT("On: the others keep theirs"), DenseHISMs, 6);
+	TestTrue(TEXT("Scenario: instances are drawn"), Shared.Num() > 0);
+	TestEqual(TEXT("As many instances drawn"), Split.Num(), Shared.Num());
+	TestEqual(TEXT("Every instance of the shared regions drawn with the dense ones, to 0.01 uu"), CountUnmatched(Shared, Split, 0.01), 0);
+	TestEqual(TEXT("and every instance of the dense regions by the shared ones"), CountUnmatched(Split, Shared, 0.01), 0);
+
+	// The whole scenario (far, an unload, a reload, a cleared radius, writes held), dense, against every write made at once
+	TArray<FString> Notes;
+	TArray<TArray<FString>> Immediate;
+	{
+		FScopedCVars CVars;
+		CVars.Set(TEXT("voxel.Scatter.HISMBatchSeconds"), TEXT("0"));
+		Immediate = RunScenario(*this, TEXT("written at once"), Notes);
+	}
+	TArray<TArray<FString>> DenseRun;
+	{
+		FScopedCVars CVars;
+		CVars.Set(TEXT("voxel.Scatter.DenseRegionChunks"), TEXT("1"));
+		CVars.Set(TEXT("voxel.Scatter.DenseMinPerChunk"), TEXT("100"));
+		CVars.Set(TEXT("voxel.Scatter.HISMCompactMinPooled"), TEXT("1"));
+		DenseRun = RunScenario(*this, TEXT("dense, compacted"), Notes);
+	}
+	for (const FString& Note : Notes)
+	{
+		AddInfo(Note);
+	}
+	TestEqual(TEXT("Dense: stops as often as the run written at once"), DenseRun.Num(), Immediate.Num());
+	for (int32 i = 0; i < FMath::Min(DenseRun.Num(), Immediate.Num()); ++i)
+	{
+		TestTrue(FString::Printf(TEXT("Dense, stop %d: draws the instances written at once"), i), DenseRun[i] == Immediate[i]);
 	}
 	return true;
 }
