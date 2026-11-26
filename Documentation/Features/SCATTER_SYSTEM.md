@@ -543,14 +543,37 @@ scene (frames up to 51 ms). Writes are now batched per HISM:
   batch as it is and is compacted at a later batch. Nothing new is queued: the held writes already are the queue every
   release path writes into (an unload's or an edit's zero scale lands in the same held entry), so a chunk unloaded, edited
   or cleared while its writes wait is drawn as it would be had they been written. 0 = every due batch in the tick it is
-  due, compactions as they come (before G281).
+  due, compactions as they come (before G281). Since G292 the budget also counts what a batch will cost before writing
+  it: a batch that starts a tree build is estimated at its HISM's instances times what the writes so far took an instance
+  (`GetEstimatedWriteNsPerInstance`, a moving average over the batches on HISMs of 1,000 instances or more, 200 ns to
+  start), and one whose estimate would overrun the budget waits for a later tick, where it is first; a batch of releases
+  alone (zero scales in place, no build) is estimated at nothing. A tick is then the budget or one HISM's write, not the
+  budget and one more write.
+- **One tree build a batch (G292).** The HISM's own `UpdateInstanceTransform` starts its tree build at the batch's first
+  placement, and every later change of the batch throws that build away (`bConcurrentChanges`), which copies every instance
+  again when it lands, in a later frame. `WriteHISMBatch` writes the in-place changes (a release's zero scale) through the
+  HISM's own call, which builds nothing, the placements through the instanced mesh's call with the HISM's bookkeeping
+  (`WriteInstanceUnbuilt`: the tree out of date, the instance's bounds among the unbuilt ones) and the new instances last,
+  whose `AddInstances` starts the batch's one build. `voxel.Scatter.HISMWritePath 0` is the path before G292 (each change
+  through the HISM's own call, the budget checked after each write); `voxel.Scatter.Stats` counts the builds started.
+- **The dense types' regions (G292, D198).** `voxel.Scatter.DenseRegionChunks` N > 0 keeps the HISMs of the dense types in
+  regions of N chunks, the others in the regions above: a static type is dense when its `Density` times a chunk's surface
+  points ((chunk size / surface point spacing)^2) is at least `voxel.Scatter.DenseMinPerChunk` (256), decided the first
+  time the renderer asks for the type and kept for the session (`GetTypeRegions`; a skeletal type keeps the render
+  regions). A dense HISM holds a quarter (N = 2) or a sixteenth (N = 1) of the instances on a heightmap world, so each of
+  its writes copies that many. 0 (the default) = every type in the same regions, as before; the trade is D198.
 - Queries see held writes: `FindNearestInstance` (harvest) reads each instance through them and also scans held
   placements and new instances; `GetTotalInstanceCount` counts held new instances. `FlushHISMWrites` applies every held
   write now, whatever the budget.
 
 The instances drawn are the same as with every write made at once (`voxel.Scatter.HISMBatchSeconds 0`, the behaviour
-before G42, for A/B runs): `VoxelWorlds.Scatter.HISMBatch.{SameInstances,InPlaceRelease,Regions,WriteBudget}`
-(`WriteBudget`: with regions of one chunk and a budget of one batch a tick, the scenario pumped by ticks alone, a chunk
+before G42, for A/B runs): `VoxelWorlds.Scatter.HISMBatch.{SameInstances,InPlaceRelease,Regions,WriteBudget}` and, since
+G292, `.OneTreeBuild` (a batch of placements and new instances starts one build and throws none away; the path before
+G292 throws its first away; the same instances on both), `.Compaction` (chunks unloaded, cleared and reloaded while the
+writes wait, then the compacting batch: the HISM holds its live instances alone, the same as the path before G292, a
+collision body at each), `.EstimateBudget` (with the estimate far over the budget a tick writes one batch that builds and
+every batch of releases) and `.DenseRegions` (the test grass dense in regions of one chunk, the other types in their
+shared region: the same transforms, and the scenario's stops the instances written at once). (`WriteBudget`: with regions of one chunk and a budget of one batch a tick, the scenario pumped by ticks alone, a chunk
 unloaded and a radius cleared while their writes wait included, draws at every stop the instances written at once, as
 the budget 0 does; of four HISMs due in one tick the nearest the viewer is written and the others draw their trees until
 later ticks). The bench logs `ScatBatchN` and `ScatCompactN` per sample, and the scatter section's steps
@@ -566,6 +589,29 @@ HISMs compacted together; without one the longest was 4.1 ms (two HISMs of 13,00
 and 0 by turns in one editor (two five-minute walks a side): the longest tick 6.31 and 4.68 ms against 3.39 and 3.37, ticks
 of 4 ms or more 3 against 0; 39 and 19 batches left for a later tick of 3,581 and 5,276, about one every ten seconds;
 compactions 78 and 63 against 28 and 40.
+
+**One HISM's write (G292, 2026-11-26).** Measured with `Scripts/qa/scatter_writes.py` on `VoxelDemo` (a fresh world each
+run, the weather locked, a five-minute walk along (1, 0.1), the pawn moved 50 m on when it stalls; `[ScatterApplySlow]`
+from 0.5 ms and the engine's own lines for each tree build's copy and each build thrown away). On `dev` the longest tick
+of writes was 3.5 ms, two grass HISMs of about 16,000 instances written in one tick, the longest single write 2.1 ms
+(Grass02, 17,406 instances), compactions 1.8 ms at most (8,143 live); G281's 4.8 ms compaction did not come back. A
+traced walk (`play_trace.py --scopes`): the engine's tree build set-up (`BuildTreeAsync`) is 36 % of the writes' time,
+56 % in the writes of 1 ms or more, the rest the instances' own add; a compaction is mostly its clear and add (set-up 1.9
+of 9.9 ms); the builds a batch's later changes threw away were 66 of 1,483 (3 ms in the walk). Alternated in one editor,
+two walks a side: the path before G292 (`voxel.Scatter.HISMWritePath 0`) had the longest tick 5.21 and 3.04 ms, ticks of
+3 ms or more 5 and 1, 89 and 96 builds thrown away; G292's path 2.61 and 2.63 ms, none of 3 ms, none thrown away, its
+longest write 2.29 and 2.38 ms (a grass batch of 14,500 to 15,900 instances), the tree builds within the runs' spread
+(2,171 to 2,381 against 2,246 to 2,297). A rewrite in place (the live instances moved into
+the free indices, the rest removed from the end) was built and measured: 4.7 ms for 8,143 live against 1.6 ms for the
+clear and add, each removal dearer than an add in the editor, so a compaction stays a clear and add. With the dense
+types' regions of 2 chunks (Grass01, Grass02, Plant01 and Bush01 on `VoxelDemo`) the longest tick was 2.00 and 2.05 ms,
+the longest write 1.89 and 1.14 ms (HISMs of 5,400 instances at most), the instances the builds copied halved (0.92
+million against 1.8 to 2.0); with regions of 1 chunk 2.03 and 2.03 ms, the longest write 0.92 and 1.13 ms (1,700
+instances at most), a third copied. What they cost (`Scripts/qa/scatter_view.py`, the spawn's view at four headings,
+three runs a side, alternated): 94, 110 and 142 HISMs there, draw calls 2,212 to 2,219, 2,229 to 2,232 and 2,234 (+0.6
+and +0.8 %), the GPU 5.82 to 5.86, 5.77 to 5.89 and 5.84 to 5.88 ms (within the spread), the frame held at 16.7 ms; after
+a five-minute walk 422 to 445, 568 to 571 and 982 to 1,011 HISMs, 165,000 to 183,000, 221,000 and 261,000 to 277,000
+instances pooled (G303). The dense regions stay off (D198).
 
 ### Dynamic materials (the foliage and bolt plan's D67)
 

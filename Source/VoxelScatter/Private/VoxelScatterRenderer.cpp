@@ -54,6 +54,32 @@ static TAutoConsoleVariable<float> CVarVoxelScatterHISMWriteBudgetMs(
 	TEXT("as they come (before G281). The project's value is UVoxelWorldsSettings::ScatterHISMWriteBudgetMs; the cvar overrides it once set."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarVoxelScatterHISMWritePath(
+	TEXT("voxel.Scatter.HISMWritePath"),
+	1,
+	TEXT("Scatter HISM writes (G292). 1 = a batch starts one tree build, after all its changes (the HISM's own call starts one\n")
+	TEXT("at the first placement and each later change throws it away, which copies every instance again when it lands); the\n")
+	TEXT("write budget leaves a batch whose estimated cost would overrun it for a later tick, where it is written first, so a\n")
+	TEXT("tick is the budget or one HISM's write, not both. 0 = the path before G292: each change through the HISM's own call,\n")
+	TEXT("the budget checked after each write."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVoxelScatterDenseRegionChunks(
+	TEXT("voxel.Scatter.DenseRegionChunks"),
+	0,
+	TEXT("Scatter HISMs of the dense types (G292, D198): N > 0 = a static type whose density over a chunk's surface points is\n")
+	TEXT("at least voxel.Scatter.DenseMinPerChunk keeps its HISMs in regions of N chunks, so each holds fewer instances and each\n")
+	TEXT("write copies fewer (more components). 0 = every type in the regions of voxel.Scatter.RegionChunks. Read when the scatter\n")
+	TEXT("renderer initializes."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarVoxelScatterDenseMinPerChunk(
+	TEXT("voxel.Scatter.DenseMinPerChunk"),
+	256.0f,
+	TEXT("Scatter HISMs (G292): a type is dense (voxel.Scatter.DenseRegionChunks) when its Density times a chunk's surface\n")
+	TEXT("points ((chunk size / surface point spacing)^2) is at least this."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<float> CVarVoxelScatterLogSlowApplyMs(
 	TEXT("voxel.Scatter.LogSlowApplyMs"),
 	0.0f,
@@ -159,8 +185,13 @@ void UVoxelScatterRenderer::Initialize(UVoxelScatterManager* Manager, UWorld* Wo
 		return;
 	}
 
+	// The dense types' regions (G292, D198), on the same grid as the others
+	DenseRegions = Regions;
+	DenseRegions.RegionChunks = FMath::Max(0, CVarVoxelScatterDenseRegionChunks.GetValueOnGameThread());
+	DenseTypeDecisions.Reset();
+
 	bIsInitialized = true;
-	UE_LOG(LogVoxelScatter, Log, TEXT("ScatterRenderer initialized"));
+	UE_LOG(LogVoxelScatter, Log, TEXT("ScatterRenderer initialized (dense types' HISM regions: %d chunks, 0 = none dense)"), DenseRegions.RegionChunks);
 }
 
 void UVoxelScatterRenderer::Tick(const FVector& ViewerPosition, float /*DeltaTime*/)
@@ -474,8 +505,8 @@ void UVoxelScatterRenderer::ReleaseChunkScatterType(const FIntVector& ChunkCoord
 		return Add.ChunkCoord == ChunkCoord && Add.ScatterTypeID == ScatterTypeID;
 	});
 
-	// The chunk's HISM: its type's in the chunk's render region (WM-BP7)
-	const FVoxelScatterHISMKey Key{ ScatterTypeID, Regions.GetRegion(ChunkCoord) };
+	// The chunk's HISM: its type's in the chunk's region (WM-BP7; a dense type's own, G292)
+	const FVoxelScatterHISMKey Key{ ScatterTypeID, GetTypeRegions(ScatterTypeID).GetRegion(ChunkCoord) };
 
 	// A skeletal definition's instances leave its skinned component by id at once: no pool, no held write (D68)
 	if (SkinnedInstances.Contains(Key))
@@ -688,6 +719,45 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::GetOrCreateHIS
 	return HISM;
 }
 
+const FVoxelRenderRegions& UVoxelScatterRenderer::GetTypeRegions(int32 ScatterTypeID) const
+{
+	if (DenseRegions.RegionChunks <= 0)
+	{
+		return Regions;
+	}
+	if (const bool* Decided = DenseTypeDecisions.Find(ScatterTypeID))
+	{
+		return *Decided ? DenseRegions : Regions;
+	}
+	// A static definition whose density over a chunk's surface points makes it dense; decided once (its keys depend on it)
+	const FScatterDefinition* Definition = ScatterManager ? ScatterManager->GetScatterDefinition(ScatterTypeID) : nullptr;
+	const double Spacing = ScatterManager ? FMath::Max(1.0, static_cast<double>(ScatterManager->GetSurfacePointSpacing())) : 100.0;
+	const double PerChunk = Definition ? Definition->Density * FMath::Square(Regions.ChunkWorldSize / Spacing) : 0.0;
+	const bool bDense = Definition && !Definition->IsSkeletal() && PerChunk >= CVarVoxelScatterDenseMinPerChunk.GetValueOnGameThread();
+	DenseTypeDecisions.Add(ScatterTypeID, bDense);
+	if (Definition)
+	{
+		UE_LOG(LogVoxelScatter, Log, TEXT("Scatter type %d (%s): %.0f instances a chunk at most (density %.3f); HISMs in regions of %d chunks%s"),
+			ScatterTypeID, *Definition->Name, PerChunk, Definition->Density, bDense ? DenseRegions.RegionChunks : Regions.RegionChunks,
+			bDense ? TEXT(" (dense, G292)") : TEXT(""));
+	}
+	return bDense ? DenseRegions : Regions;
+}
+
+TArray<int32> UVoxelScatterRenderer::GetDenseTypes() const
+{
+	TArray<int32> Out;
+	for (const TPair<int32, bool>& Pair : DenseTypeDecisions)
+	{
+		if (Pair.Value)
+		{
+			Out.Add(Pair.Key);
+		}
+	}
+	Out.Sort();
+	return Out;
+}
+
 void UVoxelScatterRenderer::GetTypeHISMs(int32 ScatterTypeID, TArray<TPair<FIntVector, UHierarchicalInstancedStaticMeshComponent*>>& OutHISMs) const
 {
 	OutHISMs.Reset();
@@ -823,6 +893,73 @@ void UVoxelScatterRenderer::CompactHISM(const FVoxelScatterHISMKey& Key, UHierar
 	++TotalHISMCompactions;
 }
 
+bool UVoxelScatterRenderer::IsUsingG292WritePath()
+{
+	return CVarVoxelScatterHISMWritePath.GetValueOnGameThread() != 0;
+}
+
+bool UVoxelScatterRenderer::IsInPlaceChange(const UHierarchicalInstancedStaticMeshComponent* HISM, int32 Index, const FTransform& Local)
+{
+	// The HISM's own rule (UHierarchicalInstancedStaticMeshComponent::UpdateInstanceTransform): a built instance whose
+	// location stays, in a game world (an editor world rebuilds for every change)
+	const UWorld* World = HISM->GetWorld();
+	if (!World || !World->IsGameWorld() || !HISM->PerInstanceSMData.IsValidIndex(Index))
+	{
+		return false;
+	}
+	const int32 RenderIndex = HISM->GetRenderIndex(Index);
+	return RenderIndex != INDEX_NONE && RenderIndex < HISM->NumBuiltRenderInstances
+		&& Local.GetTranslation().Equals(HISM->PerInstanceSMData[Index].Transform.GetOrigin());
+}
+
+void UVoxelScatterRenderer::WriteInstanceUnbuilt(UHierarchicalInstancedStaticMeshComponent* HISM, int32 Index, const FTransform& Local)
+{
+	// What the HISM's UpdateInstanceTransform does for a change that is not in place, but the BuildTreeIfOutdated at its
+	// end: the caller starts one build after the batch, rather than one at the first change that every later change of
+	// the batch throws away (G292)
+	HISM->bIsOutOfDate = true;
+	HISM->bConcurrentChanges |= HISM->IsAsyncBuilding();
+	const bool bWritten = HISM->UInstancedStaticMeshComponent::UpdateInstanceTransform(Index, Local, /*bWorldSpace=*/false,
+		/*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
+	const UStaticMesh* Mesh = HISM->GetStaticMesh();
+	if (bWritten && Mesh && !Mesh->IsCompiling() && Mesh->HasValidRenderData())
+	{
+		const FBox Bounds = Mesh->GetBounds().GetBox().TransformBy(Local);
+		HISM->UnbuiltInstanceBounds += Bounds;
+		HISM->UnbuiltInstanceBoundsList.Add(Bounds);
+	}
+}
+
+bool UVoxelScatterRenderer::WriteHISMBatch(UHierarchicalInstancedStaticMeshComponent* HISM, const FPendingHISMWrites& Writes)
+{
+	bool bUnbuilt = false;
+	for (const TPair<int32, FTransform>& Update : Writes.Updates)
+	{
+		if (IsInPlaceChange(HISM, Update.Key, Update.Value))
+		{
+			// In place (a release's zero scale where the instance stands): the HISM updates its tree's bounds, builds nothing
+			HISM->UpdateInstanceTransform(Update.Key, Update.Value, /*bWorldSpace=*/false, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
+		}
+		else
+		{
+			WriteInstanceUnbuilt(HISM, Update.Key, Update.Value);
+			bUnbuilt = true;
+		}
+	}
+	if (Writes.Grows.Num() > 0)
+	{
+		// The new instances last: AddInstances starts the batch's one tree build
+		HISM->AddInstances(Writes.Grows, /*bShouldReturnIndices=*/false, /*bWorldSpace=*/false);
+		return true;
+	}
+	if (bUnbuilt)
+	{
+		HISM->BuildTreeIfOutdated(/*Async=*/true, /*ForceUpdate=*/false);
+		return true;
+	}
+	return false;
+}
+
 void UVoxelScatterRenderer::FlushHISMWrites()
 {
 	ApplyPendingHISMWrites(/*bAll=*/true);
@@ -842,14 +979,16 @@ void UVoxelScatterRenderer::ApplyPendingHISMWrites(bool bAll)
 	int64 LogInstances = 0;
 	double LogLongestMs = 0.0;
 	int32 LogLongestInstances = 0, LogLongestType = -1;
+	bool bLogLongestCompaction = false;
 	ON_SCOPE_EXIT
 	{
 		const float LogSlowMs = CVarVoxelScatterLogSlowApplyMs.GetValueOnGameThread();
 		const double Ms = FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - StartCycles);
 		if (LogSlowMs > 0.f && Ms >= LogSlowMs)
 		{
-			UE_LOG(LogVoxelScatter, Log, TEXT("[ScatterApplySlow] %.2f ms: %d of %d held HISMs written (%d compacted, %d due left for the next tick), %d updates, %d new, %lld instances in them; longest %.2f ms (type %d, %d instances)"),
-				Ms, LogWritten, LogHeld, LogCompacted, LogLeft, LogUpdates, LogGrows, LogInstances, LogLongestMs, LogLongestType, LogLongestInstances);
+			UE_LOG(LogVoxelScatter, Log, TEXT("[ScatterApplySlow] %.2f ms: %d of %d held HISMs written (%d compacted, %d due left for the next tick), %d updates, %d new, %lld instances in them; longest %.2f ms (type %d, %d instances)%s; path %d, estimate %.0f ns an instance"),
+				Ms, LogWritten, LogHeld, LogCompacted, LogLeft, LogUpdates, LogGrows, LogInstances, LogLongestMs, LogLongestType, LogLongestInstances,
+				bLogLongestCompaction ? TEXT(" a compaction") : TEXT(""), IsUsingG292WritePath() ? 1 : 0, EstimatedWriteNsPerInstance);
 		}
 	};
 	const double Interval = FMath::Max(0.0f, VoxelSettings::Resolve(CVarVoxelScatterHISMBatchSeconds, UVoxelWorldsSettings::Get().ScatterHISMBatchSeconds));
@@ -909,61 +1048,109 @@ void UVoxelScatterRenderer::ApplyPendingHISMWrites(bool bAll)
 	}
 
 	const int32 MinPooled = VoxelSettings::Resolve(CVarVoxelScatterHISMCompactMinPooled, UVoxelWorldsSettings::Get().ScatterHISMCompactMinPooled);
+	const bool bG292 = IsUsingG292WritePath();
+	// Whether a HISM is due a compaction: its pool at least MinPooled and outweighing its live instances
+	auto IsDueCompaction = [this, MinPooled](const FVoxelScatterHISMKey& Key, const UHierarchicalInstancedStaticMeshComponent* HISM, const FHISMInstancePool* Pool)
+	{
+		const int32 Pooled = Pool ? Pool->FreeIndices.Num() : 0;
+		return Pool && MinPooled > 0 && Pooled >= MinPooled && Pooled > GetEffectiveInstanceCount(Key, HISM) - Pooled;
+	};
 	for (int32 DueIndex = 0; DueIndex < Due.Num(); ++DueIndex)
 	{
 		const FDue& Entry = Due[DueIndex];
-		// The budget spent: the batches left wait, held, for the next tick. The first batch of a tick is always written.
-		if (bBudgeted && LogWritten > 0 && FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - StartCycles) >= BudgetMs)
-		{
-			LogLeft = Due.Num() - DueIndex;
-			TotalHISMBatchesLeft += LogLeft;
-			break;
-		}
 		FPendingHISMWrites* Writes = PendingHISMWrites.Find(Entry.Key);
 		if (!Writes)
 		{
 			continue;
 		}
 		UHierarchicalInstancedStaticMeshComponent* HISM = Entry.HISM;
+		FHISMInstancePool* Pool = InstancePools.Find(Entry.Key);
+		// A HISM whose pool outweighs its live instances is rewritten with the live ones, which lands its writes too. A
+		// budgeted tick makes one at most, as its first write (G281: two in one frame took 9.6 ms); the others take their
+		// batch as it is and are rewritten at a later batch.
+		const bool bCompact = (!bBudgeted || LogWritten == 0) && IsDueCompaction(Entry.Key, HISM, Pool);
+		if (bBudgeted && LogWritten > 0)
+		{
+			// The budget spent: the batches left wait, held, for the next tick. The first batch of a tick is always written.
+			const double SpentMs = FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - StartCycles);
+			if (SpentMs >= BudgetMs)
+			{
+				LogLeft += Due.Num() - DueIndex;
+				TotalHISMBatchesLeft += Due.Num() - DueIndex;
+				break;
+			}
+			// G292: a batch that starts a tree build costs about its HISM's instances (the build's set-up copies them all on
+			// the game thread); one whose estimate would overrun the budget waits for a later tick, where it is written first
+			// (the overdue first), so a tick is the budget or one HISM's write, not both
+			if (bG292)
+			{
+				bool bStartsBuild = Writes->Grows.Num() > 0;
+				for (auto It = Writes->Updates.CreateConstIterator(); It && !bStartsBuild; ++It)
+				{
+					bStartsBuild = !It->Value.GetScale3D().IsNearlyZero();
+				}
+				const double EstimateMs = bStartsBuild ? EstimatedWriteNsPerInstance * GetEffectiveInstanceCount(Entry.Key, HISM) * 1e-6 : 0.0;
+				if (SpentMs + EstimateMs > BudgetMs)
+				{
+					++LogLeft;
+					++TotalHISMBatchesLeft;
+					continue;
+				}
+			}
+		}
 		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_WriteHISM);
 		const uint64 HISMStartCycles = FPlatformTime::Cycles64();
+		bool bStartedBuild = false;
 		ON_SCOPE_EXIT
 		{
 			const double HISMMs = FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - HISMStartCycles);
+			const int32 Instances = HISM->GetInstanceCount();
 			++LogWritten;
-			LogInstances += HISM->GetInstanceCount();
+			LogInstances += Instances;
 			if (HISMMs > LogLongestMs)
 			{
 				LogLongestMs = HISMMs;
-				LogLongestInstances = HISM->GetInstanceCount();
+				LogLongestInstances = Instances;
 				LogLongestType = Entry.Key.ScatterTypeID;
+				bLogLongestCompaction = bCompact;
+			}
+			// The estimate the budget uses: batches that started a build on a HISM large enough that its instances, not the
+			// call's fixed cost, make the time (G292; a compaction adds every instance, and is a tick's first write anyway)
+			if (bStartedBuild && !bCompact && Instances >= 1000)
+			{
+				EstimatedWriteNsPerInstance = FMath::Lerp(EstimatedWriteNsPerInstance, HISMMs * 1e6 / Instances, 0.25);
 			}
 		};
-		// A HISM whose pool outweighs its live instances is rewritten with the live ones, which lands its writes too. A
-		// rewrite costs about twice a batch, so a budgeted tick makes one at most, as its first write (G281: two in one
-		// frame took 9.6 ms); the others take their batch as it is and are rewritten at a later batch.
-		if (FHISMInstancePool* Pool = InstancePools.Find(Entry.Key); Pool && MinPooled > 0 && (!bBudgeted || LogWritten == 0))
+		if (bCompact)
 		{
-			const int32 Pooled = Pool->FreeIndices.Num();
-			if (Pooled >= MinPooled && Pooled > GetEffectiveInstanceCount(Entry.Key, HISM) - Pooled)
-			{
-				++LogCompacted;
-				CompactHISM(Entry.Key, HISM, *Pool);
-				LastHISMWriteSeconds.Add(Entry.Key, Now);
-				++TotalHISMWriteBatches;
-				PendingHISMWrites.Remove(Entry.Key);
-				continue;
-			}
+			++LogCompacted;
+			// Cleared and refilled with the live ones: one tree build on either path (G292 measured a rewrite in place, the live
+			// instances moved into the free indices and the rest removed from the end, at twice to three times this: each
+			// removal costs more than an add)
+			CompactHISM(Entry.Key, HISM, *Pool);
+			TotalHISMTreeBuilds += (bG292 && HISM->GetInstanceCount() > 0) ? 1 : 0;
+			LastHISMWriteSeconds.Add(Entry.Key, Now);
+			++TotalHISMWriteBatches;
+			PendingHISMWrites.Remove(Entry.Key);
+			continue;
 		}
 		LogUpdates += Writes->Updates.Num();
 		LogGrows += Writes->Grows.Num();
-		for (const TPair<int32, FTransform>& Update : Writes->Updates)
+		if (bG292)
 		{
-			HISM->UpdateInstanceTransform(Update.Key, Update.Value, /*bWorldSpace=*/false, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
+			bStartedBuild = WriteHISMBatch(HISM, *Writes);
+			TotalHISMTreeBuilds += bStartedBuild ? 1 : 0;
 		}
-		if (Writes->Grows.Num() > 0)
+		else
 		{
-			HISM->AddInstances(Writes->Grows, /*bShouldReturnIndices=*/false, /*bWorldSpace=*/false);
+			for (const TPair<int32, FTransform>& Update : Writes->Updates)
+			{
+				HISM->UpdateInstanceTransform(Update.Key, Update.Value, /*bWorldSpace=*/false, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
+			}
+			if (Writes->Grows.Num() > 0)
+			{
+				HISM->AddInstances(Writes->Grows, /*bShouldReturnIndices=*/false, /*bWorldSpace=*/false);
+			}
 		}
 		// No MarkRenderStateDirty: the HISM sends the changed instances to its scene proxy itself (in-place zero scales at
 		// once; placements and new instances drawn unbuilt until its tree build lands, which recreates the proxy). Marking it
@@ -1008,7 +1195,8 @@ FString UVoxelScatterRenderer::GetHISMBreakdown(int32 TopN) const
 		Type.Pooled += Row.Pooled;
 		Type.Key.Region.Y = FMath::Max(Type.Key.Region.Y, Row.Instances); // largest HISM
 	}
-	FString Out = FString::Printf(TEXT("Scatter HISMs: %d in regions of %d chunks"), Rows.Num(), Regions.RegionChunks);
+	FString Out = FString::Printf(TEXT("Scatter HISMs: %d in regions of %d chunks (the dense types' %d: %s)"), Rows.Num(), Regions.RegionChunks,
+		DenseRegions.RegionChunks, *FString::JoinBy(GetDenseTypes(), TEXT(","), [](int32 ID) { return FString::FromInt(ID); }));
 	if (SkinnedComponents.Num() > 0)
 	{
 		// The skeletal definitions' skinned components (D68): per type its components and instances (no pool)
@@ -1247,7 +1435,7 @@ FString UVoxelScatterRenderer::GetDebugStats() const
 	const int32 ActiveInstances = TotalAllocated - TotalPooled;
 	const float Utilization = TotalAllocated > 0 ? (static_cast<float>(ActiveInstances) / TotalAllocated * 100.0f) : 0.0f;
 
-	return FString::Printf(TEXT("ScatterRenderer: %d HISM, %d instances (Active: %d, Pooled: %d, Util: %.0f%%), %d skinned (%d instances, %d capsules), %d chunks, Pending: %d adds; %lld HISM batches (%lld compactions, %lld left for a later tick by the write budget); asset loads %d of %d pending (%lld add waits)"),
+	return FString::Printf(TEXT("ScatterRenderer: %d HISM, %d instances (Active: %d, Pooled: %d, Util: %.0f%%), %d skinned (%d instances, %d capsules), %d chunks, Pending: %d adds; %lld HISM batches (%lld compactions, %lld left for a later tick by the write budget, %lld tree builds started, path %d, %.0f ns an instance a build); asset loads %d of %d pending (%lld add waits)"),
 		HISMComponents.Num(),
 		TotalAllocated,
 		ActiveInstances,
@@ -1261,6 +1449,9 @@ FString UVoxelScatterRenderer::GetDebugStats() const
 		TotalHISMWriteBatches,
 		TotalHISMCompactions,
 		TotalHISMBatchesLeft,
+		TotalHISMTreeBuilds,
+		IsUsingG292WritePath() ? 1 : 0,
+		EstimatedWriteNsPerInstance,
 		GetPendingDefinitionLoadCount(),
 		DefinitionLoads.Num(),
 		TotalDefinitionLoadWaits);
@@ -1323,7 +1514,8 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComp
 	}
 
 	// Create component name (one HISM per type and render region when a planet splits them, WM-BP7)
-	FName ComponentName = Regions.IsSplit()
+	const FVoxelRenderRegions& TypeRegions = GetTypeRegions(Definition.ScatterID);
+	FName ComponentName = TypeRegions.IsSplit()
 		? FName(*FString::Printf(TEXT("HISM_%s_%d_R%d_%d_%d"), *Definition.Name, Definition.ScatterID, Region.X, Region.Y, Region.Z))
 		: FName(*FString::Printf(TEXT("HISM_%s_%d"), *Definition.Name, Definition.ScatterID));
 
@@ -1343,7 +1535,7 @@ UHierarchicalInstancedStaticMeshComponent* UVoxelScatterRenderer::CreateHISMComp
 	// Attach to container actor (at the world origin), located at the region's origin (WM-BP7): the world origin when the
 	// world is not split, as before
 	HISM->AttachToComponent(ContainerActor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
-	HISM->SetRelativeLocation(Regions.GetRegionOrigin(Region));
+	HISM->SetRelativeLocation(TypeRegions.GetRegionOrigin(Region));
 
 	// Set mesh
 	HISM->SetStaticMesh(Mesh);
@@ -1983,8 +2175,9 @@ void UVoxelScatterRenderer::FlushPendingInstanceAdds()
 			continue;
 		}
 
-		// The chunk's region's HISM of the type (WM-BP7)
-		const FIntVector Region = Regions.GetRegion(PendingAdd.ChunkCoord);
+		// The chunk's region's HISM of the type (WM-BP7; a dense type's own regions, G292; a skeletal type's are the render
+		// regions)
+		const FIntVector Region = GetTypeRegions(PendingAdd.ScatterTypeID).GetRegion(PendingAdd.ChunkCoord);
 
 		// A definition whose assets are still loading in the background (D68's skeletal ones; every one with
 		// voxel.Scatter.PreloadAssets, G287) keeps its entries in place, its instances counted as the chunk's

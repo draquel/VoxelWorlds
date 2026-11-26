@@ -243,6 +243,34 @@ public:
 	 */
 	int64 GetTotalHISMBatchesLeft() const { return TotalHISMBatchesLeft; }
 
+	/**
+	 * Tree builds the HISM writes started since Initialize (G292): with voxel.Scatter.HISMWritePath 1 one for each batch that
+	 * placed or added instances and each compaction that left any; with 0 none is counted (each of a batch's placements may
+	 * start one, the later ones throwing it away).
+	 *
+	 * @return The tree builds started
+	 */
+	int64 GetTotalHISMTreeBuilds() const { return TotalHISMTreeBuilds; }
+
+	/**
+	 * What a write that starts a HISM's tree build costs the game thread per instance the HISM holds, as measured on the
+	 * writes so far (G292: the build's set-up copies every instance); the write budget estimates a batch with it.
+	 *
+	 * @return Nanoseconds per instance
+	 */
+	double GetEstimatedWriteNsPerInstance() const { return EstimatedWriteNsPerInstance; }
+
+	/**
+	 * Set the write estimate (GetEstimatedWriteNsPerInstance), for tests; the writes measured from then on move it again
+	 * (those of HISMs of 1,000 instances or more).
+	 *
+	 * @param Ns Nanoseconds per instance
+	 */
+	void SetEstimatedWriteNsPerInstance(double Ns) { EstimatedWriteNsPerInstance = Ns; }
+
+	/** @return Whether a HISM's writes go the G292 way (voxel.Scatter.HISMWritePath 1): one tree build a batch, writes budgeted by their estimated cost */
+	static bool IsUsingG292WritePath();
+
 	// ==================== HISM Management ====================
 
 	/**
@@ -263,6 +291,21 @@ public:
 
 	/** The render regions instances are kept in. */
 	const FVoxelRenderRegions& GetRenderRegions() const { return Regions; }
+
+	/**
+	 * The regions a scatter type's HISMs are kept in: the render regions (GetRenderRegions), or for a dense type with
+	 * voxel.Scatter.DenseRegionChunks > 0 regions of that many chunks (G292, D198: a dense type's HISM holds fewer instances,
+	 * so each of its writes copies fewer). A type is dense when its definition is static and its density over a chunk's
+	 * surface points is at least voxel.Scatter.DenseMinPerChunk; decided the first time the type is asked for, then kept for
+	 * the session (its HISMs' keys depend on it). Skeletal definitions keep the render regions.
+	 *
+	 * @param ScatterTypeID Scatter type ID
+	 * @return Its regions
+	 */
+	const FVoxelRenderRegions& GetTypeRegions(int32 ScatterTypeID) const;
+
+	/** @return The types decided dense so far (GetTypeRegions) */
+	TArray<int32> GetDenseTypes() const;
 
 	/**
 	 * Every HISM of a scatter type, by region.
@@ -569,6 +612,12 @@ protected:
 	/** The render regions (SetRenderRegions); one at the world origin unless a planet splits them */
 	FVoxelRenderRegions Regions;
 
+	/** The dense types' regions (voxel.Scatter.DenseRegionChunks, read at Initialize; RegionChunks 0 = no type is dense, G292) */
+	FVoxelRenderRegions DenseRegions;
+
+	/** Whether each type asked for is dense (GetTypeRegions), decided once a session */
+	mutable TMap<int32, bool> DenseTypeDecisions;
+
 	/** Skinned components per skeletal scatter type and region (the foliage and bolt plan's D68) */
 	TMap<FVoxelScatterHISMKey, TObjectPtr<UInstancedSkinnedMeshComponent>> SkinnedComponents;
 
@@ -748,6 +797,42 @@ protected:
 	 */
 	void CompactHISM(const FVoxelScatterHISMKey& Key, UHierarchicalInstancedStaticMeshComponent* HISM, FHISMInstancePool& Pool);
 
+	/**
+	 * Write one HISM's held batch so it starts one tree build, after all its changes (G292). The HISM's own
+	 * UpdateInstanceTransform starts a build at the first placement, and every later change of the batch then throws that
+	 * build away, which starts another when it lands: two copies of every instance on the game thread for one batch.
+	 * In-place changes (a release's zero scale where the instance stands) go through the HISM's own call, which builds
+	 * nothing; placements are written through the instanced mesh's call with the HISM's bookkeeping (WriteInstanceUnbuilt);
+	 * new instances are added last, which starts the one build (or BuildTreeIfOutdated does, when nothing was added).
+	 *
+	 * @param HISM The HISM
+	 * @param Writes Its held writes
+	 * @return Whether a tree build was started
+	 */
+	bool WriteHISMBatch(UHierarchicalInstancedStaticMeshComponent* HISM, const FPendingHISMWrites& Writes);
+
+	/**
+	 * Write an instance's new transform as the HISM's UpdateInstanceTransform does for a change that is not in place (the
+	 * tree out of date, the instance's bounds among the unbuilt ones) but without starting the tree build (G292); the
+	 * caller starts one after the batch.
+	 *
+	 * @param HISM The HISM
+	 * @param Index Instance index
+	 * @param Local Its new transform, local to the HISM
+	 */
+	static void WriteInstanceUnbuilt(UHierarchicalInstancedStaticMeshComponent* HISM, int32 Index, const FTransform& Local);
+
+	/**
+	 * Whether a change to an instance is in place by the HISM's own rule (a built instance keeping its location, in a game
+	 * world): the HISM takes it without rebuilding its tree.
+	 *
+	 * @param HISM The HISM
+	 * @param Index Instance index
+	 * @param Local Its new transform, local to the HISM
+	 * @return True when in place
+	 */
+	static bool IsInPlaceChange(const UHierarchicalInstancedStaticMeshComponent* HISM, int32 Index, const FTransform& Local);
+
 	/** HISM write batches applied (GetTotalHISMWriteBatches) */
 	int64 TotalHISMWriteBatches = 0;
 
@@ -756,6 +841,15 @@ protected:
 
 	/** Due batches left for a later tick by the write budget (GetTotalHISMBatchesLeft) */
 	int64 TotalHISMBatchesLeft = 0;
+
+	/** Tree builds the writes started (GetTotalHISMTreeBuilds, G292) */
+	int64 TotalHISMTreeBuilds = 0;
+
+	/**
+	 * A write that starts a tree build, in nanoseconds per instance of its HISM (GetEstimatedWriteNsPerInstance, G292): a
+	 * moving average of the writes measured, starting from what G281 measured on VoxelDemo's grass
+	 */
+	double EstimatedWriteNsPerInstance = 200.0;
 
 	/** The viewer Tick was last given: the due batches are written nearest it first (G281) */
 	FVector LastViewerPosition = FVector::ZeroVector;
