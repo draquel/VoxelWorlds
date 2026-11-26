@@ -1,6 +1,6 @@
 # Edit Layer System
 
-> State as of 2026-11-23 (G273, edits on network clients). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-26 (G291, a chunk's Set voxels in one call; G273, edits on network clients). Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelCore (`VoxelEditTypes.h`, `VoxelEditManager.h/.cpp`); the chunk manager (VoxelStreaming) reacts to edits.
 
@@ -98,6 +98,40 @@ re-extracted no scatter. Water propagation's flood was an undo step of its own, 
 it had reached (world modes review G60; history: `WORLD_MODES_REVIEW_PLAN.md` §19.17). Tests: `VoxelWorlds.Edit.UndoRedo.Records`,
 `VoxelWorlds.Streaming.WaterPropagation.Undo.Plane`, `.Planet`; `Streaming.EditRemesh.*` edits 6 and 7 and
 `Scatter.EditReaders.{Plane,Planet}` undo and redo too.
+
+### A chunk's Set voxels in one call (G291)
+
+`ApplySetVoxelsInChunk(ChunkCoord, Voxels, bKeepChangeRecord)` writes many Set voxels of one chunk (chunk-local
+positions, `FVoxelChunkSetVoxel`) inside the open operation, or one it begins and ends for the call (in the history, as a
+brush's). It ends as `ApplyEdit` with `EEditMode::Set` at each voxel's centre, in order, would: the same edits in the
+same order (the edits file byte for byte), the validator asked per voxel with the current source (the call's refusals in
+`GetLastRejectedEditCount`), the Local rule per voxel (a Local operation leaves a marked voxel, a replicated one marks
+what it writes), one broadcast per chunk with the same bounds, the same replicated change. What it saves: the chunk's
+layer looked up once and reserved for the call, one lookup a voxel instead of three, no world-to-chunk conversion, the
+operation's bounds and chunks grown once, and, with `bKeepChangeRecord` false, the 112-byte change record. The record is
+dropped only for an operation outside the history and Local: undo and redo read it, a replicated operation's change is
+sent from it, and nothing else does but a cancel, so a caller that drops it gives the cancel up (`CancelEditOperation`
+then leaves those voxels written and logs an error; the operation counts them, `FVoxelEditOperation::UnrecordedChanges`,
+so it is not empty). A position outside the chunk is refused with a warning, never written into a neighbour.
+
+The caller is a planned dungeon stamp's chunk (`UDungeonVoxelStamper::ApplyPlannedChunks`, G280): every voxel a Set,
+Local, outside the history, never cancelled. Measured before the change (`VoxelWorlds.Edit.ChunkWrite.Cost`, a 32^3 chunk headless): `ApplyEdit` a voxel at a time was 0.115 µs a voxel, the insert into the layer 26 % of it, the change record 21 %, the bounds, the layer lookup and the world-to-chunk conversion about 9 % each; in one call it is 0.025 µs (4.5 times faster; 0.035 µs keeping the record). On `VoxelDemo` in the editor (`Scripts/qa/stamp_ab.py`: one editor, the A/B's cvar 1 and 0 by turns, eight fresh worlds, the dungeon by the spawn and the tiled dungeon 7.7 km away in each) the densest chunk of a stamp, 68,468 and 69,693 voxels, is 2.4 to 5.6 ms (median 2.7) against 11.7 to 15.5 (median 13.6), where `EndEditOperation`'s broadcasts were 0.3 ms of it; the stamp takes 2 ticks instead of 3 or 4; the stamp digests are the same on both paths, in every cycle and as before the change.
+
+`voxel.Edit.ChunkSetWrite 0` puts the voxels through `ApplyEdit` one at a time, in the same operation (the A/B). Tests:
+`VoxelWorlds.Edit.ChunkWrite.SameAsPerVoxel` (the stamp's operation, the same keeping the record, a replicated one in
+and outside the history, and the A/B's path, each against `ApplyEdit` on the same input: the edits file, the counts, the
+broadcasts, the replicated changes, undo and redo), `.Refusals` (an empty call, every voxel refused, a position outside
+the chunk, a chunk far from any layer, an uninitialized manager, no open operation, a cancel with and without the
+record), `.Cost` (the time of each step of `ApplyEdit` and of the call, a log); `Dungeon.Stamp.ChunkWrite` (the stamp end
+to end on both paths on a plane, a planet and a block world).
+
+Other writers of many voxels a call, left as they are: a brush (`ApplyBrushEdit`: relative edits composed with what a
+voxel holds, across chunks, replicated and undoable, so its record stays; the layer lookups and the bounds are what it
+could save), the entrance stitcher (`UDungeonEntranceStitcher`: Set, Local, outside the history, a few thousand voxels in
+columns across chunks, so the new call needs its writes grouped by chunk first, which changes their order in a layer),
+the one-frame stamp (`poi.Dungeon.StampOverTicks 0`, the A/B of G280), a felled voxel tree and water propagation's flood
+(replicated, hundreds of voxels), and a loaded edits file and a client's replicated message, which write the layer
+directly already (no validator, no record).
 
 ### The cylinder brush's axis (spherical Phase 4, SP-F8)
 

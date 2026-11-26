@@ -230,7 +230,7 @@ public:
 	 * as ApplyEdit with EEditMode::Set at each voxel's centre, in order, would leave them, inside the open operation (or one
 	 * the call begins and ends, "Chunk Set", in the undo history). The chunk's layer is looked up once and reserved, each
 	 * voxel takes one lookup, and the operation's bounds and chunks grow once for the call. A dungeon stamp's chunk (G280)
-	 * is the caller: about four times faster than its voxels one at a time.
+	 * is the caller: four to five times faster than its voxels one at a time.
 	 *
 	 * The validator is asked at each voxel's centre with the current source, and refuses voxel by voxel
 	 * (GetLastRejectedEditCount then counts the call's refusals, as a brush's). A Local operation leaves a voxel a replicated
