@@ -15,9 +15,11 @@ Marching Cubes meshers, never dispatched by a world, were deleted in code review
 voxels on the CPU since G27.
 
 Every world mode generates on the GPU when it is allowed: `UVoxelWorldConfiguration::bUseGPUGeneration` (default true),
-the `voxel.Stream.GPUGeneration` cvar (0 forces CPU without a restart) and the `-VoxelForceCPU` switch (headless and
-`-nullrhi` runs, where compute cannot dispatch). The CPU generator (`FVoxelCPUNoiseGenerator`) computes the same voxels
-and is the reference the parity tests compare against.
+the `-VoxelForceCPU` switch, the `voxel.Stream.GPUGeneration` cvar (0 forces CPU without a restart) and the process: one
+that cannot run the GPU path generates on the CPU by itself ("Where the GPU path cannot run", below). The chunk manager
+chooses once, in `Initialize` (`UVoxelChunkManager::ChooseGenerator`, in that order, the first rule that says no naming
+the CPU; `GetGeneratorChoice`), and logs one line: `Using GPU noise generator` or `Using CPU noise generator: <why>`. The
+CPU generator (`FVoxelCPUNoiseGenerator`) computes the same voxels and is the reference the parity tests compare against.
 
 ## Module Configuration
 
@@ -156,6 +158,34 @@ The streaming path never stalls a thread. `FVoxelGPUNoiseGenerator::BeginGenerat
 `PollGenerateChunkGPU` once a frame until it reports `Ready` (or `Failed`). A landed result is scanned for a uniform
 value (all air, all rock, open sea) so the chunk can be stored collapsed (G67). `GenerateChunkAsync` with the blocking
 `ReadbackToCPU` remains for tests and editor tools.
+
+## Where the GPU path cannot run
+
+The GPU generator needs a renderer and the global shader map its compute shaders come from.
+`FVoxelGPUNoiseGenerator::CanRunInThisProcess` asks for both: `FApp::CanEverRender` (the renderer's own question, which
+the voxel renderer asks before it draws: false in a dedicated server process, under `-nullrhi` and in a commandlet) and
+the global shader map of the feature level. Where it says no, the chunk manager generates on the CPU by itself and says
+why (`Using CPU noise generator: the world allows the GPU, but a dedicated server process has no renderer (G289)`).
+PIE's dedicated server, a listen server and a client run in a process that renders: they generate on the GPU as
+before. Nothing else in the plugin dispatches a compute or global shader (generation's are the only ones,
+`VoxelGenerationShaders.cpp`), and the rest of the render work a server could reach skips a dedicated server already:
+the renderer and its region components (`FApp::CanEverRender` and the net mode), the far field, the far ocean, the
+planet's ocean shell and the lakes' and rivers' meshes (the net mode), the map (the net mode); scatter's instanced
+components and the collision have no render commands of their own.
+
+**Results (G289, 2026-11-25).** Before: `UnrealEditor.exe <project> VoxelDemo -server` (uncooked) chose the GPU and
+stopped at its first generation, `Assertion failed: GGlobalShaderMap[Platform]` in `GetGlobalShaderMap`, from the render
+command `BeginGenerateChunkGPU` enqueues (`UVoxelChunkManager::LaunchAsyncGeneration`), exit 3; a server process ran only
+with `-VoxelForceCPU` on its command line (`first_use_trace.py --net` passed it). After: the same process generates on
+the CPU by itself, and a `-game` client that joins it generates on the GPU (`Scripts/qa/server_process.py`: five
+sessions on VoxelDemo, the client walking 240 to 298 m; the server running at the end, the client's pawn and the
+server's copy of it walking on collision and 0.0 to 1.6 uu apart at the end). The two machines stand on the same
+terrain: 520 down-traces of the collision at eight places of the walks, in the editor with the GPU generator and with
+the CPU's alternated twice, hit the same height at every point (0.00 uu apart), and the parity lines are the record's
+(249 identical). The client is still corrected more on the GPU than on the CPU at four places of the walk (G299,
+`Documentation/FINDINGS.md`): a cause the traces put outside the settled terrain. `-VoxelForceCPU` and
+`voxel.Stream.GPUGeneration 0` force the CPU as before (`VoxelWorlds.Streaming.GeneratorChoice.Rules` and
+`.ThisProcess`); in the editor the GPU path is still the one used (the scatter digest on VoxelDemo the record's).
 
 ## Parity tests
 

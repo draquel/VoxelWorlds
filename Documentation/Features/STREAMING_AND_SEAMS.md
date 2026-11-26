@@ -124,7 +124,8 @@ over the chunk, `FVoxelConditioning`) and launches it within `voxel.Stream.MaxAs
 
 - **CPU**: a thread-pool task runs `FVoxelCPUNoiseGenerator`, injects voxel trees on the same worker, and queues the
   result.
-- **GPU** (`bUseGPUGeneration` and `voxel.Stream.GPUGeneration` 1; `-VoxelForceCPU` forces the CPU): the compute
+- **GPU** (`bUseGPUGeneration` and `voxel.Stream.GPUGeneration` 1 in a process that can run it; `-VoxelForceCPU` forces
+  the CPU, and a dedicated server process generates on the CPU by itself, G289, `GPU_PIPELINE.md`): the compute
   dispatch goes to the render thread with an async readback (`FVoxelGPUNoiseGenerator`), polled each tick in
   `ProcessPendingGPUReadbacks`; the CPU post-passes run after it (`LaunchPostReadbackProcessing`).
 
