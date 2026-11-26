@@ -126,7 +126,10 @@ a level's configuration for a test run.
 chunk; the readback is one buffer. Meshing stays on CPU workers because a chunk mesh and the seams it meets must agree
 exactly, which the GPU meshers never did; no world dispatched them and they were deleted (the cubic one in the world
 modes review, Marching Cubes and Dual Contouring in code review CR1). The CPU generator stays as the GPU's twin, held to
-it by the `GPUvsCPU*Parity` tests, and runs headless runs (`-VoxelForceCPU`).
+it by the `GPUvsCPU*Parity` tests, and runs headless runs (`-VoxelForceCPU`) and every process that cannot run the GPU
+path: a dedicated server process (no renderer, no global shader map), `-nullrhi`, a commandlet (G289). So a dedicated
+server process generates on the CPU and its clients on the GPU, the same voxels; PIE's dedicated server, a listen server
+and a client render and generate on the GPU (`GPU_PIPELINE.md`, "Where the GPU path cannot run").
 
 **Seam ownership.** Each chunk boundary belongs to one seam job that reads both sides, instead of each chunk reading
 its neighbours' faces. Seams are watertight across LOD levels by construction, a chunk never waits for a neighbour, and an

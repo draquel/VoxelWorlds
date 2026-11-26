@@ -39,6 +39,17 @@ public:
 	FVoxelGPUNoiseGenerator();
 	virtual ~FVoxelGPUNoiseGenerator();
 
+	/**
+	 * Whether this process can run the GPU generator: it renders (FApp::CanEverRender: not a dedicated server process,
+	 * not -nullrhi, not a commandlet) and the global shader map its compute shaders come from exists. A dedicated server
+	 * in a process of its own has neither, and its first dispatch would assert in GetGlobalShaderMap (G289). PIE's
+	 * dedicated server, a listen server and a client run in a process that renders, so they can.
+	 *
+	 * @param OutWhyNot When it returns false and this is not null, why not (for the log line of the generator's choice)
+	 * @return True when a chunk can be dispatched to the GPU in this process
+	 */
+	static bool CanRunInThisProcess(FString* OutWhyNot = nullptr);
+
 	// ==================== IVoxelNoiseGenerator Interface ====================
 
 	virtual void Initialize() override;

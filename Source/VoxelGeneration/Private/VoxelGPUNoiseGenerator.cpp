@@ -24,6 +24,7 @@
 #include "RenderingThread.h"
 #include "DataDrivenShaderPlatformInfo.h"
 #include "RHIGPUReadback.h"
+#include "Misc/App.h"
 
 // Flood rounds: repeated bidirectional axis sweeps converge to the same 6-connected fixpoint as the CPU BFS (monotone
 // flag spread). Each round can carry the flood around one more "corner" per axis; ocean-pocket topology converges in
@@ -821,6 +822,33 @@ FVoxelGPUNoiseGenerator::~FVoxelGPUNoiseGenerator()
 	{
 		Shutdown();
 	}
+}
+
+bool FVoxelGPUNoiseGenerator::CanRunInThisProcess(FString* OutWhyNot)
+{
+	// FApp::CanEverRender is the renderer's own question (the voxel renderer asks it before it draws): false in a
+	// dedicated server process, under -nullrhi and in a commandlet. PIE's dedicated server is a world in the editor's
+	// process, which renders.
+	if (!FApp::CanEverRender())
+	{
+		if (OutWhyNot)
+		{
+			*OutWhyNot = IsRunningDedicatedServer() ? TEXT("a dedicated server process has no renderer")
+				: IsRunningCommandlet() ? TEXT("a commandlet does not render")
+				: TEXT("the process does not render (-nullrhi)");
+		}
+		return false;
+	}
+	// The compute shaders come from the global shader map; GetGlobalShaderMap asserts when it is absent (G289).
+	if (GGlobalShaderMap[GShaderPlatformForFeatureLevel[GMaxRHIFeatureLevel]] == nullptr)
+	{
+		if (OutWhyNot)
+		{
+			*OutWhyNot = TEXT("the process has no global shader map");
+		}
+		return false;
+	}
+	return true;
 }
 
 void FVoxelGPUNoiseGenerator::Initialize()
