@@ -40,6 +40,16 @@ struct FVoxelReplicatedChunkChange
 	bool bResendWhole = false;
 };
 
+/** One voxel of a chunk's write (UVoxelEditManager::ApplySetVoxelsInChunk, G291): where it is in the chunk and what it is set to. */
+struct FVoxelChunkSetVoxel
+{
+	/** The voxel's position in the chunk (0 to ChunkSize-1 on each axis) */
+	FIntVector LocalPosition = FIntVector::ZeroValue;
+
+	/** The voxel it is set to (an absolute edit, EEditMode::Set) */
+	FVoxelData Voxel;
+};
+
 /** A replicated change on the server: what the client's OnChunkEdited broadcasts, and the chunks it changed. */
 struct FVoxelReplicatedChange
 {
@@ -214,6 +224,31 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Edit")
 	int32 ApplyBrushEdit(const FVector& WorldPos, const FVoxelBrushParams& Brush, EEditMode Mode);
+
+	/**
+	 * Set many voxels of one chunk in one call (G291): the edit layer, the Local rule, the validator and the broadcasts end
+	 * as ApplyEdit with EEditMode::Set at each voxel's centre, in order, would leave them, inside the open operation (or one
+	 * the call begins and ends, "Chunk Set", in the undo history). The chunk's layer is looked up once and reserved, each
+	 * voxel takes one lookup, and the operation's bounds and chunks grow once for the call. A dungeon stamp's chunk (G280)
+	 * is the caller: about four times faster than its voxels one at a time.
+	 *
+	 * The validator is asked at each voxel's centre with the current source, and refuses voxel by voxel
+	 * (GetLastRejectedEditCount then counts the call's refusals, as a brush's). A Local operation leaves a voxel a replicated
+	 * one changed as it is (G273); a replicated one marks each voxel it writes.
+	 *
+	 * voxel.Edit.ChunkSetWrite 0 runs the voxels through ApplyEdit one at a time (the A/B), in the same single operation.
+	 *
+	 * @param ChunkCoord The chunk
+	 * @param Voxels The chunk's voxels, each a Set; a position given twice ends with its last voxel. A position outside the
+	 *        chunk is refused (a warning), never written into a neighbour
+	 * @param bKeepChangeRecord False for a write nothing will take back: an operation outside the undo history and Local (a
+	 *        dungeon's stamp) then keeps no 112-byte change record per voxel, only a count, so it cannot be cancelled
+	 *        (CancelEditOperation leaves these voxels written, an error). Ignored, the record kept, for an operation in the
+	 *        history (undo and redo read it) or a replicated one (its change is sent from it)
+	 * @return The voxels taken: written, or left by the Local rule (ApplyEdit's true); a voxel the validator refused or one
+	 *         outside the chunk is not
+	 */
+	int32 ApplySetVoxelsInChunk(const FIntVector& ChunkCoord, TConstArrayView<FVoxelChunkSetVoxel> Voxels, bool bKeepChangeRecord = true);
 
 	// ==================== Undo/Redo ====================
 
