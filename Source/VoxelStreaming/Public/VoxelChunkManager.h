@@ -56,6 +56,23 @@ struct FIslandBowlParams;
 enum class EEditSource : uint8;
 
 /**
+ * Where a chunk manager generates its chunks, and why: the first rule that keeps it off the GPU names the CPU (G289).
+ */
+enum class EVoxelGeneratorChoice : uint8
+{
+	/** The world allows the GPU and nothing in the process forbids it */
+	GPU,
+	/** The world's configuration asks for the CPU (bUseGPUGeneration false) */
+	CPUConfigured,
+	/** -VoxelForceCPU on the command line */
+	CPUForcedBySwitch,
+	/** voxel.Stream.GPUGeneration 0 */
+	CPUForcedByCVar,
+	/** The process cannot run the GPU path (a dedicated server process, -nullrhi, a commandlet: FVoxelGPUNoiseGenerator::CanRunInThisProcess) */
+	CPUProcessCannotRunGPU,
+};
+
+/**
  * Internal chunk state tracking.
  */
 USTRUCT()
@@ -1744,6 +1761,28 @@ public:
 	/** True when terrain generation runs on the GPU (bUseGPUGeneration, and not forced to the CPU). */
 	bool IsUsingGPUGeneration() const { return GPUGeneratorPtr != nullptr; }
 
+	/** Where this chunk manager generates and why, as Initialize chose it (G289). */
+	EVoxelGeneratorChoice GetGeneratorChoice() const { return GeneratorChoice; }
+
+	/**
+	 * The generator's choice from its four inputs, in order: the world's configuration, the -VoxelForceCPU switch, the
+	 * voxel.Stream.GPUGeneration cvar, and whether the process can run the GPU path (G289: a dedicated server process
+	 * generates on the CPU by itself; PIE's dedicated server, a listen server and a client are processes that render).
+	 *
+	 * @param bConfigAllowsGPU UVoxelWorldConfiguration::ShouldUseGPUGeneration
+	 * @param bForceCPUSwitch -VoxelForceCPU is on the command line
+	 * @param bCVarAllowsGPU voxel.Stream.GPUGeneration is not 0
+	 * @param bProcessCanRunGPU FVoxelGPUNoiseGenerator::CanRunInThisProcess
+	 * @return GPU, or the first rule that keeps generation on the CPU
+	 */
+	static EVoxelGeneratorChoice ChooseGenerator(bool bConfigAllowsGPU, bool bForceCPUSwitch, bool bCVarAllowsGPU, bool bProcessCanRunGPU);
+
+	/**
+	 * @param Choice A generator choice
+	 * @return Its name for a log line or a test ("GPU", "CPU (configured)", ...)
+	 */
+	static const TCHAR* GeneratorChoiceToString(EVoxelGeneratorChoice Choice);
+
 	// ==================== Performance Stats ====================
 
 	/** Voxel-specific memory breakdown */
@@ -2961,8 +3000,11 @@ private:
 	/** Non-owning alias to NoiseGenerator when GPU generation is active (for the poll-based readback API). */
 	FVoxelGPUNoiseGenerator* GPUGeneratorPtr = nullptr;
 
-	/** True when bUseGPUGeneration resolved on (config flag && !-VoxelForceCPU && voxel.Stream.GPUGeneration). */
+	/** True when bUseGPUGeneration resolved on (config flag && !-VoxelForceCPU && voxel.Stream.GPUGeneration && a process that can run it). */
 	bool bUseGPUGenerationActive = false;
+
+	/** Where Initialize chose to generate, and why (ChooseGenerator) */
+	EVoxelGeneratorChoice GeneratorChoice = EVoxelGeneratorChoice::CPUConfigured;
 
 	/** Analytic world mode matching the config's WorldMode (FVoxelWorldModeFactory::Create) */
 	TSharedPtr<IVoxelWorldMode> WorldMode;

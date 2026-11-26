@@ -1083,6 +1083,41 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 
 // ==================== Initialization ====================
 
+EVoxelGeneratorChoice UVoxelChunkManager::ChooseGenerator(bool bConfigAllowsGPU, bool bForceCPUSwitch, bool bCVarAllowsGPU,
+	bool bProcessCanRunGPU)
+{
+	if (!bConfigAllowsGPU)
+	{
+		return EVoxelGeneratorChoice::CPUConfigured;
+	}
+	if (bForceCPUSwitch)
+	{
+		return EVoxelGeneratorChoice::CPUForcedBySwitch;
+	}
+	if (!bCVarAllowsGPU)
+	{
+		return EVoxelGeneratorChoice::CPUForcedByCVar;
+	}
+	if (!bProcessCanRunGPU)
+	{
+		return EVoxelGeneratorChoice::CPUProcessCannotRunGPU;
+	}
+	return EVoxelGeneratorChoice::GPU;
+}
+
+const TCHAR* UVoxelChunkManager::GeneratorChoiceToString(EVoxelGeneratorChoice Choice)
+{
+	switch (Choice)
+	{
+	case EVoxelGeneratorChoice::GPU: return TEXT("GPU");
+	case EVoxelGeneratorChoice::CPUConfigured: return TEXT("CPU (configured)");
+	case EVoxelGeneratorChoice::CPUForcedBySwitch: return TEXT("CPU (-VoxelForceCPU)");
+	case EVoxelGeneratorChoice::CPUForcedByCVar: return TEXT("CPU (voxel.Stream.GPUGeneration 0)");
+	case EVoxelGeneratorChoice::CPUProcessCannotRunGPU: return TEXT("CPU (the process cannot run the GPU path)");
+	}
+	return TEXT("?");
+}
+
 void UVoxelChunkManager::Initialize(
 	UVoxelWorldConfiguration* InConfig,
 	IVoxelLODStrategy* InLODStrategy,
@@ -1216,16 +1251,17 @@ void UVoxelChunkManager::Initialize(
 	// context set, so its continentalness-modulated height matches generation.
 	WorldMode = FVoxelWorldModeFactory::Create(*Configuration);
 
-	// -VoxelForceCPU (headless/benchmark, e.g. under -nullrhi where GPU compute can't dispatch) forces
-	// BOTH the CPU generator and the CPU mesher. Evaluated once here and reused for the mesher below.
+	// Select the voxel data generator. Every world mode generates on the GPU when allowed: planets too since spherical
+	// Phase 2 (SP-B4). -VoxelForceCPU (headless and benchmark runs) and the cvar voxel.Stream.GPUGeneration 0 force the
+	// CPU by hand; a process that cannot run the GPU path (a dedicated server process: no renderer, no global shader map)
+	// generates on the CPU by itself, where the first dispatch would assert (G289). The CPU's voxels are the GPU's
+	// (the GPUvsCPU*Parity tests), so a server on the CPU and its clients on the GPU stand on the same terrain.
 	const bool bForceCPU = FParse::Param(FCommandLine::Get(), TEXT("VoxelForceCPU"));
-
-	// Select the voxel data generator. bUseGPUGeneration was historically a dead flag — this is where it
-	// becomes real. The runtime cvar voxel.Stream.GPUGeneration can force CPU without an editor restart.
-	// Every world mode generates on the GPU when allowed: planets too since spherical Phase 2 (SP-B4).
-	const bool bUseGPUGen = Configuration->ShouldUseGPUGeneration() && !bForceCPU
-		&& CVarGPUGenerationEnable.GetValueOnGameThread() != 0;
-	if (bUseGPUGen)
+	FString WhyNotGPU;
+	const bool bProcessCanRunGPU = FVoxelGPUNoiseGenerator::CanRunInThisProcess(&WhyNotGPU);
+	GeneratorChoice = ChooseGenerator(Configuration->ShouldUseGPUGeneration(), bForceCPU,
+		CVarGPUGenerationEnable.GetValueOnGameThread() != 0, bProcessCanRunGPU);
+	if (GeneratorChoice == EVoxelGeneratorChoice::GPU)
 	{
 		TUniquePtr<FVoxelGPUNoiseGenerator> GPUGen = MakeUnique<FVoxelGPUNoiseGenerator>();
 		GPUGen->Initialize();
@@ -1240,13 +1276,21 @@ void UVoxelChunkManager::Initialize(
 		NoiseGenerator->Initialize();
 		GPUGeneratorPtr = nullptr;
 		bUseGPUGenerationActive = false;
-		UE_LOG(LogVoxelStreaming, Log, TEXT("Using CPU noise generator (bUseGPUGeneration=%s, ForceCPU=%s)"),
-			Configuration->bUseGPUGeneration ? TEXT("true") : TEXT("false"),
-			bForceCPU ? TEXT("true") : TEXT("false"));
-	}
-	if (bForceCPU)
-	{
-		UE_LOG(LogVoxelStreaming, Warning, TEXT("VoxelForceCPU: forcing CPU generation"));
+		switch (GeneratorChoice)
+		{
+		case EVoxelGeneratorChoice::CPUForcedBySwitch:
+			UE_LOG(LogVoxelStreaming, Warning, TEXT("Using CPU noise generator: -VoxelForceCPU"));
+			break;
+		case EVoxelGeneratorChoice::CPUForcedByCVar:
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Using CPU noise generator: voxel.Stream.GPUGeneration 0"));
+			break;
+		case EVoxelGeneratorChoice::CPUProcessCannotRunGPU:
+			UE_LOG(LogVoxelStreaming, Display, TEXT("Using CPU noise generator: the world allows the GPU, but %s (G289)"), *WhyNotGPU);
+			break;
+		default:
+			UE_LOG(LogVoxelStreaming, Log, TEXT("Using CPU noise generator: the world's configuration (bUseGPUGeneration=false)"));
+			break;
+		}
 	}
 
 	// Create mesher based on configuration
