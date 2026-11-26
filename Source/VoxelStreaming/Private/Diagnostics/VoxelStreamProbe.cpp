@@ -171,12 +171,13 @@ namespace
 			TEXT("JobsInFlight,LoadJobs,LODUpdateMs,StreamingMs,GenLaunchMs,GenPollMs,GenApplyMs,MeshLaunchMs,MeshApplyMs,RenderMeshMs,")
 			TEXT("RenderUnloadMs,RenderWaterTileMs,LODMs,SeamMs,FarCompressMs,CollisionMs,CollisionPrepMs,CollisionApplyMs,ScatterMs,")
 			TEXT("RenderFlushMs,HydrologyMs,WaterBodyMeshMs,FarFieldMs,TotalMs,GenApplyCount,MeshLaunchCount,RenderSubmitCount,ScatterApplied,")
-			TEXT("FarSelectMs,FarApplyMs,FarCoveredTests,FarCoveredLookups,TickBudgetMs,FarLaunchesHeld,WaterBodiesPending,CollDestroysPending\n");
+			TEXT("FarSelectMs,FarApplyMs,FarCoveredTests,FarCoveredLookups,TickBudgetMs,FarLaunchesHeld,WaterBodiesPending,CollDestroysPending,")
+			TEXT("FarSkipped,FarCoveredKept,FarPatches,FarDrawn,FarComponents,FarCheckDiffs\n");
 		for (const FProbeRow& Row : GProbe.Rows)
 		{
 			const UVoxelChunkManager::FVoxelTimingStats& T = Row.Timing;
 			Csv += FString::Printf(TEXT("%.4f,%.3f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%d,%d,%d,")
-				TEXT("%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.3f,%.3f,%d,%d,%.2f,%d,%d,%d\n"),
+				TEXT("%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.3f,%.3f,%d,%d,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%lld\n"),
 				Row.Time, Row.FrameSeconds * 1000.0, Row.FrameCycles * CyclesToMs, Row.TickSeconds * 1000.0, Row.TickCycles * CyclesToMs,
 				Row.ComputeSeconds * 1e6, Row.ComputeCycles * CyclesToMs * 1000.0, Row.MemorySeconds * 1e6, Row.MemoryCycles * CyclesToMs * 1000.0,
 				Row.AllocSeconds * 1e6, Row.ParallelSeconds * 1e6, Row.Processor, Row.ProcessorAfter, Row.JobsInFlight, Row.LoadJobs,
@@ -184,7 +185,8 @@ namespace
 				T.RenderUnloadMs, T.RenderWaterTileMs, T.LODMs, T.SeamMs, T.FarCompressMs, T.CollisionMs, T.CollisionPrepMs, T.CollisionApplyMs,
 				T.ScatterMs, T.RenderFlushMs, T.HydrologyMs, T.WaterBodyMeshMs, T.FarFieldMs, T.TotalMs, T.GenApplyCount, T.MeshLaunchCount, T.RenderSubmitCount, T.ScatterApplied,
 				T.FarFieldSelectMs, T.FarFieldApplyMs, T.FarFieldCoveredTests, T.FarFieldCoveredLookups,
-				T.TickBudgetMs, T.FarFieldLaunchesHeld, T.WaterBodiesPending, T.CollisionDestroysPending);
+				T.TickBudgetMs, T.FarFieldLaunchesHeld, T.WaterBodiesPending, T.CollisionDestroysPending,
+				T.bFarFieldSkipped ? 1 : 0, T.FarFieldCoveredKept, T.FarFieldPatches, T.FarFieldDrawn, T.FarFieldComponents, T.FarFieldCheckDifferences);
 		}
 		const FString Path = FPaths::ProjectSavedDir() / TEXT("VoxelBench") / (GProbe.Tag + TEXT("_probe.csv"));
 		const bool bSaved = FFileHelper::SaveStringToFile(Csv, *Path);

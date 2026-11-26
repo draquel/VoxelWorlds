@@ -341,6 +341,23 @@ struct VOXELSTREAMING_API FVoxelFarFieldStats
 	int32 CoveredTests = 0;
 	int32 CoveredChunkLookups = 0;
 
+	/**
+	 * G293: the last update was skipped (nothing to change: voxel.World.FarFieldIncremental), the covered answers it kept
+	 * without a test (none of the patch's chunks changed state), and the updates skipped in all
+	 */
+	bool bSkipped = false;
+	int32 CoveredKept = 0;
+	int64 SkippedUpdates = 0;
+
+	/**
+	 * G293's checking mode (voxel.World.FarFieldCheck), in all: skips that would have changed the selection, kept covered
+	 * answers a test changed; and the skips and kept covers it checked
+	 */
+	int64 CheckSkipDifferences = 0;
+	int64 CheckCoveredDifferences = 0;
+	int64 CheckSkips = 0;
+	int64 CheckCovered = 0;
+
 	/** Patches in its trees, and the ones drawn (outside the voxel window's hole). */
 	int32 Patches = 0;
 	int32 DrawnPatches = 0;
@@ -1838,6 +1855,14 @@ public:
 		float FarFieldApplyMs = 0.0f;
 		int32 FarFieldCoveredTests = 0;
 		int32 FarFieldCoveredLookups = 0;
+		// G293: the far field's update skipped (nothing to change), the covered answers kept without a test, its patches,
+		// drawn ones and components, and the checking mode's differences in all.
+		bool bFarFieldSkipped = false;
+		int32 FarFieldCoveredKept = 0;
+		int32 FarFieldPatches = 0;
+		int32 FarFieldDrawn = 0;
+		int32 FarFieldComponents = 0;
+		int64 FarFieldCheckDifferences = 0;
 		// The tick budget (G282): its milliseconds (0: none) and what waited for the next tick: far-field build launches,
 		// lake and river reach meshes still to build, collision components of chunks that left the shell still to destroy.
 		float TickBudgetMs = 0.0f;
@@ -3491,6 +3516,37 @@ private:
 	 * cover only when it moved.
 	 */
 	int64 ChunkStateVersion = 0;
+
+	/**
+	 * The chunks whose drawn state for the far field may have changed since its last update (G293: SetChunkState,
+	 * RemoveChunkState, the loaded set, the renderer's chunks), handed to it with ChunkStateVersion so that only the edge
+	 * patches over them test their cover again. Unknown after a reset and past FarFieldChangedChunksMax; cleared by an
+	 * update that read it.
+	 */
+	TSet<FIntVector> FarFieldChangedChunks;
+	bool bFarFieldChangesUnknown = true;
+	static constexpr int32 FarFieldChangedChunksMax = 1 << 14;
+
+	/** Note a chunk whose drawn state for the far field may have changed (G293). */
+	void NoteFarFieldChunkChanged(const FIntVector& ChunkCoord)
+	{
+		if (FarField && !bFarFieldChangesUnknown)
+		{
+			FarFieldChangedChunks.Add(ChunkCoord);
+			if (FarFieldChangedChunks.Num() > FarFieldChangedChunksMax)
+			{
+				bFarFieldChangesUnknown = true;
+				FarFieldChangedChunks.Reset();
+			}
+		}
+	}
+
+	/** Every chunk's drawn state may have changed (a reset of the chunk states, G293). */
+	void NoteFarFieldChunksUnknown()
+	{
+		bFarFieldChangesUnknown = true;
+		FarFieldChangedChunks.Reset();
+	}
 
 	/**
 	 * Build the far field (game worlds, planets; bEnabled from voxel.World.FarField). Before RebuildPlanetOcean: it decides

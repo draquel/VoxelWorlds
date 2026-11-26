@@ -1,6 +1,7 @@
 // Copyright Daniel Raquel. All Rights Reserved.
 
 #include "VoxelFarField.h"
+#include "VoxelStreaming.h"
 #include "VoxelTickBudget.h"
 #include "VoxelCubeSphere.h"
 #include "VoxelPlanetOcean.h"
@@ -1352,6 +1353,12 @@ void FVoxelFarField::Reset()
 	MeshMemoryBytes = 0;
 	bHasLastCamera = false;
 	Surface.Reset();
+	ChunkPatches.Reset();
+	DrawnPatches.Reset();
+	CoveredTrackedSince = 0;
+	bSettled = false;
+	bInvalidated = true;
+	bLastUpdateSkipped = false;
 }
 
 FVoxelFarField::FPatchState* FVoxelFarField::FindPatchMutable(uint64 PackedKey)
@@ -1374,8 +1381,19 @@ FVoxelFarField::FPatchState& FVoxelFarField::GetOrAddPatch(const FVoxelFarFieldP
 		Slot = MakeUnique<FPatchState>();
 		Slot->Key = Key;
 		static_cast<FVoxelFarFieldFootprint&>(*Slot) = Frame.MakeFootprint(Key);
+		++SelectionChanges;
 	}
 	return *Slot;
+}
+
+void FVoxelFarField::RemovePatch(uint64 PackedKey)
+{
+	if (TUniquePtr<FPatchState>* Found = Patches.Find(PackedKey))
+	{
+		UnindexChunks(**Found);
+		Patches.Remove(PackedKey);
+		++SelectionChanges;
+	}
 }
 
 void FVoxelFarField::ForEachPatch(TFunctionRef<void(const FPatchState&)> VisitPatch) const
@@ -1443,6 +1461,7 @@ void FVoxelFarField::InvalidateRegion(const FVoxelFarFieldRegion& Region)
 		if (Patch.bBuilt && Frame.TakesZones(Patch) && Frame.Intersects(Patch, Frame.GrownBy(Region, Frame.LeastLineHalfWidth(Patch.Key.Level))))
 		{
 			Patch.bDirty = true;
+			bInvalidated = true;
 		}
 	}
 }
@@ -1470,8 +1489,95 @@ FIntVector FVoxelFarField::GetChunkOf(const FVector& WorldPoint) const
 
 bool FVoxelFarField::UpdateCovered(FPatchState& Patch)
 {
+	const bool bCovered = TestCovered(Patch);
+	// A covered edge patch hides (SetDrawn), and past the prebuild radius stands in without a mesh (IsLazy), once its chunks
+	// have been drawn HideDelay: until then the rule is due at a later update, which a skip must not pass over (G293).
+	if (bCovered && !(View.Time - Patch.CoveredSince >= View.HideDelay))
+	{
+		PendingHideFrom = FMath::Min(PendingHideFrom, Patch.CoveredSince);
+	}
+	return bCovered;
+}
+
+void FVoxelFarField::IndexChunks(FPatchState& Patch, const TArray<FIntVector>& Chunks)
+{
+	UnindexChunks(Patch);
+	const uint64 Key = Patch.Key.Pack();
+	Patch.IndexedChunks = Chunks;
+	for (const FIntVector& Chunk : Patch.IndexedChunks)
+	{
+		ChunkPatches.FindOrAdd(Chunk).AddUnique(Key);
+	}
+	Patch.bChunksIndexed = true;
+}
+
+void FVoxelFarField::UnindexChunks(FPatchState& Patch)
+{
+	if (!Patch.bChunksIndexed)
+	{
+		return;
+	}
+	const uint64 Key = Patch.Key.Pack();
+	for (const FIntVector& Chunk : Patch.IndexedChunks)
+	{
+		if (TArray<uint64, TInlineAllocator<2>>* Keys = ChunkPatches.Find(Chunk))
+		{
+			Keys->RemoveSingleSwap(Key, EAllowShrinking::No);
+			if (Keys->Num() == 0)
+			{
+				ChunkPatches.Remove(Chunk);
+			}
+		}
+	}
+	Patch.IndexedChunks.Reset();
+	Patch.bChunksIndexed = false;
+}
+
+void FVoxelFarField::MarkChangedChunks()
+{
+	if (View.ChunkStateVersion < 0)
+	{
+		return;
+	}
+	if (!View.ChangedChunks)
+	{
+		// Which chunks changed is not known: every answer worked out up to now is tested again at the next change of the
+		// version, as before G293 (answers worked out in this update too: a change told to no one may follow them).
+		CoveredTrackedSince = View.ChunkStateVersion + 1;
+		return;
+	}
+	// Every chunk told, also at an unchanged version (the renderer's chunks and the loaded set move without it): a stale
+	// answer is tested at the next change of the version, as the full walk tests every answer then.
+	for (const FIntVector& Chunk : *View.ChangedChunks)
+	{
+		if (const TArray<uint64, TInlineAllocator<2>>* Keys = ChunkPatches.Find(Chunk))
+		{
+			for (const uint64 Key : *Keys)
+			{
+				if (FPatchState* Patch = FindPatchMutable(Key))
+				{
+					Patch->bCoveredStale = true;
+				}
+			}
+		}
+	}
+}
+
+bool FVoxelFarField::TestCovered(FPatchState& Patch)
+{
 	if (View.ChunkStateVersion >= 0 && Patch.CoveredVersion == View.ChunkStateVersion)
 	{
+		return Patch.bCovered;
+	}
+	// The chunk-state version moved, but no chunk under the patch changed state since its test (G293: the chunks that changed
+	// are known since then, and none of its chunks is among them): its chunks are drawn as they were, and the test would give
+	// its answer again. While the voxel window fills, the version moves every frame and every edge patch was tested again.
+	const bool bKept = View.ChangedChunks != nullptr && View.ChunkStateVersion >= 0 && Patch.CoveredVersion >= 0
+		&& Patch.CoveredVersion >= CoveredTrackedSince && !Patch.bCoveredStale;
+	if (bKept && !View.bCheck)
+	{
+		Patch.CoveredVersion = View.ChunkStateVersion;
+		++CoveredKept;
 		return Patch.bCovered;
 	}
 	if (!Patch.bBuilt && Patch.SampleChunks.Num() == 0 && Surface.IsValid())
@@ -1505,6 +1611,18 @@ bool FVoxelFarField::UpdateCovered(FPatchState& Patch)
 			}
 		}
 	}
+	CoveredChecks += bKept ? 1 : 0;
+	if (bKept && bCovered != Patch.bCovered)
+	{
+		// The checking mode: the kept answer would have been wrong (a chunk under the patch changed without being told).
+		++CoveredDifferences;
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.World.FarFieldCheck: the covered answer kept for %s was %d, its test gives %d (chunk-state version %lld, tested at %lld)"),
+			*Patch.Key.ToString(), Patch.bCovered ? 1 : 0, bCovered ? 1 : 0, View.ChunkStateVersion, Patch.CoveredVersion);
+	}
+	if (bCovered != Patch.bCovered)
+	{
+		++SelectionChanges;
+	}
 	if (bCovered && !Patch.bCovered)
 	{
 		Patch.CoveredSince = View.Time;
@@ -1515,6 +1633,12 @@ bool FVoxelFarField::UpdateCovered(FPatchState& Patch)
 	}
 	Patch.bCovered = bCovered;
 	Patch.CoveredVersion = View.ChunkStateVersion;
+	Patch.bCoveredStale = false;
+	// The chunks the test read, in the chunk index (once per chunk set: the samples', then the built patch's).
+	if (!Patch.bChunksIndexed || Patch.IndexedChunks.Num() != Chunks.Num() || Patch.IndexedChunks != Chunks)
+	{
+		IndexChunks(Patch, Chunks);
+	}
 	return bCovered;
 }
 
@@ -1661,6 +1785,7 @@ void FVoxelFarField::ReleasePatch(FPatchState& Patch, FVoxelFarFieldChanges& Out
 	Patch.bAppliedTerrain = false;
 	Patch.bAppliedSea = false;
 	++TotalReleased;
+	++SelectionChanges;
 }
 
 void FVoxelFarField::PruneChildren(FPatchState& Patch, FVoxelFarFieldChanges& OutChanges)
@@ -1680,7 +1805,7 @@ void FVoxelFarField::PruneChildren(FPatchState& Patch, FVoxelFarFieldChanges& Ou
 		FPatchState& Child = **Found;
 		PruneChildren(Child, OutChanges);
 		ReleasePatch(Child, OutChanges);
-		Patches.Remove(ChildKey);
+		RemovePatch(ChildKey);
 	}
 	Patch.bHasChildren = false;
 }
@@ -1696,6 +1821,7 @@ bool FVoxelFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutChanges)
 	Patch->bDrawSea = false;
 	const bool bCulledBefore = Patch->bCulled;
 	Patch->bCulled = IsCulled(*Patch);
+	SelectionChanges += Patch->bCulled != bCulledBefore ? 1 : 0;
 	if (Patch->bCulled)
 	{
 		PruneChildren(*Patch, OutChanges);
@@ -1761,7 +1887,9 @@ bool FVoxelFarField::Visit(uint64 PackedKey, FVoxelFarFieldChanges& OutChanges)
 				bCovered = false;
 				continue;
 			}
-			Child->bLazy = IsLazy(*Child, *Patch);
+			const bool bLazy = IsLazy(*Child, *Patch);
+			SelectionChanges += bLazy != Child->bLazy ? 1 : 0;
+			Child->bLazy = bLazy;
 			bCovered &= Visit(Child->Key.Pack(), OutChanges);
 		}
 		if (bCovered)
@@ -1808,7 +1936,9 @@ void FVoxelFarField::UpdateRoots(FVoxelFarFieldChanges& OutChanges)
 	for (const FVoxelFarFieldPatchKey& Root : Keys)
 	{
 		Wanted.Add(Root.Pack());
-		GetOrAddPatch(Root).bLazy = false;
+		FPatchState& RootPatch = GetOrAddPatch(Root);
+		SelectionChanges += RootPatch.bLazy ? 1 : 0;
+		RootPatch.bLazy = false;
 		Visit(Root.Pack(), OutChanges);
 	}
 	// Roots out of reach go with their trees (a planet's six roots are always wanted, so they are kept for ever).
@@ -1822,7 +1952,7 @@ void FVoxelFarField::UpdateRoots(FVoxelFarFieldChanges& OutChanges)
 		{
 			PruneChildren(*Root, OutChanges);
 			ReleasePatch(*Root, OutChanges);
-			Patches.Remove(Old);
+			RemovePatch(Old);
 		}
 	}
 	Roots = MoveTemp(Wanted);
@@ -1992,6 +2122,55 @@ void FVoxelFarField::LaunchBuilds()
 	PendingBuildCount = Waiting;
 }
 
+bool FVoxelFarField::CanSkip(const FVoxelFarFieldView& InView) const
+{
+	if (!InView.bSkipUnchanged || !bSettled || bInvalidated || InView.ChunkStateVersion < 0)
+	{
+		return false;
+	}
+	// The inputs of the last update, exactly: the selection is a function of them, the patches' states and the time.
+	const FVoxelFarFieldView& Last = SettledView;
+	if (InView.ChunkStateVersion != Last.ChunkStateVersion || InView.Camera != Last.Camera || InView.Viewer != Last.Viewer
+		|| InView.GroundRadius != Last.GroundRadius || InView.PixelsPerRadian != Last.PixelsPerRadian
+		|| InView.MaxScreenError != Last.MaxScreenError || InView.EdgeRadius != Last.EdgeRadius
+		|| InView.PrebuildRadius != Last.PrebuildRadius || InView.HideDelay != Last.HideDelay || InView.ReleaseDelay != Last.ReleaseDelay)
+	{
+		return false;
+	}
+	// A time rule due: a covered edge patch hides (or stands in) once its chunks have been drawn HideDelay, a hidden patch is
+	// released once hidden ReleaseDelay. The same comparisons as the walk's, on the earliest time each rule waits for.
+	if (InView.Time - SettledHideFrom >= InView.HideDelay)
+	{
+		return false;
+	}
+	if (InView.ReleaseDelay >= 0.0 && InView.Time - SettledReleaseFrom > InView.ReleaseDelay)
+	{
+		return false;
+	}
+	// A build that finished is applied by the walk.
+	FScopeLock Lock(&Sink->Lock);
+	return Sink->Done.Num() == 0;
+}
+
+void FVoxelFarField::SkipUpdate(const FVoxelFarFieldView& InView)
+{
+	// What the walk would do with nothing to change: the patches it draws are drawn at this time (the release rule measures
+	// from it), it tests no covered answer, launches nothing and stands in nothing; its other figures are the last update's.
+	for (FPatchState* Patch : DrawnPatches)
+	{
+		Patch->LastDrawnTime = InView.Time;
+	}
+	BuiltThisUpdate.Reset();
+	CoveredTests = 0;
+	CoveredChunkLookups = 0;
+	CoveredKept = 0;
+	LaunchesHeld = 0;
+	TotalStandIns += StandInCount;
+	StandInUpdates += StandInCount > 0 ? 1 : 0;
+	++SkippedUpdates;
+	bLastUpdateSkipped = true;
+}
+
 void FVoxelFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef<bool(const FIntVector&)> IsChunkDrawn, FVoxelFarFieldChanges& OutChanges)
 {
 	OutChanges.Reset();
@@ -1999,6 +2178,15 @@ void FVoxelFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef<bool(
 	{
 		return;
 	}
+	// An update that would change nothing is skipped (G293): at rest the walk visited every patch of the trees each frame to
+	// select what it had selected. The checking mode walks anyway and counts a walk that changed something.
+	const bool bMaySkip = CanSkip(InView);
+	if (bMaySkip && !InView.bCheck)
+	{
+		SkipUpdate(InView);
+		return;
+	}
+	bLastUpdateSkipped = false;
 	View = InView;
 	if (View.GroundRadius <= 0.0)
 	{
@@ -2018,6 +2206,12 @@ void FVoxelFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef<bool(
 	bHasUndrawnChunk = false;
 	CoveredTests = 0;
 	CoveredChunkLookups = 0;
+	CoveredKept = 0;
+	SelectionChanges = 0;
+	PendingHideFrom = TNumericLimits<double>::Max();
+	PendingReleaseFrom = TNumericLimits<double>::Max();
+	bInvalidated = false;
+	MarkChangedChunks();
 
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelFarField_DrainBuilds);
@@ -2038,23 +2232,41 @@ void FVoxelFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef<bool(
 		for (TPair<uint64, TUniquePtr<FPatchState>>& Pair : Patches)
 		{
 			FPatchState& Patch = *Pair.Value;
-			if (Patch.bResident && !Patch.bDrawTerrain && !Patch.bDrawSea && !Patch.bBuilding
-				&& View.Time - Patch.LastDrawnTime > View.ReleaseDelay && !IsKeptBuilt(Patch))
+			if (Patch.bResident && !Patch.bDrawTerrain && !Patch.bDrawSea && !Patch.bBuilding)
 			{
-				ReleasePatch(Patch, OutChanges);
+				if (View.Time - Patch.LastDrawnTime > View.ReleaseDelay)
+				{
+					if (!IsKeptBuilt(Patch))
+					{
+						ReleasePatch(Patch, OutChanges);
+					}
+				}
+				else
+				{
+					// Released at a later update, unless drawn again first (the skip's time rule).
+					PendingReleaseFrom = FMath::Min(PendingReleaseFrom, Patch.LastDrawnTime);
+				}
 			}
 		}
 	}
 
-	// What the owner must show or hide (and every patch built this update, whose component is new).
+	// What the owner must show or hide (and every patch built this update, whose component is new); the figures.
 	DrawnPatchCount = 0;
+	DrawnTerrainCount = 0;
+	DrawnSeaCount = 0;
+	HiddenEdgeCount = 0;
+	DrawnPatches.Reset();
 	for (TPair<uint64, TUniquePtr<FPatchState>>& Pair : Patches)
 	{
 		FPatchState& Patch = *Pair.Value;
 		if (Patch.bDrawTerrain || Patch.bDrawSea)
 		{
 			++DrawnPatchCount;
+			DrawnPatches.Add(&Patch);
 		}
+		DrawnTerrainCount += Patch.bDrawTerrain ? 1 : 0;
+		DrawnSeaCount += Patch.bDrawSea ? 1 : 0;
+		HiddenEdgeCount += (Patch.Key.Level >= Settings.EdgeLevel && !Patch.bDrawTerrain && Patch.bCovered) ? 1 : 0;
 		if (Patch.bResident && (Patch.bDrawTerrain != Patch.bAppliedTerrain || Patch.bDrawSea != Patch.bAppliedSea
 			|| BuiltThisUpdate.Contains(Pair.Key)))
 		{
@@ -2069,4 +2281,21 @@ void FVoxelFarField::Update(const FVoxelFarFieldView& InView, TFunctionRef<bool(
 
 	LaunchBuilds();
 	ChunkDrawn = nullptr;
+
+	// A fixed point (G293): nothing changed, nothing is wanted, and this was motion, not a cut (whose next update reads the
+	// horizon rule another way). The next update with these inputs selects the same, until a time rule is due.
+	bSettled = View.ChunkStateVersion >= 0 && !bCameraCut && SelectionChanges == 0 && Requests.Num() == 0 && OutChanges.IsEmpty();
+	SettledView = InView;
+	SettledView.Budget = nullptr;
+	SettledView.ChangedChunks = nullptr;
+	SettledHideFrom = PendingHideFrom;
+	SettledReleaseFrom = PendingReleaseFrom;
+	SkipChecks += bMaySkip ? 1 : 0;
+	if (bMaySkip && !bSettled)
+	{
+		// The checking mode: the skip would have kept a selection this walk changed.
+		++SkipDifferences;
+		UE_LOG(LogVoxelStreaming, Warning, TEXT("voxel.World.FarFieldCheck: an update the skip would have skipped changed the selection: %d built, %d removed, %d visibility, %d requests, %d other changes, cut %d"),
+			OutChanges.Built.Num(), OutChanges.Removed.Num(), OutChanges.Visibility.Num(), Requests.Num(), SelectionChanges, bCameraCut ? 1 : 0);
+	}
 }
