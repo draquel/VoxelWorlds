@@ -11,6 +11,7 @@
 #include "HAL/PlatformFileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/Optional.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelEdit, Log, All);
 
@@ -20,6 +21,14 @@ static TAutoConsoleVariable<float> CVarVoxelEditUndoHistoryMB(
 	TEXT("Memory budget of the edit manager's undo and redo history, in MB: past it the oldest ")
 	TEXT("operations are dropped, down to the newest, which is always kept. 0 = no budget (the 100-operation limit only). ")
 	TEXT("An operation records 112 bytes per voxel it changed: a player brush of radius 8 voxels about 0.25 MB."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVoxelEditChunkSetWrite(
+	TEXT("voxel.Edit.ChunkSetWrite"),
+	1,
+	TEXT("A/B (G291): 1 = ApplySetVoxelsInChunk writes a chunk's Set voxels in one pass (the layer looked up once and reserved, ")
+	TEXT("one lookup a voxel, the change record dropped where nothing reads it); 0 = through ApplyEdit one voxel at a time, ")
+	TEXT("in the same single operation. The edit layer, the broadcasts and the replication are the same either way."),
 	ECVF_Default);
 
 // File format version for binary serialization
@@ -217,8 +226,12 @@ void UVoxelEditManager::CancelEditOperation()
 		BroadcastChunkEdited(Pair.Key, CurrentEditSource, CurrentEditCenter, CurrentEditRadius, Pair.Value);
 	}
 
+	// Voxels written without a record (ApplySetVoxelsInChunk for an operation nothing takes back) cannot be put back.
+	UE_CLOG(CurrentOperation->UnrecordedChanges > 0, LogVoxelEdit, Error,
+		TEXT("Edit operation '%s' cancelled with %d voxel change(s) made without a record (ApplySetVoxelsInChunk): they stay written"),
+		*CurrentOperation->Description, CurrentOperation->UnrecordedChanges);
 	UE_LOG(LogVoxelEdit, Log, TEXT("Edit operation '%s' cancelled (%d edits reverted)"),
-		*CurrentOperation->Description, CurrentOperation->GetEditCount());
+		*CurrentOperation->Description, CurrentOperation->Changes.Num());
 
 	CurrentOperation.Reset();
 	OperationBounds.Reset();
@@ -458,6 +471,142 @@ int32 UVoxelEditManager::ApplyBrushEdit(const FVector& WorldPos, const FVoxelBru
 		UE_LOG(LogVoxelEdit, Verbose, TEXT("Brush edit: %d voxels modified"), ModifiedCount);
 	}
 	return ModifiedCount;
+}
+
+int32 UVoxelEditManager::ApplySetVoxelsInChunk(const FIntVector& ChunkCoord, TConstArrayView<FVoxelChunkSetVoxel> Voxels,
+	bool bKeepChangeRecord)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelEdit_ApplySetVoxelsInChunk);
+	LastRejectedEditCount = 0;
+	if (!bIsInitialized || !Configuration || Voxels.Num() == 0)
+	{
+		return 0;
+	}
+
+	const int32 ChunkSize = Configuration->ChunkSize;
+	auto InChunk = [ChunkSize](const FIntVector& P)
+	{
+		return P.X >= 0 && P.X < ChunkSize && P.Y >= 0 && P.Y < ChunkSize && P.Z >= 0 && P.Z < ChunkSize;
+	};
+
+	// One operation for the call when none is open, as a brush's.
+	const bool bAutoOperation = !CurrentOperation.IsValid();
+	if (bAutoOperation)
+	{
+		BeginEditOperation(TEXT("Chunk Set"));
+	}
+
+	int32 Taken = 0;
+	int32 Rejected = 0;
+	int32 Outside = 0;
+	if (CVarVoxelEditChunkSetWrite.GetValueOnGameThread() == 0)
+	{
+		// The A/B's per-voxel path: each voxel through ApplyEdit at its centre, in the one operation.
+		for (const FVoxelChunkSetVoxel& Voxel : Voxels)
+		{
+			if (!InChunk(Voxel.LocalPosition))
+			{
+				++Outside;
+				continue;
+			}
+			Taken += ApplyEdit(LocalToWorldPos(ChunkCoord, Voxel.LocalPosition), Voxel.Voxel, EEditMode::Set) ? 1 : 0;
+			Rejected += LastRejectedEditCount;
+		}
+	}
+	else
+	{
+		FVoxelEditOperation& Operation = *CurrentOperation;
+		const bool bLocal = Operation.Replication == EVoxelEditReplication::Local;
+		// The record is what undo, redo, a cancel and a replicated change read: dropped only where none of them will.
+		const bool bRecord = bKeepChangeRecord || Operation.bAddToUndoHistory || !bLocal;
+
+		// The layer is made at the first voxel the validator lets through, as ApplyEdit makes it: a call whose voxels are all
+		// refused leaves no empty layer (the edits file counts every layer).
+		FChunkEditLayer* Layer = nullptr;
+		bool bAnyMarked = false;
+		FVoxelEditedVoxelBounds Bounds;
+		int32 Written = 0;
+		for (const FVoxelChunkSetVoxel& Voxel : Voxels)
+		{
+			const FIntVector& Local = Voxel.LocalPosition;
+			if (!InChunk(Local))
+			{
+				++Outside;
+				continue;
+			}
+			if (EditValidator && !EditValidator->CanApplyEdit(LocalToWorldPos(ChunkCoord, Local), CurrentEditSource))
+			{
+				++Rejected;
+				continue;
+			}
+			++Taken;
+			if (!Layer)
+			{
+				Layer = GetOrCreateEditLayer(ChunkCoord);
+				Layer->Edits.Reserve(Layer->Edits.Num() + Voxels.Num());
+				if (bRecord)
+				{
+					Operation.Changes.Reserve(Operation.Changes.Num() + Voxels.Num());
+				}
+				bAnyMarked = Layer->HasReplicatedVoxels();
+			}
+
+			// The Local rule, as ApplyEditInternal's (G273, D189).
+			const int32 Index = Layer->ToIndex(Local);
+			if (bLocal)
+			{
+				if (bAnyMarked && Layer->IsReplicatedVoxel(Index))
+				{
+					continue;
+				}
+			}
+			else
+			{
+				Layer->ReplicatedVoxels.Add(Index);
+				bAnyMarked = true;
+			}
+
+			// A Set replaces whatever edit the voxel held (the composition table's last rows).
+			const FVoxelEdit Edit(Local, Voxel.Voxel, EEditMode::Set);
+			if (bRecord)
+			{
+				FVoxelEditChange& Change = Operation.Changes.AddDefaulted_GetRef();
+				Change.ChunkCoord = ChunkCoord;
+				Change.LocalPosition = Local;
+				if (const FVoxelEdit* Existing = Layer->Edits.Find(Index))
+				{
+					Change.Before = *Existing;
+					Change.bHadBefore = true;
+				}
+				Change.After = Edit;
+				Change.bHasAfter = true;
+			}
+			Layer->Edits.Add(Index, Edit);
+			Bounds.Add(Local);
+			++Written;
+		}
+
+		if (Written > 0)
+		{
+			if (!bRecord)
+			{
+				Operation.UnrecordedChanges += Written;
+			}
+			Operation.AffectedChunks.AddUnique(ChunkCoord);
+			FVoxelEditedVoxelBounds& OperationChunkBounds = OperationBounds.FindOrAdd(ChunkCoord);
+			OperationChunkBounds.Add(Bounds.Min);
+			OperationChunkBounds.Add(Bounds.Max);
+		}
+	}
+
+	if (bAutoOperation)
+	{
+		EndEditOperation();
+	}
+	LastRejectedEditCount = Rejected;
+	UE_CLOG(Outside > 0, LogVoxelEdit, Warning, TEXT("ApplySetVoxelsInChunk: %d voxel(s) outside chunk %s refused"),
+		Outside, *ChunkCoord.ToString());
+	return Taken;
 }
 
 // ==================== Undo/Redo ====================

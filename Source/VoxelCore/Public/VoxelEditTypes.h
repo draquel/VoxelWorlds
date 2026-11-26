@@ -531,6 +531,13 @@ struct VOXELCORE_API FVoxelEditOperation
 	UPROPERTY()
 	float EditRadius = 0.0f;
 
+	/**
+	 * Voxel changes made without a record (UVoxelEditManager::ApplySetVoxelsInChunk with no change record, G291: an
+	 * operation outside the history and Local, a dungeon's stamp): counted, so the operation is not empty, but neither
+	 * undone nor cancelled.
+	 */
+	int32 UnrecordedChanges = 0;
+
 	FVoxelEditOperation() = default;
 
 	explicit FVoxelEditOperation(uint64 InId, const FString& InDescription = TEXT(""))
@@ -571,15 +578,15 @@ struct VOXELCORE_API FVoxelEditOperation
 	 */
 	FORCEINLINE bool IsEmpty() const
 	{
-		return Changes.Num() == 0;
+		return Changes.Num() == 0 && UnrecordedChanges == 0;
 	}
 
 	/**
-	 * Get number of voxel changes in this operation.
+	 * Get number of voxel changes in this operation, those made without a record included.
 	 */
 	FORCEINLINE int32 GetEditCount() const
 	{
-		return Changes.Num();
+		return Changes.Num() + UnrecordedChanges;
 	}
 
 	/**
