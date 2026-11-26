@@ -219,6 +219,27 @@ static TAutoConsoleVariable<float> CVarFarFieldDistance(
 	TEXT("field is built."),
 	ECVF_Default);
 
+// G293: the far field's update skipped when it would change nothing, and its covered tests run only over the chunks that
+// changed state (A/B against the full walk of every update), and a checking mode for tests and gates.
+static TAutoConsoleVariable<int32> CVarFarFieldIncremental(
+	TEXT("voxel.World.FarFieldIncremental"),
+	1,
+	TEXT("G293: the far field's update skipped when it would change nothing (the camera, the viewer, the chunk states and the\n")
+	TEXT("builds as at the last update, which changed nothing, and no time rule due), and on a chunk-state change only the edge\n")
+	TEXT("patches over the chunks that changed test their cover again. The selection is the same either way.\n")
+	TEXT("  1 = on (default)\n")
+	TEXT("  0 = every update walks the trees and every edge patch tests its cover again at each change (as before G293; A/B)"),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarFarFieldCheck(
+	TEXT("voxel.World.FarFieldCheck"),
+	0,
+	TEXT("G293's checking mode (tests and gates): every far-field update walks the trees and tests every cover in full, and\n")
+	TEXT("counts and logs (Warning) an update voxel.World.FarFieldIncremental would have skipped whose walk changed the selection,\n")
+	TEXT("and a cover it would have kept whose test changed it (vox.Planet / voxel.World.FarFieldStats show the counts).\n")
+	TEXT("0 = off (default)."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarFarFieldTrace(
 	TEXT("voxel.World.FarFieldTrace"),
 	0,
@@ -975,6 +996,12 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		Timing.FarFieldCoveredTests = FarFieldStats.CoveredTests;
 		Timing.FarFieldCoveredLookups = FarFieldStats.CoveredChunkLookups;
 		Timing.FarFieldLaunchesHeld = FarField->GetLaunchesHeld();
+		Timing.bFarFieldSkipped = FarFieldStats.bSkipped;
+		Timing.FarFieldCoveredKept = FarFieldStats.CoveredKept;
+		Timing.FarFieldPatches = FarFieldStats.Patches;
+		Timing.FarFieldDrawn = FarFieldStats.DrawnPatches;
+		Timing.FarFieldComponents = FarFieldStats.Components;
+		Timing.FarFieldCheckDifferences = FarFieldStats.CheckSkipDifferences + FarFieldStats.CheckCoveredDifferences;
 	}
 
 	// === Water propagation (bounded BFS per frame) ===
@@ -1204,6 +1231,7 @@ void UVoxelChunkManager::Initialize(
 	// Clear any existing state
 	ChunkStates.Empty();
 	++ChunkStateVersion;
+	NoteFarFieldChunksUnknown();
 	BenchCounters.EverMeshed.Empty();
 	LoadedChunkCoords.Empty();
 	GenerationQueue.Empty();
@@ -1682,6 +1710,7 @@ void UVoxelChunkManager::Shutdown()
 	// Clear state
 	ChunkStates.Empty();
 	++ChunkStateVersion;
+	NoteFarFieldChunksUnknown();
 	BenchCounters.EverMeshed.Empty();
 	LoadedChunkCoords.Empty();
 	EditScatterReaderChunks.Empty();
@@ -4573,6 +4602,8 @@ void UVoxelChunkManager::RebuildFarField(bool bEnabled)
 	}
 
 	FarField = MakeUnique<FVoxelFarField>();
+	// No chunk change was recorded without it: its first update tests every cover (G293).
+	NoteFarFieldChunksUnknown();
 	FarField->Initialize(Settings, Surface);
 	FarField->SetMaxBuildsInFlight(VoxelSettings::Resolve(CVarFarFieldMaxBuilds, Configuration->FarFieldMaxBuilds));
 	// The cut-over is in force only with a far field (D38, every mode since G78): told now, not at the next Update.
@@ -4862,12 +4893,23 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	View.ChunkStateVersion = ChunkStateVersion;
 	// The build launches gather on the game thread: within what is left of the tick (G282).
 	View.Budget = &TickBudget;
+	// G293: an update that would change nothing is skipped, and the covered tests run over the chunks that changed.
+	const bool bIncremental = CVarFarFieldIncremental.GetValueOnGameThread() != 0;
+	View.bSkipUnchanged = bIncremental;
+	View.ChangedChunks = bIncremental && !bFarFieldChangesUnknown ? &FarFieldChangedChunks : nullptr;
+	View.bCheck = CVarFarFieldCheck.GetValueOnGameThread() != 0;
 
 	FarField->SetMaxBuildsInFlight(VoxelSettings::Resolve(CVarFarFieldMaxBuilds, Configuration->FarFieldMaxBuilds));
 	FVoxelFarFieldChanges Changes;
 	const double SelectStart = FPlatformTime::Seconds();
 	FarField->Update(View, [this](const FIntVector& Coord) { return IsChunkDrawnForFarField(Coord); }, Changes);
 	const double ApplyStart = FPlatformTime::Seconds();
+	// The changes it read are its now (a skipped update reads none: the chunk states have not changed since the last one).
+	if (!FarField->WasLastUpdateSkipped())
+	{
+		FarFieldChangedChunks.Reset();
+		bFarFieldChangesUnknown = false;
+	}
 
 	// Apply: components go with their patches, are (re)filled when a patch is built, and show what the selection drew.
 	AActor* Owner = GetOwner();
@@ -4885,19 +4927,36 @@ void UVoxelChunkManager::UpdateFarField(const FVector& CameraPosition, const FVe
 	Stats.ApplyMs = static_cast<float>((FPlatformTime::Seconds() - ApplyStart) * 1000.0);
 	Stats.CoveredTests = FarField->GetCoveredTests();
 	Stats.CoveredChunkLookups = FarField->GetCoveredChunkLookups();
+	Stats.bSkipped = FarField->WasLastUpdateSkipped();
+	Stats.CoveredKept = FarField->GetCoveredKept();
+	Stats.SkippedUpdates = FarField->GetSkippedUpdates();
+	Stats.CheckSkipDifferences = FarField->GetSkipDifferences();
+	Stats.CheckCoveredDifferences = FarField->GetCoveredDifferences();
+	Stats.CheckSkips = FarField->GetSkipChecks();
+	Stats.CheckCovered = FarField->GetCoveredChecks();
 	Stats.bActive = true;
 	Stats.bDrawsSea = Settings.bSea;
 	Stats.Patches = FarField->GetPatchCount();
 	Stats.DrawnPatches = FarField->GetDrawnPatchCount();
-	Stats.DrawnTerrain = 0;
-	Stats.DrawnSea = 0;
-	Stats.HiddenEdge = 0;
-	FarField->ForEachPatch([&Stats, &Settings](const FVoxelFarField::FPatchState& Patch)
+	if (bIncremental)
 	{
-		Stats.DrawnTerrain += Patch.bDrawTerrain ? 1 : 0;
-		Stats.DrawnSea += Patch.bDrawSea ? 1 : 0;
-		Stats.HiddenEdge += (Patch.Key.Level >= Settings.EdgeLevel && !Patch.bDrawTerrain && Patch.bCovered) ? 1 : 0;
-	});
+		// Counted by the update's own pass over the patches (G293), and unchanged by a skipped one.
+		Stats.DrawnTerrain = FarField->GetDrawnTerrainCount();
+		Stats.DrawnSea = FarField->GetDrawnSeaCount();
+		Stats.HiddenEdge = FarField->GetHiddenEdgeCount();
+	}
+	else
+	{
+		Stats.DrawnTerrain = 0;
+		Stats.DrawnSea = 0;
+		Stats.HiddenEdge = 0;
+		FarField->ForEachPatch([&Stats, &Settings](const FVoxelFarField::FPatchState& Patch)
+		{
+			Stats.DrawnTerrain += Patch.bDrawTerrain ? 1 : 0;
+			Stats.DrawnSea += Patch.bDrawSea ? 1 : 0;
+			Stats.HiddenEdge += (Patch.Key.Level >= Settings.EdgeLevel && !Patch.bDrawTerrain && Patch.bCovered) ? 1 : 0;
+		});
+	}
 	Stats.PatchesBuilt = FarField->ConsumeBuiltCount();
 	Stats.BuildsPending = FarField->GetBuildsPending();
 	Stats.TotalBuilt = FarField->GetTotalBuilt();
@@ -4945,12 +5004,13 @@ FString UVoxelChunkManager::GetFarFieldDebugString() const
 		const FVoxelFarField::FPatchState* Root = FarField->FindPatch(Key);
 		RootsBuilt += Root && Root->bResident ? 1 : 0;
 	}
-	return FString::Printf(TEXT("%spatches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s; stand-ins over the window %lld in %lld updates; roots built %d of %d; updates for the frame's camera after a cut %lld"),
+	return FString::Printf(TEXT("%spatches=%d drawn=%d (terrain %d, sea %d) hidden by the voxel window=%d components=%d builds pending=%d built=%lld (%.2f ms each) update %.2f ms, %.1f MB; band level %d (%.0f uu), sink %.0f, sea %s; stand-ins over the window %lld in %lld updates; roots built %d of %d; updates for the frame's camera after a cut %lld; skipped %lld (G293); checked skips %lld and kept covers %lld, differences: skip %lld, covered %lld"),
 		Settings.bHeightmap ? *FString::Printf(TEXT("heightmap (root tiles of %d chunks, out to %.0f uu) "), Settings.RootChunks, Settings.FarDistance) : TEXT(""),
 		Stats.Patches, Stats.DrawnPatches, Stats.DrawnTerrain, Stats.DrawnSea, Stats.HiddenEdge, Stats.Components, Stats.BuildsPending,
 		Stats.TotalBuilt, Stats.BuildMsMean, Stats.UpdateMs, Stats.MemoryMB, Settings.EdgeLevel, Settings.GetPatchArc(Settings.EdgeLevel),
 		Settings.Sink, Settings.bSea ? TEXT("far field") : (Settings.bHeightmap ? TEXT("tiles / far ocean / none") : TEXT("ocean shell / none")),
-		Stats.TotalStandIns, Stats.StandInUpdates, RootsBuilt, Roots, FarFieldCameraUpdates);
+		Stats.TotalStandIns, Stats.StandInUpdates, RootsBuilt, Roots, FarFieldCameraUpdates, Stats.SkippedUpdates,
+		Stats.CheckSkips, Stats.CheckCovered, Stats.CheckSkipDifferences, Stats.CheckCoveredDifferences);
 }
 
 FString UVoxelChunkManager::GetFarOceanDebugString() const
@@ -6285,6 +6345,7 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 		if (MeshRenderer)
 		{
 			MeshRenderer->RemoveChunk(ChunkCoord);
+			NoteFarFieldChunkChanged(ChunkCoord);
 			// Seam-ownership: drop this chunk's owned seam buckets with it — SeamSlots 0-2 (faces
 			// +X/+Y/+Z), 3-5 (edges parallel to X/Y/Z), 6 (corner). Cheap no-ops when absent.
 			for (uint8 SeamSlot = 0; SeamSlot <= 6; ++SeamSlot)
@@ -6300,6 +6361,7 @@ void UVoxelChunkManager::ProcessUnloadQueue(int32 MaxChunks)
 
 		// Remove from loaded set
 		LoadedChunkCoords.Remove(ChunkCoord);
+		NoteFarFieldChunkChanged(ChunkCoord);
 
 		// Remove water tile contribution before state is cleared
 		if (UsesWaterTiles())
@@ -6716,6 +6778,7 @@ void UVoxelChunkManager::SetChunkState(const FIntVector& ChunkCoord, EChunkState
 		State->Descriptor.State = NewState;
 		State->LastStateChangeFrame = CurrentFrame;
 		++ChunkStateVersion;
+		NoteFarFieldChunkChanged(ChunkCoord);
 	}
 }
 
@@ -6723,6 +6786,7 @@ void UVoxelChunkManager::RemoveChunkState(const FIntVector& ChunkCoord)
 {
 	ChunkStates.Remove(ChunkCoord);
 	++ChunkStateVersion;
+	NoteFarFieldChunkChanged(ChunkCoord);
 	// Its next mesh, after a reload, is a first mesh again (G14).
 	BenchCounters.EverMeshed.Remove(ChunkCoord);
 	// Release any in-flight generation / mesh slot: its result belongs to the residency that just
@@ -8327,6 +8391,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 						ChunkCoord,
 						PendingMeshQueue[i].LODLevel,
 						MoveTemp(PendingMeshQueue[i].MeshData));
+					NoteFarFieldChunkChanged(ChunkCoord);
 					SubmitRendererSecondsThisTick += FPlatformTime::Seconds() - RendT0;
 					State->MeshedLODLevel = PendingMeshQueue[i].LODLevel;
 					// Rendered LOD known — refresh the seam registry (no-op if unchanged).
@@ -8363,6 +8428,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 				TEXT("Chunk (%d,%d,%d) mesh submitted but chunk in unexpected state %d — forcing to Loaded"),
 				ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, static_cast<int32>(State->State));
 			LoadedChunkCoords.Add(ChunkCoord);
+			NoteFarFieldChunkChanged(ChunkCoord);
 			State->Descriptor.bIsDirty = false;
 			SetChunkState(ChunkCoord, EChunkState::Loaded);
 			OnChunkLoaded.Broadcast(ChunkCoord);
@@ -8414,6 +8480,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			PendingMesh.LODLevel,
 			MoveTemp(PendingMesh.MeshData)
 		);
+		NoteFarFieldChunkChanged(ChunkCoord);
 		SubmitRendererSecondsThisTick += FPlatformTime::Seconds() - RendT0;
 
 		// Track which LOD is actually rendered so neighbors can read the correct
@@ -8482,6 +8549,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 	// Mark as loaded
 	LoadedChunkCoords.Add(ChunkCoord);
+	NoteFarFieldChunkChanged(ChunkCoord);
 	State->Descriptor.bIsDirty = false;
 	SetChunkState(ChunkCoord, EChunkState::Loaded);
 

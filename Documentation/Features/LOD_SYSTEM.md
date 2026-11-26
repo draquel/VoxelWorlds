@@ -367,6 +367,27 @@ below): before, nothing was drawn past the voxel window but an island's far ocea
   paused, as a capture script does; for about a second after a 44 km teleport while the window streams in) the view
   passes under the voxel ground's edge onto far field the voxel ground shadows and hides from the sky, and the step
   draws as a black stepped band or chunk-wide notches (G258, traced on `Review_TerrainLines_Planet` 2026-11-20).
+- **The update's cost** (G293, 2026-11-26). An update that would change nothing is skipped
+  (`FVoxelFarFieldView::bSkipUnchanged`): the last update changed nothing (no build, removal or visibility change, no
+  build wanted, no patch added, removed or released, no flag changed, no cut) and this one has its inputs exactly (the
+  camera, the viewer and its ground radius, the error and the pixels per radian, the window's radii, the hide and release
+  delays, the chunk-state version), no build has finished, no region was invalidated or query set, and neither time rule
+  is due (the earliest covered edge patch's `CoveredSince` plus `HideDelay`, the earliest hidden patch's `LastDrawnTime`
+  plus `ReleaseDelay`). A skip only draws the drawn patches at its time, as the walk would. On a chunk-state change only
+  the edge patches over the chunks that changed test their cover again (`FVoxelFarFieldView::ChangedChunks`: the chunk
+  manager records the chunks `SetChunkState`, `RemoveChunkState`, the loaded set and the renderer's submits and removals
+  touch, and the far field keeps an index from a chunk to the patches whose cover reads it); with the record unknown (a
+  reset, more than 16,384 chunks) every cover is tested again at the next change, as before. The selection is the one the
+  full walk makes, update for update: `voxel.World.FarFieldIncremental 0` restores the walk (an A/B), and
+  `voxel.World.FarFieldCheck 1` walks every update and counts a skip or a kept cover the walk disagrees with (tests
+  `VoxelWorlds.FarField.Incremental.*`: a twin on the full walk compared after every update, and a chunk manager on a
+  plane, an island, a block world and a planet). Measured on `VoxelDemo` with the two alternated in one editor
+  (`Scripts/qa/stream_probe.py`, `far_field_seconds.py`): at rest the selection fell from 0.20 to 0.22 ms a frame to
+  0.008 ms (every update skipped, the same 844 patches, 485 drawn, 569 components) and the chunk manager's tick from 0.38
+  to 0.41 ms to 0.19 to 0.20; in the first three seconds after a teleport from 0.95 to 1.18 ms (490 to 613 covered tests a
+  frame) to 0.59 to 0.87 ms (17 to 41), over the twelve seconds after one from 0.54 to 0.59 ms to 0.37 to 0.40. Turning
+  the camera costs nothing (the far field reads where the camera is, not where it looks); walking and flying the walk
+  still runs every frame (0.26 to 0.31 ms walking), since the camera moves and each update may change the selection.
 - **Residency.** One patch component (`UVoxelFarFieldPatchComponent`: sections drawn like a procedural mesh's, through
   `FLocalVertexFactory`) per resident patch at the patch's origin (its centre's point on the
   datum, double), vertices as float offsets of the patch's size; a patch hidden for 10 s releases its component and

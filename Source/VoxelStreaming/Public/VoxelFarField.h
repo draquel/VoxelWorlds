@@ -747,6 +747,29 @@ struct VOXELSTREAMING_API FVoxelFarFieldView
 	 * rest launch in the next updates. Null: every free slot is filled (as before)
 	 */
 	const struct FVoxelTickBudget* Budget = nullptr;
+
+	/**
+	 * The chunks whose drawn state may have changed since the last update (G293; the chunk manager's record, with
+	 * ChunkStateVersion): on a version change an edge patch's covered test runs again only when a chunk under it is among
+	 * them, and the others keep their answer, which the test would give again. Null when they are not known (a reset, more
+	 * than the record holds, or a caller that keeps none): every edge patch's test runs again, as before G293.
+	 */
+	const TSet<FIntVector>* ChangedChunks = nullptr;
+
+	/**
+	 * Skip an update that would change nothing (G293): its inputs (the camera, the viewer, the error, the window's radii,
+	 * the delays and ChunkStateVersion) those of the last update, which changed nothing, no build finished, nothing
+	 * invalidated and no time rule due (a covered edge patch's HideDelay, a hidden patch's ReleaseDelay). The selection
+	 * stands; only the drawn patches' LastDrawnTime moves, as the walk would move it. False: every update walks the trees.
+	 */
+	bool bSkipUnchanged = false;
+
+	/**
+	 * The checking mode (G293; tests and gates): every update walks the trees and works out every covered test in full, and
+	 * counts the updates the skip would have got wrong and the covered answers kept that the test changed
+	 * (FVoxelFarField::GetSkipDifferences, GetCoveredDifferences).
+	 */
+	bool bCheck = false;
 };
 
 /** What an update changed, for the owner to apply to its components. */
@@ -849,6 +872,13 @@ public:
 		/** Unbuilt edge patches: the chunks at a 9 x 9 grid of surface samples (the lazy test), filled once */
 		TArray<FIntVector> SampleChunks;
 
+		/** G293: a chunk under the patch changed state since its covered test (FVoxelFarFieldView::ChangedChunks) */
+		bool bCoveredStale = false;
+
+		/** G293: the chunks its covered test read, as the far field's chunk index holds them for it */
+		TArray<FIntVector> IndexedChunks;
+		bool bChunksIndexed = false;
+
 		/** What the owner was last told is drawn */
 		bool bAppliedTerrain = false;
 		bool bAppliedSea = false;
@@ -905,6 +935,7 @@ public:
 	void SetConditioningGatherer(TFunction<void(const FVoxelFarFieldRegion& Region, FVoxelConditioning& Out)> InGatherer)
 	{
 		ConditioningGatherer = MoveTemp(InGatherer);
+		bInvalidated = true;
 	}
 
 	/**
@@ -915,6 +946,7 @@ public:
 	void SetWaterGatherer(TFunction<FVoxelWaterLevels(const FVoxelFarFieldRegion& Region)> InGatherer)
 	{
 		WaterGatherer = MoveTemp(InGatherer);
+		bInvalidated = true;
 	}
 
 	/**
@@ -934,6 +966,7 @@ public:
 	void SetWaterTileQuery(TFunction<bool(const FIntPoint& Column)> InQuery)
 	{
 		WaterTileQuery = MoveTemp(InQuery);
+		bInvalidated = true;
 	}
 
 	/**
@@ -1042,6 +1075,33 @@ public:
 	/** The last update's builds that had a free slot and waited for the tick budget (G282, FVoxelFarFieldView::Budget). */
 	int32 GetLaunchesHeld() const { return LaunchesHeld; }
 	int32 GetCoveredChunkLookups() const { return CoveredChunkLookups; }
+
+	/**
+	 * The last update's covered answers kept without a test (G293): edge patches asked again after a chunk-state version
+	 * change none of whose chunks changed state (FVoxelFarFieldView::ChangedChunks).
+	 */
+	int32 GetCoveredKept() const { return CoveredKept; }
+
+	/** Updates skipped in all (G293, FVoxelFarFieldView::bSkipUnchanged: nothing to change), and whether the last one was. */
+	int64 GetSkippedUpdates() const { return SkippedUpdates; }
+	bool WasLastUpdateSkipped() const { return bLastUpdateSkipped; }
+
+	/**
+	 * The checking mode's counts in all (G293, FVoxelFarFieldView::bCheck): updates the skip would have skipped whose walk
+	 * changed something, and covered answers that would have been kept whose test gave another answer. Both 0 when the new
+	 * path selects what the full walk does.
+	 */
+	int64 GetSkipDifferences() const { return SkipDifferences; }
+	int64 GetCoveredDifferences() const { return CoveredDifferences; }
+
+	/** The checking mode's checks in all: updates the skip would have skipped, and covered answers that would have been kept. */
+	int64 GetSkipChecks() const { return SkipChecks; }
+	int64 GetCoveredChecks() const { return CoveredChecks; }
+
+	/** After the last update: patches drawing their terrain, their sea, and edge patches hidden by the drawn chunks under them. */
+	int32 GetDrawnTerrainCount() const { return DrawnTerrainCount; }
+	int32 GetDrawnSeaCount() const { return DrawnSeaCount; }
+	int32 GetHiddenEdgeCount() const { return HiddenEdgeCount; }
 
 	/** Patches built in all, and their total build time (ms, on the build threads). */
 	int64 GetTotalBuilt() const { return TotalBuilt; }
@@ -1152,8 +1212,30 @@ private:
 	/** Whether a patch lies within the band region (with hysteresis while it is split). */
 	bool IsEdgePatch(const FPatchState& Patch) const;
 
-	/** Whether every chunk under an edge patch is drawn (cached per chunk-state version). */
+	/**
+	 * Whether every chunk under an edge patch is drawn (cached per chunk-state version; across a version change while no
+	 * chunk under it changed state, G293), noting when its hide rule is due (the skip's time rule).
+	 */
 	bool UpdateCovered(FPatchState& Patch);
+
+	/** UpdateCovered's answer: the cached one, the kept one or a test. */
+	bool TestCovered(FPatchState& Patch);
+
+	/** G293: put a patch's chunks in the chunk index, or take them out (before the patch goes). */
+	void IndexChunks(FPatchState& Patch, const TArray<FIntVector>& Chunks);
+	void UnindexChunks(FPatchState& Patch);
+
+	/** G293: mark the patches over the view's changed chunks stale (or, when they are not known, every answer older than now). */
+	void MarkChangedChunks();
+
+	/** G293: whether an update for this view would change nothing (FVoxelFarFieldView::bSkipUnchanged). */
+	bool CanSkip(const FVoxelFarFieldView& InView) const;
+
+	/** G293: a skipped update: the drawn patches drawn at its time, the update's figures those of no change. */
+	void SkipUpdate(const FVoxelFarFieldView& InView);
+
+	/** Remove a patch from the trees (its chunk index entries with it). */
+	void RemovePatch(uint64 PackedKey);
 
 	/** Count a patch that is not ready to draw, if it is an edge patch (the stand-in figures, VP4). */
 	void NoteUnready(FPatchState& Patch);
@@ -1221,4 +1303,48 @@ private:
 	bool bCameraCut = true;
 	FIntVector UndrawnChunk = FIntVector::ZeroValue;
 	bool bHasUndrawnChunk = false;
+
+	// ---- G293: the skip and the covered tests by changed chunks ----
+
+	/** The chunk index: the patches whose covered test reads each chunk (their IndexedChunks) */
+	TMap<FIntVector, TArray<uint64, TInlineAllocator<2>>> ChunkPatches;
+
+	/** The chunk-state version from which every chunk change was told (ChangedChunks): older covered answers are tested again */
+	int64 CoveredTrackedSince = 0;
+
+	/**
+	 * The last update changed nothing (no build, removal, visibility change, request, patch added or removed, flag change
+	 * or cut): an update with its inputs would change nothing either, until a time rule is due
+	 */
+	bool bSettled = false;
+	FVoxelFarFieldView SettledView;
+
+	/** Something outside the update changed what it would select (an invalidation, a new query or gatherer, a reset) */
+	bool bInvalidated = true;
+
+	/**
+	 * The time rules of the last update: the earliest CoveredSince of a covered edge patch not yet hidden by HideDelay, and
+	 * the earliest LastDrawnTime of a hidden patch not yet released by ReleaseDelay (+inf: none)
+	 */
+	double PendingHideFrom = 0.0;
+	double PendingReleaseFrom = 0.0;
+	double SettledHideFrom = 0.0;
+	double SettledReleaseFrom = 0.0;
+
+	/** Flags, patches and covered answers this update changed (beyond what the changes report) */
+	int32 SelectionChanges = 0;
+
+	/** The patches drawn after the last update (stable addresses; rebuilt by every update that walks) */
+	TArray<FPatchState*> DrawnPatches;
+
+	int32 CoveredKept = 0;
+	int64 SkippedUpdates = 0;
+	bool bLastUpdateSkipped = false;
+	int64 SkipDifferences = 0;
+	int64 CoveredDifferences = 0;
+	int64 SkipChecks = 0;
+	int64 CoveredChecks = 0;
+	int32 DrawnTerrainCount = 0;
+	int32 DrawnSeaCount = 0;
+	int32 HiddenEdgeCount = 0;
 };
