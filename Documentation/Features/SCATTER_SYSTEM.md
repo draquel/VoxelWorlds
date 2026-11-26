@@ -590,6 +590,29 @@ and 0 by turns in one editor (two five-minute walks a side): the longest tick 6.
 of 4 ms or more 3 against 0; 39 and 19 batches left for a later tick of 3,581 and 5,276, about one every ten seconds;
 compactions 78 and 63 against 28 and 40.
 
+**One HISM's write (G292, 2026-11-26).** Measured with `Scripts/qa/scatter_writes.py` on `VoxelDemo` (a fresh world each
+run, the weather locked, a five-minute walk along (1, 0.1), the pawn moved 50 m on when it stalls; `[ScatterApplySlow]`
+from 0.5 ms and the engine's own lines for each tree build's copy and each build thrown away). On `dev` the longest tick
+of writes was 3.5 ms, two grass HISMs of about 16,000 instances written in one tick, the longest single write 2.1 ms
+(Grass02, 17,406 instances), compactions 1.8 ms at most (8,143 live); G281's 4.8 ms compaction did not come back. A
+traced walk (`play_trace.py --scopes`): the engine's tree build set-up (`BuildTreeAsync`) is 36 % of the writes' time,
+56 % in the writes of 1 ms or more, the rest the instances' own add; a compaction is mostly its clear and add (set-up 1.9
+of 9.9 ms); the builds a batch's later changes threw away were 66 of 1,483 (3 ms in the walk). Alternated in one editor,
+two walks a side: the path before G292 (`voxel.Scatter.HISMWritePath 0`) had the longest tick 5.21 and 3.04 ms, ticks of
+3 ms or more 5 and 1, 89 and 96 builds thrown away; G292's path 2.61 and 2.63 ms, none of 3 ms, none thrown away, its
+longest write 2.29 and 2.38 ms (a grass batch of 14,500 to 15,900 instances), the tree builds within the runs' spread
+(2,171 to 2,381 against 2,246 to 2,297). A rewrite in place (the live instances moved into
+the free indices, the rest removed from the end) was built and measured: 4.7 ms for 8,143 live against 1.6 ms for the
+clear and add, each removal dearer than an add in the editor, so a compaction stays a clear and add. With the dense
+types' regions of 2 chunks (Grass01, Grass02, Plant01 and Bush01 on `VoxelDemo`) the longest tick was 2.00 and 2.05 ms,
+the longest write 1.89 and 1.14 ms (HISMs of 5,400 instances at most), the instances the builds copied halved (0.92
+million against 1.8 to 2.0); with regions of 1 chunk 2.03 and 2.03 ms, the longest write 0.92 and 1.13 ms (1,700
+instances at most), a third copied. What they cost (`Scripts/qa/scatter_view.py`, the spawn's view at four headings,
+three runs a side, alternated): 94, 110 and 142 HISMs there, draw calls 2,212 to 2,219, 2,229 to 2,232 and 2,234 (+0.6
+and +0.8 %), the GPU 5.82 to 5.86, 5.77 to 5.89 and 5.84 to 5.88 ms (within the spread), the frame held at 16.7 ms; after
+a five-minute walk 422 to 445, 568 to 571 and 982 to 1,011 HISMs, 165,000 to 183,000, 221,000 and 261,000 to 277,000
+instances pooled (G303). The dense regions stay off (D198).
+
 ### Dynamic materials (the foliage and bolt plan's D67)
 
 A definition with `bDynamicMaterials` is drawn through one `UMaterialInstanceDynamic` per override slot: the renderer
