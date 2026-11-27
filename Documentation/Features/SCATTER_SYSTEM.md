@@ -544,12 +544,18 @@ apply is one piece); the hand-off 77 to 79 ms a teleport against 9; the longest 
 longest 15.9 to 28.3 against 1.6 to 2.5 (an apply or a launch of 2.1 to 2.5 ms in two of the four), the longest tick 25.5 to 34.8 ms against 9.8 to 12.1, the hand-off 58 to 64 ms
 against 7 to 8. On island M (`Review_Island_M`; teleports out to the sea 120 km away and back, eight a side): the own
 part's longest 1.5 to 5.5 ms against 0.5 to 1.4, the distance pass 0.4 to 5.4 against 0.2 to 0.9, the hand-off 77 to 83
-ms against 9 to 10. PLANET_TBD. The same work on every world: the same applies, launches and mesh submits a teleport
+ms against 9 to 10. On the review planet (`PlanetTest` with `Review_Planet`, between 16.5 N 31 W and its antipode,
+ten a side): the own part's longest 2.2 to 13.1 ms (one or two ticks of 2 ms a teleport) against 1.1 to 2.1 (one
+tick of 2.08 ms in ten teleports), the distance pass 1.8 to 13.1 against 0.2 to 2.1, the longest tick 11.3 to 21.4 ms
+against 10.4 to 12.9, the hand-off 78 to 87 ms against 10 to 11. The same work on every world: the same applies, launches and mesh submits a teleport
 (on `VoxelDemo` 174 and 167 applies, 363 and 362 launches, 931 and 957 submits at the two sites), and the scatter
 complete around the player (nothing queued, in flight, waiting or held but the renderer's writes) after the same 6.2 to
-7.4 s on `VoxelDemo`, 6.1 to 7.2 on the block world and 5.3 to 7.3 on the island. Walking (`VoxelDemo`, three minutes a
+7.4 s on `VoxelDemo`, 6.1 to 7.2 on the block world, 5.3 to 7.3 on the island and 7.9 to 9.1 on the planet (the
+last apply 8.40 s after the teleport on the old path and 8.51 on the new, the means of ten; half of them after 3.36 and
+3.39 s). Walking (`VoxelDemo`, three minutes a
 side) the own part took no tick of 2 ms against 0 to 3 a minute, its longest 1.4 to 1.9 ms against 2.0 to 3.0, the
-hand-off 7 ms a minute against 24 to 41. The digests are the same on both paths (`digest_gate.py`: below). What is
+hand-off 7 ms a minute against 24 to 41. The placement is the same (`digest_gate.py`, a fresh world each): `VoxelDemo` 176 of 176 chunks as its record, and
+the old path against the new the block world 188 of 188, island M 191 of 191, the review planet 195 of 195. What is
 left of a scatter tick after a teleport is the renderer's flush, its queued instance adds (`MaxInstanceAddsPerFrame`)
 and its HISM writes (`voxel.Scatter.HISMWriteBudgetMs`) in the same tick: 2.3 to 3.7 ms on `VoxelDemo` on both paths, 4.0 to 5.3 ms
 on the block world against 3.4 to 8.1 (G309 in `Documentation/FINDINGS.md`); on the block world the place left's releases,
