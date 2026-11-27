@@ -46,8 +46,9 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelCollisionCookStatsCmd(
 	     "cooks by kind (a chunk's first, a neighbour's re-cook, an edit's), the chunks found to have no surface (skipped at the launch or "
 	     "on the worker), the neighbour wait's holds (D196), the audit's counts "
 	     "(voxel.Collision.CookAudit: predictions against meshes, re-cooks that built the same triangles), and per distance band from the "
-	     "nearest focus (in chunk widths) the chunks whose first collision arrived and when (mean and last, seconds after the reset); then "
-	     "reset. `voxel.Collision.CookStats keep` logs without the reset."),
+	     "nearest focus (in chunk widths) the chunks whose first collision arrived and when (mean and last, seconds after the reset); and (G296) "
+	     "for the cooks that found a surface, where the chunk's drawn mesh and its neighbours' stood against the cook's LOD at the launch "
+	     "and the wait in the queue; then reset. `voxel.Collision.CookStats keep` logs without the reset."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*)
 	{
 		const bool bKeep = Args.Num() > 0 && Args[0] == TEXT("keep");
