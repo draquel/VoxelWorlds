@@ -17,6 +17,7 @@ class IVoxelWorldMode;
 class FVoxelMaterialTable;
 class UVoxelCaveConfiguration;
 struct FVoxelConditioning;
+struct FVoxelTickBudget;
 
 struct FScatterExtractionContext;
 
@@ -141,14 +142,20 @@ public:
 	// ==================== Per-Frame Update ====================
 
 	/**
-	 * Update scatter state based on viewer position.
+	 * Update scatter state based on viewer position: the completed extractions applied, the queued ones launched, the
+	 * distance pass (the releases beyond each type's distance, the hand-offs at the horizon, the launches of the types
+	 * come in range), the renderer's queued instance adds and held HISM writes.
 	 *
-	 * Currently handles debug visualization updates.
+	 * With a limited budget (G295; the chunk manager's FVoxelTickBudget, voxel.Scatter.TickBudget 1) the applies and the
+	 * distance pass's pieces draw on what is left of it: each does at least one piece a tick, nearest the viewer first,
+	 * and what is left waits for the next tick (a pass cut short resumes there before its next interval), so the work
+	 * always finishes and the scatter settles to what it is without a budget.
 	 *
 	 * @param ViewerPosition Current viewer/camera position
 	 * @param DeltaTime Time since last update
+	 * @param Budget The tick's budget (null or unlimited: every piece of work goes on, as before G295)
 	 */
-	void Update(const FVector& ViewerPosition, float DeltaTime);
+	void Update(const FVector& ViewerPosition, float DeltaTime, const FVoxelTickBudget* Budget = nullptr);
 
 	/**
 	 * The viewers beside Update's (G217): on a server, the pawns of the players other than the one the streaming follows.
@@ -468,10 +475,13 @@ public:
 		float ApplyMs = 0.0f;     // ProcessCompletedAsyncScatter: completed extractions into the caches and the renderer
 		float RegrowMs = 0.0f;    // ProcessPendingExclusionRegrow
 		float LaunchMs = 0.0f;    // ProcessPendingGenerationQueue: extraction contexts and launches
-		float DistanceMs = 0.0f;  // ProcessCompletedDistanceStream + PerformDistanceSpawn
+		float DistanceMs = 0.0f;  // ProcessCompletedDistanceStream, the queued releases (G295) and PerformDistanceSpawn
 		float FlushMs = 0.0f;     // the renderer's Tick: queued instance adds into the HISMs
 		int32 Applied = 0;        // completed extractions applied
 		int32 Launched = 0;       // extractions launched
+		int32 ApplyHeld = 0;      // completed extractions and distance results waiting after this tick's applies (the caps, or the budget: G295)
+		int32 DistanceHeld = 0;   // the distance pass's pieces left for a later tick by the budget: releases, hand-offs, launches (G295)
+		int32 Released = 0;       // chunks whose out-of-range types the distance pass released this tick
 	};
 
 	/** The last Update's step timings. */
@@ -499,6 +509,44 @@ public:
 	 * @param VoxelSize World-space size of each voxel
 	 */
 	void HandOffChunkVoxels(const FIntVector& ChunkCoord, const TArray<FVoxelData>& VoxelData, int32 ChunkSize, float VoxelSize);
+
+	/**
+	 * HandOffChunkVoxels with the chunk's voxels as a shared, immutable snapshot (the chunk manager's GetVoxelSnapshot,
+	 * G295): the queued extraction keeps the snapshot instead of a copy of the chunk's voxels (1 MB for a 64-voxel chunk,
+	 * about 200 us of the submit's game thread for a chunk within the scatter horizon). The snapshot must not change
+	 * while scatter holds it (a resident chunk's shared array is cloned by its next write, G71).
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @param VoxelData Full-resolution (edit-merged) voxel data of the chunk; null hands nothing off
+	 * @param ChunkSize Number of voxels per edge
+	 * @param VoxelSize World-space size of each voxel
+	 */
+	void HandOffChunkVoxels(const FIntVector& ChunkCoord, TSharedPtr<const TArray<FVoxelData>> VoxelData, int32 ChunkSize, float VoxelSize);
+
+	/**
+	 * Scatter's outstanding work, for the probe and the tests (G295): extractions queued, in flight or completed and not
+	 * applied, distance tasks in flight or completed and not applied, chunks with releases queued. The renderer's queued
+	 * instance adds and held HISM writes are its own (UVoxelScatterRenderer::GetPendingInstanceAddCount,
+	 * GetPendingHISMWriteCount).
+	 *
+	 * @return The pieces of work outstanding
+	 */
+	int32 GetOutstandingWorkCount() const;
+
+	/**
+	 * Take the extractions the workers finished off their queue, to wait for their apply (each Update does it first; G295).
+	 * For tests: an apply's order is decided among the results waiting.
+	 *
+	 * @return The completed extractions waiting for an apply
+	 */
+	int32 TakeArrivedResults();
+
+	/**
+	 * The extractions launched a tick at most (2 by default; 0 = as many as the free worker slots). For tests.
+	 *
+	 * @param InMax Launches a tick
+	 */
+	void SetMaxScatterGenerationsPerFrame(int32 InMax) { MaxScatterGenerationsPerFrame = FMath::Max(0, InMax); }
 
 	/**
 	 * Called when a chunk is unloaded.
@@ -824,7 +872,7 @@ protected:
 	bool PassesTreeModeRule(const FScatterDefinition& Def, float ChunkDistance) const;
 
 	/** Hand off the chunks awaiting their first extraction that have come within the scatter horizon, nearest first (G79). */
-	void ProcessDeferredFirstExtractions();
+	void ProcessDeferredFirstExtractions(const FVoxelTickBudget* Budget = nullptr);
 
 	/** Build the cross-chunk classification context from the world mode + configuration (water level, noise params). */
 	FScatterExtractionContext MakeExtractionContext(const FIntVector& ChunkCoord) const;
@@ -972,6 +1020,18 @@ protected:
 	/** The viewers beside Update's (SetFurtherViewers, G217) */
 	TArray<FVector> FurtherViewers;
 
+	/**
+	 * The hand-off's body (HandOffChunkVoxels, either form): the voxels are taken only when an extraction is queued.
+	 *
+	 * @param ChunkCoord Chunk coordinate
+	 * @param NumVoxels The voxels handed off (checked against ChunkSize^3)
+	 * @param TakeVoxels Gives the voxels the queued extraction keeps (a copy, or the shared snapshot)
+	 * @param ChunkSize Number of voxels per edge
+	 * @param VoxelSize World-space size of each voxel
+	 */
+	void HandOffChunkVoxelsImpl(const FIntVector& ChunkCoord, int32 NumVoxels, TFunctionRef<TSharedPtr<const TArray<FVoxelData>>()> TakeVoxels,
+		int32 ChunkSize, float VoxelSize);
+
 	// ==================== Deferred Generation Queue ====================
 
 	/**
@@ -985,8 +1045,9 @@ protected:
 		// Definitions to generate (captured at queue time based on distance rules)
 		TArray<FScatterDefinition> CapturedDefinitions;
 
-		// Voxel data for LOD-independent surface extraction
-		TArray<FVoxelData> ChunkVoxelData;
+		// Voxel data for LOD-independent surface extraction: the chunk's snapshot, shared with the chunk manager (G295), or
+		// a copy of its own (HandOffChunkVoxels with an array)
+		TSharedPtr<const TArray<FVoxelData>> ChunkVoxelData;
 		int32 ChunkSize = VOXEL_DEFAULT_CHUNK_SIZE;
 		float VoxelSize = 100.0f;
 
@@ -1040,6 +1101,10 @@ protected:
 	/** MPSC queue for completed async scatter results (written by thread pool, read by game thread) */
 	TQueue<FAsyncScatterResult, EQueueMode::Mpsc> CompletedScatterQueue;
 
+	/** The completed results taken from CompletedScatterQueue and not applied yet, in the order they arrived: applied
+	 *  MaxProcessPerFrame a tick, the nearest first under a budget (G295). Game thread only. */
+	TArray<FAsyncScatterResult> ReadyScatterResults;
+
 	/** Chunks currently being processed asynchronously */
 	TSet<FIntVector> AsyncScatterInProgress;
 
@@ -1066,10 +1131,35 @@ protected:
 	 * Also clears CompletedScatterTypes entries for out-of-range definitions
 	 * so they can regenerate when the player returns.
 	 */
-	void PerformDistanceSpawn();
+	void PerformDistanceSpawn(const FVoxelTickBudget* Budget = nullptr);
 
-	/** Process completed distance stream results on game thread */
-	void ProcessCompletedDistanceStream();
+	/**
+	 * Process completed distance stream results on game thread: MaxDistanceStreamResultsPerFrame a tick in the order they
+	 * arrived, or under a limited budget the nearest first, the first always and the others while time is left (G295).
+	 *
+	 * @param Budget The tick's budget (null: every result up to the cap)
+	 * @return The results waiting for a later tick
+	 */
+	int32 ProcessCompletedDistanceStream(const FVoxelTickBudget* Budget = nullptr);
+
+	/**
+	 * Make the distance pass's queued releases (PendingDistanceReleases): each chunk's types still on the chunk and still
+	 * beyond their cleanup distance from every viewer, out of CompletedScatterTypes, the renderer and the spawn cache.
+	 * Without a budget all of them, in the order the pass found them (the release before G295); under a limited budget
+	 * the first chunk of the tick always, the others while time is left (G295).
+	 *
+	 * @param Budget The tick's budget (null: all of them)
+	 */
+	void ProcessPendingDistanceReleases(const FVoxelTickBudget* Budget);
+
+	/**
+	 * The distance pass's spawn part (PerformDistanceSpawn after its releases), or the part a pass the budget cut short
+	 * left (G295).
+	 *
+	 * @param Budget The tick's budget
+	 * @param bResume True to go on with the pass the budget cut short (no new releases, what is left of its quotas)
+	 */
+	void PerformDistanceSpawnPass(const FVoxelTickBudget* Budget, bool bResume);
 
 	/** Result from async distance stream generation */
 	struct FDistanceStreamResult
@@ -1082,6 +1172,31 @@ protected:
 
 	/** Dedicated MPSC queue for distance stream results (separate from chunk generation) */
 	TQueue<FDistanceStreamResult, EQueueMode::Mpsc> DistanceStreamQueue;
+
+	/** The distance results taken from DistanceStreamQueue and not applied yet, in the order they arrived (G295) */
+	TArray<FDistanceStreamResult> ReadyDistanceResults;
+
+	/** The distance pass's releases not made yet (G295): per chunk, each type it found beyond its cleanup distance and that
+	 *  distance. Made within the tick budget; checked again when made (still on the chunk, still out of range); an unload
+	 *  or a regeneration drops the chunk's entry. Without a budget they are all made in the pass that found them. */
+	TMap<FIntVector, TArray<TPair<int32, float>>> PendingDistanceReleases;
+
+	/** A distance pass the budget cut short (a hand-off or a launch left): the next tick runs it again, before its
+	 *  interval (G295) */
+	bool bDistancePassCutShort = false;
+
+	/** What is left of the current distance pass's quotas (MaxDistanceSpawnChunksPerPass each): the hand-offs at the
+	 *  horizon and the launches. A new pass starts them again; a pass the budget cut short resumes with them (G295). */
+	int32 DistancePassHandOffsLeft = 0;
+	int32 DistancePassLaunchesLeft = 0;
+
+	/** This Update's pieces, each part counting its own for the budget's first piece (G295) */
+	int32 ReleasesThisTick = 0;
+	int32 HandOffsThisTick = 0;
+	int32 DistanceLaunchesThisTick = 0;
+
+	/** The distance pass's hand-offs and launches the budget left for a later tick in this Update (G295) */
+	int32 DistancePiecesHeld = 0;
 
 	/** Chunks currently being processed by distance streaming (separate from AsyncScatterInProgress) */
 	TSet<FIntVector> DistanceStreamInProgress;
@@ -1109,8 +1224,32 @@ protected:
 	/** Launch async scatter generation on thread pool */
 	void LaunchAsyncScatterGeneration(FPendingScatterGeneration PendingData);
 
-	/** Process completed async scatter results on game thread */
-	void ProcessCompletedAsyncScatter();
+	/**
+	 * Process completed async scatter results on game thread: MaxProcessPerFrame a tick, in the order they arrived, or
+	 * under a limited budget the nearest the viewer first, the first always and the others while time is left (G295).
+	 *
+	 * @param Budget The tick's budget (null: every result up to the cap)
+	 * @return The results left for a later tick
+	 */
+	int32 ProcessCompletedAsyncScatter(const FVoxelTickBudget* Budget = nullptr);
+
+	/**
+	 * Whether this tick's scatter work goes under the budget (G295): a limited budget and voxel.Scatter.TickBudget 1.
+	 *
+	 * @param Budget The tick's budget
+	 * @return True to take the pieces nearest first while time is left
+	 */
+	static bool IsBudgeted(const FVoxelTickBudget* Budget);
+
+	/**
+	 * The entry nearest a viewer (GetViewerDistance of its chunk's centre) among Count entries, the earliest of equal
+	 * ones, so a chunk's results keep the order they arrived in (G295).
+	 *
+	 * @param Count The entries
+	 * @param ChunkOf An entry's chunk
+	 * @return The index (INDEX_NONE when Count is 0)
+	 */
+	int32 FindNearestIndex(int32 Count, TFunctionRef<FIntVector(int32)> ChunkOf) const;
 
 	// ==================== Statistics ====================
 

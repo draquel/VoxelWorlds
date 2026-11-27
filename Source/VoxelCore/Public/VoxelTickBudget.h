@@ -11,9 +11,12 @@
  * held by it (the collision cooks' applies and launches, the cooks under and ahead of the pawn, the meshes' submits to the
  * renderer, which keep their own caps); what can wait draws on what is left of the tick, in the tick's order: the far
  * field's build launches (UVoxelChunkManager::UpdateFarField), the lakes' and river reaches' meshes
- * (UpdateWaterBodyMeshes), the collision components of chunks that left the shell (UVoxelCollisionManager). Each of
- * those does at least one piece a tick, so nothing waits for ever; the rest goes on the next tick, nearest first, and the
- * world settles to the same state as without a budget.
+ * (UpdateWaterBodyMeshes), the collision components of chunks that left the shell (UVoxelCollisionManager), and since
+ * G295 the scatter's distance pass (its releases, its hand-offs at the horizon and its launches) and the applies of its
+ * completed extractions (UVoxelScatterManager::Update). Each of those does at least one piece a tick, so nothing waits
+ * for ever; the rest goes on the next tick, nearest first, and the world settles to the same state as without a budget.
+ *
+ * In VoxelCore since G295 (header only), so the scatter module, which the streaming module depends on, can take it.
  *
  * voxel.Stream.TickBudgetMs (UVoxelWorldsSettings::StreamTickBudgetMs): 0 = no budget (every section as before G282).
  */

@@ -20,6 +20,7 @@
 #include "VoxelMaterialRegistry.h"
 #include "VoxelBiomeRegistry.h"
 #include "VoxelScatter.h"
+#include "VoxelTickBudget.h"
 #include "DrawDebugHelpers.h"
 #include "Algo/BinarySearch.h"
 #include "Algo/StableSort.h"
@@ -57,6 +58,15 @@ static TAutoConsoleVariable<float> CVarVoxelScatterDenseMinPerChunk(
 	TEXT("points ((chunk size / surface point spacing)^2) is at least this. The world's value is\n")
 	TEXT("UVoxelWorldConfiguration::ScatterDenseMinPerChunk (256); the variable overrides it once set. Read when the scatter\n")
 	TEXT("manager initializes."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVoxelScatterTickBudget(
+	TEXT("voxel.Scatter.TickBudget"),
+	1,
+	TEXT("G295: 1 = the scatter's distance pass (its releases beyond each type's distance, its hand-offs at the horizon, its\n")
+	TEXT("launches) and the applies of its completed extractions and distance results draw on the chunk manager's tick budget\n")
+	TEXT("(voxel.Stream.TickBudgetMs): each at least one piece a tick, the nearest a viewer first, the rest on the next tick (a\n")
+	TEXT("pass cut short resumes there). 0 = every piece in the tick it comes up (before G295; an A/B)."),
 	ECVF_Default);
 
 /** The scatter HISM regions by default (voxel.Scatter.RegionChunks -1), every world mode: a quarter of the render regions' edge. */
@@ -520,6 +530,7 @@ void UVoxelScatterManager::Shutdown()
 		FAsyncScatterResult DiscardedResult;
 		while (CompletedScatterQueue.Dequeue(DiscardedResult)) {}
 	}
+	ReadyScatterResults.Empty();
 	AsyncScatterInProgress.Empty();
 
 	// Drain distance stream queue
@@ -527,7 +538,10 @@ void UVoxelScatterManager::Shutdown()
 		FDistanceStreamResult DiscardedResult;
 		while (DistanceStreamQueue.Dequeue(DiscardedResult)) {}
 	}
+	ReadyDistanceResults.Empty();
 	DistanceStreamInProgress.Empty();
+	PendingDistanceReleases.Empty();
+	bDistancePassCutShort = false;
 
 	// Clear pending queue and deferred upgrades
 	PendingGenerationQueue.Empty();
@@ -566,7 +580,7 @@ float UVoxelScatterManager::GetViewerDistance(const FVector& Point) const
 	return Distance;
 }
 
-void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime)
+void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime, const FVoxelTickBudget* Budget)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_Scatter);
 	if (!bIsInitialized)
@@ -587,8 +601,15 @@ void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime
 		StepStart = Now;
 	};
 
+	// Under a limited budget (G295) the applies and the distance pass's pieces draw on what is left of the chunk manager's
+	// tick, each part its first piece always; these count this tick's
+	ReleasesThisTick = 0;
+	HandOffsThisTick = 0;
+	DistanceLaunchesThisTick = 0;
+	DistancePiecesHeld = 0;
+
 	// Process completed async scatter results (game thread only: cache + HISM update)
-	ProcessCompletedAsyncScatter();
+	Timings.ApplyHeld = ProcessCompletedAsyncScatter(Budget);
 	EndStep(Timings.ApplyMs);
 
 	// Launch regrow placements for chunks uncovered by an unregistered exclusion volume
@@ -603,14 +624,24 @@ void UVoxelScatterManager::Update(const FVector& ViewerPosition, float DeltaTime
 	// Distance-based scatter streaming — fully decoupled from chunk generation.
 	// Uses its own async pipeline (DistanceStreamQueue / DistanceStreamInProgress).
 	// Process completed results every frame; launch new tasks periodically.
-	ProcessCompletedDistanceStream();
+	Timings.ApplyHeld += ProcessCompletedDistanceStream(Budget);
+
+	// The releases an earlier pass left to the budget (G295; none without one)
+	ProcessPendingDistanceReleases(Budget);
 
 	TimeSinceLastDistanceCheck += DeltaTime;
 	if (TimeSinceLastDistanceCheck >= DistanceStreamingInterval)
 	{
 		TimeSinceLastDistanceCheck = 0.0f;
-		PerformDistanceSpawn();
+		PerformDistanceSpawn(Budget);
 	}
+	else if (bDistancePassCutShort)
+	{
+		// A pass the budget cut short goes on where it stopped, before its next interval (G295)
+		PerformDistanceSpawnPass(Budget, /*bResume=*/true);
+	}
+	Timings.Released = ReleasesThisTick;
+	Timings.DistanceHeld = PendingDistanceReleases.Num() + DistancePiecesHeld;
 	EndStep(Timings.DistanceMs);
 
 	// Tick the scatter renderer to flush pending HISM rebuilds
@@ -724,6 +755,40 @@ bool UVoxelScatterManager::HasScatterData(const FIntVector& ChunkCoord) const
 void UVoxelScatterManager::HandOffChunkVoxels(const FIntVector& ChunkCoord, const TArray<FVoxelData>& VoxelData,
 	int32 ChunkSize, float VoxelSize)
 {
+	HandOffChunkVoxelsImpl(ChunkCoord, VoxelData.Num(), [&VoxelData]() -> TSharedPtr<const TArray<FVoxelData>>
+	{
+		// The copy the queued extraction keeps (the hand-off's cost before G295: 1 MB for a 64-voxel chunk)
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_HandOffCopy);
+		return MakeShared<TArray<FVoxelData>>(VoxelData);
+	}, ChunkSize, VoxelSize);
+}
+
+void UVoxelScatterManager::HandOffChunkVoxels(const FIntVector& ChunkCoord, TSharedPtr<const TArray<FVoxelData>> VoxelData,
+	int32 ChunkSize, float VoxelSize)
+{
+	HandOffChunkVoxelsImpl(ChunkCoord, VoxelData.IsValid() ? VoxelData->Num() : 0,
+		[&VoxelData]() { return VoxelData; }, ChunkSize, VoxelSize);
+}
+
+int32 UVoxelScatterManager::TakeArrivedResults()
+{
+	FAsyncScatterResult Arrived;
+	while (CompletedScatterQueue.Dequeue(Arrived))
+	{
+		ReadyScatterResults.Add(MoveTemp(Arrived));
+	}
+	return ReadyScatterResults.Num();
+}
+
+int32 UVoxelScatterManager::GetOutstandingWorkCount() const
+{
+	return PendingGenerationQueue.Num() + AsyncScatterInProgress.Num() + DeferredSupplementalPasses.Num()
+		+ DistanceStreamInProgress.Num() + PendingDistanceReleases.Num();
+}
+
+void UVoxelScatterManager::HandOffChunkVoxelsImpl(const FIntVector& ChunkCoord, int32 NumVoxels,
+	TFunctionRef<TSharedPtr<const TArray<FVoxelData>>()> TakeVoxels, int32 ChunkSize, float VoxelSize)
+{
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_OnChunkMeshDataReady);
 	if (!bIsInitialized || !Configuration)
 	{
@@ -731,10 +796,10 @@ void UVoxelScatterManager::HandOffChunkVoxels(const FIntVector& ChunkCoord, cons
 	}
 
 	// Extraction reads the chunk's voxels (always full resolution, LOD-independent)
-	if (VoxelData.Num() != ChunkSize * ChunkSize * ChunkSize)
+	if (NumVoxels != ChunkSize * ChunkSize * ChunkSize)
 	{
 		UE_LOG(LogVoxelScatter, Warning, TEXT("Chunk (%d,%d,%d): No voxel data for scatter extraction (expected %d, got %d)"),
-			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, ChunkSize * ChunkSize * ChunkSize, VoxelData.Num());
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, ChunkSize * ChunkSize * ChunkSize, NumVoxels);
 		return;
 	}
 
@@ -808,7 +873,7 @@ void UVoxelScatterManager::HandOffChunkVoxels(const FIntVector& ChunkCoord, cons
 		Req.ChunkCoord = ChunkCoord;
 		Req.DistanceToViewer = ChunkDistance;
 		Req.CapturedDefinitions = DefsToGenerate;
-		Req.ChunkVoxelData = VoxelData;
+		Req.ChunkVoxelData = TakeVoxels();
 		Req.ChunkSize = ChunkSize;
 		Req.VoxelSize = VoxelSize;
 		return Req;
@@ -889,8 +954,9 @@ void UVoxelScatterManager::OnChunkUnloaded(const FIntVector& ChunkCoord)
 	// A queued exclusion regrow is obsolete too: the reload's first pass reads the current volume set
 	PendingExclusionRegrow.Remove(ChunkCoord);
 
-	// An unloaded chunk waits for nothing (G79)
+	// An unloaded chunk waits for nothing (G79), and its instances all go below: a queued release has nothing left (G295)
 	ChunksAwaitingFirstExtraction.Remove(ChunkCoord);
+	PendingDistanceReleases.Remove(ChunkCoord);
 
 	RemoveChunkScatter(ChunkCoord);
 }
@@ -922,8 +988,10 @@ void UVoxelScatterManager::RegenerateChunkScatter(const FIntVector& ChunkCoord)
 	ClearedVolumesPerChunk.Remove(ChunkCoord);
 	CompletedScatterTypes.Remove(ChunkCoord);
 
-	// The hand-off that follows a regeneration decides again whether the chunk waits (G79)
+	// The hand-off that follows a regeneration decides again whether the chunk waits (G79); its re-extraction replaces every
+	// type it had, so a release queued for it has nothing to do (G295)
 	ChunksAwaitingFirstExtraction.Remove(ChunkCoord);
+	PendingDistanceReleases.Remove(ChunkCoord);
 
 	// Drop cached surface/scatter data so the re-extraction is treated as a fresh first pass (a full
 	// replace, not a supplemental append). Deliberately keep the rendered HISM instances: the completed
@@ -1481,7 +1549,11 @@ int64 UVoxelScatterManager::GetTotalMemoryUsage() const
 	Total += PendingGenerationQueue.GetAllocatedSize();
 	for (const auto& Pending : PendingGenerationQueue)
 	{
-		Total += Pending.ChunkVoxelData.GetAllocatedSize();
+		// A shared snapshot is the chunk's own array (G295): only a copy of the queue's own counts here
+		if (Pending.ChunkVoxelData.IsValid() && Pending.ChunkVoxelData.IsUnique())
+		{
+			Total += Pending.ChunkVoxelData->GetAllocatedSize();
+		}
 	}
 	Total += PendingQueueSet.GetAllocatedSize();
 
@@ -1549,6 +1621,7 @@ FString UVoxelScatterManager::GetDebugStats() const
 		TEXT("Async In-Flight: %d / %d\n")
 		TEXT("Distance Stream In-Flight: %d / %d\n")
 		TEXT("Awaiting First Extraction: %d (handed off by the distance pass: %lld, horizon %.0f)\n")
+		TEXT("Waiting for an apply: %d extractions, %d distance results; distance releases queued: %d chunks%s (G295)\n")
 		TEXT("Total Surface Points: %lld\n")
 		TEXT("Total Spawn Points: %lld\n")
 		TEXT("Avg Surface/Chunk: %.1f\n")
@@ -1564,6 +1637,8 @@ FString UVoxelScatterManager::GetDebugStats() const
 		AsyncScatterInProgress.Num(), MaxAsyncScatterTasks,
 		DistanceStreamInProgress.Num(), MaxDistanceStreamTasks,
 		ChunksAwaitingFirstExtraction.Num(), TotalDeferredFirstExtractions, GetScatterHorizon(),
+		ReadyScatterResults.Num(), ReadyDistanceResults.Num(), PendingDistanceReleases.Num(),
+		bDistancePassCutShort ? TEXT(", a distance pass cut short") : TEXT(""),
 		Stats.TotalSurfacePoints,
 		Stats.TotalSpawnPoints,
 		Stats.GetAverageSurfacePointsPerChunk(),
@@ -1729,9 +1804,9 @@ float UVoxelScatterManager::GetScatterHorizon() const
 	return Horizon;
 }
 
-void UVoxelScatterManager::ProcessDeferredFirstExtractions()
+void UVoxelScatterManager::ProcessDeferredFirstExtractions(const FVoxelTickBudget* Budget)
 {
-	if (ChunksAwaitingFirstExtraction.Num() == 0 || !Configuration)
+	if (ChunksAwaitingFirstExtraction.Num() == 0 || !Configuration || DistancePassHandOffsLeft <= 0)
 	{
 		return;
 	}
@@ -1767,11 +1842,22 @@ void UVoxelScatterManager::ProcessDeferredFirstExtractions()
 	}
 	Candidates.Sort([](const FCandidate& A, const FCandidate& B) { return A.Distance < B.Distance; });
 
+	// The pass's quota (MaxDistanceSpawnChunksPerPass, what is left of it when a pass the budget cut short resumes), and
+	// under a limited budget the first hand-off of the tick always, the others while time is left (G295)
+	const bool bBudgeted = IsBudgeted(Budget);
+	const int32 Limit = DistancePassHandOffsLeft;
 	int32 Launched = 0;
-	for (const FCandidate& Candidate : Candidates)
+	for (int32 CandidateIndex = 0; CandidateIndex < Candidates.Num(); ++CandidateIndex)
 	{
-		if (Launched >= MaxDistanceSpawnChunksPerPass)
+		const FCandidate& Candidate = Candidates[CandidateIndex];
+		if (Launched >= Limit)
 		{
+			break;
+		}
+		if (bBudgeted && !Budget->MayContinue(HandOffsThisTick))
+		{
+			bDistancePassCutShort = true;
+			DistancePiecesHeld += FMath::Min(Candidates.Num() - CandidateIndex, Limit - Launched);
 			break;
 		}
 		// The hand-off runs HandOffChunkVoxels, which queues the extraction and takes the chunk out of the set; a chunk
@@ -1787,6 +1873,8 @@ void UVoxelScatterManager::ProcessDeferredFirstExtractions()
 		if (HandOff != EVoxelScatterHandOff::Gone)
 		{
 			++Launched;
+			++HandOffsThisTick;
+			--DistancePassHandOffsLeft;
 		}
 	}
 	if (Launched > 0)
@@ -1796,7 +1884,7 @@ void UVoxelScatterManager::ProcessDeferredFirstExtractions()
 	}
 }
 
-void UVoxelScatterManager::PerformDistanceSpawn()
+void UVoxelScatterManager::PerformDistanceSpawn(const FVoxelTickBudget* Budget)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_DistanceSpawn);
 	if (!Configuration)
@@ -1804,9 +1892,24 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 		return;
 	}
 
+	// A new pass: its own quotas. A pass the budget cut short gives up what it had left; this one finds it again (G295).
+	DistancePassHandOffsLeft = MaxDistanceSpawnChunksPerPass;
+	DistancePassLaunchesLeft = MaxDistanceSpawnChunksPerPass;
+	PerformDistanceSpawnPass(Budget, /*bResume=*/false);
+}
+
+void UVoxelScatterManager::PerformDistanceSpawnPass(const FVoxelTickBudget* Budget, bool bResume)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_DistancePass);
+	bDistancePassCutShort = false;
+	if (!Configuration)
+	{
+		return;
+	}
+
 	// The chunks that arrived beyond every type's reach, once within the scatter horizon (before the cache check: they
 	// have nothing cached yet; G79)
-	ProcessDeferredFirstExtractions();
+	ProcessDeferredFirstExtractions(Budget);
 
 	if (SurfaceCache.Num() == 0)
 	{
@@ -1851,62 +1954,50 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 	// 1. Clear from CompletedScatterTypes (allows regeneration on return)
 	// 2. Remove spawn points from SpawnCache (prevents data bloat)
 	// 3. Release instances in renderer (zero-scaled, returned to pool — no flicker)
-
-	for (auto& CompletedPair : CompletedScatterTypes)
+	// The pass finds them (a cheap scan) and queues them; ProcessPendingDistanceReleases makes them: all of them at once
+	// without a budget, as before G295, or within it (after a teleport the place left's chunks are all beyond, 651
+	// releases and 2.2 ms of one pass on VoxelDemo). A pass that resumes finds nothing new: its releases are queued.
+	if (!bResume)
 	{
-		const FIntVector& ChunkCoord = CompletedPair.Key;
-		TSet<int32>& CompletedTypeIDs = CompletedPair.Value;
-
-		const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
-			FVector(ChunkWorldSize * 0.5f);
-		const float ChunkDistance = GetViewerDistance(ChunkCenter);
-
-		TArray<int32> TypesToRemove;
-		for (const FDistanceLimitedDef& Limited : DistanceLimitedDefs)
+		for (const auto& CompletedPair : CompletedScatterTypes)
 		{
-			const float CleanupDistance = Limited.SpawnDistance * (1.0f + DistanceCleanupHysteresis);
-			if (ChunkDistance > CleanupDistance && CompletedTypeIDs.Contains(Limited.Def->ScatterID))
+			const FIntVector& ChunkCoord = CompletedPair.Key;
+			const TSet<int32>& CompletedTypeIDs = CompletedPair.Value;
+			if (CompletedTypeIDs.Num() == 0)
 			{
-				TypesToRemove.Add(Limited.Def->ScatterID);
+				continue;
 			}
-		}
 
-		if (TypesToRemove.Num() == 0)
-		{
-			continue;
-		}
+			const FVector ChunkCenter = GetChunkWorldOrigin(ChunkCoord) +
+				FVector(ChunkWorldSize * 0.5f);
+			const float ChunkDistance = GetViewerDistance(ChunkCenter);
 
-		// Clear from completed tracking (allows regeneration when player returns)
-		for (int32 TypeID : TypesToRemove)
-		{
-			CompletedTypeIDs.Remove(TypeID);
-		}
-
-		// Release instances directly — zero-scaled, returned to pool
-		if (ScatterRenderer && ScatterRenderer->IsInitialized())
-		{
-			for (int32 TypeID : TypesToRemove)
+			TArray<TPair<int32, float>>* Queued = nullptr;
+			for (const FDistanceLimitedDef& Limited : DistanceLimitedDefs)
 			{
-				ScatterRenderer->ReleaseChunkScatterType(ChunkCoord, TypeID);
+				const float CleanupDistance = Limited.SpawnDistance * (1.0f + DistanceCleanupHysteresis);
+				if (ChunkDistance > CleanupDistance && CompletedTypeIDs.Contains(Limited.Def->ScatterID))
+				{
+					if (!Queued)
+					{
+						Queued = &PendingDistanceReleases.FindOrAdd(ChunkCoord);
+					}
+					const int32 TypeID = Limited.Def->ScatterID;
+					if (!Queued->ContainsByPredicate([TypeID](const TPair<int32, float>& Entry) { return Entry.Key == TypeID; }))
+					{
+						Queued->Emplace(TypeID, CleanupDistance);
+					}
+				}
 			}
-		}
-
-		// Remove spawn points for these types from the scatter data cache
-		FChunkScatterData* ScatterData = SpawnCache.Find(ChunkCoord);
-		if (ScatterData && ScatterData->bIsValid)
-		{
-			TSet<int32> TypeIDSet(TypesToRemove);
-			ScatterData->SpawnPoints.RemoveAll([&TypeIDSet](const FScatterSpawnPoint& Point)
-			{
-				return TypeIDSet.Contains(Point.ScatterTypeID);
-			});
 		}
 	}
+	ProcessPendingDistanceReleases(Budget);
 
 	// --- Spawn pass ---
-	// Don't launch more if our dedicated pipeline is saturated
+	// Don't launch more if our dedicated pipeline is saturated, or the pass has used its quota (G295: a pass the budget cut
+	// short resumes with what it has left)
 	const int32 AvailableSlots = MaxDistanceStreamTasks - DistanceStreamInProgress.Num();
-	if (AvailableSlots <= 0)
+	if (AvailableSlots <= 0 || DistancePassLaunchesLeft <= 0)
 	{
 		return;
 	}
@@ -1994,14 +2085,24 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 		return A.Distance < B.Distance;
 	});
 
-	// Launch async tasks on thread pool — dedicated pipeline, no competition with chunk generation
+	// Launch async tasks on thread pool — dedicated pipeline, no competition with chunk generation. Each launch copies the
+	// chunk's surface points for its task; under a limited budget the first launch of the tick always, the others while
+	// time is left, the rest on the next tick (G295).
+	const bool bBudgeted = IsBudgeted(Budget);
 	int32 ChunksLaunched = 0;
-	const int32 MaxToLaunch = FMath::Min(MaxDistanceSpawnChunksPerPass, AvailableSlots);
+	const int32 MaxToLaunch = FMath::Min(DistancePassLaunchesLeft, AvailableSlots);
 
-	for (const FSpawnCandidate& Candidate : Candidates)
+	for (int32 CandidateIndex = 0; CandidateIndex < Candidates.Num(); ++CandidateIndex)
 	{
+		const FSpawnCandidate& Candidate = Candidates[CandidateIndex];
 		if (ChunksLaunched >= MaxToLaunch)
 		{
+			break;
+		}
+		if (bBudgeted && !Budget->MayContinue(DistanceLaunchesThisTick))
+		{
+			bDistancePassCutShort = true;
+			DistancePiecesHeld += FMath::Min(Candidates.Num() - CandidateIndex, MaxToLaunch - ChunksLaunched);
 			break;
 		}
 
@@ -2060,6 +2161,8 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 		});
 
 		++ChunksLaunched;
+		++DistanceLaunchesThisTick;
+		--DistancePassLaunchesLeft;
 	}
 
 	if (ChunksLaunched > 0)
@@ -2069,16 +2172,155 @@ void UVoxelScatterManager::PerformDistanceSpawn()
 	}
 }
 
-void UVoxelScatterManager::ProcessCompletedDistanceStream()
+void UVoxelScatterManager::ProcessPendingDistanceReleases(const FVoxelTickBudget* Budget)
+{
+	if (PendingDistanceReleases.Num() == 0 || !Configuration)
+	{
+		return;
+	}
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_DistanceRelease);
+	const float ChunkWorldSize = Configuration->GetChunkWorldSize();
+	const bool bBudgeted = IsBudgeted(Budget);
+
+	// One chunk's queued types, checked again now: still on the chunk and still beyond their cleanup distance (in the pass
+	// that found them, the same check; a later tick's viewers may have come back)
+	auto ReleaseChunk = [this, ChunkWorldSize](const FIntVector& ChunkCoord, const TArray<TPair<int32, float>>& Queued)
+	{
+		TSet<int32>* CompletedTypeIDs = CompletedScatterTypes.Find(ChunkCoord);
+		if (!CompletedTypeIDs)
+		{
+			return;
+		}
+		const float ChunkDistance = GetViewerDistance(GetChunkWorldOrigin(ChunkCoord) + FVector(ChunkWorldSize * 0.5f));
+		TArray<int32> TypesToRemove;
+		for (const TPair<int32, float>& Entry : Queued)
+		{
+			if (ChunkDistance > Entry.Value && CompletedTypeIDs->Contains(Entry.Key))
+			{
+				TypesToRemove.Add(Entry.Key);
+			}
+		}
+		if (TypesToRemove.Num() == 0)
+		{
+			return;
+		}
+
+		// Clear from completed tracking (allows regeneration when player returns)
+		for (int32 TypeID : TypesToRemove)
+		{
+			CompletedTypeIDs->Remove(TypeID);
+		}
+
+		// Release instances directly — zero-scaled, returned to pool
+		if (ScatterRenderer && ScatterRenderer->IsInitialized())
+		{
+			for (int32 TypeID : TypesToRemove)
+			{
+				ScatterRenderer->ReleaseChunkScatterType(ChunkCoord, TypeID);
+			}
+		}
+
+		// Remove spawn points for these types from the scatter data cache
+		FChunkScatterData* ScatterData = SpawnCache.Find(ChunkCoord);
+		if (ScatterData && ScatterData->bIsValid)
+		{
+			TSet<int32> TypeIDSet(TypesToRemove);
+			ScatterData->SpawnPoints.RemoveAll([&TypeIDSet](const FScatterSpawnPoint& Point)
+			{
+				return TypeIDSet.Contains(Point.ScatterTypeID);
+			});
+		}
+	};
+
+	if (!bBudgeted)
+	{
+		// Every one now, in the order the pass found them (the release before G295)
+		for (const auto& Pair : PendingDistanceReleases)
+		{
+			ReleaseChunk(Pair.Key, Pair.Value);
+			++ReleasesThisTick;
+		}
+		PendingDistanceReleases.Reset();
+		return;
+	}
+
+	// The tick's first always, the others while time is left; the rest wait for the next tick (out of range, where no
+	// viewer sees them: the order does not matter)
+	for (auto It = PendingDistanceReleases.CreateIterator(); It; ++It)
+	{
+		if (!Budget->MayContinue(ReleasesThisTick))
+		{
+			break;
+		}
+		const FIntVector ChunkCoord = It.Key();
+		const TArray<TPair<int32, float>> Queued = MoveTemp(It.Value());
+		It.RemoveCurrent();
+		ReleaseChunk(ChunkCoord, Queued);
+		++ReleasesThisTick;
+	}
+	if (PendingDistanceReleases.Num() == 0)
+	{
+		PendingDistanceReleases.Reset();
+	}
+}
+
+bool UVoxelScatterManager::IsBudgeted(const FVoxelTickBudget* Budget)
+{
+	return Budget && Budget->IsLimited() && CVarVoxelScatterTickBudget.GetValueOnGameThread() != 0;
+}
+
+int32 UVoxelScatterManager::FindNearestIndex(int32 Count, TFunctionRef<FIntVector(int32)> ChunkOf) const
+{
+	if (Count <= 0)
+	{
+		return INDEX_NONE;
+	}
+	if (!Configuration)
+	{
+		return 0;
+	}
+	const float HalfChunk = Configuration->GetChunkWorldSize() * 0.5f;
+	int32 Best = 0;
+	float BestDistance = TNumericLimits<float>::Max();
+	for (int32 Index = 0; Index < Count; ++Index)
+	{
+		const float Distance = GetViewerDistance(GetChunkWorldOrigin(ChunkOf(Index)) + FVector(HalfChunk));
+		if (Distance < BestDistance)
+		{
+			Best = Index;
+			BestDistance = Distance;
+		}
+	}
+	return Best;
+}
+
+int32 UVoxelScatterManager::ProcessCompletedDistanceStream(const FVoxelTickBudget* Budget)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_DistanceApply);
-	FDistanceStreamResult Result;
-	int32 ProcessedCount = 0;
-
-	// Count check BEFORE dequeue — see ProcessCompletedAsyncScatter: dequeue-first
-	// drops one result on the exiting iteration and leaks its in-progress entry.
-	while (ProcessedCount < MaxDistanceStreamResultsPerFrame && DistanceStreamQueue.Dequeue(Result))
+	// Every arrived result is taken off the workers' queue and waits here, in the order it arrived, for its apply (G295)
 	{
+		FDistanceStreamResult Arrived;
+		while (DistanceStreamQueue.Dequeue(Arrived))
+		{
+			ReadyDistanceResults.Add(MoveTemp(Arrived));
+		}
+	}
+
+	// MaxDistanceStreamResultsPerFrame a tick in the order they arrived; under a limited budget the nearest a viewer first,
+	// the first always and the others while time is left (G295)
+	const bool bBudgeted = IsBudgeted(Budget);
+	int32 ProcessedCount = 0;
+	while (ProcessedCount < MaxDistanceStreamResultsPerFrame && ReadyDistanceResults.Num() > 0)
+	{
+		if (bBudgeted && !Budget->MayContinue(ProcessedCount))
+		{
+			break;
+		}
+		const int32 Index = bBudgeted
+			? FindNearestIndex(ReadyDistanceResults.Num(), [this](int32 I) { return ReadyDistanceResults[I].ChunkCoord; })
+			: 0;
+		FDistanceStreamResult Result = MoveTemp(ReadyDistanceResults[Index]);
+		ReadyDistanceResults.RemoveAt(Index, EAllowShrinking::No);
 		++ProcessedCount;
 
 		// Remove from distance stream tracking
@@ -2121,6 +2363,7 @@ void UVoxelScatterManager::ProcessCompletedDistanceStream()
 
 		TotalSpawnPointsGenerated += SpawnCount;
 	}
+	return ReadyDistanceResults.Num();
 }
 
 void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneration PendingData)
@@ -2178,7 +2421,7 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 
 		// Validate voxel data
 		const int32 ExpectedVoxels = PendingData.ChunkSize * PendingData.ChunkSize * PendingData.ChunkSize;
-		if (PendingData.ChunkVoxelData.Num() != ExpectedVoxels)
+		if (!PendingData.ChunkVoxelData.IsValid() || PendingData.ChunkVoxelData->Num() != ExpectedVoxels)
 		{
 			if (UVoxelScatterManager* This = WeakThis.Get())
 			{
@@ -2190,7 +2433,7 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 		// Extract surface points from voxel data (LOD-independent)
 		FChunkSurfaceData SurfaceData;
 		const double ExtractStart = FPlatformTime::Seconds();
-		ExtractChunkSurfacePoints(bCubicExtraction, PendingData.ChunkVoxelData, ChunkCoord, ChunkWorldOrigin, PendingData.ChunkSize,
+		ExtractChunkSurfacePoints(bCubicExtraction, *PendingData.ChunkVoxelData, ChunkCoord, ChunkWorldOrigin, PendingData.ChunkSize,
 			PendingData.VoxelSize, CapturedSurfacePointSpacing, CapturedClearedVolumes, ExtractionContext, SurfaceData);
 		const double PlaceStart = FPlatformTime::Seconds();
 		Result.ExtractSeconds = PlaceStart - ExtractStart;
@@ -2235,18 +2478,29 @@ void UVoxelScatterManager::LaunchAsyncScatterGeneration(FPendingScatterGeneratio
 	});
 }
 
-void UVoxelScatterManager::ProcessCompletedAsyncScatter()
+int32 UVoxelScatterManager::ProcessCompletedAsyncScatter(const FVoxelTickBudget* Budget)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelScatter_Apply);
-	FAsyncScatterResult Result;
+	// Every arrived result is taken off the workers' queue and waits here, in the order it arrived, for its apply (G295).
+	// A result waiting is still in AsyncScatterInProgress, so an unload or a regeneration meanwhile discards it as before.
+	TakeArrivedResults();
+
+	// MaxProcessPerFrame a tick in the order they arrived; under a limited budget the nearest a viewer first (a chunk's
+	// results keep their order: the earliest of equal distances), the first always and the others while time is left (G295)
+	const bool bBudgeted = IsBudgeted(Budget);
 	int32 ProcessedCount = 0;
 	const int32 MaxProcessPerFrame = 2;
-
-	// Count check BEFORE dequeue: dequeuing first would pop a result on the
-	// iteration that exits the loop and silently drop it, leaving its chunk
-	// stuck in AsyncScatterInProgress forever.
-	while (ProcessedCount < MaxProcessPerFrame && CompletedScatterQueue.Dequeue(Result))
+	while (ProcessedCount < MaxProcessPerFrame && ReadyScatterResults.Num() > 0)
 	{
+		if (bBudgeted && !Budget->MayContinue(ProcessedCount))
+		{
+			break;
+		}
+		const int32 Index = bBudgeted
+			? FindNearestIndex(ReadyScatterResults.Num(), [this](int32 I) { return ReadyScatterResults[I].ChunkCoord; })
+			: 0;
+		FAsyncScatterResult Result = MoveTemp(ReadyScatterResults[Index]);
+		ReadyScatterResults.RemoveAt(Index, EAllowShrinking::No);
 		++ProcessedCount;
 		++ExtractionTiming.Chunks;
 		ExtractionTiming.Points += Result.ExtractedPoints;
@@ -2362,6 +2616,7 @@ void UVoxelScatterManager::ProcessCompletedAsyncScatter()
 			}
 		}
 	}
+	return ReadyScatterResults.Num();
 }
 
 void UVoxelScatterManager::ExtractSurfacePointsByColumn(
