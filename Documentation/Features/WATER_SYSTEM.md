@@ -687,6 +687,13 @@ world that names none has no generator, no source and no term in its fingerprint
   from the viewers): the worker walks the region's tiles itself, so the asking thread does nothing more, and queues
   those that are not kept, the nearest to a place first, up to a limit per ask. `GetLoad` gives the cache's size and
   what is queued without walking the cache (`GetStats` walks every tile), so the asker can wait for an idle worker.
+  A reader about to test many small places it knows ahead has their tiles worked out together
+  (`IVoxelWaterBodySource::PrepareWaterBodies`, G297: the POI layer's road warm-up at a world's start, for the boxes
+  its blocks' sites will ask for): every region's missing tiles, each once, in one parallel build, the springs'
+  descents in batches small enough to spread over every worker (a build waits for its slowest batch, and a few dozen
+  tiles in batches of 16 squares left most workers idle). On VoxelDemo's start the 88 tiles the sites need cost 1.8 s
+  worked out a site's gather at a time on the game thread, about 0.6 s so; the slowest single descent is about 0.38 s.
+  The default for another source is a complete gather over each region in turn. Regions on a planet are not taken.
   On a planet (H8) a tile is a cell of a cube sphere grid of its own, about `TileCells` cells wide, and its region
   the cap round it; the gathers, the warm-up, the announcements and `HoldsWaterBodiesOnSphere` take caps. What costs
   nothing on a plane (the tiles of a box are a rectangle) is a flood through the tiles' neighbours there, so three
