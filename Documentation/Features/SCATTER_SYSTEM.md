@@ -556,12 +556,17 @@ scene (frames up to 51 ms). Writes are now batched per HISM:
   (`WriteInstanceUnbuilt`: the tree out of date, the instance's bounds among the unbuilt ones) and the new instances last,
   whose `AddInstances` starts the batch's one build. `voxel.Scatter.HISMWritePath 0` is the path before G292 (each change
   through the HISM's own call, the budget checked after each write); `voxel.Scatter.Stats` counts the builds started.
-- **The dense types' regions (G292, D198).** `voxel.Scatter.DenseRegionChunks` N > 0 keeps the HISMs of the dense types in
-  regions of N chunks, the others in the regions above: a static type is dense when its `Density` times a chunk's surface
-  points ((chunk size / surface point spacing)^2) is at least `voxel.Scatter.DenseMinPerChunk` (256), decided the first
-  time the renderer asks for the type and kept for the session (`GetTypeRegions`; a skeletal type keeps the render
-  regions). A dense HISM holds a quarter (N = 2) or a sixteenth (N = 1) of the instances on a heightmap world, so each of
-  its writes copies that many. 0 (the default) = every type in the same regions, as before; the trade is D198.
+- **The dense types' regions (G292; D198, regions of 2 chunks by default since 2026-11-26).** The HISMs of the dense types
+  are kept in regions of the world configuration's `ScatterDenseRegionChunks` chunks (2), the others in the regions above:
+  a static type is dense when its `Density` times a chunk's surface points ((chunk size / surface point spacing)^2) is at
+  least the configuration's `ScatterDenseMinPerChunk` (256), decided the first time the renderer asks for the type and
+  kept for the session (`GetTypeRegions`; a skeletal type keeps the render regions). The scatter manager resolves both
+  when it initializes and gives them to the renderer (`SetDenseTypeRegions`); `voxel.Scatter.DenseRegionChunks` and
+  `voxel.Scatter.DenseMinPerChunk` override them once set (an A/B: `DenseRegionChunks 0` = every type in the same
+  regions, as before D198), and a change on a running world takes effect at the next initialize, as the regions above.
+  A dense HISM holds a quarter (2) or a sixteenth (1) of the instances on a heightmap world, so each of its writes copies
+  that many. Only which HISM holds an instance changes: the placement and the digests are the same either way. A
+  dedicated server builds no HISM and is not affected.
 - Queries see held writes: `FindNearestInstance` (harvest) reads each instance through them and also scans held
   placements and new instances; `GetTotalInstanceCount` counts held new instances. `FlushHISMWrites` applies every held
   write now, whatever the budget.
@@ -572,8 +577,11 @@ G292, `.OneTreeBuild` (a batch of placements and new instances starts one build 
 G292 throws its first away; the same instances on both), `.Compaction` (chunks unloaded, cleared and reloaded while the
 writes wait, then the compacting batch: the HISM holds its live instances alone, the same as the path before G292, a
 collision body at each), `.EstimateBudget` (with the estimate far over the budget a tick writes one batch that builds and
-every batch of releases) and `.DenseRegions` (the test grass dense in regions of one chunk, the other types in their
-shared region: the same transforms, and the scenario's stops the instances written at once). (`WriteBudget`: with regions of one chunk and a budget of one batch a tick, the scenario pumped by ticks alone, a chunk
+every batch of releases), `.DenseRegions` (the test grass dense in regions of one chunk, the other types in their
+shared region, the override at 0 a HISM per type: the same transforms, and the scenario's stops the instances written at
+once) and, since D198, `.DenseByDefault` (a world that sets nothing: the grass made dense in regions of 2 chunks, the
+rocks and trees in the shared region; the configuration's 0 and the override's 0 a HISM per type; the same transforms
+in all three; the test grass of the other tests, 128 a chunk, is under the default threshold). (`WriteBudget`: with regions of one chunk and a budget of one batch a tick, the scenario pumped by ticks alone, a chunk
 unloaded and a radius cleared while their writes wait included, draws at every stop the instances written at once, as
 the budget 0 does; of four HISMs due in one tick the nearest the viewer is written and the others draw their trees until
 later ticks). The bench logs `ScatBatchN` and `ScatCompactN` per sample, and the scatter section's steps
@@ -611,7 +619,28 @@ instances at most), a third copied. What they cost (`Scripts/qa/scatter_view.py`
 three runs a side, alternated): 94, 110 and 142 HISMs there, draw calls 2,212 to 2,219, 2,229 to 2,232 and 2,234 (+0.6
 and +0.8 %), the GPU 5.82 to 5.86, 5.77 to 5.89 and 5.84 to 5.88 ms (within the spread), the frame held at 16.7 ms; after
 a five-minute walk 422 to 445, 568 to 571 and 982 to 1,011 HISMs, 165,000 to 183,000, 221,000 and 261,000 to 277,000
-instances pooled (G303). The dense regions stay off (D198).
+instances pooled (G303). The user decided D198 with regions of 2 chunks (below).
+
+**The dense types in regions of 2 chunks by default (D198, 2026-11-26).** Built as the world configuration's
+`ScatterDenseRegionChunks` (2) and `ScatterDenseMinPerChunk` (256), measured with `voxel.Scatter.DenseRegionChunks` 0
+and the default alternated in one editor. On `VoxelDemo` (two five-minute walks a side, `scatter_writes.py`): the
+longest tick of writes 2.82 and 2.26 ms against 1.55 and 1.99, the longest write 2.04 and 2.24 (grass HISMs of 15,800
+to 17,400 instances) against 0.88 and 0.91 (5,400 at most), ticks of 2 ms or more 6 and 9 against none, 1.8 million
+instances copied by the tree builds against 0.9; after the walk 416 to 425 HISMs against 560, 161,000 to 172,000
+instances pooled against 212,000 to 219,000 (G303). At the spawn's view (`scatter_view.py`, six runs a side, every
+frame of the CSV profile read since G305): 94 against 110 HISMs, draw calls 2,438 to 2,442 against 2,455 to 2,460
+(+0.7 %), the GPU 6.86 to 6.91 against 6.89 to 6.91 ms, the game thread 13.03 to 13.53 against 13.10 to 13.42 ms. The
+review planet (`PlanetTest` with `Review_Planet`, the same four dense types), a walk a side: the longest tick 2.45
+against 1.72 ms, the longest write 1.71 against 1.00, 1.83 against 0.73 million copied, 346 against 460 HISMs after the
+walk; its spawn, at the grid's origin, splits the same in regions of 4 and of 2 (128 HISMs either way). A block world
+(`Review_Cubic`; dense: Grass03, Grass04, Mushroom01, Rock01 and Rock02), two walks a side: its peaks are ticks the
+write budget fills with several smaller writes, so the longest tick does not come down (2.51 and 2.67 ms against 2.69
+and 2.73) while the longest write does (1.34 and 1.60 against 1.00 and 0.93) and the copies halve (1.63 and 1.69
+million against 0.78); 151 against 361 HISMs after the walk; at the spawn 60 against 142 HISMs, draw calls 2,154
+against 2,201 to 2,205 (+2.3 %), the GPU 5.56 to 5.58 ms either way. Whether a block world keeps the default is D199
+(`Documentation/FINDINGS.md`). The scatter digests are the same either way (`VoxelDemo` against its record, the review
+planet, the block world and island M with the override at 0 and the default), the chord bench's counters the same
+(three runs a side), and a dedicated server, which builds no HISM, stands its players as before (`server_ground.py`).
 
 ### Dynamic materials (the foliage and bolt plan's D67)
 
