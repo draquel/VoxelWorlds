@@ -78,6 +78,8 @@ bool FVoxelSettingsOverrideTest::RunTest(const FString& Parameters)
 		{ TEXT("voxel.World.FarFieldMaxBuilds"), static_cast<float>(C->FarFieldMaxBuilds) },
 		{ TEXT("voxel.Render.RegionChunks"), static_cast<float>(C->RenderRegionChunks) },
 		{ TEXT("voxel.Scatter.RegionChunks"), static_cast<float>(C->ScatterRegionChunks) },
+		{ TEXT("voxel.Scatter.DenseRegionChunks"), static_cast<float>(C->ScatterDenseRegionChunks) },
+		{ TEXT("voxel.Scatter.DenseMinPerChunk"), C->ScatterDenseMinPerChunk },
 	};
 	for (const TPair<const TCHAR*, float>& Pair : Pairs)
 	{

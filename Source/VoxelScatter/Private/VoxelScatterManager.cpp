@@ -40,6 +40,25 @@ static TAutoConsoleVariable<int32> CVarVoxelScatterRegionChunks(
 	TEXT("(voxel.Render.RegionChunks); N > 0 = regions of N chunks. Read when the scatter manager initializes."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarVoxelScatterDenseRegionChunks(
+	TEXT("voxel.Scatter.DenseRegionChunks"),
+	2,
+	TEXT("Scatter HISMs of the dense types (G292, D198): N > 0 = a static type whose density over a chunk's surface points is\n")
+	TEXT("at least voxel.Scatter.DenseMinPerChunk keeps its HISMs in regions of N chunks, so each holds fewer instances and each\n")
+	TEXT("write copies fewer (more components). 0 = every type in the regions of voxel.Scatter.RegionChunks (before D198).\n")
+	TEXT("The world's value is UVoxelWorldConfiguration::ScatterDenseRegionChunks (2); the variable overrides it once set.\n")
+	TEXT("Read when the scatter manager initializes."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarVoxelScatterDenseMinPerChunk(
+	TEXT("voxel.Scatter.DenseMinPerChunk"),
+	256.0f,
+	TEXT("Scatter HISMs (G292, D198): a type is dense (voxel.Scatter.DenseRegionChunks) when its Density times a chunk's surface\n")
+	TEXT("points ((chunk size / surface point spacing)^2) is at least this. The world's value is\n")
+	TEXT("UVoxelWorldConfiguration::ScatterDenseMinPerChunk (256); the variable overrides it once set. Read when the scatter\n")
+	TEXT("manager initializes."),
+	ECVF_Default);
+
 /** The scatter HISM regions by default (voxel.Scatter.RegionChunks -1), every world mode: a quarter of the render regions' edge. */
 static constexpr int32 DefaultScatterRegionChunks = 4;
 
@@ -403,6 +422,10 @@ void UVoxelScatterManager::Initialize(UVoxelWorldConfiguration* Config, UWorld* 
 		ScatterRegions.RegionChunks = DefaultScatterRegionChunks;
 	}
 	ScatterRenderer->SetRenderRegions(ScatterRegions);
+	// The dense types' smaller regions (D198, decided by the user 2026-11-26: regions of 2 chunks by default)
+	ScatterRenderer->SetDenseTypeRegions(
+		FMath::Max(0, VoxelSettings::Resolve(CVarVoxelScatterDenseRegionChunks, Config->ScatterDenseRegionChunks)),
+		FMath::Max(0.0f, VoxelSettings::Resolve(CVarVoxelScatterDenseMinPerChunk, Config->ScatterDenseMinPerChunk)));
 	UE_LOG(LogVoxelScatter, Log, TEXT("Scatter HISM regions: %d chunks along an edge (0 = one region)"), ScatterRegions.RegionChunks);
 	ScatterRenderer->Initialize(this, World);
 
