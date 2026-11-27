@@ -621,19 +621,26 @@ bool FVoxelCollisionMeshReachTest::RunTest(const FString& Parameters)
 		const FRun Run = RunWorld(*this, Kind, 1, 0, 0, true, false);
 		const FVoxelCollisionCookStats& S = Run.RecookStats;
 		const int32 Drawn = static_cast<int32>(EVoxelCollisionOwnMesh::DrawnAtLOD);
-		int64 Classes = 0;
-		for (int32 Own = 0; Own < FVoxelCollisionCookStats::NumReachOwn; ++Own)
+		// The re-cook from scratch (RegenerateChunkCollision drops the chunk's data first) counts its cooks as first cooks:
+		// both kinds are summed.
+		int64 Cooks = 0, OwnDrawn = 0, AllDrawn = 0, Classes = 0;
+		for (int32 K = 0; K < 2; ++K)
 		{
-			Classes += S.ReachOwn[1][Own];
+			Cooks += S.ReachCooks[K];
+			OwnDrawn += S.ReachOwn[K][Drawn];
+			AllDrawn += S.ReachAllDrawn[K];
+			for (int32 Own = 0; Own < FVoxelCollisionCookStats::NumReachOwn; ++Own)
+			{
+				Classes += S.ReachOwn[K][Own];
+			}
 		}
-		AddInfo(FString::Printf(TEXT("%s: %lld re-cooks with a surface, %lld drawn at LOD 0, %lld with every neighbour drawn there; asked of one chunk: own %d, neighbours %d of %d drawn at LOD 0"),
-			KindName(Kind), S.ReachCooks[1], S.ReachOwn[1][Drawn], S.ReachAllDrawn[1], static_cast<int32>(Run.ReachAtLOD0.Own),
-			Run.ReachAtLOD0.NeighborsDrawnAtLOD, Run.ReachAtLOD0.NeighborsWithVoxels));
+		AddInfo(FString::Printf(TEXT("%s: %lld cooks with a surface re-cooked, %lld drawn at LOD 0, %lld with every neighbour drawn there; asked of one chunk: own %d, neighbours %d of %d drawn at LOD 0"),
+			KindName(Kind), Cooks, OwnDrawn, AllDrawn, static_cast<int32>(Run.ReachAtLOD0.Own), Run.ReachAtLOD0.NeighborsDrawnAtLOD,
+			Run.ReachAtLOD0.NeighborsWithVoxels));
 		TestTrue(FString::Printf(TEXT("%s: streaming and collision settle"), KindName(Kind)), Run.bSettled);
-		TestTrue(FString::Printf(TEXT("%s: chunks with a surface were re-cooked (non-vacuous)"), KindName(Kind)), S.ReachCooks[1] > 0 && Run.bReachAsked);
-		TestEqual(FString::Printf(TEXT("%s: every cook with a surface is in one own-mesh class"), KindName(Kind)), Classes, S.ReachCooks[1]);
-		TestTrue(FString::Printf(TEXT("%s: those with every neighbour drawn there are drawn there themselves"), KindName(Kind)), S.ReachAllDrawn[1] <= S.ReachOwn[1][Drawn]);
-		TestEqual(FString::Printf(TEXT("%s: the first cooks are not counted as re-cooks"), KindName(Kind)), S.ReachCooks[0], static_cast<int64>(0));
+		TestTrue(FString::Printf(TEXT("%s: chunks with a surface were re-cooked (non-vacuous)"), KindName(Kind)), Cooks > 0 && Run.bReachAsked);
+		TestEqual(FString::Printf(TEXT("%s: every cook with a surface is in one own-mesh class"), KindName(Kind)), Classes, Cooks);
+		TestTrue(FString::Printf(TEXT("%s: those with every neighbour drawn there are drawn there themselves"), KindName(Kind)), AllDrawn <= OwnDrawn);
 		if (Run.ReachAtLOD0.Own == EVoxelCollisionOwnMesh::DrawnAtLOD)
 		{
 			TestEqual(FString::Printf(TEXT("%s: asked at LOD 1, a chunk drawn at LOD 0 is at another LOD"), KindName(Kind)),
@@ -641,8 +648,8 @@ bool FVoxelCollisionMeshReachTest::RunTest(const FString& Parameters)
 		}
 		if (Kind == EKind::Blocks)
 		{
-			TestEqual(TEXT("Block world: every re-cooked chunk is drawn at LOD 0"), S.ReachOwn[1][Drawn], S.ReachCooks[1]);
-			TestEqual(TEXT("Block world: with every neighbour that has voxels drawn there too"), S.ReachAllDrawn[1], S.ReachCooks[1]);
+			TestEqual(TEXT("Block world: every re-cooked chunk is drawn at LOD 0"), OwnDrawn, Cooks);
+			TestEqual(TEXT("Block world: with every neighbour that has voxels drawn there too"), AllDrawn, Cooks);
 			TestEqual(TEXT("Block world: the chunk asked is drawn at LOD 0"), static_cast<int32>(Run.ReachAtLOD0.Own), Drawn);
 			TestEqual(TEXT("Block world: so are its neighbours with voxels"), Run.ReachAtLOD0.NeighborsDrawnAtLOD, Run.ReachAtLOD0.NeighborsWithVoxels);
 			TestEqual(TEXT("Block world: none of them is drawn at LOD 1"), Run.ReachAtLOD1.NeighborsDrawnAtLOD, 0);

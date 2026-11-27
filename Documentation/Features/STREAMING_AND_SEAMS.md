@@ -373,11 +373,32 @@ never wait. On, alternated with off: 35 to 49 re-cooks a teleport against 98 to 
 to 7.0; the first collision within 2 chunk widths when it was, 2 to 3 widths out after 4.6 to 4.8 s on average against 2.7
 to 2.8, 3 to 5 widths out after 6.6 to 7.1 s against 4.5 to 5.0; the frame (19.7 to 20.8 ms) and the chunk manager's tick
 the same, and the same when the window is full. Running at 1,500 uu/s the re-cooks fall from 113 to 114 to 33 to 37 with
-no fall-through either way. Test `Collision.NeighborWait` (the same collision with the wait as without). What is left of the
-cooks' cost: each meshes its chunk again though a mesh job meshes the same voxels (G296).
+no fall-through either way. Test `Collision.NeighborWait` (the same collision with the wait as without).
 
-`voxel.Collision.CookStats` reports the cooks by kind, the skips, the wait's holds and, per distance band from the nearest
-focus, when the first collision arrived.
+**A cook meshes its chunk itself, at LOD 0, from the voxels and its neighbours' slices** (G296, measured and narrowed
+2026-11-27). The drawn mesh cannot stand in for it on a smooth world. `voxel.Collision.CookStats`' reach lines record at
+each launch where the chunk's own drawn mesh stands against the cook's LOD and how many of its neighbours with voxels are
+drawn there (`UVoxelChunkManager::GetCollisionMeshReach`). On `VoxelDemo` (Dual Contouring, LOD 0 to 7,000 uu, the shell
+20,000 uu: four chunk widths) the shell's cooks are of chunks drawn at LOD 1 and 2: of a teleport's 119 to 131 first cooks
+with a surface, 9 to 12 had their own mesh drawn at LOD 0 and 0 to 3 every neighbour too; of its 84 to 93 neighbour
+re-cooks, 6 to 11 and none; walking, 0 of 77; the island and the planet the same (6 to 10 of 128 to 133, 0 to 3 with
+their neighbours, 0 walking). And the drawn mesh is not the cook's: the Interior domain clamps its gradient taps at the
+chunk's faces and the seam meshers geomorph at mixed LOD, so the collision would change near every boundary, and change
+with the drawn LOD, which a server decides from its first player (a further player's chunks are meshed at the coarsest
+LOD there and at LOD 0 on that player's own client): the two machines would cook different ground. A cook almost never
+waits for anything but generation: a first cook launches 0.16 to 0.19 s after it is queued on average (0.6 s at most),
+a re-cook 0.03 to 0.05 s, and 20 ms faster cooks would not bring the collision visibly sooner. On a block world it would
+be reachable and the same collision: the cubic mesher's WholeChunk mesh is its Interior mesh and the six boundary slices
+(the same quads, slice by slice), every chunk is drawn at LOD 0 (no LOD), and on `Review_Cubic` every cook with a surface
+had its own mesh drawn there, 0.7 to 0.8 s old at a teleport's first cooks, 2.2 to 2.5 s at its re-cooks and 36 s on
+average (61 at most) while walking, so a kept Interior mesh would wait that long for its cook. Its cooks are the
+mesher's: 25 to 29 ms a cook, 23 to 27 of them the mesh, 8.2 to 9.9 thread-seconds a teleport; but the same mesher's
+mesh jobs are 26.4 to 26.6 thread-seconds of the same teleport (G311), and a cheaper cubic mesh speeds both with no
+second path through collision. What is left is in `Documentation/FINDINGS.md`, G296 and G311. Test `Collision.MeshReach`
+(on a settled block world every re-cooked chunk is drawn at LOD 0 with its neighbours; the counts add up on a plane).
+
+`voxel.Collision.CookStats` reports the cooks by kind, the skips, the wait's holds, per distance band from the nearest
+focus when the first collision arrived, and where the cooked chunks' drawn meshes stood (the reach lines, G296).
 
 **A chunk's collision is a static component.** Each cooked chunk is one `UVoxelCollisionComponent` at the chunk's
 corner, on the `VoxelCollisionContainer` actor the collision manager spawns (transient, not replicated: every machine

@@ -157,6 +157,14 @@ chunk meshes alone, a figure no buffer had: records older than G119 read low aga
   `Scripts/qa/stream_probe.py` runs both through a list of phases in one PIE and tables each phase, with the
   collision's arrival after each teleport. `voxel.Collision.CookStats` gives a cook's stages on its worker. In an
   Insights trace each section of the chunk manager's tick has a `VoxelTick_*` scope.
+- **The cooks and the meshes of a teleport, by world** (G296, 2026-11-27). On `VoxelDemo` a teleport onto fresh ground
+  launches 321 to 329 cooks, 5.4 to 6.1 thread-seconds (17 to 19 ms a cook with the empty ones, 12 to 13 of them the mesh
+  and 5 the Chaos triangle mesh; about 28 ms a cook with a surface), beside its 931 to 957 chunk meshes (1.2 thread-seconds:
+  most are drawn at LOD 1 and 2) and 9,026 to 9,167 seam jobs (15.1 to 16.0 thread-seconds). On `Review_Cubic` the cooks
+  are 8.2 to 9.9 thread-seconds (25 to 29 ms a cook, 23 to 27 of them the cubic mesh) and the chunk meshes 26.4 to 26.6
+  (947 to 1,013 at 26 to 28 ms each; G311), the seam jobs 1.0. A cook does not take the drawn mesh (`STREAMING_AND_SEAMS.md`,
+  "Collision cooking"): on the smooth worlds the shell's chunks are drawn at a coarser LOD than the collision's. The
+  counters: `voxel.Collision.CookStats` (its reach lines) and `voxel.Edit.MeshWork`.
 - **The scatter's half-second after a teleport** (G295, closed 2026-11-27). Of what the chunk manager's tick budget
   holds since G282 (the far field's launches and removed components, the lakes' and river reaches' meshes, the collision
   components that left the shell), the scatter's distance pass and the applies of its extractions were outside it: the
