@@ -3,6 +3,7 @@
 #include "VoxelHydrologyNetwork.h"
 #include "VoxelStreaming.h"
 #include "Async/ParallelFor.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/AssertionMacros.h"
@@ -259,7 +260,7 @@ TSharedRef<const FVoxelHydrologySystem> FVoxelHydrologyNetwork::StoreValleyRiver
 
 // ==================== Working tiles out ====================
 
-double FVoxelHydrologyNetwork::BuildNow(const TArray<FIntPoint>& InTiles, EBuild Who, bool bParallel)
+double FVoxelHydrologyNetwork::BuildNow(const TArray<FIntPoint>& InTiles, EBuild Who, bool bParallel, bool bSpread)
 {
 	using namespace VoxelHydrologyNetworkPrivate;
 	if (InTiles.Num() == 0)
@@ -290,12 +291,15 @@ double FVoxelHydrologyNetwork::BuildNow(const TArray<FIntPoint>& InTiles, EBuild
 			}
 		}
 	}
-	const int32 NumBatches = FMath::DivideAndRoundUp(Squares.Num(), SquaresPerBatch);
-	ParallelFor(NumBatches, [this, &Squares](int32 Batch)
+	const int32 PerBatch = bSpread && bParallel
+		? FMath::Clamp(Squares.Num() / (4 * FMath::Max(FTaskGraphInterface::Get().GetNumWorkerThreads(), 1)), 1, static_cast<int32>(SquaresPerBatch))
+		: SquaresPerBatch;
+	const int32 NumBatches = FMath::DivideAndRoundUp(Squares.Num(), PerBatch);
+	ParallelFor(NumBatches, [this, &Squares, PerBatch](int32 Batch)
 	{
 		FVoxelHydrologyHeights Heights(Ground, Settings);
-		const int32 End = FMath::Min((Batch + 1) * SquaresPerBatch, Squares.Num());
-		for (int32 Index = Batch * SquaresPerBatch; Index < End; ++Index)
+		const int32 End = FMath::Min((Batch + 1) * PerBatch, Squares.Num());
+		for (int32 Index = Batch * PerBatch; Index < End; ++Index)
 		{
 			StoreTrace(FVoxelHydrology::TraceSpring(Settings, Heights, Squares[Index], this));
 		}
@@ -746,6 +750,49 @@ void FVoxelHydrologyNetwork::GatherWaterBodiesOnSphere(const FVector& Direction,
 	TArray<FVoxelWaterBody>& OutBodies) const
 {
 	const_cast<FVoxelHydrologyNetwork*>(this)->Gather(FVoxelConditioningRegion::OfCap(Direction, AngularRadius), Need, &OutBodies, nullptr);
+}
+
+int32 FVoxelHydrologyNetwork::PrepareWaterBodies(TConstArrayView<FBox2D> Regions) const
+{
+	using namespace VoxelHydrologyNetworkPrivate;
+	FVoxelHydrologyNetwork& Self = const_cast<FVoxelHydrologyNetwork&>(*this);
+	// Every region's tiles, each once, in the order met (the tiles are the same whatever the order: each is its own).
+	TArray<FIntPoint> Missing;
+	{
+		TSet<FIntPoint> Seen;
+		TArray<FIntPoint> Keys;
+		for (const FBox2D& Box : Regions)
+		{
+			const FVoxelConditioningRegion Region = FVoxelConditioningRegion::OfBox(Box);
+			Keys.Reset();
+			if (!Box.bIsValid || !IsRegionOfWorld(Region) || !TilesOf(Region, CompleteTileLimit, Keys))
+			{
+				continue;
+			}
+			for (const FIntPoint& Key : Keys)
+			{
+				bool bAlready = false;
+				Seen.Add(Key, &bAlready);
+				if (!bAlready)
+				{
+					Missing.Add(Key);
+				}
+			}
+		}
+		FScopeLock Scope(&Lock);
+		Self.Stats.CompleteGathers += Regions.Num();
+		Missing.RemoveAll([this](const FIntPoint& Key) { return Tiles.Contains(Key); });
+	}
+	if (Missing.Num() > 0)
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelHydrology_PrepareRegions);
+		// A few dozen tiles, whose descents are a few hundred squares: traced 16 a batch they made a handful of batches,
+		// and the build waited for the slowest (VoxelDemo's start: 107 and 384 squares in 7 and 24 batches, 250 and 610 ms
+		// of descents). A few squares a batch spreads them over the workers (160 and 420 ms; the slowest square alone is
+		// about 380); a descent is the same whichever batch traces it.
+		Self.BuildNow(Missing, EBuild::Gather, /*bParallel=*/true, /*bSpread=*/true);
+	}
+	return Missing.Num();
 }
 
 bool FVoxelHydrologyNetwork::Holds(const FVoxelConditioningRegion& Region) const

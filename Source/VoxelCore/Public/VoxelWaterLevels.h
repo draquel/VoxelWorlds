@@ -792,6 +792,27 @@ public:
 	virtual bool HoldsWaterBodiesOnSphere(const FVector& Direction, double AngularRadius) const { return true; }
 
 	/**
+	 * Work out and keep, all at once, what Complete gathers over several regions of a heightmap world would work out:
+	 * for a reader about to test many small places it knows ahead (the POI layer's road warm-up at a world's start places
+	 * its blocks of POIs after this, G297), so that each later gather finds its bodies at hand. A source that works its
+	 * bodies out in parallel does so over the regions together, not a region at a time. Defaults to a Complete gather
+	 * over each region in turn.
+	 *
+	 * @param Regions World XY regions (a region of the other kind of world, or too wide for a Complete gather, is skipped)
+	 * @return How many units of the source's work (a generated source's tiles) were worked out here
+	 */
+	virtual int32 PrepareWaterBodies(TConstArrayView<FBox2D> Regions) const
+	{
+		TArray<FVoxelWaterBody> Unused;
+		for (const FBox2D& Region : Regions)
+		{
+			Unused.Reset();
+			GatherWaterBodies(Region, EVoxelConditioningGather::Complete, Unused);
+		}
+		return 0;
+	}
+
+	/**
 	 * The lowest and the highest level of the bodies at hand that may reach a cap of a planet, with no body listed: for
 	 * a reader that wants the levels' range over a region too wide to list bodies for, at every update (the LOD
 	 * window's near disk; a source of generated bodies holds thousands). Defaults to false: the caller gathers the

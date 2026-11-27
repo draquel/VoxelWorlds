@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "Async/Async.h"
 #include "Testing/VoxelTestChunkWorld.h"
 #include "VoxelChunkManager.h"
 #include "VoxelHydrologyNetwork.h"
@@ -18,7 +19,9 @@
 //   that takes what is at hand gives nothing the first time, queues the tiles for the worker, and gets the bodies once
 //   the worker is done, with the tiles that hold a body announced; a warm-up that waits leaves nothing to work out in
 //   the gathers inside its disc; the beds come with the bodies, as lines whose ids lie over the roads'; the counters
-//   tell a tile worked out on the game thread once the world streams from one worked out before.
+//   tell a tile worked out on the game thread once the world streams from one worked out before; regions prepared
+//   together (PrepareWaterBodies, G297) have their tiles worked out in one build, each once, and the gathers over them
+//   then work nothing out.
 // - Streaming.Hydrology.World: a streamed plane whose configuration names a hydrology configuration. The network is
 //   there when the world's sources register (a complete gather inside the registration finds a generated lake), the
 //   fingerprint has the term, no source registers late; the voxels of a generated lake hold flagged water under its
@@ -237,6 +240,57 @@ bool FVoxelHydrologyNetworkTest::RunTest(const FString& Parameters)
 			&& Whole.RequestedTiles > 2 && Whole.SyncTiles == 0);
 		Network->Shutdown();
 		TestFalse(TEXT("a network shut down takes no ask"), Network->RequestRegion(FVoxelConditioningRegion::OfBox(Region), Place, 2));
+	}
+
+	// ---- Regions prepared together (G297): the tiles of several regions worked out in one build, each tile once; the
+	// gathers over them then work nothing out and give what a complete gather on a fresh network gives. On the game thread
+	// before the world streams they count as a gather's there, on a task as a gather's off the game thread.
+	{
+		const TSharedRef<FVoxelHydrologyNetwork, ESPMode::ThreadSafe> Network = MakeShared<FVoxelHydrologyNetwork, ESPMode::ThreadSafe>(Ground, Settings, 10000.0);
+		// The region of the gathers above (it holds lakes and river reaches) in two halves, a box inside the first (its
+		// tiles once), a box far away, and one too wide for a complete gather (skipped).
+		const TArray<FBox2D> Regions = {
+			FBox2D(Box.Min, FVector2D(Box.GetCenter().X, Box.Max.Y)),
+			FBox2D(FVector2D(Box.GetCenter().X, Box.Min.Y), Box.Max),
+			FBox2D(Box.Min + FVector2D(1000.0, 1000.0), Box.Min + FVector2D(3000.0, 3000.0)),
+			FBox2D(FVector2D(160000.0, 160000.0), FVector2D(161000.0, 161000.0)),
+			FBox2D(FVector2D(-4000000.0, -4000000.0), FVector2D(4000000.0, 4000000.0)) };
+		const int32 Prepared = Network->PrepareWaterBodies(Regions);
+		const FVoxelHydrologyStats After = Network->GetStats();
+		AddInfo(FString::Printf(TEXT("prepared: %d tile(s) of %d region(s) in %.1f ms"), Prepared, Regions.Num(), After.StartSyncMs));
+		TestTrue(TEXT("the regions' tiles are worked out together, each once, counted as a gather's before the world streams"), Prepared > 2
+			&& After.StartSyncTiles == Prepared && After.Tiles == Prepared && After.SyncTiles == 0 && After.OffThreadTiles == 0);
+		bool bHeld = true;
+		for (int32 Index = 0; Index < 4; ++Index)
+		{
+			bHeld &= Network->HoldsWaterBodies(Regions[Index]);
+		}
+		TestTrue(TEXT("... and kept: each region is held"), bHeld);
+		TestFalse(TEXT("... but not the region too wide to work out"), Network->HoldsWaterBodies(Regions[4]));
+		TestEqual(TEXT("prepared again, nothing is left to work out"), Network->PrepareWaterBodies(Regions), 0);
+		const TSharedRef<FVoxelHydrologyNetwork, ESPMode::ThreadSafe> Fresh = MakeShared<FVoxelHydrologyNetwork, ESPMode::ThreadSafe>(Ground, Settings, 10000.0);
+		bool bSame = true;
+		int32 Bodies = 0;
+		for (int32 Index = 0; Index < 4; ++Index)
+		{
+			TArray<FVoxelWaterBody> Here, There;
+			Network->GatherWaterBodies(Regions[Index], EVoxelConditioningGather::Complete, Here);
+			Fresh->GatherWaterBodies(Regions[Index], EVoxelConditioningGather::Complete, There);
+			bSame &= IdsOf(Here).Num() == IdsOf(There).Num() && IdsOf(Here).Includes(IdsOf(There));
+			Bodies += Here.Num();
+		}
+		TestTrue(TEXT("the regions have bodies (non-vacuous)"), Bodies > 0);
+		TestTrue(TEXT("gathers over the regions work nothing out and give a fresh network's bodies"), bSame && Network->GetStats().StartSyncTiles == Prepared);
+		Network->Shutdown();
+		Fresh->Shutdown();
+
+		const TSharedRef<FVoxelHydrologyNetwork, ESPMode::ThreadSafe> OnTask = MakeShared<FVoxelHydrologyNetwork, ESPMode::ThreadSafe>(Ground, Settings, 10000.0);
+		int32 PreparedOnTask = 0;
+		// A thread of its own: a task waited for may run on the waiting thread.
+		Async(EAsyncExecution::Thread, [&OnTask, &Regions, &PreparedOnTask]() { PreparedOnTask = OnTask->PrepareWaterBodies(Regions); }).Wait();
+		TestTrue(TEXT("on another thread: the same tiles, counted as a gather's off the game thread"), PreparedOnTask == Prepared && OnTask->GetStats().OffThreadTiles == Prepared
+			&& OnTask->GetStats().StartSyncTiles == 0);
+		OnTask->Shutdown();
 	}
 	return true;
 }
