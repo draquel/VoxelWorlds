@@ -129,6 +129,16 @@ public:
 	virtual bool HoldsWaterBodies(const FBox2D& Bounds) const override;
 	virtual bool HoldsWaterBodiesOnSphere(const FVector& Direction, double AngularRadius) const override;
 
+	/**
+	 * The tiles of every region that the network does not keep, worked out here together, in parallel (the descents first,
+	 * then the tiles, as a gather's; the descents in batches small enough to spread over every worker), and kept: one
+	 * build over all of them, not a region's few at a time (G297: the POI layer's road warm-up gathers the boxes its sites
+	 * will ask for, 88 tiles on VoxelDemo's start that cost 1.8 s worked out a gather at a time on the game thread, and
+	 * 1.15 s a gather at a time on tasks, each alone; 0.7 s so). Counted as a gather's tiles (before the world streams on
+	 * the game thread; on another thread as off-thread tiles).
+	 */
+	virtual int32 PrepareWaterBodies(TConstArrayView<FBox2D> Regions) const override;
+
 	/** The levels of the kept tiles' bodies round a cap, from each tile's own range: no body is listed or copied. */
 	virtual bool GetLevelRangeAtHandOnSphere(const FVector& Direction, double AngularRadius, bool& bOutAny, double& OutMinLevel, double& OutMaxLevel) const override;
 
@@ -285,8 +295,14 @@ private:
 	/** Whether every tile of a region is kept. */
 	bool Holds(const FVoxelConditioningRegion& Region) const;
 
-	/** Work tiles out here and keep them: the springs' descents first, in parallel, then each tile's region. Lock not held. @return The wall time, in milliseconds */
-	double BuildNow(const TArray<FIntPoint>& Tiles, EBuild Who, bool bParallel);
+	/**
+	 * Work tiles out here and keep them: the springs' descents first, in parallel, then each tile's region. Lock not held.
+	 * @param bSpread The descents in batches small enough to spread over every worker (fewer squares a batch, down to
+	 *                one; G297), rather than SquaresPerBatch a batch sharing one set of kept ground heights: a build's
+	 *                wait is its slowest batch's, and a small build's few batches leave the workers idle
+	 * @return The wall time, in milliseconds
+	 */
+	double BuildNow(const TArray<FIntPoint>& Tiles, EBuild Who, bool bParallel, bool bSpread = false);
 
 	/** Queue a tile for the worker unless it is kept or queued, and start the worker. Lock held. @return Whether it was queued */
 	bool Enqueue(const FIntPoint& Tile);
