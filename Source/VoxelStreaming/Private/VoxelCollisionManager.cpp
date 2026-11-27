@@ -115,7 +115,7 @@ static TAutoConsoleVariable<int32> CVarCollisionCookAudit(
 static TAutoConsoleVariable<int32> CVarCollisionNeighborWait(
 	TEXT("voxel.Collision.NeighborWait"),
 	0,
-	TEXT("G283, D196 (the user's decision; off by default): 1 = a chunk's first cook away from every focus waits while one of ")
+	TEXT("G283, D196 (decided by the user on 2026-11-25: off; an A/B switch): 1 = a chunk's first cook away from every focus waits while one of ")
 	TEXT("its 26 neighbours is still being generated, so it reads them instead of air and needs no re-cook when they arrive; ")
 	TEXT("the chunks near a focus and the path coverage never wait. The project's value is ")
 	TEXT("UVoxelWorldsSettings::bCollisionNeighborWait; the cvar overrides it once set."),
@@ -837,6 +837,16 @@ int32 UVoxelCollisionManager::OnChunkVoxelDataAvailable(const FIntVector& ChunkC
 			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, Noted);
 	}
 	return Noted;
+}
+
+void UVoxelCollisionManager::NoteChunkMeshSubmitted(const FIntVector& ChunkCoord, int32 LODLevel)
+{
+	double LaunchSeconds = 0.0;
+	if (LODLevel == CollisionLODLevel && CookedBeforeMesh.RemoveAndCopyValue(ChunkCoord, LaunchSeconds))
+	{
+		++CookStats.MeshAfterCook;
+		CookStats.MeshAfterCookSumSeconds += FPlatformTime::Seconds() - LaunchSeconds;
+	}
 }
 
 int32 UVoxelCollisionManager::MarkNeighborsDirtyForEdit(const FIntVector& EditedChunk, const FVector& EditCenter, float EditRadius)
@@ -1595,6 +1605,20 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 		return;
 	}
 
+	// Where the chunk's drawn mesh and its neighbours' stand now (G296's measure: voxel.Collision.CookStats' reach line).
+	const FVoxelCollisionMeshReach Reach = ChunkManager->GetCollisionMeshReach(Request.ChunkCoord, CollisionLODLevel);
+	const double LaunchSeconds = FPlatformTime::Seconds();
+	if (Reach.Own == EVoxelCollisionOwnMesh::ComingAtLOD)
+	{
+		CookedBeforeMesh.Add(Request.ChunkCoord, LaunchSeconds);
+	}
+	const uint8 ReachOwn = static_cast<uint8>(Reach.Own);
+	const uint8 ReachNeighborsDrawn = static_cast<uint8>(Reach.NeighborsDrawnAtLOD);
+	const uint8 ReachNeighborsTarget = static_cast<uint8>(Reach.NeighborsTargetLOD);
+	const uint8 ReachNeighborsWithVoxels = static_cast<uint8>(Reach.NeighborsWithVoxels);
+	const float ReachOwnMeshAgeSeconds = static_cast<float>(Reach.OwnMeshAgeSeconds);
+	const float QueueWaitSeconds = Request.QueuedSeconds > 0.0 ? static_cast<float>(LaunchSeconds - Request.QueuedSeconds) : 0.0f;
+
 	// Capture data for async task
 	const FIntVector ChunkCoord = Request.ChunkCoord;
 	const int32 LODLevel = Request.LODLevel;
@@ -1604,7 +1628,7 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 	LastPrepMs += static_cast<float>((FPlatformTime::Seconds() - PrepT0) * 1000.0);
 
 	// Launch async task: mesh generation + Chaos trimesh construction on thread pool
-	Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(ChunkManager->GetWorkerJobs()), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), NeighborShells = MoveTemp(NeighborShells), ChunkCoord, LODLevel, ChunkSizeCapture, SnapshotDecodes = MoveTemp(SnapshotDecodes), Kind, bSkipNoSurface, bAudit]() mutable
+	Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(ChunkManager->GetWorkerJobs()), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), SharedVoxels = MoveTemp(SharedVoxels), NeighborSnapshots = MoveTemp(NeighborSnapshots), NeighborShells = MoveTemp(NeighborShells), ChunkCoord, LODLevel, ChunkSizeCapture, SnapshotDecodes = MoveTemp(SnapshotDecodes), Kind, bSkipNoSurface, bAudit, ReachOwn, ReachNeighborsDrawn, ReachNeighborsTarget, ReachNeighborsWithVoxels, ReachOwnMeshAgeSeconds, QueueWaitSeconds]() mutable
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_Collision);
 		const double CookStart = FPlatformTime::Seconds();
@@ -1626,6 +1650,12 @@ void UVoxelCollisionManager::LaunchAsyncCollisionCook(const FCollisionCookReques
 		Result.LODLevel = LODLevel;
 		Result.WaitMs = EndStage();
 		Result.Kind = static_cast<uint8>(Kind);
+		Result.ReachOwn = ReachOwn;
+		Result.ReachNeighborsDrawn = ReachNeighborsDrawn;
+		Result.ReachNeighborsTarget = ReachNeighborsTarget;
+		Result.ReachNeighborsWithVoxels = ReachNeighborsWithVoxels;
+		Result.ReachOwnMeshAgeSeconds = ReachOwnMeshAgeSeconds;
+		Result.QueueWaitSeconds = QueueWaitSeconds;
 
 		// No surface (G283): the chunk's voxels and every plane it reads of its neighbours on one side make no triangle in
 		// any mesher. Worked out before the copy, so a skipped cook costs a scan of the snapshot it already holds.
@@ -1830,6 +1860,25 @@ void UVoxelCollisionManager::ProcessCompletedCollisionCooks()
 		CookStats.TriMeshMs += Result.TriMeshMs;
 		CookStats.TotalMs += Result.TotalMs;
 		CookStats.MaxTotalMs = FMath::Max<double>(CookStats.MaxTotalMs, Result.TotalMs);
+		// G296's measure: where the drawn meshes stood for the cooks that found a surface.
+		if (Result.bSuccess && !Result.bEmpty)
+		{
+			const int32 K = Kind == EVoxelCollisionCookKind::First ? 0 : 1;
+			const int32 Own = FMath::Min<int32>(Result.ReachOwn, FVoxelCollisionCookStats::NumReachOwn - 1);
+			const bool bOwnDrawn = Own == static_cast<int32>(EVoxelCollisionOwnMesh::DrawnAtLOD);
+			const bool bOwnComing = Own == static_cast<int32>(EVoxelCollisionOwnMesh::ComingAtLOD);
+			++CookStats.ReachCooks[K];
+			++CookStats.ReachOwn[K][Own];
+			CookStats.ReachAllDrawn[K] += (bOwnDrawn && Result.ReachNeighborsDrawn == Result.ReachNeighborsWithVoxels) ? 1 : 0;
+			CookStats.ReachAllTarget[K] += ((bOwnDrawn || bOwnComing) && Result.ReachNeighborsTarget == Result.ReachNeighborsWithVoxels) ? 1 : 0;
+			if (bOwnDrawn)
+			{
+				CookStats.ReachOwnAgeSumSeconds[K] += Result.ReachOwnMeshAgeSeconds;
+				CookStats.ReachOwnAgeMaxSeconds[K] = FMath::Max<double>(CookStats.ReachOwnAgeMaxSeconds[K], Result.ReachOwnMeshAgeSeconds);
+			}
+			CookStats.QueueWaitSumSeconds[K] += Result.QueueWaitSeconds;
+			CookStats.QueueWaitMaxSeconds[K] = FMath::Max<double>(CookStats.QueueWaitMaxSeconds[K], Result.QueueWaitSeconds);
+		}
 
 		// Check if chunk is still relevant (may have been removed while cooking)
 		FChunkCollisionData* Data = CollisionData.Find(Result.ChunkCoord);

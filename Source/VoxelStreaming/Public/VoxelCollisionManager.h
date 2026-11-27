@@ -223,6 +223,15 @@ struct FAsyncCollisionResult
 	float MeshMs = 0.0f;
 	float TriMeshMs = 0.0f;
 	float TotalMs = 0.0f;
+	/** Where the chunk's drawn mesh and its neighbours' stood at the launch (G296's measure; EVoxelCollisionOwnMesh as a byte) */
+	uint8 ReachOwn = 3;
+	uint8 ReachNeighborsDrawn = 0;
+	uint8 ReachNeighborsTarget = 0;
+	uint8 ReachNeighborsWithVoxels = 0;
+	/** Seconds since the chunk's mesh was submitted, when it was drawn at the cook's LOD */
+	float ReachOwnMeshAgeSeconds = 0.0f;
+	/** Seconds from the request's queueing to its launch */
+	float QueueWaitSeconds = 0.0f;
 };
 
 /** What a collision cook is (G283): a chunk's first, a re-cook for a neighbour's arrival, or another re-cook (an edit). */
@@ -313,6 +322,25 @@ struct FVoxelCollisionCookStats
 	int64 BandFirstReady[NumBands] = {};
 	double BandFirstReadySumSeconds[NumBands] = {};
 	double BandFirstReadyLastSeconds[NumBands] = {};
+	/**
+	 * G296's measure (the reach line): the cooks that found a surface, [0] first cooks and [1] re-cooks, by where the chunk's own
+	 * drawn mesh stood against the cook's LOD at the launch (EVoxelCollisionOwnMesh), how many also had every neighbour with
+	 * voxels drawn at that LOD (the share a cook from the drawn mesh and seam meshers could take at once; a neighbour never
+	 * loaded, above or below a heightmap's slab, is read as air either way) or to be drawn there (the share it could take
+	 * after waiting for meshes), the drawn mesh's age at the launch, and the wait in the queue.
+	 */
+	static constexpr int32 NumReachOwn = 4;
+	int64 ReachCooks[2] = {};
+	int64 ReachOwn[2][NumReachOwn] = {};
+	int64 ReachAllDrawn[2] = {};
+	int64 ReachAllTarget[2] = {};
+	double ReachOwnAgeSumSeconds[2] = {};
+	double ReachOwnAgeMaxSeconds[2] = {};
+	double QueueWaitSumSeconds[2] = {};
+	double QueueWaitMaxSeconds[2] = {};
+	/** Cooks launched while the chunk's mesh at the cook's LOD was coming, whose mesh was then submitted: how many and the seconds after the launch */
+	int64 MeshAfterCook = 0;
+	double MeshAfterCookSumSeconds = 0.0;
 	/** Waiting for far-compressed snapshots to decode. */
 	double WaitMs = 0.0;
 	/** The chunk's voxels copied into the meshing request. */
@@ -460,6 +488,15 @@ public:
 	int32 OnChunkVoxelDataAvailable(const FIntVector& ChunkCoord);
 
 	/**
+	 * The chunk manager submitted a chunk's mesh (G296's measure): a cook launched while that mesh was coming counts the
+	 * seconds it came after the cook (voxel.Collision.CookStats' reach line).
+	 *
+	 * @param ChunkCoord The chunk
+	 * @param LODLevel   The submitted mesh's LOD
+	 */
+	void NoteChunkMeshSubmitted(const FIntVector& ChunkCoord, int32 LODLevel);
+
+	/**
 	 * The bit of a neighbour offset in FChunkCollisionData::MissingNeighborMask.
 	 *
 	 * @param Offset A neighbour's offset from the chunk, each component in -1..1, not all zero
@@ -472,7 +509,7 @@ public:
 
 	/** The cooks' cost per stage since the last reset. */
 	const FVoxelCollisionCookStats& GetCookStats() const { return CookStats; }
-	void ResetCookStats() { CookStats = FVoxelCollisionCookStats(); CookStats.ResetSeconds = FPlatformTime::Seconds(); NeighborWaitHeld.Reset(); }
+	void ResetCookStats() { CookStats = FVoxelCollisionCookStats(); CookStats.ResetSeconds = FPlatformTime::Seconds(); NeighborWaitHeld.Reset(); CookedBeforeMesh.Reset(); }
 
 	// ==================== No surface (G283) ====================
 
@@ -1026,6 +1063,9 @@ protected:
 
 	/** Summed from each completed cook's result on the game thread. */
 	FVoxelCollisionCookStats CookStats;
+
+	/** Cooks launched while the chunk's mesh at the cook's LOD was coming: the launch's FPlatformTime::Seconds (G296's measure) */
+	TMap<FIntVector, double> CookedBeforeMesh;
 
 	/** Total collision meshes removed */
 	int64 TotalCollisionsRemoved = 0;

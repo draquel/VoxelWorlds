@@ -78,6 +78,20 @@ static FAutoConsoleCommandWithWorldAndArgs GVoxelCollisionCookStatsCmd(
 					Count > 0 ? Stats.BandFirstReadySumSeconds[Band] / static_cast<double>(Count) : 0.0, Stats.BandFirstReadyLastSeconds[Band]);
 			}
 			UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.Collision.CookStats first collision by chunk widths from the nearest focus:%s"), *Bands);
+			// G296's measure: for the cooks that found a surface, where the chunk's drawn mesh and its neighbours' stood at the launch.
+			static const TCHAR* KindNames[2] = { TEXT("first"), TEXT("re-cooks") };
+			for (int32 K = 0; K < 2; ++K)
+			{
+				const int64 N = Stats.ReachCooks[K];
+				const int64 Drawn = Stats.ReachOwn[K][static_cast<int32>(EVoxelCollisionOwnMesh::DrawnAtLOD)];
+				UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.Collision.CookStats reach %s: %lld with a surface; own mesh drawn at the cook's LOD %lld (aged %.2f s, the oldest %.1f), coming %lld, other LOD %lld, none %lld; with every neighbour that has voxels drawn there %lld, to be drawn there %lld; queued %.2f s (the longest %.2f)"),
+					KindNames[K], N, Drawn, Drawn > 0 ? Stats.ReachOwnAgeSumSeconds[K] / static_cast<double>(Drawn) : 0.0, Stats.ReachOwnAgeMaxSeconds[K],
+					Stats.ReachOwn[K][static_cast<int32>(EVoxelCollisionOwnMesh::ComingAtLOD)], Stats.ReachOwn[K][static_cast<int32>(EVoxelCollisionOwnMesh::OtherLOD)],
+					Stats.ReachOwn[K][static_cast<int32>(EVoxelCollisionOwnMesh::None)], Stats.ReachAllDrawn[K], Stats.ReachAllTarget[K],
+					N > 0 ? Stats.QueueWaitSumSeconds[K] / static_cast<double>(N) : 0.0, Stats.QueueWaitMaxSeconds[K]);
+			}
+			UE_LOG(LogVoxelStreaming, Log, TEXT("voxel.Collision.CookStats reach: %lld cooks launched before their mesh at the cook's LOD, which came %.2f s after on average"),
+				Stats.MeshAfterCook, Stats.MeshAfterCook > 0 ? Stats.MeshAfterCookSumSeconds / static_cast<double>(Stats.MeshAfterCook) : 0.0);
 			if (!bKeep)
 			{
 				Collision->ResetCookStats();
