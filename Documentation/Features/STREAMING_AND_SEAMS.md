@@ -104,7 +104,10 @@ water on the game thread, 1 to 2 ms a patch; six at once were updates of 5 to 13
 the far field's components of removed patches (hidden at once, destroyed later: a teleport removes the place left's 500
 patches, 12 ms of one update), the lakes' and river reaches' meshes (built on the thread pool, their components made
 within the budget: one valley river's mesh alone took 10 to 14 ms of a tick) and the collision components of chunks that
-left the shell (their data dropped at once). The collision manager also takes a jump of more than a chunk in one tick
+left the shell (their data dropped at once); since G295 also the scatter's distance pass (its releases of the place
+left, which one pass made all at once: 1.6 to 10.4 ms a teleport on VoxelDemo, 15.7 to 28.3 on the block world; its
+hand-offs at the horizon and its launches) and the applies of its extractions, nearest first, a pass cut short resuming
+on the next tick (`SCATTER_SYSTEM.md`, "Distance Streaming Cleanup"; `voxel.Scatter.TickBudget`). The collision manager also takes a jump of more than a chunk in one tick
 as a cut, not speed (Collision cooking, below). Measured with the old and the new path alternated in one editor, six
 teleports a side between two sites 90 km apart (`Scripts/qa/stream_probe.py`): in the first two seconds the longest tick
 11 to 18 ms against 27 to 34, the mean tick 5.4 to 6.2 ms against 6.4 to 7.0, the time in frames over 33.3 ms 0 to 7 %

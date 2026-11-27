@@ -1841,6 +1841,12 @@ public:
 		float ScatterDistanceMs = 0.0f; // the distance spawn: completed passes and the periodic pass
 		float ScatterFlushMs = 0.0f;    // the renderer's queued instance adds into the HISMs
 		int32 ScatterApplied = 0;       // completed extractions applied this tick
+		int32 ScatterApplyHeld = 0;     // completed extractions and distance results waiting after this tick's applies (G295)
+		int32 ScatterDistanceHeld = 0;  // the distance pass's releases, hand-offs and launches left to a later tick by the budget (G295)
+		int32 ScatterReleased = 0;      // chunks whose out-of-range types the distance pass released this tick (G295)
+		int32 ScatterOutstanding = 0;   // the scatter manager's outstanding work (GetOutstandingWorkCount, G295)
+		int32 ScatterAddsPending = 0;   // the scatter renderer's queued instance adds (G295)
+		int32 ScatterWritesPending = 0; // the scatter renderer's held HISM writes, instances (G295)
 		int32 ScatterLaunched = 0;      // extractions launched this tick
 		float LODMs = 0.0f;
 		float LODUpdateMs = 0.0f;   // LOD strategy Update (balanced-LOD cache rebuild), before the streaming section

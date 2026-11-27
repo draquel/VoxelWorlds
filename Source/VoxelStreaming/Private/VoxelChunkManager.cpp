@@ -290,8 +290,17 @@ static TAutoConsoleVariable<float> CVarStreamTickBudgetMs(
 	4.0f,
 	TEXT("G282: milliseconds a chunk manager tick may take before the work that can wait a tick waits: the far field's build ")
 	TEXT("launches, the lakes' and river reaches' meshes, the collision components of chunks that left the shell (each at least ")
-	TEXT("one a tick, nearest first). The collision cooks and the meshes' submits are not held by it. 0 = no budget, every ")
+	TEXT("one a tick, nearest first), and since G295 the scatter's distance pass and applies (voxel.Scatter.TickBudget). The ")
+	TEXT("collision cooks and the meshes' submits are not held by it. 0 = no budget, every ")
 	TEXT("section as before G282. The project's value is UVoxelWorldsSettings::StreamTickBudgetMs; the cvar overrides it once set."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarScatterHandOffSnapshot(
+	TEXT("voxel.Scatter.HandOffSnapshot"),
+	1,
+	TEXT("A/B (G295): 1 (the default) hands a chunk's voxels to scatter at its mesh submit as its shared snapshot ")
+	TEXT("(GetVoxelSnapshot: a resident chunk's own array, copy-on-write), so a queued extraction keeps no copy. 0 = a copy ")
+	TEXT("of the chunk's voxels a hand-off within the scatter horizon (1 MB for a 64-voxel chunk), as before G295."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarMeshPrepareRenderVertices(
@@ -1098,7 +1107,8 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	{
 		ProcessEditScatterReaders();
 		Timing.ScatterEditMs = VoxelTickTiming::MsSince(SectionStart);
-		ScatterManager->Update(Context.ViewerPosition, DeltaTime);
+		// The distance pass and the applies draw on what is left of the tick's budget (G295)
+		ScatterManager->Update(Context.ViewerPosition, DeltaTime, &TickBudget);
 		const UVoxelScatterManager::FUpdateTimings& ScatterSteps = ScatterManager->GetLastUpdateTimings();
 		Timing.ScatterApplyMs = ScatterSteps.ApplyMs;
 		Timing.ScatterLaunchMs = ScatterSteps.RegrowMs + ScatterSteps.LaunchMs;
@@ -1106,6 +1116,15 @@ void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 		Timing.ScatterFlushMs = ScatterSteps.FlushMs;
 		Timing.ScatterApplied = ScatterSteps.Applied;
 		Timing.ScatterLaunched = ScatterSteps.Launched;
+		Timing.ScatterApplyHeld = ScatterSteps.ApplyHeld;
+		Timing.ScatterDistanceHeld = ScatterSteps.DistanceHeld;
+		Timing.ScatterReleased = ScatterSteps.Released;
+		Timing.ScatterOutstanding = ScatterManager->GetOutstandingWorkCount();
+		if (const UVoxelScatterRenderer* ScatterRendererForStats = ScatterManager->GetScatterRenderer())
+		{
+			Timing.ScatterAddsPending = ScatterRendererForStats->GetPendingInstanceAddCount();
+			Timing.ScatterWritesPending = ScatterRendererForStats->GetPendingHISMWriteCount();
+		}
 
 		if (Configuration->bScatterDebugVisualization)
 		{
@@ -8323,7 +8342,16 @@ void UVoxelChunkManager::HandOffChunkScatter(const FIntVector& ChunkCoord, FVoxe
 	// Scatter must classify against the terrain the player actually sees. When the chunk has edits (player dig/build, POI,
 	// editor), merge them into a scratch copy so scatter extracts from edit-merged voxels: otherwise grass can cover a dug
 	// cave opening or mushrooms can appear on a carved-flat surface.
-	if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
+	if (CVarScatterHandOffSnapshot.GetValueOnGameThread() != 0)
+	{
+		// The chunk's snapshot (G295): its own array shared copy-on-write (G71), its edit-merged copy built once per content
+		// version and shared with the seams, or a far-compressed chunk's decode (G65). The extraction queued keeps it
+		// instead of a copy of the voxels; a write to the chunk meanwhile (the water pull's flags) clones the array, so
+		// scatter reads what it was handed, as with the copy.
+		ScatterManager->HandOffChunkVoxels(ChunkCoord, GetVoxelSnapshot(ChunkCoord, State), State.Descriptor.ChunkSize,
+			Configuration->VoxelSize);
+	}
+	else if (EditManager && EditManager->ChunkHasEdits(ChunkCoord))
 	{
 		TArray<FVoxelData> EditMergedVoxels = State.Descriptor.GetVoxelDataForRead();
 		EditManager->ApplyEditsToVoxelData(ChunkCoord, EditMergedVoxels);

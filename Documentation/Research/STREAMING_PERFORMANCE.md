@@ -157,6 +157,16 @@ chunk meshes alone, a figure no buffer had: records older than G119 read low aga
   `Scripts/qa/stream_probe.py` runs both through a list of phases in one PIE and tables each phase, with the
   collision's arrival after each teleport. `voxel.Collision.CookStats` gives a cook's stages on its worker. In an
   Insights trace each section of the chunk manager's tick has a `VoxelTick_*` scope.
+- **The scatter's half-second after a teleport** (G295, closed 2026-11-27). Of what the chunk manager's tick budget
+  holds since G282 (the far field's launches and removed components, the lakes' and river reaches' meshes, the collision
+  components that left the shell), the scatter's distance pass and the applies of its extractions were outside it: the
+  pass released the place left's types in one tick (on VoxelDemo 1.6 to 10.4 ms a teleport, on the block world 15.7 to
+  28.3). They draw on it now, nearest first, a pass cut short resuming on the next tick (`SCATTER_SYSTEM.md`,
+  "Distance Streaming Cleanup"): the scatter's own part of a tick at most 1.7 ms on VoxelDemo, 2.5 on the block world,
+  the longest chunk manager tick after a block world's teleport 9.8 to 12.1 ms against 25.5 to 34.8, the scatter complete
+  around the player after the same 6 to 7 s and the same applies, launches and submits. The submit's hand-off to scatter
+  (G294's 77 to 80 ms a teleport) was a copy of each chunk's voxels; it gives the chunk's shared snapshot now: 9 ms a
+  teleport. What is left is the renderer's flush, its instance adds and its HISM writes in one tick (G309).
 - **A mesh submit's cost was the water's, not the renderer's** (G294, closed 2026-11-26). After G282 the submits of a
   teleport onto fresh ground were most of the tick for ten seconds, about 0.6 ms each, and taken to be the renderer's.
   With a scope on each part of a submit (`VoxelSubmit_*`, `VoxelWater_*`; `RENDERING_SYSTEM.md`, "What a submit costs

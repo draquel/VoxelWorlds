@@ -509,6 +509,65 @@ points, with surface data, with spawn points but no surface data (0), spawn poin
 
 When scatter types go out of range, the manager calls `ReleaseChunkScatterType()` directly instead of the previous stale-type tracking approach. Instances are zero-scaled immediately (CullDistance already hides them at that range) and recycled when the player returns and new transforms are generated. The release also drops the pair's adds still queued for the per-frame budget: a chunk submitted while the viewer was still near it (in the seconds after a teleport) can take a distance-limited type in its first pass and release it at the next check, behind the arrival's backlog. Until world modes review G30 those adds were flushed after the release into the pool for a type the chunk no longer tracked, which `RemoveChunkInstances` never released, so they stayed in the world and the chunk's reload drew the type a second time over them.
 
+**The distance pass, the applies and the hand-off within the tick (G295, 2026-11-27).** After a teleport onto fresh
+ground the place left's chunks are all beyond every type's distance, and the next distance pass released them in one
+tick: on `VoxelDemo` 651 to 834 releases, 2.2 to 4.7 ms of one pass in a trace, 1.6 to 10.4 ms a teleport in the probe,
+15.7 to 28.3 ms on the block world (`Review_Cubic`). The pass and the applies now draw on the chunk manager's tick budget
+(`FVoxelTickBudget`, `voxel.Stream.TickBudgetMs`; in `VoxelCore` since G295, so the scatter module takes it from
+`UVoxelScatterManager::Update`), each part at least one piece a tick, nearest the viewer first, the rest on the next
+tick: the pass finds the types beyond their cleanup distance (a scan) and queues them per chunk
+(`PendingDistanceReleases`); the releases are made a chunk at a time, each checked again when it is made (still on the
+chunk, still beyond the distance from every viewer: a viewer that came back keeps them), and an unload or a regeneration
+drops the chunk's entry, whose instances go with it anyway. The pass's hand-offs at the horizon
+(`ProcessDeferredFirstExtractions`) and its launches go one at a time beyond the first while time is left; a pass the
+budget cut short resumes on the next tick, before its interval, with what is left of its quotas
+(`MaxDistanceSpawnChunksPerPass` each), and a new pass at the interval starts them again. The completed extractions and
+distance results are taken off the workers' queues and wait in arrival order (`ReadyScatterResults`,
+`ReadyDistanceResults`, still in flight for an unload or a regeneration); the applies take them nearest first (a chunk's
+results in their order), the first always and the others while time is left, within the caps they had (2 and 8 a tick).
+Without a budget, or with `voxel.Scatter.TickBudget 0`, every piece goes in the tick it comes up, in the order before
+G295. The mesh submit's hand-off (`UVoxelChunkManager::HandOffChunkScatter`) gives the chunk's shared snapshot
+(`GetVoxelSnapshot`: a resident chunk's own array, copy-on-write, G71; the edit-merged copy built once per content
+version; a far-compressed chunk's decode) and the queued extraction keeps it (`FPendingScatterGeneration::ChunkVoxelData`)
+instead of a copy of the chunk's voxels: 363 copies of 1 MB a teleport on `VoxelDemo`, about 200 µs each
+(`VoxelScatter_HandOffCopy`, 72 of the submits' 80 ms of hand-off). A write to the chunk while scatter holds it (the
+water pull's flags) clones the array first, so scatter reads what it was handed, as with the copy; a traced teleport had
+no such clone (`VoxelChunk_CopyOnWrite`). `voxel.Scatter.HandOffSnapshot 0` is the copy before G295.
+
+Measured with `Scripts/qa/stream_probe.py` and `Scripts/qa/scatter_ticks.py`, the two paths alternated in one editor
+(both cvars together), the weather locked, teleports between G282's two sites 90 km apart: on `VoxelDemo` six a side,
+the scatter's own part of a tick (the section less the renderer's flush: the edits' readers, the applies, the launches,
+the distance pass) took 2 ms or more once in five of the six teleports, its longest 1.7 to 10.5 ms, against no tick of 2 ms and the longest
+0.8 to 1.7 ms; the distance pass 1.6 to 10.4 ms against 0.24 to 0.34; the longest apply 0.6 to 1.7 ms either way (one
+apply is one piece); the hand-off 77 to 79 ms a teleport against 9; the longest chunk manager tick 10.4 to 20.8 ms against
+10.4 to 13.7. On `Review_Cubic`, four a side: the distance pass 15.7 to 28.3 ms against 1.2 to 2.3, the scatter's own
+longest 15.9 to 28.3 against 1.6 to 2.5 (an apply or a launch of 2.1 to 2.5 ms in two of the four), the longest tick 25.5 to 34.8 ms against 9.8 to 12.1, the hand-off 58 to 64 ms
+against 7 to 8. On island M (`Review_Island_M`; teleports out to the sea 120 km away and back, eight a side): the own
+part's longest 1.5 to 5.5 ms against 0.5 to 1.4, the distance pass 0.4 to 5.4 against 0.2 to 0.9, the hand-off 77 to 83
+ms against 9 to 10. On the review planet (`PlanetTest` with `Review_Planet`, between 16.5 N 31 W and its antipode,
+ten a side): the own part's longest 2.2 to 13.1 ms (one or two ticks of 2 ms a teleport) against 1.1 to 2.1 (one
+tick of 2.08 ms in ten teleports), the distance pass 1.8 to 13.1 against 0.2 to 2.1, the longest tick 11.3 to 21.4 ms
+against 10.4 to 12.9, the hand-off 78 to 87 ms against 10 to 11. The same work on every world: the same applies, launches and mesh submits a teleport
+(on `VoxelDemo` 174 and 167 applies, 363 and 362 launches, 931 and 957 submits at the two sites), and the scatter
+complete around the player (nothing queued, in flight, waiting or held but the renderer's writes) after the same 6.2 to
+7.4 s on `VoxelDemo`, 6.1 to 7.2 on the block world, 5.3 to 7.3 on the island and 7.9 to 9.1 on the planet (the
+last apply 8.40 s after the teleport on the old path and 8.51 on the new, the means of ten; half of them after 3.36 and
+3.39 s). Walking (`VoxelDemo`, three minutes a
+side) the own part took no tick of 2 ms against 0 to 3 a minute, its longest 1.4 to 1.9 ms against 2.0 to 3.0, the
+hand-off 7 ms a minute against 24 to 41. The placement is the same (`digest_gate.py`, a fresh world each): `VoxelDemo` 176 of 176 chunks as its record, and
+the old path against the new the block world 188 of 188, island M 191 of 191, the review planet 195 of 195. What is
+left of a scatter tick after a teleport is the renderer's flush, its queued instance adds (`MaxInstanceAddsPerFrame`)
+and its HISM writes (`voxel.Scatter.HISMWriteBudgetMs`) in the same tick: 2.3 to 3.7 ms on `VoxelDemo` on both paths, 4.0 to 5.3 ms
+on the block world against 3.4 to 8.1 (G309 in `Documentation/FINDINGS.md`); on the block world the place left's releases,
+spread over the ticks, take their HISMs' writes in more batches (544 to 600 a teleport against 379 to 501), the flush
+159 to 183 ms a teleport against 138 to 160. Tests: `VoxelWorlds.Scatter.TickBudget.ApplyNearestFirst` (four
+extractions waiting at once: under a spent budget one apply a tick, the nearest first; without it two a tick in arrival
+order; the same spawn points, and a shared snapshot handed off is kept, not copied), `.DistanceReleases` (six chunks
+released one a tick under the budget and all in one pass without; a chunk unloaded with its release queued, a chunk the
+viewer came back to; back near the same spawn points), `.SameAsUnbudgeted` (a walk over a grid, a chunk unloaded and
+loaded again on the way: the same spawn points and instances at every stop, every piece finished, the pass cut short
+and resumed).
+
 ### Batched HISM writes (world modes review G42)
 
 Each change to a HISM costs all its instances (the pool section above), and streaming changes the HISMs around the
