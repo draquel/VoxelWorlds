@@ -294,6 +294,24 @@ static TAutoConsoleVariable<float> CVarStreamTickBudgetMs(
 	TEXT("section as before G282. The project's value is UVoxelWorldsSettings::StreamTickBudgetMs; the cvar overrides it once set."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarMeshPrepareRenderVertices(
+	TEXT("voxel.Mesh.PrepareRenderVertices"),
+	1,
+	TEXT("A/B (G294): 1 (the default) converts a chunk mesh to the renderer's vertices on its mesh worker, beside its Lumen ")
+	TEXT("cards, so the submit on the game thread moves them in; 0 converts them at the submit, as before G294. The same ")
+	TEXT("vertices and bounds either way. Never on a dedicated server (nothing draws there) nor for a renderer that reads the ")
+	TEXT("mesher's attributes (IVoxelMeshRenderer::TakesPreparedVertices). Read when a mesh job launches."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarWaterStridedScans(
+	TEXT("voxel.Water.StridedScans"),
+	0,
+	TEXT("A/B (G294): 1 walks a chunk's voxels for its water as before G294: the water tile's column mask up each column and ")
+	TEXT("the water pull's faces along each face's columns, a slice (16 KB on a 64-voxel chunk) apart per step. 0 (the default) ")
+	TEXT("walks them in the array's order: the same masks and the same flood, at a fraction of the cost on the game thread at ")
+	TEXT("each mesh submit under the sea's level."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<float> CVarStreamSubmitBudgetMs(
 	TEXT("voxel.Stream.SubmitBudgetMs"),
 	4.0f,
@@ -649,6 +667,7 @@ void UVoxelChunkManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void UVoxelChunkManager::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_ChunkManager);
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	if (!bIsInitialized)
@@ -6004,13 +6023,18 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 	IVoxelMesher* MesherPtr = Mesher.Get();
 	const FIntVector ChunkCoord = Request.ChunkCoord;
 	const int32 LODLevel = Request.LODLevel;
+	// The renderer's vertices made on the worker (G294), where a renderer takes them, never on a dedicated server (it
+	// draws nothing; its renderer converts at the submit as before)
+	const UWorld* World = GetWorld();
+	const bool bPrepareRenderVertices = CVarMeshPrepareRenderVertices.GetValueOnGameThread() != 0 && MeshRenderer
+		&& MeshRenderer->TakesPreparedVertices() && !IsRunningDedicatedServer() && !(World && World->GetNetMode() == NM_DedicatedServer);
 
 	// Use a weak pointer to safely check if ChunkManager is still valid
 	TWeakObjectPtr<UVoxelChunkManager> WeakThis(this);
 
 	// Dispatch to a thread-pool worker
 	Async(EAsyncExecution::ThreadPool, [WorkerGuard = FVoxelWorkerJobGuard(WorkerJobs), WeakThis, MesherPtr, MeshRequest = MoveTemp(MeshRequest), ChunkCoord, LODLevel, DispatchSerial,
-		DeferredVoxels = MoveTemp(DeferredVoxels), DeferredDecode = MoveTemp(DeferredDecode)]() mutable
+		DeferredVoxels = MoveTemp(DeferredVoxels), DeferredDecode = MoveTemp(DeferredDecode), bPrepareRenderVertices]() mutable
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_Mesh);
 		// Generate mesh on background thread
@@ -6023,6 +6047,14 @@ void UVoxelChunkManager::LaunchAsyncMeshGeneration(const FChunkLODRequest& Reque
 		if (bSuccess)
 		{
 			MeshData.PrebuiltLumenCards = PrebuildVoxelChunkMeshCards(MeshData);
+			// The renderer's vertices and bounds, here rather than at the submit on the game thread (G294); the attributes
+			// they came from go (the cards above were their last reader). A result superseded or discarded before its
+			// submit frees them with the rest of its mesh.
+			if (bPrepareRenderVertices && MeshData.IsValid())
+			{
+				TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWorker_PrepareRenderVertices);
+				MeshData.PrepareRenderVertices(/*bDropConverted*/ true);
+			}
 		}
 
 		// Queue result for game thread (thread-safe MPSC queue)
@@ -8442,12 +8474,15 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 
 	// Find mesh in pending queue (search from back since we pop from back)
 	int32 PendingIndex = INDEX_NONE;
-	for (int32 i = PendingMeshQueue.Num() - 1; i >= 0; --i)
 	{
-		if (PendingMeshQueue[i].ChunkCoord == ChunkCoord)
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_FindPending);
+		for (int32 i = PendingMeshQueue.Num() - 1; i >= 0; --i)
 		{
-			PendingIndex = i;
-			break;
+			if (PendingMeshQueue[i].ChunkCoord == ChunkCoord)
+			{
+				PendingIndex = i;
+				break;
+			}
 		}
 	}
 
@@ -8461,16 +8496,21 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		// chunk's max faces, which belong to its seams (world modes review G27).
 		if (ScatterManager && Configuration && Configuration->bEnableScatter)
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_Scatter);
 			const double ScatT0 = FPlatformTime::Seconds();
 			HandOffChunkScatter(ChunkCoord, *State);
 			SubmitScatterSecondsThisTick += FPlatformTime::Seconds() - ScatT0;
 		}
 
 		// An LOD change (or a faded-in first appearance, P3) holds the swap until its seams land (see BeginSeamHold; R24).
-		const bool bHoldForSeams = ShouldHoldForSeams(ChunkCoord, PreviousMeshedLOD, PendingMesh.LODLevel, PendingMesh.MeshData);
-		if (bHoldForSeams)
+		bool bHoldForSeams = false;
 		{
-			MeshRenderer->SetChunkFadeHold(ChunkCoord, true);
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_SeamHold);
+			bHoldForSeams = ShouldHoldForSeams(ChunkCoord, PreviousMeshedLOD, PendingMesh.LODLevel, PendingMesh.MeshData);
+			if (bHoldForSeams)
+			{
+				MeshRenderer->SetChunkFadeHold(ChunkCoord, true);
+			}
 		}
 
 		// Send mesh to renderer (entry is discarded below — move the mesh data in)
@@ -8486,14 +8526,17 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		// Track which LOD is actually rendered so neighbors can read the correct
 		// LOD level for MergeLODBoundaryCells and transition face setup.
 		State->MeshedLODLevel = PendingMesh.LODLevel;
-		// Rendered LOD known — refresh the seam registry (no-op if unchanged).
-		if (SeamRegistry.IsValid())
 		{
-			SeamRegistry->UpdateChunkRenderedLOD(ChunkCoord, State->MeshedLODLevel);
-		}
-		if (bHoldForSeams)
-		{
-			BeginSeamHold(ChunkCoord);
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_SeamRegistry);
+			// Rendered LOD known — refresh the seam registry (no-op if unchanged).
+			if (SeamRegistry.IsValid())
+			{
+				SeamRegistry->UpdateChunkRenderedLOD(ChunkCoord, State->MeshedLODLevel);
+			}
+			if (bHoldForSeams)
+			{
+				BeginSeamHold(ChunkCoord);
+			}
 		}
 		BenchCounters.EverMeshed.Add(ChunkCoord);
 
@@ -8501,9 +8544,13 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		// so caves connected across chunk boundaries receive consistent water flags.
 		if (Configuration && (GetWaterLevels().HasWater() || HasWaterBodies()))
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_Water);
 			const double WaterT0 = FPlatformTime::Seconds();
 			uint8 FloodedFaces = 0;
-			PropagateWaterFromNeighbors(ChunkCoord, &FloodedFaces);
+			{
+				TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWater_Pull);
+				PropagateWaterFromNeighbors(ChunkCoord, &FloodedFaces);
+			}
 
 			// The chunk's water is in place, the first time since its voxel data arrived: an edit that reached it before (a
 			// POI's terraform or a dungeon stamp at stream-in, a save's edits) is scanned for voxels it opened to the sea now
@@ -8512,22 +8559,29 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 			State->bWaterSettled = true;
 			if (WaterPropagation && bWaterArrived)
 			{
+				TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWater_Settled);
 				WaterPropagation->OnChunkWaterSettled(ChunkCoord);
 			}
 
 			// Its neighbours that pulled before its water was there pull again (G70): across every face the first time (its
 			// generated water arrived with it), else across the faces this pull flooded.
-			QueueWaterRepulls(ChunkCoord, bWaterArrived ? 0x3F : FloodedFaces);
+			{
+				TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWater_Repulls);
+				QueueWaterRepulls(ChunkCoord, bWaterArrived ? 0x3F : FloodedFaces);
+			}
 
 			// Update this chunk's contribution to its 2D water tile
 			if (UsesWaterTiles())
 			{
+				TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWater_Tile);
 				UpdateWaterTileContribution(ChunkCoord);
 			}
 			SubmitWaterSecondsThisTick += FPlatformTime::Seconds() - WaterT0;
 		}
 
-		// Remove from pending queue — O(1) swap since order doesn't matter (accessed by coord)
+		// Remove from pending queue — O(1) swap since order doesn't matter (accessed by coord); the mesh's arrays the
+		// renderer did not take are freed here
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_FreeMesh);
 		PendingMeshQueue.RemoveAtSwap(PendingIndex, EAllowShrinking::No);
 	}
 	else if (PendingIndex == INDEX_NONE)
@@ -8548,6 +8602,7 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 	}
 
 	// Mark as loaded
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_Loaded);
 	LoadedChunkCoords.Add(ChunkCoord);
 	NoteFarFieldChunkChanged(ChunkCoord);
 	State->Descriptor.bIsDirty = false;
@@ -8666,6 +8721,8 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	// Collect seed voxels from 6 face neighbors
 	TArray<int32> Seeds;
 	TSet<int32> SeedSet;
+	const bool bStridedScans = CVarWaterStridedScans.GetValueOnGameThread() != 0;
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWater_PullFaces);
 
 	static const FIntVector FaceOffsets[6] = {
 		{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}
@@ -8697,75 +8754,94 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 		// X/Y faces iterate Z on axis B — only the underwater band can seed
 		const int32 MaxB = (F < 4) ? MaxSeedZ : MaxIdx;
 
-		// Iterate boundary face voxels (2D loop over the two axes perpendicular to this face)
-		for (int32 A = 0; A < CS; ++A)
+		// One boundary voxel pair: A and B are the two axes across this face
+		auto VisitFaceVoxel = [&](int32 A, int32 B)
+		{
+			int32 OurX, OurY, OurZ;
+			int32 NbrX, NbrY, NbrZ;
+
+			switch (F)
+			{
+			case 0: // +X neighbor: our X=MaxIdx, neighbor X=0
+				OurX = MaxIdx; OurY = A; OurZ = B;
+				NbrX = 0;      NbrY = A; NbrZ = B;
+				break;
+			case 1: // -X neighbor: our X=0, neighbor X=MaxIdx
+				OurX = 0;      OurY = A; OurZ = B;
+				NbrX = MaxIdx; NbrY = A; NbrZ = B;
+				break;
+			case 2: // +Y neighbor: our Y=MaxIdx, neighbor Y=0
+				OurX = A; OurY = MaxIdx; OurZ = B;
+				NbrX = A; NbrY = 0;      NbrZ = B;
+				break;
+			case 3: // -Y neighbor: our Y=0, neighbor Y=MaxIdx
+				OurX = A; OurY = 0;      OurZ = B;
+				NbrX = A; NbrY = MaxIdx; NbrZ = B;
+				break;
+			case 4: // +Z neighbor: our Z=MaxIdx, neighbor Z=0
+				OurX = A; OurY = B; OurZ = MaxIdx;
+				NbrX = A; NbrY = B; NbrZ = 0;
+				break;
+			case 5: // -Z neighbor: our Z=0, neighbor Z=MaxIdx
+				OurX = A; OurY = B; OurZ = 0;
+				NbrX = A; NbrY = B; NbrZ = MaxIdx;
+				break;
+			default:
+				return;
+			}
+
+			const int32 OurIdx = OurX + OurY * CS + OurZ * SliceSize;
+			const FVoxelData& OurVoxel = OwnVoxels[OurIdx];
+
+			// Our voxel must be dry air below the sea
+			if (OurVoxel.IsSolid() || OurVoxel.HasWaterFlag())
+			{
+				return;
+			}
+
+			if (!IsBelowSea(OurX, OurY, OurZ))
+			{
+				return;
+			}
+
+			// Only propagate water from neighbors that already have water flags.
+			// No special-casing for +Z face — the column scan in
+			// ApplyWaterFillPass handles seeding for the water-level chunk.
+			const int32 NbrIdx = NbrX + NbrY * CS + NbrZ * SliceSize;
+			if (!NeighborData[NbrIdx].HasWaterFlag())
+			{
+				return;
+			}
+
+			// Seed this voxel (once: a voxel on a chunk edge faces two neighbours)
+			bool bAlreadySeeded = false;
+			SeedSet.Add(OurIdx, &bAlreadySeeded);
+			if (!bAlreadySeeded)
+			{
+				Seeds.Add(OurIdx);
+			}
+		};
+
+		// Iterate boundary face voxels (2D loop over the two axes perpendicular to this face). A, the inner loop, steps a
+		// voxel or a row in memory on every face; B, the outer, a row or a slice (G294: B inner stepped a slice, 16 KB on a
+		// 64-voxel chunk, per voxel on the four side faces). The seeds come in another order and flood the same voxels.
+		if (bStridedScans)
+		{
+			for (int32 A = 0; A < CS; ++A)
+			{
+				for (int32 B = 0; B <= MaxB; ++B)
+				{
+					VisitFaceVoxel(A, B);
+				}
+			}
+		}
+		else
 		{
 			for (int32 B = 0; B <= MaxB; ++B)
 			{
-				int32 OurX, OurY, OurZ;
-				int32 NbrX, NbrY, NbrZ;
-
-				switch (F)
+				for (int32 A = 0; A < CS; ++A)
 				{
-				case 0: // +X neighbor: our X=MaxIdx, neighbor X=0
-					OurX = MaxIdx; OurY = A; OurZ = B;
-					NbrX = 0;      NbrY = A; NbrZ = B;
-					break;
-				case 1: // -X neighbor: our X=0, neighbor X=MaxIdx
-					OurX = 0;      OurY = A; OurZ = B;
-					NbrX = MaxIdx; NbrY = A; NbrZ = B;
-					break;
-				case 2: // +Y neighbor: our Y=MaxIdx, neighbor Y=0
-					OurX = A; OurY = MaxIdx; OurZ = B;
-					NbrX = A; NbrY = 0;      NbrZ = B;
-					break;
-				case 3: // -Y neighbor: our Y=0, neighbor Y=MaxIdx
-					OurX = A; OurY = 0;      OurZ = B;
-					NbrX = A; NbrY = MaxIdx; NbrZ = B;
-					break;
-				case 4: // +Z neighbor: our Z=MaxIdx, neighbor Z=0
-					OurX = A; OurY = B; OurZ = MaxIdx;
-					NbrX = A; NbrY = B; NbrZ = 0;
-					break;
-				case 5: // -Z neighbor: our Z=0, neighbor Z=MaxIdx
-					OurX = A; OurY = B; OurZ = 0;
-					NbrX = A; NbrY = B; NbrZ = MaxIdx;
-					break;
-				default:
-					continue;
-				}
-
-				const int32 NbrIdx = NbrX + NbrY * CS + NbrZ * SliceSize;
-				const FVoxelData& NbrVoxel = NeighborData[NbrIdx];
-
-				const int32 OurIdx = OurX + OurY * CS + OurZ * SliceSize;
-				const FVoxelData& OurVoxel = OwnVoxels[OurIdx];
-
-				// Our voxel must be dry air below the sea
-				if (OurVoxel.IsSolid() || OurVoxel.HasWaterFlag())
-				{
-					continue;
-				}
-
-				if (!IsBelowSea(OurX, OurY, OurZ))
-				{
-					continue;
-				}
-
-				// Only propagate water from neighbors that already have water flags.
-				// No special-casing for +Z face — the column scan in
-				// ApplyWaterFillPass handles seeding for the water-level chunk.
-				if (!NbrVoxel.HasWaterFlag())
-				{
-					continue;
-				}
-
-				// Seed this voxel (once: a voxel on a chunk edge faces two neighbours)
-				bool bAlreadySeeded = false;
-				SeedSet.Add(OurIdx, &bAlreadySeeded);
-				if (!bAlreadySeeded)
-				{
-					Seeds.Add(OurIdx);
+					VisitFaceVoxel(A, B);
 				}
 			}
 		}
@@ -8791,6 +8867,7 @@ bool UVoxelChunkManager::PropagateWaterFromNeighbors(const FIntVector& ChunkCoor
 	}
 
 	// BFS flood fill from seeds (same algorithm as ApplyWaterFillPass Phase 2)
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWater_PullFlood);
 	const int32 NumSeeds = Seeds.Num();
 	TArray<int32> BFSQueue = MoveTemp(Seeds);
 	int32 QueueHead = 0;
@@ -8908,6 +8985,7 @@ void UVoxelChunkManager::QueueWaterRepulls(const FIntVector& ChunkCoord, uint8 F
 
 void UVoxelChunkManager::ProcessWaterRepulls()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelTick_ProcessWaterRepulls);
 	// About a millisecond a tick, at least one pull: a pull without seeds reads only its six faces, one that floods a chunk
 	// runs a BFS over it. First in, first out, so a flood spreads ring by ring.
 	const double Deadline = FPlatformTime::Seconds() + 0.001;
@@ -8968,6 +9046,7 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 		}
 	}
 
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelWater_TileMask);
 	TArray<bool> PartialMask;
 	PartialMask.SetNumZeroed(CS * CS);
 
@@ -8984,8 +9063,10 @@ void UVoxelChunkManager::UpdateWaterTileContribution(const FIntVector& ChunkCoor
 		// A far-compressed chunk reads its snapshot (the generated voxels, no edits), decoded on a worker (G65).
 		EditMerged = GetVoxelSnapshot(ChunkCoord, *State);
 	}
-	bool bAnyWater = FVoxelWaterMesher::BuildColumnMask(
-		EditMerged.IsValid() ? *EditMerged : State->Descriptor.GetVoxelDataForRead(), CS, PartialMask);
+	const TArray<FVoxelData>& MaskVoxels = EditMerged.IsValid() ? *EditMerged : State->Descriptor.GetVoxelDataForRead();
+	bool bAnyWater = CVarWaterStridedScans.GetValueOnGameThread() != 0
+		? FVoxelWaterMesher::BuildColumnMaskByColumn(MaskVoxels, CS, PartialMask)
+		: FVoxelWaterMesher::BuildColumnMask(MaskVoxels, CS, PartialMask);
 
 	// The tiles are the sea's (the hydrology plan's section 5.5): a column whose level is not the sea's, a lake's or a
 	// river reach's, adds nothing to the mask. Its water is drawn by the body's own mesh. Only a chunk a body may reach

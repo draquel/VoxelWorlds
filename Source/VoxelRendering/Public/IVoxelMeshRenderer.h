@@ -95,6 +95,18 @@ public:
 	}
 
 	/**
+	 * Whether this renderer takes a chunk mesh's vertices in its own format, made on the mesh worker
+	 * (FChunkMeshData::PrepareRenderVertices, G294), so the chunk manager's mesh jobs prepare them and drop the attributes
+	 * they came from. A renderer that reads the mesher's normals, UVs or colours keeps the default.
+	 *
+	 * @return True if the mesh jobs may prepare the render vertices for this renderer
+	 */
+	virtual bool TakesPreparedVertices() const
+	{
+		return false;
+	}
+
+	/**
 	 * Remove chunk mesh from rendering.
 	 *
 	 * Releases all resources associated with the chunk.

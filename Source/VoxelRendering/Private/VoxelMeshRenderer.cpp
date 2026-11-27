@@ -17,6 +17,16 @@
 #include "VT/RuntimeVirtualTexture.h"
 #include "RHICommandList.h"
 #include "RenderingThread.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include <atomic>
+#include "Hash/CityHash.h"
+
+namespace
+{
+	/** The chunk meshes the renderer took with their mesh worker's vertices, and the ones it converted (G294) */
+	std::atomic<int64> GVoxelSubmitPreparedTaken{ 0 };
+	std::atomic<int64> GVoxelSubmitConverted{ 0 };
+}
 
 // ==================== FVoxelMeshRenderer ====================
 
@@ -315,13 +325,34 @@ void FVoxelMeshRenderer::UpdateChunkMeshFromCPU(
 	int32 LODLevel,
 	const FChunkMeshData& MeshData)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_Renderer);
 	if (!MeshData.IsValid())
 	{
 		RemoveChunk(ChunkCoord);
 		return;
 	}
-	// Caller keeps the mesh data — copy the index buffer
-	SubmitChunkMeshInternal(ChunkCoord, LODLevel, MeshData, TArray<uint32>(MeshData.Indices));
+	// Caller keeps the mesh data — copy the index buffer, and the vertices its mesh worker prepared (else convert them)
+	TArray<uint32> Indices;
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_IndexCopy);
+		Indices = MeshData.Indices;
+	}
+	TArray<FVoxelVertex> Vertices;
+	FBox LocalBounds(ForceInit);
+	if (MeshData.HasRenderVertices())
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_CopyPrepared);
+		Vertices = MeshData.RenderVertices;
+		LocalBounds = MeshData.RenderBounds;
+		GVoxelSubmitPreparedTaken.fetch_add(1, std::memory_order_relaxed);
+	}
+	else
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_Convert);
+		ConvertToVoxelVertices(MeshData, Vertices, LocalBounds);
+		GVoxelSubmitConverted.fetch_add(1, std::memory_order_relaxed);
+	}
+	SubmitChunkMeshInternal(ChunkCoord, LODLevel, MoveTemp(Vertices), LocalBounds, MoveTemp(Indices), MeshData.PrebuiltLumenCards);
 }
 
 void FVoxelMeshRenderer::UpdateChunkMeshFromCPU(
@@ -329,21 +360,46 @@ void FVoxelMeshRenderer::UpdateChunkMeshFromCPU(
 	int32 LODLevel,
 	FChunkMeshData&& MeshData)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_Renderer);
 	if (!MeshData.IsValid())
 	{
 		RemoveChunk(ChunkCoord);
 		return;
 	}
-	// Caller is done with the mesh data — move the index buffer straight into the pending
-	// batch. (Vertices always need converting to FVoxelVertex, so only indices benefit.)
-	SubmitChunkMeshInternal(ChunkCoord, LODLevel, MeshData, MoveTemp(MeshData.Indices));
+	// Caller is done with the mesh data — move the index buffer straight into the pending batch, and the vertices its
+	// mesh worker prepared (G294; a mesh that came another way is converted here)
+	TArray<FVoxelVertex> Vertices;
+	FBox LocalBounds(ForceInit);
+	if (MeshData.HasRenderVertices())
+	{
+		Vertices = MoveTemp(MeshData.RenderVertices);
+		LocalBounds = MeshData.RenderBounds;
+		GVoxelSubmitPreparedTaken.fetch_add(1, std::memory_order_relaxed);
+	}
+	else
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_Convert);
+		ConvertToVoxelVertices(MeshData, Vertices, LocalBounds);
+		GVoxelSubmitConverted.fetch_add(1, std::memory_order_relaxed);
+	}
+	SubmitChunkMeshInternal(ChunkCoord, LODLevel, MoveTemp(Vertices), LocalBounds, MoveTemp(MeshData.Indices), MeshData.PrebuiltLumenCards);
+}
+
+FVoxelSubmitCounters::FCounts FVoxelSubmitCounters::Get()
+{
+	FCounts Counts;
+	Counts.PreparedTaken = GVoxelSubmitPreparedTaken.load(std::memory_order_relaxed);
+	Counts.Converted = GVoxelSubmitConverted.load(std::memory_order_relaxed);
+	return Counts;
 }
 
 void FVoxelMeshRenderer::SubmitChunkMeshInternal(
 	const FIntVector& ChunkCoord,
 	int32 LODLevel,
-	const FChunkMeshData& MeshData,
-	TArray<uint32>&& Indices)
+	TArray<FVoxelVertex>&& Vertices,
+	const FBox& LocalBounds,
+	TArray<uint32>&& Indices,
+	const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& PrebuiltCards)
 {
 	check(IsInGameThread());
 
@@ -352,12 +408,6 @@ void FVoxelMeshRenderer::SubmitChunkMeshInternal(
 		UE_LOG(LogVoxelRendering, Warning, TEXT("FVoxelMeshRenderer::UpdateChunkMeshFromCPU called before initialization"));
 		return;
 	}
-
-	// Convert CPU mesh data to FVoxelVertex array; local bounds are computed in the same pass
-	// (this used to be a second full sweep over the positions)
-	TArray<FVoxelVertex> Vertices;
-	FBox LocalBounds(ForceInit);
-	ConvertToVoxelVertices(MeshData, Vertices, LocalBounds);
 
 	// Update statistics
 	FChunkStats* ExistingStats = ChunkStatsMap.Find(ChunkCoord);
@@ -377,12 +427,26 @@ void FVoxelMeshRenderer::SubmitChunkMeshInternal(
 	TotalVertexCount += Stats.VertexCount;
 	TotalTriangleCount += Stats.TriangleCount;
 
+	if (bRecordSubmittedVertexHashes)
+	{
+		const double Box[6] = { LocalBounds.Min.X, LocalBounds.Min.Y, LocalBounds.Min.Z, LocalBounds.Max.X, LocalBounds.Max.Y, LocalBounds.Max.Z };
+		const uint64 VertexHash = CityHash64(reinterpret_cast<const char*>(Vertices.GetData()), Vertices.Num() * sizeof(FVoxelVertex));
+		const uint64 IndexHash = CityHash64(reinterpret_cast<const char*>(Indices.GetData()), Indices.Num() * sizeof(uint32));
+		const uint64 BoundsHash = CityHash64(reinterpret_cast<const char*>(Box), sizeof(Box));
+		SubmittedVertexHashes.Add(ChunkCoord, CityHash128to64(Uint128_64(CityHash128to64(Uint128_64(VertexHash, IndexHash)), BoundsHash)));
+	}
+
 	// Use DIRECT CPU PATH - no GPU buffer roundtrip!
 	// This passes CPU arrays directly to the render thread, avoiding:
 	// 1. Creating intermediate GPU buffers
 	// 2. Bouncing back to game thread
 	// 3. GPU readback stalls in scene proxy
-	if (UVoxelRegionComponent* Component = GetOrCreateRegionComponent(ChunkCoord))
+	UVoxelRegionComponent* Component = nullptr;
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_FindRegion);
+		Component = GetOrCreateRegionComponent(ChunkCoord);
+	}
+	if (Component)
 	{
 		Component->UpdateChunkBuffersFromCPUData(
 			ChunkCoord,
@@ -390,7 +454,7 @@ void FVoxelMeshRenderer::SubmitChunkMeshInternal(
 			MoveTemp(Indices),
 			LODLevel,
 			LocalBounds,
-			MeshData.PrebuiltLumenCards
+			PrebuiltCards
 		);
 	}
 
@@ -398,9 +462,19 @@ void FVoxelMeshRenderer::SubmitChunkMeshInternal(
 		*ChunkCoord.ToString(), Stats.VertexCount, Stats.TriangleCount);
 }
 
+void FVoxelMeshRenderer::SetRecordSubmittedVertexHashes(bool bRecord)
+{
+	bRecordSubmittedVertexHashes = bRecord;
+	if (!bRecord)
+	{
+		SubmittedVertexHashes.Empty();
+	}
+}
+
 void FVoxelMeshRenderer::RemoveChunk(const FIntVector& ChunkCoord)
 {
 	check(IsInGameThread());
+	SubmittedVertexHashes.Remove(ChunkCoord);
 
 	// Update statistics
 	FChunkStats* Stats = ChunkStatsMap.Find(ChunkCoord);
@@ -939,58 +1013,8 @@ void FVoxelMeshRenderer::ConvertToVoxelVertices(
 	TArray<FVoxelVertex>& OutVertices,
 	FBox& OutLocalBounds)
 {
-	const int32 VertexCount = MeshData.Positions.Num();
-	OutVertices.SetNumUninitialized(VertexCount);
-	OutLocalBounds.Init();
-
-	// Attribute arrays are either full-size or absent — decide once, not per vertex.
-	// (The per-vertex `i < Num()` checks this replaces also handled partially-filled arrays,
-	// which no mesher produces; short arrays now fall back to defaults wholesale.)
-	const bool bHasNormals = MeshData.Normals.Num() >= VertexCount;
-	const bool bHasUVs = MeshData.UVs.Num() >= VertexCount;
-	const bool bHasColors = MeshData.Colors.Num() >= VertexCount;
-	const bool bHasBlends = MeshData.MaterialBlends.Num() >= VertexCount;
-
-	FVector3f BoundsMin(FLT_MAX, FLT_MAX, FLT_MAX);
-	FVector3f BoundsMax(-FLT_MAX, -FLT_MAX, -FLT_MAX);
-
-	for (int32 i = 0; i < VertexCount; ++i)
-	{
-		FVoxelVertex& Vertex = OutVertices[i];
-
-		// Position + bounds (fused — this loop runs per submitted chunk on the game thread)
-		const FVector3f& Pos = MeshData.Positions[i];
-		Vertex.Position = Pos;
-		BoundsMin = FVector3f::Min(BoundsMin, Pos);
-		BoundsMax = FVector3f::Max(BoundsMax, Pos);
-
-		Vertex.SetNormal(bHasNormals ? MeshData.Normals[i] : FVector3f::UpVector);
-		Vertex.UV = bHasUVs ? MeshData.UVs[i] : FVector2f::ZeroVector;
-
-		// Extract material data from vertex color
-		if (bHasColors)
-		{
-			const FColor& Color = MeshData.Colors[i];
-			Vertex.SetMaterialID(Color.R);
-			Vertex.SetBiomeID(Color.G);
-			Vertex.SetAO(Color.B >> 6); // Top 2 bits of blue channel
-		}
-		else
-		{
-			Vertex.SetMaterialID(0);
-			Vertex.SetBiomeID(0);
-			Vertex.SetAO(0);
-		}
-		// The soft material border's blend (VP2-O4; 0 = none). Set on every vertex: the array is uninitialized, and
-		// the setters above leave these bits alone
-		Vertex.SetMaterialBlend(bHasBlends ? MeshData.MaterialBlends[i] : 0);
-	}
-
-	if (VertexCount > 0)
-	{
-		OutLocalBounds += FVector(BoundsMin);
-		OutLocalBounds += FVector(BoundsMax);
-	}
+	// The one conversion, which the mesh workers run too (FChunkMeshData::PrepareRenderVertices, G294)
+	FChunkMeshData::ConvertToVoxelVertices(MeshData, OutVertices, OutLocalBounds);
 }
 
 FBox FVoxelMeshRenderer::CalculateChunkBounds(const FIntVector& ChunkCoord) const

@@ -9,6 +9,8 @@
 #include "VoxelSeaSurface.h"
 #include "VoxelWaterLevels.h"
 #include "VoxelWorldConfiguration.h"
+#include "Testing/VoxelTestScopedCVar.h"
+#include "Misc/Crc.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -28,6 +30,9 @@
 //   in its place, a footprint 4,800 uu across at the level the sea stood at, so the pull and the flood test a voxel
 //   against the level over its own column (the chunk's water columns): the flags are closed under that flood, and no
 //   voxel holds the flag over its column's level or outside the footprint.
+// - Streaming.Water.PullOrder.StridedScansSame (G294): the plane's sea and the lake's streamed twice, the pull's face scan
+//   in the array's order (the default) and along each face's columns as before G294 (voxel.Water.StridedScans 1): every
+//   chunk loaded in both holds the same water flags, voxel for voxel, and the same chunks are loaded.
 // ---------------------------------------------------------------------------
 
 namespace VoxelWaterPullOrderTestUtils
@@ -183,6 +188,126 @@ namespace VoxelWaterPullOrderTestUtils
 		Test.TestEqual(*FString::Printf(TEXT("%s: no flagged voxel over the water over its column"), Name), Result.Stray, static_cast<int64>(0));
 		Test.TestEqual(*FString::Printf(TEXT("%s: the queue drained"), Name), Result.Repulls.Pending, 0);
 	}
+}
+
+namespace VoxelWaterPullOrderTestUtils
+{
+	/** Per loaded chunk, a CRC of its water flags (one bit a voxel) and how many it holds. */
+	TMap<FIntVector, TPair<uint32, int32>> FlagDigests(VoxelTesting::FTestChunkWorld& W)
+	{
+		TMap<FIntVector, TPair<uint32, int32>> Out;
+		TArray<FIntVector> Loaded;
+		W.Manager->GetLoadedChunks(Loaded);
+		for (const FIntVector& Coord : Loaded)
+		{
+			const TSharedPtr<const TArray<FVoxelData>> Snapshot = W.Manager->GetVoxelSnapshot(Coord);
+			if (!Snapshot.IsValid())
+			{
+				continue;
+			}
+			TArray<uint8> Bits;
+			Bits.SetNumZeroed((Snapshot->Num() + 7) / 8);
+			int32 Flagged = 0;
+			for (int32 Index = 0; Index < Snapshot->Num(); ++Index)
+			{
+				if ((*Snapshot)[Index].HasWaterFlag())
+				{
+					Bits[Index / 8] |= static_cast<uint8>(1u << (Index % 8));
+					++Flagged;
+				}
+			}
+			Out.Add(Coord, TPair<uint32, int32>(FCrc::MemCrc32(Bits.GetData(), Bits.Num()), Flagged));
+		}
+		return Out;
+	}
+
+	/** Stream the world with the pull's scans in one order and take its flags. */
+	TMap<FIntVector, TPair<uint32, int32>> StreamFlags(FAutomationTestBase& Test, const FString& Name, int32 StridedScans,
+		TFunctionRef<void(VoxelTesting::FTestChunkWorld&)> Configure, TFunction<void(VoxelTesting::FTestChunkWorld&)> AddBodies)
+	{
+		const VoxelTesting::FScopedCVar Scans(TEXT("voxel.Water.StridedScans"), StridedScans);
+		VoxelTesting::FTestChunkWorld W;
+		W.Create(TEXT("WaterPullScans"));
+		Configure(W);
+		W.StartManager();
+		if (AddBodies)
+		{
+			AddBodies(W);
+		}
+		W.SetViewer(FVector(0.0, 0.0, -1200.0));
+		Test.TestTrue(*FString::Printf(TEXT("%s, strided scans %d: the pipeline settled"), *Name, StridedScans), W.Settle());
+		for (int32 Tick = 0; Tick < 600 && W.Manager->GetWaterRepullStats().Pending > 0; ++Tick)
+		{
+			W.Manager->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
+		}
+		TMap<FIntVector, TPair<uint32, int32>> Flags = FlagDigests(W);
+		W.Stop();
+		return Flags;
+	}
+
+	/** The same flags from both scan orders. */
+	void RunScansSame(FAutomationTestBase& Test, const FString& Name, TFunctionRef<void(VoxelTesting::FTestChunkWorld&)> Configure,
+		TFunction<void(VoxelTesting::FTestChunkWorld&)> AddBodies = nullptr)
+	{
+		const TMap<FIntVector, TPair<uint32, int32>> InOrder = StreamFlags(Test, Name, 0, Configure, AddBodies);
+		const TMap<FIntVector, TPair<uint32, int32>> Strided = StreamFlags(Test, Name, 1, Configure, AddBodies);
+		int32 Common = 0;
+		int32 Differ = 0;
+		int64 Flagged = 0;
+		for (const TPair<FIntVector, TPair<uint32, int32>>& Pair : InOrder)
+		{
+			if (const TPair<uint32, int32>* Other = Strided.Find(Pair.Key))
+			{
+				++Common;
+				Flagged += Pair.Value.Value;
+				if (*Other != Pair.Value)
+				{
+					++Differ;
+					Test.AddError(FString::Printf(TEXT("%s: chunk %s holds %d flags in order, %d strided (CRC %08x, %08x)"), *Name,
+						*Pair.Key.ToString(), Pair.Value.Value, Other->Value, Pair.Value.Key, Other->Key));
+				}
+			}
+		}
+		Test.AddInfo(FString::Printf(TEXT("%s: %d chunks in order, %d strided, %d in both, %lld flagged voxels in them, %d differ"),
+			*Name, InOrder.Num(), Strided.Num(), Common, Flagged, Differ));
+		Test.TestEqual(*FString::Printf(TEXT("%s: the same chunks loaded"), *Name), Common, InOrder.Num());
+		Test.TestEqual(*FString::Printf(TEXT("%s: the same chunks loaded (strided)"), *Name), Common, Strided.Num());
+		Test.TestTrue(*FString::Printf(TEXT("%s: the sea floods (non-vacuous)"), *Name), Flagged > 10000);
+		Test.TestEqual(*FString::Printf(TEXT("%s: no chunk's flags differ"), *Name), Differ, 0);
+	}
+}
+
+/**
+ * G294: the pull's face scan in either order floods the same voxels, on the plane under the sea (the PullOrder.Plane
+ * world) and under a lake (PullOrder.LakePlane's).
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVoxelWaterPullStridedScansSameTest,
+	"VoxelWorlds.Streaming.Water.PullOrder.StridedScansSame",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVoxelWaterPullStridedScansSameTest::RunTest(const FString& Parameters)
+{
+	using namespace VoxelWaterPullOrderTestUtils;
+	RunScansSame(*this, TEXT("Sea on a plane"),
+		[](VoxelTesting::FTestChunkWorld& W)
+		{
+			W.ConfigureSmallPlane();
+			W.Config->bEnableWaterLevel = true;
+			W.Config->WaterLevel = 2900.0f;
+		});
+	RunScansSame(*this, TEXT("Lake on a plane"),
+		[](VoxelTesting::FTestChunkWorld& W)
+		{
+			W.ConfigureSmallPlane();
+			W.Config->bEnableWaterLevel = false;
+		},
+		[](VoxelTesting::FTestChunkWorld& W)
+		{
+			const FVoxelWaterFrame Frame = W.Manager->GetWaterLevels().GetFrame();
+			W.Manager->AddWaterBody(FVoxelWaterBody::MakeLake(53, 2900.0,
+				FVoxelWaterLake::Make(FVector2D(-2400.0, -2400.0), 400.0, FIntPoint(12, 12), TBitArray<>(true, 144)), Frame, 6000.0));
+		});
+	return true;
 }
 
 /**

@@ -2,10 +2,60 @@
 
 #include "VoxelWaterMesher.h"
 #include "VoxelData.h"
+#include "VoxelCoreTypes.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelWaterMesher, Log, All);
 
 bool FVoxelWaterMesher::BuildColumnMask(
+	const TArray<FVoxelData>& VoxelData,
+	int32 ChunkSize,
+	TArray<bool>& OutMask)
+{
+	const int32 SliceSize = ChunkSize * ChunkSize;
+
+	if (VoxelData.Num() < SliceSize * ChunkSize || OutMask.Num() < SliceSize)
+	{
+		return false;
+	}
+
+	// In the array's own order, a slice at a time (G294). A column's voxels are a slice apart (16 KB on a 64-voxel chunk), so
+	// the walk up each column to its first water touched a page a voxel: 0.8 ms on the game thread at each submit of a chunk
+	// under the sea's level. Each voxel is read as its packed word (FVoxelData::Pack's layout is its memory's: the density in
+	// bits 8-15, the flags in 28-31) into a word a column, the same few integer operations on every lane, so the inner loop
+	// vectorizes (the struct's bytes one at a time did not: about 1 ns a voxel). The mask is the same: a column is wet when
+	// any of its voxels is.
+	static_assert(sizeof(FVoxelData) == sizeof(uint32), "the column mask reads a voxel as its packed word");
+	constexpr uint32 WaterBit = static_cast<uint32>(FVoxelData::VOXEL_FLAG_WATER) << 28;
+	constexpr uint32 UndergroundBit = static_cast<uint32>(FVoxelData::VOXEL_FLAG_UNDERGROUND) << 28;
+	constexpr uint32 Threshold = VOXEL_SURFACE_THRESHOLD;
+	TArray<uint32, TInlineAllocator<64 * 64>> Columns;
+	Columns.SetNumZeroed(SliceSize);
+	uint32* RESTRICT Wet = Columns.GetData();
+	const FVoxelData* RESTRICT Voxels = VoxelData.GetData();
+	for (int32 Z = 0; Z < ChunkSize; ++Z)
+	{
+		const FVoxelData* RESTRICT Slice = Voxels + Z * SliceSize;
+		for (int32 Index = 0; Index < SliceSize; ++Index)
+		{
+			uint32 Word;
+			FMemory::Memcpy(&Word, &Slice[Index], sizeof(uint32));
+			// Air (density under the surface's), the water flag, and no underground flag (a cave's water)
+			Wet[Index] |= static_cast<uint32>(((Word >> 8) & 0xFFu) < Threshold) & static_cast<uint32>((Word & (WaterBit | UndergroundBit)) == WaterBit);
+		}
+	}
+
+	bool* Mask = OutMask.GetData();
+	bool bHasAnyWater = false;
+	for (int32 Index = 0; Index < SliceSize; ++Index)
+	{
+		const bool bWet = Wet[Index] != 0;
+		Mask[Index] |= bWet;
+		bHasAnyWater |= bWet;
+	}
+	return bHasAnyWater;
+}
+
+bool FVoxelWaterMesher::BuildColumnMaskByColumn(
 	const TArray<FVoxelData>& VoxelData,
 	int32 ChunkSize,
 	TArray<bool>& OutMask)
