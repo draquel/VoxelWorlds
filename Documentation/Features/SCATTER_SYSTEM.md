@@ -1,6 +1,6 @@
 # Scatter System
 
-> State as of 2026-11-02 (code review CR5); the HISM writes' budget as of 2026-11-24 (G281). Terms: `Documentation/GLOSSARY.md`.
+> State as of 2026-11-02 (code review CR5); the HISM writes' budget as of 2026-11-24 (G281); the dense types' regions as of 2026-11-27 (D198, D199). Terms: `Documentation/GLOSSARY.md`.
 
 **Module**: VoxelScatter
 **Dependencies**: VoxelCore, VoxelGeneration (the surface queries); the chunk manager (VoxelStreaming) drives it
@@ -564,6 +564,11 @@ scene (frames up to 51 ms). Writes are now batched per HISM:
   when it initializes and gives them to the renderer (`SetDenseTypeRegions`); `voxel.Scatter.DenseRegionChunks` and
   `voxel.Scatter.DenseMinPerChunk` override them once set (an A/B: `DenseRegionChunks 0` = every type in the same
   regions, as before D198), and a change on a running world takes effect at the next initialize, as the regions above.
+  A block world's configurations set `ScatterDenseRegionChunks` 0 (D199, 2026-11-27: `Review_Cubic`,
+  `Review_Cubic_NoLOD`, `Review_Cubic_NoLOD_Simple`, `Review_Cubic_SingleLOD`, `DemoCubicWorldConfig`,
+  `CubicTerrain_Plane_Config`): its write peaks are ticks the write budget fills with several small writes, which
+  smaller regions do not shorten, so they bought it more HISMs and draw calls for no lower peak (below). A new block
+  world's configuration starts at the default (2) and sets 0 the same way.
   A dense HISM holds a quarter (2) or a sixteenth (1) of the instances on a heightmap world, so each of its writes copies
   that many. Only which HISM holds an instance changes: the placement and the digests are the same either way. A
   dedicated server builds no HISM and is not affected.
@@ -637,8 +642,16 @@ walk; its spawn, at the grid's origin, splits the same in regions of 4 and of 2 
 write budget fills with several smaller writes, so the longest tick does not come down (2.51 and 2.67 ms against 2.69
 and 2.73) while the longest write does (1.34 and 1.60 against 1.00 and 0.93) and the copies halve (1.63 and 1.69
 million against 0.78); 151 against 361 HISMs after the walk; at the spawn 60 against 142 HISMs, draw calls 2,154
-against 2,201 to 2,205 (+2.3 %), the GPU 5.56 to 5.58 ms either way. Whether a block world keeps the default is D199
-(`Documentation/FINDINGS.md`). The scatter digests are the same either way (`VoxelDemo` against its record, the review
+against 2,201 to 2,205 (+2.3 %), the GPU 5.56 to 5.58 ms either way. The user decided D199 (`Documentation/FINDINGS.md`)
+with (b): a block world's configurations set `ScatterDenseRegionChunks` 0 (above). Confirmed on 2026-11-27 in one
+editor (PIE window 2874 by 1358), the block world with no console override against `voxel.Scatter.DenseRegionChunks 2`
+run after it: at the spawn (two runs a side) 60 against 142 HISMs, the draw calls by heading 2,162 to 2,191, 2,425,
+2,309 to 2,310 and 1,721 against 2,239, 2,416, 2,302 and 1,864 (the median 2,250 against 2,270.5; the draw calls depend
+on the PIE window: 1,710.5 at 1280 by 720), the GPU 5.3 to 5.6 ms either way; a walk (300 s) the longest tick 2.68 ms,
+the longest write 1.26, 24 ticks of 2 ms or more, 1.71 million instances copied, 151 HISMs after it, the shared regions'
+numbers above. `VoxelDemo`'s own world keeps regions of 2: 110 HISMs at the spawn (two runs). The placement is
+unchanged: the block world's digests 188 of 188 chunks the same at 2 and at 0, `VoxelDemo`'s 176 of 176 as its record.
+For D198 itself: the scatter digests are the same either way (`VoxelDemo` against its record, the review
 planet, the block world and island M with the override at 0 and the default), the chord bench's counters the same
 (three runs a side), and a dedicated server, which builds no HISM, stands its players as before (`server_ground.py`).
 
