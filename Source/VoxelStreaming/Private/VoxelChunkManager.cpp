@@ -8454,6 +8454,11 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 					NoteFarFieldChunkChanged(ChunkCoord);
 					SubmitRendererSecondsThisTick += FPlatformTime::Seconds() - RendT0;
 					State->MeshedLODLevel = PendingMeshQueue[i].LODLevel;
+					State->MeshSubmitSeconds = FPlatformTime::Seconds();
+					if (CollisionManager)
+					{
+						CollisionManager->NoteChunkMeshSubmitted(ChunkCoord, State->MeshedLODLevel);
+					}
 					// Rendered LOD known — refresh the seam registry (no-op if unchanged).
 					if (SeamRegistry.IsValid())
 					{
@@ -8554,6 +8559,11 @@ void UVoxelChunkManager::OnChunkMeshingComplete(const FIntVector& ChunkCoord)
 		// Track which LOD is actually rendered so neighbors can read the correct
 		// LOD level for MergeLODBoundaryCells and transition face setup.
 		State->MeshedLODLevel = PendingMesh.LODLevel;
+		State->MeshSubmitSeconds = FPlatformTime::Seconds();
+		if (CollisionManager)
+		{
+			CollisionManager->NoteChunkMeshSubmitted(ChunkCoord, State->MeshedLODLevel);
+		}
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_SeamRegistry);
 			// Rendered LOD known — refresh the seam registry (no-op if unchanged).
@@ -9866,4 +9876,60 @@ bool UVoxelChunkManager::PrepareCollisionMeshRequest(
 	}
 
 	return true;
+}
+
+FVoxelCollisionMeshReach UVoxelChunkManager::GetCollisionMeshReach(const FIntVector& ChunkCoord, int32 LODLevel) const
+{
+	FVoxelCollisionMeshReach Reach;
+	// A mesh of the chunk queued or on a worker (set lookups only: this runs for every cook and its 26 neighbours). A finished
+	// mesh waiting for its submit leaves the chunk Meshing, which the state checks below read as coming.
+	auto IsMeshComing = [this](const FIntVector& Coord)
+	{
+		return MeshingQueueSet.Contains(Coord) || AsyncMeshingInProgress.Contains(Coord);
+	};
+	// Drawn at the LOD, of the current voxels: loaded with that LOD submitted and nothing newer coming.
+	auto IsDrawnAt = [](const FVoxelChunkState& S, int32 LOD, bool bComing)
+	{
+		return S.State == EChunkState::Loaded && S.MeshedLODLevel == LOD && S.MeshSubmitSeconds > 0.0 && !bComing;
+	};
+
+	const FVoxelChunkState* State = ChunkStates.Find(ChunkCoord);
+	if (!State)
+	{
+		return Reach;
+	}
+	const bool bOwnComing = IsMeshComing(ChunkCoord);
+	if (IsDrawnAt(*State, LODLevel, bOwnComing))
+	{
+		Reach.Own = EVoxelCollisionOwnMesh::DrawnAtLOD;
+		Reach.OwnMeshAgeSeconds = FPlatformTime::Seconds() - State->MeshSubmitSeconds;
+	}
+	else if (bOwnComing || State->State == EChunkState::PendingMeshing || State->State == EChunkState::Meshing)
+	{
+		Reach.Own = State->LODLevel == LODLevel ? EVoxelCollisionOwnMesh::ComingAtLOD : EVoxelCollisionOwnMesh::OtherLOD;
+	}
+	else if (State->MeshSubmitSeconds > 0.0)
+	{
+		Reach.Own = EVoxelCollisionOwnMesh::OtherLOD;
+	}
+
+	for (int32 DZ = -1; DZ <= 1; ++DZ)
+	for (int32 DY = -1; DY <= 1; ++DY)
+	for (int32 DX = -1; DX <= 1; ++DX)
+	{
+		if (DX == 0 && DY == 0 && DZ == 0)
+		{
+			continue;
+		}
+		const FIntVector NCoord = ChunkCoord + FIntVector(DX, DY, DZ);
+		const FVoxelChunkState* NState = ChunkStates.Find(NCoord);
+		if (!NState || !NState->Descriptor.HasVoxelDataAvailable())
+		{
+			continue;
+		}
+		++Reach.NeighborsWithVoxels;
+		Reach.NeighborsTargetLOD += NState->LODLevel == LODLevel ? 1 : 0;
+		Reach.NeighborsDrawnAtLOD += IsDrawnAt(*NState, LODLevel, IsMeshComing(NCoord)) ? 1 : 0;
+	}
+	return Reach;
 }

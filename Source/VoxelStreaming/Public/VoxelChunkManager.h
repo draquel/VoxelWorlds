@@ -121,6 +121,9 @@ struct FVoxelChunkState
 	 */
 	bool bWaterSettled = false;
 
+	/** When the chunk's last mesh was submitted (FPlatformTime::Seconds; 0 = never): G296's measure of a mesh's age at its cook */
+	double MeshSubmitSeconds = 0.0;
+
 	FVoxelChunkState() = default;
 
 	explicit FVoxelChunkState(const FIntVector& InChunkCoord)
@@ -145,6 +148,38 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChunkLoaded, FIntVector, ChunkCoo
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnChunkUnloaded, FIntVector, ChunkCoord);
 
 class UVoxelChunkManager;
+
+/** What a chunk's own drawn mesh is against a collision cook's LOD when the cook launches (G296's measure). */
+enum class EVoxelCollisionOwnMesh : uint8
+{
+	/** Drawn at the cook's LOD, of the current voxels (loaded, no mesh queued or on a worker) */
+	DrawnAtLOD,
+	/** A mesh at the cook's LOD is queued, on a worker or waiting for its submit */
+	ComingAtLOD,
+	/** Drawn or to be drawn at another LOD (a coarser band) */
+	OtherLOD,
+	/** No mesh drawn or coming */
+	None,
+	Count
+};
+
+/**
+ * Where a chunk's drawn mesh and its 26 neighbours' stand when its collision cook launches (G296's measure): the share of
+ * cooks that could take a mesh job's mesh (its own at the cook's LOD, the boundary band from seam meshers over neighbours
+ * drawn at that LOD too).
+ */
+struct FVoxelCollisionMeshReach
+{
+	EVoxelCollisionOwnMesh Own = EVoxelCollisionOwnMesh::None;
+	/** Seconds since the chunk's mesh was submitted (DrawnAtLOD only) */
+	double OwnMeshAgeSeconds = 0.0;
+	/** Neighbours drawn at the cook's LOD of current voxels */
+	int32 NeighborsDrawnAtLOD = 0;
+	/** Neighbours whose target LOD is the cook's and that have voxels (drawn there now or later) */
+	int32 NeighborsTargetLOD = 0;
+	/** Neighbours with voxel data */
+	int32 NeighborsWithVoxels = 0;
+};
 
 /**
  * Fired at the end of every UVoxelChunkManager::Initialize, before the manager's first tick and so before it builds a
@@ -1741,6 +1776,17 @@ public:
 		uint32* OutMissingNeighborMask = nullptr,
 		TArray<UE::Tasks::FTask>* OutSnapshotsReady = nullptr,
 		TMap<FIntVector, TSharedPtr<const FVoxelFaceSlabs>>* OutNeighborFaceSlabs = nullptr);
+
+	/**
+	 * Where a chunk's drawn mesh and its neighbours' stand when its collision cook launches (G296's measure,
+	 * voxel.Collision.CookStats' reach line): whether a cook could take the chunk's mesh job's mesh at that LOD instead of
+	 * meshing again. Read only; game thread.
+	 *
+	 * @param ChunkCoord The chunk being cooked
+	 * @param LODLevel   The cook's LOD level
+	 * @return The chunk's and its neighbours' mesh state against that LOD
+	 */
+	FVoxelCollisionMeshReach GetCollisionMeshReach(const FIntVector& ChunkCoord, int32 LODLevel) const;
 
 	/**
 	 * Start the inputs of a queued collision cook decoding on workers (G65, G69): with shells (ShouldUseCollisionShells),

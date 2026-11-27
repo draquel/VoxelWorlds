@@ -62,9 +62,9 @@ public:
 	bool bCollisionSkipNoSurface = true;
 
 	/**
-	 * Decision D196 (open, the user's): a chunk's first cook away from every focus waits while a neighbour is still being
-	 * generated, trading when its collision arrives for the re-cook it saves; off = no chunk waits, as before G283
-	 * (voxel.Collision.NeighborWait)
+	 * Decision D196 (the user's, 2026-11-25: (a), the wait stays off, to be looked at again with G296's measurements): a
+	 * chunk's first cook away from every focus waits while a neighbour is still being generated, trading when its collision
+	 * arrives for the re-cook it saves; off = no chunk waits, as before G283 (voxel.Collision.NeighborWait)
 	 */
 	UPROPERTY(config, EditAnywhere, Category = "Collision")
 	bool bCollisionNeighborWait = false;
