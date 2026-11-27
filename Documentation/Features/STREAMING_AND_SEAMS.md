@@ -381,7 +381,7 @@ each launch where the chunk's own drawn mesh stands against the cook's LOD and h
 drawn there (`UVoxelChunkManager::GetCollisionMeshReach`). On `VoxelDemo` (Dual Contouring, LOD 0 to 7,000 uu, the shell
 20,000 uu: four chunk widths) the shell's cooks are of chunks drawn at LOD 1 and 2: of a teleport's 119 to 131 first cooks
 with a surface, 9 to 12 had their own mesh drawn at LOD 0 and 0 to 3 every neighbour too; of its 84 to 93 neighbour
-re-cooks, 6 to 11 and none; walking, 0 of 77; the island and the planet the same (6 to 10 of 128 to 133, 0 to 3 with
+re-cooks, 6 to 11 and none; walking, 0 of 77, and running at 1,440 uu/s, 0 of 332 (the cooks are at the shell's edge); the island and the planet the same (6 to 10 of 128 to 133, 0 to 3 with
 their neighbours, 0 walking). And the drawn mesh is not the cook's: the Interior domain clamps its gradient taps at the
 chunk's faces and the seam meshers geomorph at mixed LOD, so the collision would change near every boundary, and change
 with the drawn LOD, which a server decides from its first player (a further player's chunks are meshed at the coarsest
@@ -390,8 +390,8 @@ waits for anything but generation: a first cook launches 0.16 to 0.19 s after it
 a re-cook 0.03 to 0.05 s, and 20 ms faster cooks would not bring the collision visibly sooner. On a block world it would
 be reachable and the same collision: the cubic mesher's WholeChunk mesh is its Interior mesh and the six boundary slices
 (the same quads, slice by slice), every chunk is drawn at LOD 0 (no LOD), and on `Review_Cubic` every cook with a surface
-had its own mesh drawn there, 0.7 to 0.8 s old at a teleport's first cooks, 2.2 to 2.5 s at its re-cooks and 36 s on
-average (61 at most) while walking, so a kept Interior mesh would wait that long for its cook. Its cooks are the
+had its own mesh drawn there, 0.7 to 0.8 s old at a teleport's first cooks, 2.2 to 2.5 s at its re-cooks, 36 s on
+average (61 at most) while walking and 32 s (81) running at 1,240 uu/s, so a kept Interior mesh would wait that long for its cook. Its cooks are the
 mesher's: 25 to 29 ms a cook, 23 to 27 of them the mesh, 8.2 to 9.9 thread-seconds a teleport; but the same mesher's
 mesh jobs are 26.4 to 26.6 thread-seconds of the same teleport (G311), and a cheaper cubic mesh speeds both with no
 second path through collision. What is left is in `Documentation/FINDINGS.md`, G296 and G311. Test `Collision.MeshReach`
