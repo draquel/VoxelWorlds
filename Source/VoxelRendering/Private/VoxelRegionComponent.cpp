@@ -30,6 +30,7 @@
 #include "Engine/Engine.h"
 #include "Async/Async.h"
 #include "RenderingThread.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "UObject/UObjectIterator.h"
 #include "Engine/Texture.h"
 #include "Engine/Texture2D.h"
@@ -453,6 +454,7 @@ void UVoxelRegionComponent::UpdateChunkBuffersFromCPUData(
 	const FBox& LocalBounds,
 	const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& PrebuiltCards)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_RegionChunk);
 	check(IsInGameThread());
 	EnsureChunkPrimitiveMode();
 
@@ -468,6 +470,7 @@ void UVoxelRegionComponent::UpdateChunkBuffersFromCPUData(
 	// Update game thread tracking
 	bool bChunkExisted = false;
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_ChunkInfo);
 		FScopeLock Lock(&ChunkInfoLock);
 
 		bChunkExisted = ChunkInfoMap.Contains(ChunkCoord);
@@ -487,7 +490,11 @@ void UVoxelRegionComponent::UpdateChunkBuffersFromCPUData(
 	// into the batched swap; the fade-state attach lands BEFORE the flush, so a held fade's flag is
 	// in place when the swap retires the old mesh.
 	const FIntVector4 FadeKey = FVoxelFadeScheduler::ChunkKey(ChunkCoord);
-	const bool bCrossfade = StartChunkMeshFade(FadeKey, bChunkExisted);
+	bool bCrossfade = false;
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_StartFade);
+		bCrossfade = StartChunkMeshFade(FadeKey, bChunkExisted);
+	}
 
 	if (bUseChunkPrimitives)
 	{
@@ -495,9 +502,13 @@ void UVoxelRegionComponent::UpdateChunkBuffersFromCPUData(
 		SubmitChunkPrimitive(FadeKey, MoveTemp(Vertices), MoveTemp(Indices), LODLevel, LocalBounds, ChunkWorldPos, bCrossfade, PrebuiltCards);
 		if (!bCrossfade && ActiveFades.Contains(FadeKey))
 		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_CancelFade);
 			CancelFade(FadeKey, /*bClearRenderState=*/true);
 		}
-		UpdateBounds();
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_Bounds);
+			UpdateBounds();
+		}
 		RequestRenderBoundsRefresh();
 		return;
 	}
@@ -2824,10 +2835,15 @@ void UVoxelRegionComponent::SubmitChunkPrimitive(const FIntVector4& Key, TArray<
 		// Not registered: nothing to draw into (the registration's ConsumeLostRenderData brings it back)
 		return;
 	}
-	const TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe> Mesh = MakeShared<FVoxelChunkMesh, ESPMode::ThreadSafe>(MoveTemp(Vertices), MoveTemp(Indices), LODLevel,
-		LocalBounds, Origin, ChunkMeshBytes.ToSharedRef(), ChunkPrimitiveCards, PrebuiltCards);
+	TSharedPtr<FVoxelChunkMesh, ESPMode::ThreadSafe> Mesh;
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_MeshCards);
+		Mesh = MakeShared<FVoxelChunkMesh, ESPMode::ThreadSafe>(MoveTemp(Vertices), MoveTemp(Indices), LODLevel,
+			LocalBounds, Origin, ChunkMeshBytes.ToSharedRef(), ChunkPrimitiveCards, PrebuiltCards);
+	}
 	if (IsNaniteTerrain())
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_Nanite);
 		if (!IsVoxelNaniteAsyncWanted())
 		{
 			Mesh->BuildNanite_GameThread(this, bRadialFaceUp, FaceUpCenter, NaniteMaskedMaterials);
@@ -2872,14 +2888,20 @@ void UVoxelRegionComponent::SubmitChunkPrimitiveMesh(const FIntVector4& Key, con
 		return;
 	}
 
-	RetireChunkPrimitive(Primitive);
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_Retire);
+		RetireChunkPrimitive(Primitive);
+	}
 	if (!Primitive.Interface.IsValid())
 	{
 		Primitive.Interface = MakeShared<FVoxelChunkPrimitiveInterface>(this, Key);
 	}
 	Primitive.Mesh = Mesh;
 	Primitive.Previous = Previous;
-	CreateChunkPrimitive(Primitive, Key, Mesh, Previous, bFading);
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_Proxy);
+		CreateChunkPrimitive(Primitive, Key, Mesh, Previous, bFading);
+	}
 	Primitive.bPendingAdd = true;
 	PendingPrimitiveAdds.Add(MakePendingChunkPrimitive(Key, Primitive));
 }
@@ -2976,6 +2998,7 @@ void UVoxelRegionComponent::RemoveAllChunkPrimitives(bool bSeamsOnly)
 void UVoxelRegionComponent::FlushChunkPrimitives()
 {
 	check(IsInGameThread());
+	TRACE_CPUPROFILER_EVENT_SCOPE(VoxelSubmit_FlushPrimitives);
 
 	if (PendingPrimitiveAdds.Num() == 0 && PendingPrimitiveRemovals.Num() == 0)
 	{

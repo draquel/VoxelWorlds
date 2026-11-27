@@ -170,6 +170,25 @@ a pull that floods refreshes its water tile and queues on. The flood so reaches 
 to the sea through loaded chunks, whatever the order (before G70 each chunk pulled once). `voxel.Water.Stats` reports the
 second pulls (`GetWaterRepullStats`). Tests: `Streaming.Water.PullOrder.Plane`, `.Planet`.
 
+**What the water costs a mesh submit (G294, 2026-11-26).** The pull and the tile's mask run on the game thread inside
+each submit (`OnChunkMeshingComplete`), and they, not the renderer, were most of what a submit cost: in a traced teleport
+onto fresh ground on VoxelDemo (931 submits, the `VoxelSubmit_*` and `VoxelWater_*` scopes) the submits took 583 to 619
+ms, 390 to 417 of it the water's, and of that 300 to 323 ms the tile's column mask, 0.76 to 0.82 ms at each of the 393
+submits of a chunk under the sea's level. Both walks read a 64-voxel chunk's 1 MB of voxels with a slice's stride (16 KB)
+between steps: the mask walked up each column to its first water, the pull's four side faces along their columns. Both
+walk in the array's order now: the mask a slice at a time, each voxel read as its packed word into a word a column so
+the loop vectorizes, and the face scan a row at a time (the seeds come in another order and flood the same voxels). The
+masks and the flood are the same, voxel for voxel (`Meshing.Water.ColumnMaskOrder`, and
+`Streaming.Water.PullOrder.StridedScansSame`: the plane's sea and a lake streamed with each walk, 48 chunks and 736,658
+and 496,112 flags each, none different); `voxel.Water.StridedScans 1` walks as before, for an A/B. Alternated in one
+editor, three teleports a side: the submits 350 to 366 ms against 583 to 619 (a submit 376 to 393 µs against 627 to
+665), the mask 206 to 222 µs against 763 to 823, the same 931 submits and 393 masks. The face scan gained less (202 to
+205 µs a pull against 235 to 249): its X faces read a cache line a voxel in either order, and it runs about 1,300 times a
+teleport, the submits' pulls and the second pulls' (G307). A planet has no water tiles, and its pull costs more (319 to
+337 µs a pull against 406 to 431 before, 2,200 to 2,300 pulls a teleport on `Review_Planet`: its sea is a sphere, so the
+Z clamp of the faces does not apply); a block world's mask and pull as the plane's (`Review_Cubic`: the mask 157 to 166
+µs against 685).
+
 ### Edit-Triggered Propagation
 
 **File**: `VoxelStreaming/Public/VoxelWaterPropagation.h`
@@ -934,7 +953,9 @@ class FVoxelWaterTiles
 
 **Chunk loads or re-meshes** → `UpdateWaterTileContribution(ChunkCoord)`:
 1. Build partial mask from chunk voxel data via `BuildColumnMask()`: the edit-merged snapshot when the chunk has edits
-   (`GetVoxelSnapshot`; an edit-driven flood's water is in the edit layer, G59), else the generated voxels
+   (`GetVoxelSnapshot`; an edit-driven flood's water is in the edit layer, G59), else the generated voxels. It reads the
+   voxels in the array's order (G294, "What the water costs a mesh submit" above; `BuildColumnMaskByColumn` is the walk
+   before, for `voxel.Water.StridedScans`)
 2. `FVoxelWaterTiles::Contribute` stores it as the tile's `PartialMasks[Z]`, marks the tile dirty and queues it
 
 **Chunk unloads** → `RemoveWaterTileContribution(ChunkCoord)` (`FVoxelWaterTiles::Remove`):

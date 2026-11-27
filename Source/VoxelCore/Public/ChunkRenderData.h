@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "VoxelVertex.h"
 #include "ChunkRenderData.generated.h"
 
 /**
@@ -114,6 +115,41 @@ struct VOXELCORE_API FChunkMeshData
 	 *  them with the mesh; null when the fitted cards are off or the mesh came from elsewhere (the renderer fits them then) */
 	TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe> PrebuiltLumenCards;
 
+	/**
+	 * The mesh's vertices in the renderer's format, made on its mesh worker (G294, PrepareRenderVertices) so the submit on
+	 * the game thread moves them in instead of converting; empty when the mesh came another way (the renderer converts
+	 * then). Not reflected: the renderer's alone.
+	 */
+	TArray<FVoxelVertex> RenderVertices;
+
+	/** The positions' bounds, made with RenderVertices (the renderer's chunk-local bounds) */
+	FBox RenderBounds = FBox(ForceInit);
+
+	/**
+	 * Convert a mesh to the renderer's vertices, its positions' bounds in the same pass (FVoxelMeshRenderer's conversion,
+	 * shared with the mesh workers). Pure; any thread.
+	 *
+	 * @param MeshData The mesher's mesh (normals, UVs, colours and blends full-size or absent)
+	 * @param OutVertices Receives a vertex per position
+	 * @param OutLocalBounds Receives the positions' bounds (invalid for no vertex)
+	 */
+	static void ConvertToVoxelVertices(const FChunkMeshData& MeshData, TArray<FVoxelVertex>& OutVertices, FBox& OutLocalBounds);
+
+	/**
+	 * Make RenderVertices and RenderBounds from this mesh (a mesh worker, G294), and drop the attributes only the
+	 * conversion reads (normals, UVs, colours, blends; the positions and indices stay: the mesh's validity, its counts
+	 * and the renderer's indices). Any thread, on a mesh no other thread reads.
+	 *
+	 * @param bDropConverted Drop the converted attributes (a mesh only the renderer takes; false keeps them)
+	 */
+	void PrepareRenderVertices(bool bDropConverted);
+
+	/** @return Whether RenderVertices hold this mesh's vertices (one per position) */
+	FORCEINLINE bool HasRenderVertices() const
+	{
+		return Positions.Num() > 0 && RenderVertices.Num() == Positions.Num();
+	}
+
 	/** Clear all mesh data */
 	void Reset()
 	{
@@ -126,6 +162,8 @@ struct VOXELCORE_API FChunkMeshData
 		Indices.Reset();
 		bHasMaskedMaterial = false;
 		PrebuiltLumenCards.Reset();
+		RenderVertices.Reset();
+		RenderBounds = FBox(ForceInit);
 	}
 
 	/** Check if mesh has valid data */
@@ -155,6 +193,7 @@ struct VOXELCORE_API FChunkMeshData
 			+ UV1s.GetAllocatedSize()
 			+ Colors.GetAllocatedSize()
 			+ MaterialBlends.GetAllocatedSize()
-			+ Indices.GetAllocatedSize();
+			+ Indices.GetAllocatedSize()
+			+ RenderVertices.GetAllocatedSize();
 	}
 };

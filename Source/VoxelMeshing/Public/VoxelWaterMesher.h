@@ -44,6 +44,21 @@ public:
 		TArray<bool>& OutMask);
 
 	/**
+	 * The column mask as it was built before G294: each column walked up from its bottom voxel, a slice apart in memory,
+	 * stopping at its first water. The same mask as BuildColumnMask, several times slower on a 64-voxel chunk; kept for
+	 * the A/B cvar voxel.Water.StridedScans and the test that compares the two.
+	 *
+	 * @param VoxelData Raw voxel data array (ChunkSize^3 elements)
+	 * @param ChunkSize Number of voxels per chunk axis
+	 * @param OutMask Pre-allocated bool array (ChunkSize * ChunkSize); wet columns are set, the others left as they are
+	 * @return True if any water was found
+	 */
+	static bool BuildColumnMaskByColumn(
+		const TArray<FVoxelData>& VoxelData,
+		int32 ChunkSize,
+		TArray<bool>& OutMask);
+
+	/**
 	 * Generate water mesh from a pre-built column mask.
 	 *
 	 * Takes a combined column mask (OR of multiple chunks' partial masks)

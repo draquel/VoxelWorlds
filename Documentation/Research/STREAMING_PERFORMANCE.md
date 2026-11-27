@@ -157,6 +157,23 @@ chunk meshes alone, a figure no buffer had: records older than G119 read low aga
   `Scripts/qa/stream_probe.py` runs both through a list of phases in one PIE and tables each phase, with the
   collision's arrival after each teleport. `voxel.Collision.CookStats` gives a cook's stages on its worker. In an
   Insights trace each section of the chunk manager's tick has a `VoxelTick_*` scope.
+- **A mesh submit's cost was the water's, not the renderer's** (G294, closed 2026-11-26). After G282 the submits of a
+  teleport onto fresh ground were most of the tick for ten seconds, about 0.6 ms each, and taken to be the renderer's.
+  With a scope on each part of a submit (`VoxelSubmit_*`, `VoxelWater_*`; `RENDERING_SYSTEM.md`, "What a submit costs
+  the game thread"), a traced teleport on VoxelDemo split its 931 submits' 583 to 619 ms as the water 390 to 417 (the
+  water tile's column mask 300 to 323 of it), the scatter's hand-off 77 to 80 (G295), the renderer 62 to 66, the seam
+  registry about 29: the mask and the water pull walked each chunk's 1 MB of voxels a slice apart a step, a page a voxel.
+  Both walk in the array's order now, with the same masks and flood (`WATER_SYSTEM.md`, "What the water costs a mesh
+  submit"; `voxel.Water.StridedScans 1` is the walk before): alternated in one editor, three teleports a side, the
+  submits 350 to 366 ms against 583 to 619, 376 to 393 µs a submit against 627 to 665. On a block world the vertex
+  conversion was 93 to 101 ms of a teleport's submits and now runs on the mesh worker (`RENDERING_SYSTEM.md`, "The
+  render vertices on the mesh worker"; `voxel.Mesh.PrepareRenderVertices 0` converts at the submit): `Review_Cubic`'s
+  submits 702 to 711 ms against 308 to 320 with both changes. Over 14 s after each of three teleports a side the probe
+  read the submit section at 0.51 to 0.53 ms a frame against 0.84 to 0.91, the tick at 3.10 to 3.18 ms against 3.45 to
+  3.69, with the same submits a frame and the same cooks. `voxel.Stream.Probe` records
+  the submit section's parts (`SubRendererMs`, `SubScatterMs`, `SubWaterMs`) and the parent project's `Scripts/qa/stream_probe.py`
+  tables them per phase; its `Scripts/qa/scope_table.py` tables a trace's scopes (`play_trace.py --scopes`) by count, total and
+  percentiles. What is left: the pull's face scan, 0.2 ms a pull about 1,300 times a teleport (G307).
 
 ---
 

@@ -713,6 +713,37 @@ ChunkManager::OnChunkMeshingComplete()
     └→ the chunk's seams restaled and queued; collision queued if in range
 ```
 
+**What a submit costs the game thread (G294, 2026-11-26).** Each part of a submit has its own scope in an Insights trace:
+`VoxelSubmit_Renderer` (the renderer's whole call) and inside it `VoxelSubmit_Convert` (`ConvertToVoxelVertices` with the
+bounds), `VoxelSubmit_FindRegion`, `VoxelSubmit_RegionChunk` (the region component's), `VoxelSubmit_ChunkInfo`,
+`VoxelSubmit_StartFade`, `VoxelSubmit_MeshCards` (the `FVoxelChunkMesh` and its Lumen cards), `VoxelSubmit_Nanite`,
+`VoxelSubmit_Retire`, `VoxelSubmit_Proxy` (the chunk primitive's proxy), `VoxelSubmit_CancelFade` and `VoxelSubmit_Bounds`;
+beside it in the chunk manager `VoxelSubmit_FindPending`, `VoxelSubmit_Scatter`, `VoxelSubmit_SeamHold`,
+`VoxelSubmit_SeamRegistry`, `VoxelSubmit_Water` (the pull and the water tile, `WATER_SYSTEM.md`), `VoxelSubmit_FreeMesh`
+and `VoxelSubmit_Loaded`; the region's flush has `VoxelSubmit_FlushPrimitives`. In a traced teleport onto fresh ground on
+VoxelDemo (931 submits, 435 of them a mesh and the rest an empty chunk's removal) the renderer's part was 59 to 66 ms of
+the submits' 583 to 619, 70 µs a submit: the region's work 50 ms (115 µs a mesh; of it the fade's start 60 µs, the proxy
+16 µs, the retire 4 µs, the bounds 4 µs, the mesh with its prebuilt cards under 1 µs), the conversion 11 ms (25 µs a
+mesh), and the primitives' flush 16 ms over the frames (outside the submit). What the submits did cost there was the
+water's (390 to 417 ms, `WATER_SYSTEM.md`, "What the water costs a mesh submit"), now 159 to 166. On a block world
+(`Review_Cubic`, 947 submits, 483 meshes) the conversion was 93 to 94 ms a teleport, 192 to 195 µs a mesh: a cubic mesh
+has more vertices, and the conversion wrote them into a fresh allocation on the game thread.
+
+**The render vertices on the mesh worker (G294).** The conversion is pure, so the chunk's mesh job runs it on its
+worker beside the Lumen cards (`FChunkMeshData::PrepareRenderVertices`, the one conversion,
+`FChunkMeshData::ConvertToVoxelVertices`, which `ConvertToVoxelVertices` here calls too): `FChunkMeshData::RenderVertices`
+and `RenderBounds` ride the mesh to the submit, and the job drops the attributes only the conversion read (normals, UVs,
+colours, blends; the positions and indices stay). The submit moves them in (`HasRenderVertices`) and converts a mesh that
+came another way, and `FVoxelSubmitCounters` counts both. The job prepares only for a renderer that takes them
+(`IVoxelMeshRenderer::TakesPreparedVertices`, true here) and never on a dedicated server, whose renderer still converts
+at the submit; `voxel.Mesh.PrepareRenderVertices 0` converts at the submit as before. The same bytes reach the region:
+the conversion now starts each vertex's two packed words from zero (bits 28-31 of the material word, which nothing reads,
+held whatever the allocation held), and `Streaming.PreparedVertices.SmoothSameData` and `.CubicSameData` stream a plane both ways, dig,
+and find every chunk's vertices, indices, bounds and drawn triangles the same (`Meshing.PreparedRenderVertices`: each
+mesher's prepared vertices byte for byte against the conversion). A queued mesh holds its positions and its render
+vertices (40 bytes a vertex) where it held the mesher's arrays (36 to 48), and a result superseded, discarded or
+deduplicated before its submit frees them with its mesh.
+
 ---
 
 ## Debugging

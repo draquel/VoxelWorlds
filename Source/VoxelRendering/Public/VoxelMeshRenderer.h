@@ -13,6 +13,25 @@ class UVoxelMaterialAtlas;
 class UTexture2D;
 class UWorld;
 class UVoxelWorldConfiguration;
+struct FVoxelPrebuiltChunkMeshCards;
+
+/**
+ * The chunk meshes FVoxelMeshRenderer took with the vertices their mesh worker prepared and the ones it converted at the
+ * submit (G294: the streaming tests' and the A/B's evidence of the path a submit took). Totals since the process started.
+ */
+struct VOXELRENDERING_API FVoxelSubmitCounters
+{
+	struct FCounts
+	{
+		/** Chunk meshes submitted with their prepared vertices (FChunkMeshData::HasRenderVertices) */
+		int64 PreparedTaken = 0;
+		/** Chunk meshes converted at the submit */
+		int64 Converted = 0;
+	};
+
+	/** @return The totals (any thread) */
+	static FCounts Get();
+};
 
 /**
  * GPU-driven Custom Vertex Factory renderer.
@@ -59,6 +78,8 @@ public:
 		const FIntVector& ChunkCoord,
 		int32 LODLevel,
 		FChunkMeshData&& MeshData) override;
+	/** The chunk manager's mesh jobs prepare this renderer's vertices (G294): it takes them at the submit */
+	virtual bool TakesPreparedVertices() const override { return true; }
 	virtual void RemoveChunk(const FIntVector& ChunkCoord) override;
 	virtual void ClearAllChunks() override;
 
@@ -135,6 +156,17 @@ public:
 	 */
 	void GetRegionComponents(TArray<TPair<FIntVector, UVoxelRegionComponent*>>& OutComponents) const;
 
+	/**
+	 * Record, per chunk, a hash of what each submit hands its region (the vertices, the indices and the bounds), for tests
+	 * that compare two ways of making a mesh's render data (G294: voxel.Mesh.PrepareRenderVertices). Off by default.
+	 *
+	 * @param bRecord Record from now on (true) or stop and forget (false)
+	 */
+	void SetRecordSubmittedVertexHashes(bool bRecord);
+
+	/** @return The recorded hashes, per chunk with a mesh (SetRecordSubmittedVertexHashes) */
+	const TMap<FIntVector, uint64>& GetSubmittedVertexHashes() const { return SubmittedVertexHashes; }
+
 private:
 	// ==================== Internal Helpers ====================
 
@@ -151,12 +183,14 @@ private:
 		TArray<FVoxelVertex>& OutVertices,
 		FBox& OutLocalBounds);
 
-	/** Shared submit body for the copy/move UpdateChunkMeshFromCPU variants */
+	/** Shared submit body for the copy/move UpdateChunkMeshFromCPU variants: the vertices converted or prepared */
 	void SubmitChunkMeshInternal(
 		const FIntVector& ChunkCoord,
 		int32 LODLevel,
-		const FChunkMeshData& MeshData,
-		TArray<uint32>&& Indices);
+		TArray<FVoxelVertex>&& Vertices,
+		const FBox& LocalBounds,
+		TArray<uint32>&& Indices,
+		const TSharedPtr<const FVoxelPrebuiltChunkMeshCards, ESPMode::ThreadSafe>& PrebuiltCards);
 
 	/** Calculate chunk bounds from mesh data */
 	FBox CalculateChunkBounds(const FIntVector& ChunkCoord) const;
@@ -231,6 +265,10 @@ private:
 
 	/** Game thread chunk tracking */
 	TMap<FIntVector, FChunkStats> ChunkStatsMap;
+
+	/** Tests' record of what each chunk's last submit handed its region (SetRecordSubmittedVertexHashes) */
+	bool bRecordSubmittedVertexHashes = false;
+	TMap<FIntVector, uint64> SubmittedVertexHashes;
 
 	/** Total statistics */
 	int64 TotalVertexCount = 0;
