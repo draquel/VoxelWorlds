@@ -248,6 +248,12 @@ public:
 	int64 GetTotalDeferredFirstExtractions() const { return TotalDeferredFirstExtractions; }
 
 	/**
+	 * Extractions launched from the pending queue that were not at its back, the nearest when queued: a viewer moved on
+	 * while the queue was behind and a chunk nearer it now went first (voxel.Scatter.LaunchNearest, G299). Since Initialize.
+	 */
+	int64 GetLaunchedOutOfQueueOrder() const { return LaunchedOutOfQueueOrder; }
+
+	/**
 	 * The scatter horizon: the largest distance any enabled scatter type spawns at (its SpawnDistance, or ScatterRadius
 	 * when 0; VoxelInjection types the tree mode rules out left out). A chunk beyond it has nothing to extract.
 	 */
@@ -493,6 +499,13 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Voxel|Scatter")
 	int32 GetPendingGenerationCount() const { return PendingGenerationQueue.Num() + AsyncScatterInProgress.Num(); }
+
+	/**
+	 * Whether a chunk waits in the pending queue for its extraction's launch (not launched yet), for tests and audits.
+	 * @param ChunkCoord The chunk
+	 * @return True while it is queued; false once launched, done, or never handed off
+	 */
+	bool IsChunkQueuedForExtraction(const FIntVector& ChunkCoord) const { return PendingQueueSet.Contains(ChunkCoord); }
 
 	// ==================== The hand-off ====================
 
@@ -850,6 +863,9 @@ protected:
 	/** Hand-offs the distance pass asked for (GetTotalDeferredFirstExtractions). */
 	int64 TotalDeferredFirstExtractions = 0;
 
+	/** Launches out of the queue's order (GetLaunchedOutOfQueueOrder, G299). */
+	int64 LaunchedOutOfQueueOrder = 0;
+
 	/** A type's spawn distance: its SpawnDistance, or ScatterRadius when 0. */
 	float GetEffectiveSpawnDistance(const FScatterDefinition& Def) const
 	{
@@ -1068,6 +1084,14 @@ protected:
 
 	/** Process pending scatter generation queue */
 	void ProcessPendingGenerationQueue();
+
+	/**
+	 * The pending queue's entry whose chunk is nearest a viewer now (GetViewerDistance), of equal distances the one
+	 * furthest back (G299). The queue is sorted by the distances its chunks had when queued, which go stale as a viewer
+	 * moves while the queue is behind.
+	 * @return The entry's index; the queue must not be empty
+	 */
+	int32 FindNearestPendingIndex() const;
 
 	// ==================== Async Scatter Generation ====================
 

@@ -1100,6 +1100,36 @@ Game Thread:               Drain Result -> Cache -> HISM Update
 - `MaxAsyncScatterTasks` (1-4, default 2): Max concurrent async tasks
 - `MaxScatterGenerationsPerFrame` (default 2): Max tasks launched per frame
 
+### The launch order (G299)
+
+The pending queue (`PendingGenerationQueue`) is sorted by each chunk's distance from a viewer when it was queued, and
+until G299 its launches took the queue's back, the chunk nearest the viewer at that time. Where extractions keep up
+(a client or a standalone game: the queue is empty within a frame or two) the order never mattered. A dedicated server
+process runs on four task workers and generates its window on the CPU (G289), so its extractions lag the chunks
+arriving: on `VoxelDemo`, walking at 500 uu/s, its queue grew from 67 to 221 chunks over a minute and held the chunks
+queued around where its player had been, while the chunks under the walking player waited behind them. The client
+had those chunks' trees and its pawn walked up their trunks (the scatter's collision, G149). The server had no tree
+there (`voxel.Scatter.Digest` reported the chunk not cached), so it corrected the client by 20 to 80 uu at each tree
+(`Scripts/qa/server_process.py`).
+
+Now each launch takes the queued chunk nearest a viewer now (`FindNearestPendingIndex`, `GetViewerDistance`, which
+covers a server's further viewers), the back's on a tie, so the queue's own order still decides when nobody moved.
+`voxel.Scatter.LaunchNearest` (1, on; 0 is the queue's order before G299, an A/B switch) chooses between the two. A
+scan of the queue per launch, at most `MaxScatterGenerationsPerFrame` launches a frame, costs nothing measurable at
+the 250 chunks a server queues. `voxel.Scatter.Stats` reports the queue, the nearest queued chunk's distance from a
+viewer and how many launches left the queue's order.
+
+Measured with `Scripts/qa/server_process_ab.py` (a dedicated server process on the CPU and a `-game` client on the
+GPU, a 60 s walk along `vox.AutoRun 1 0.1 0`), five runs a side, the sides alternated, 2026-11-28. With the queue's
+order, 13 to 46 corrections a walk (32.6 on average), 98 of them over 10 uu, the largest 71.5 uu. Launching the
+nearest gave 13 to 18 (16.6), 4 over 10 uu, the largest 24.4. Those 4 are one correction a run, at the walk's end:
+`vox.AutoRun 0 0 0` zeroes the client's velocity, which the server does not do. What is left (2 to 8 uu, at the chunk
+faces the walk crosses) is the server's collision, not scatter ([STREAMING_AND_SEAMS.md](STREAMING_AND_SEAMS.md),
+"Neighbour re-cooks on a server process", D201). Both machines stood on the same trees. The nearest queued chunk at the
+walk's end was 13 to 14 km from the player, against 2 to 6 km with the queue's order. The spawn points are the same
+either way: only when a chunk's scatter arrives changes. Test: `VoxelWorlds.Scatter.LaunchNearest`, a row of eight
+chunks queued from one end and launched with the viewer at the other.
+
 ### Edge Cases
 - **Chunk unloaded during async**: Result arrives, chunk not in tracking -> discarded
 - **Chunk unloaded and reloaded**: both caches were dropped on unload, so the reload's result is a first pass (cached,

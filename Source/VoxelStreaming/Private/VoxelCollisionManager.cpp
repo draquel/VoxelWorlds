@@ -121,6 +121,16 @@ static TAutoConsoleVariable<int32> CVarCollisionNeighborWait(
 	TEXT("UVoxelWorldsSettings::bCollisionNeighborWait; the cvar overrides it once set."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<float> CVarCollisionRecookNearChunks(
+	TEXT("voxel.Collision.RecookNearChunks"),
+	0.0f,
+	TEXT("G299, D201 (open: the user's decision; an A/B switch, 0 by default): N > 0 = a neighbour re-cook of a chunk whose centre is\n")
+	TEXT("within N chunk widths of a focus queues as a first cook at its distance would; 0 = below every first cook (G32), as\n")
+	TEXT("before. A machine whose cooks lag (a dedicated server process: four workers, the CPU generating its window) launches\n")
+	TEXT("first cooks without end, so a re-cook below them was never launched and the server kept a cook that read a neighbour\n")
+	TEXT("as air under a walking player, a few uu off the client's re-cooked collision at every chunk face."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<float> CVarCollisionNeighborWaitChunks(
 	TEXT("voxel.Collision.NeighborWaitChunks"),
 	2.0f,
@@ -609,6 +619,13 @@ float UVoxelCollisionManager::GetDirtyPriority(const FChunkCollisionData& Data, 
 	const float FirstCook = CollisionRadius - Distance;
 	if (Data.bNeighborRecookOnly)
 	{
+		// Near a focus (D201, off by default): as a first cook at this distance, so a machine whose first cooks never run out
+		// still re-cooks the ground its players walk on (G299).
+		const float NearChunks = CVarCollisionRecookNearChunks.GetValueOnGameThread();
+		if (NearChunks > 0.0f && Configuration && Distance <= NearChunks * Configuration->GetChunkWorldSize())
+		{
+			return FirstCook;
+		}
 		// Below every first cook: the old body is live and only its boundary cells facing the new neighbour are off, while a
 		// chunk without collision has nothing. Waiting in the queue also folds the neighbours still arriving into one re-cook.
 		return FirstCook - 2.0f * FMath::Max(CurrentEffectiveRadius, CollisionRadius) - 1000.0f;

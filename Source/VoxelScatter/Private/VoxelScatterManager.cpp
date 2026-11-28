@@ -69,6 +69,15 @@ static TAutoConsoleVariable<int32> CVarVoxelScatterTickBudget(
 	TEXT("pass cut short resumes there). 0 = every piece in the tick it comes up (before G295; an A/B)."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarVoxelScatterLaunchNearest(
+	TEXT("voxel.Scatter.LaunchNearest"),
+	1,
+	TEXT("G299: 1 = each extraction launched from the pending queue is the chunk nearest a viewer now (the streaming viewer or,\n")
+	TEXT("on a server, any other player). 0 = the queue's order, its chunks' distances when they were queued (before G299; an\n")
+	TEXT("A/B): a machine whose extractions lag (a dedicated server process) worked through the chunks queued around where\n")
+	TEXT("the player was, while the chunks under the player waited. A queue that is not behind launches the same chunks either way."),
+	ECVF_Default);
+
 /** The scatter HISM regions by default (voxel.Scatter.RegionChunks -1), every world mode: a quarter of the render regions' edge. */
 static constexpr int32 DefaultScatterRegionChunks = 4;
 
@@ -1617,7 +1626,7 @@ FString UVoxelScatterManager::GetDebugStats() const
 		TEXT("Initialized: %s\n")
 		TEXT("Definitions: %d\n")
 		TEXT("Chunks with Scatter: %d\n")
-		TEXT("Pending Queue: %d\n")
+		TEXT("Pending Queue: %d (the nearest %.0f uu from a viewer; %lld launched out of the queue's order, G299)\n")
 		TEXT("Async In-Flight: %d / %d\n")
 		TEXT("Distance Stream In-Flight: %d / %d\n")
 		TEXT("Awaiting First Extraction: %d (handed off by the distance pass: %lld, horizon %.0f)\n")
@@ -1634,6 +1643,9 @@ FString UVoxelScatterManager::GetDebugStats() const
 		ScatterDefinitions.Num(),
 		Stats.ChunksWithScatter,
 		PendingGenerationQueue.Num(),
+		PendingGenerationQueue.Num() > 0 ? GetViewerDistance(GetChunkWorldOrigin(PendingGenerationQueue[FindNearestPendingIndex()].ChunkCoord)
+			+ FVector(Configuration ? Configuration->GetChunkWorldSize() * 0.5 : 0.0)) : 0.0f,
+		LaunchedOutOfQueueOrder,
 		AsyncScatterInProgress.Num(), MaxAsyncScatterTasks,
 		DistanceStreamInProgress.Num(), MaxDistanceStreamTasks,
 		ChunksAwaitingFirstExtraction.Num(), TotalDeferredFirstExtractions, GetScatterHorizon(),
@@ -1751,6 +1763,7 @@ void UVoxelScatterManager::ProcessPendingGenerationQueue()
 	}
 
 	int32 LaunchedCount = 0;
+	const bool bLaunchNearest = CVarVoxelScatterLaunchNearest.GetValueOnGameThread() != 0;
 
 	// Launch from back of queue (closest chunks are at back, due to reversed sort)
 	for (int32 i = 0; i < NumToLaunch; ++i)
@@ -1760,10 +1773,16 @@ void UVoxelScatterManager::ProcessPendingGenerationQueue()
 			break;
 		}
 
-		// Take last item (closest chunk — O(1) pop from back)
-		FPendingScatterGeneration Request = MoveTemp(PendingGenerationQueue.Last());
-		PendingGenerationQueue.Pop(EAllowShrinking::No);
+		// The chunk nearest a viewer now (G299), or the last item: the nearest when it was queued (O(1) pop from back). The
+		// queue keeps its sorted insertion, so the search starts from the back, where the nearest usually still is.
+		const int32 Index = bLaunchNearest ? FindNearestPendingIndex() : PendingGenerationQueue.Num() - 1;
+		FPendingScatterGeneration Request = MoveTemp(PendingGenerationQueue[Index]);
+		PendingGenerationQueue.RemoveAt(Index, EAllowShrinking::No);
 		PendingQueueSet.Remove(Request.ChunkCoord);
+		if (Index != PendingGenerationQueue.Num())
+		{
+			++LaunchedOutOfQueueOrder;
+		}
 
 		// Launch async scatter generation on thread pool
 		LaunchAsyncScatterGeneration(MoveTemp(Request));
@@ -1775,6 +1794,25 @@ void UVoxelScatterManager::ProcessPendingGenerationQueue()
 		UE_LOG(LogVoxelScatter, Verbose, TEXT("Launched %d async scatter tasks (%d queued, %d in-flight)"),
 			LaunchedCount, PendingGenerationQueue.Num(), AsyncScatterInProgress.Num());
 	}
+}
+
+int32 UVoxelScatterManager::FindNearestPendingIndex() const
+{
+	check(PendingGenerationQueue.Num() > 0);
+	const double HalfChunk = Configuration ? Configuration->GetChunkWorldSize() * 0.5 : 0.0;
+	int32 Best = PendingGenerationQueue.Num() - 1;
+	float BestDistance = TNumericLimits<float>::Max();
+	for (int32 Index = PendingGenerationQueue.Num() - 1; Index >= 0; --Index)
+	{
+		const float Distance = GetViewerDistance(GetChunkWorldOrigin(PendingGenerationQueue[Index].ChunkCoord) + FVector(HalfChunk));
+		// Strictly nearer: of equal distances the one further back (the queue's own choice) is kept.
+		if (Distance < BestDistance)
+		{
+			BestDistance = Distance;
+			Best = Index;
+		}
+	}
+	return Best;
 }
 
 bool UVoxelScatterManager::PassesTreeModeRule(const FScatterDefinition& Def, float ChunkDistance) const
