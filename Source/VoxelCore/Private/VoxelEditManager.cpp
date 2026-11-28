@@ -12,6 +12,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Misc/Optional.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "Engine/World.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogVoxelEdit, Log, All);
 
@@ -29,6 +30,14 @@ static TAutoConsoleVariable<int32> CVarVoxelEditChunkSetWrite(
 	TEXT("A/B (G291): 1 = ApplySetVoxelsInChunk writes a chunk's Set voxels in one pass (the layer looked up once and reserved, ")
 	TEXT("one lookup a voxel, the change record dropped where nothing reads it); 0 = through ApplyEdit one voxel at a time, ")
 	TEXT("in the same single operation. The edit layer, the broadcasts and the replication are the same either way."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVoxelEditTrace(
+	TEXT("voxel.Edit.Trace"),
+	0,
+	TEXT("Diagnostic (G299): 1 = log every edit broadcast ([EditTrace]: the world and its net mode, the chunk, the source, ")
+	TEXT("the centre and radius, the voxel bounds, the operation's description); 2 = also the call stack that broadcast it ")
+	TEXT("(slow: a stack walk a broadcast). Compares which edits each machine of a session makes, and when."),
 	ECVF_Default);
 
 // File format version for binary serialization
@@ -1343,6 +1352,22 @@ void UVoxelEditManager::BroadcastChunkEdited(const FIntVector& ChunkCoord, EEdit
 	float EditRadius, const FVoxelEditedVoxelBounds& Bounds)
 {
 	// Listeners may edit in turn (water propagation): keep the outer broadcast's bounds for the rest of its listeners.
+	if (const int32 Trace = CVarVoxelEditTrace.GetValueOnGameThread())
+	{
+		const UWorld* World = GetWorld();
+		const TCHAR* Net = !World ? TEXT("none") : World->GetNetMode() == NM_DedicatedServer ? TEXT("server")
+			: World->GetNetMode() == NM_ListenServer ? TEXT("listen") : World->GetNetMode() == NM_Client ? TEXT("client") : TEXT("standalone");
+		const TCHAR* SourceName = Source == EEditSource::Player ? TEXT("Player") : Source == EEditSource::System ? TEXT("System") : TEXT("Editor");
+		UE_LOG(LogVoxelEdit, Log, TEXT("[EditTrace] world=%s net=%s t=%.3f chunk=(%d,%d,%d) source=%s centre=(%.0f,%.0f,%.0f) radius=%.0f bounds=%s op='%s'"),
+			World ? *World->GetName() : TEXT("none"), Net, World ? World->GetTimeSeconds() : 0.0,
+			ChunkCoord.X, ChunkCoord.Y, ChunkCoord.Z, SourceName, EditCenter.X, EditCenter.Y, EditCenter.Z, EditRadius,
+			Bounds.IsValid() ? *FString::Printf(TEXT("(%d,%d,%d)-(%d,%d,%d)"), Bounds.Min.X, Bounds.Min.Y, Bounds.Min.Z, Bounds.Max.X, Bounds.Max.Y, Bounds.Max.Z) : TEXT("none"),
+			CurrentOperation.IsValid() ? *CurrentOperation->Description : TEXT(""));
+		if (Trace >= 2)
+		{
+			FDebug::DumpStackTraceToLog(TEXT("[EditTrace] stack"), ELogVerbosity::Log);
+		}
+	}
 	const FVoxelEditedVoxelBounds* Outer = ActiveBroadcastBounds;
 	ActiveBroadcastBounds = &Bounds;
 	OnChunkEdited.Broadcast(ChunkCoord, Source, EditCenter, EditRadius);

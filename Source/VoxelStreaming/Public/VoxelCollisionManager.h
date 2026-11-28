@@ -383,6 +383,17 @@ public:
 	UVoxelCollisionManager();
 
 	/**
+	 * The cook priority of a dirty chunk at a distance: an edit's above a first cook's at the same distance, a
+	 * neighbour arrival's re-cook below every first cook's (FChunkCollisionData::bNeighborRecookOnly), or with
+	 * voxel.Collision.RecookNearChunks N > 0 a first cook's at that distance within N chunk widths of a focus (D201, G299).
+	 *
+	 * @param Data The chunk's collision state (bNeedsUpdate set)
+	 * @param Distance The chunk centre's distance from the nearest focus
+	 * @return The priority to request it at
+	 */
+	float GetDirtyPriority(const FChunkCollisionData& Data, float Distance) const;
+
+	/**
 	 * Per-Update game-thread sub-phase attribution (milliseconds), read by the chunk manager
 	 * into FVoxelTimingStats after Update(): cook-launch preparation (request build + neighbor
 	 * slices) vs completed-cook application (BodySetup + collision component recreation).
@@ -808,15 +819,6 @@ protected:
 	 */
 	void ForcePathCoverage(const FVector& FocusPosition, const FVector& FocusVelocity);
 
-	/**
-	 * The cook priority of a dirty chunk at a distance: an edit's above a first cook's at the same distance, a
-	 * neighbour arrival's re-cook below every first cook's (FChunkCollisionData::bNeighborRecookOnly).
-	 *
-	 * @param Data The chunk's collision state (bNeedsUpdate set)
-	 * @param Distance The chunk centre's distance from the focus
-	 * @return The priority to request it at
-	 */
-	float GetDirtyPriority(const FChunkCollisionData& Data, float Distance) const;
 
 	/**
 	 * Request the re-cooks of chunks whose missing neighbours arrived (PendingNeighborRecooks), each once none of its

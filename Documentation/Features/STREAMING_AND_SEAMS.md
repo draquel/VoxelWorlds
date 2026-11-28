@@ -397,6 +397,30 @@ mesh jobs are 26.4 to 26.6 thread-seconds of the same teleport (G311), and a che
 second path through collision. What is left is in `Documentation/FINDINGS.md`, G296 and G311. Test `Collision.MeshReach`
 (on a settled block world every re-cooked chunk is drawn at LOD 0 with its neighbours; the counts add up on a plane).
 
+**Neighbour re-cooks on a server process** (G299, decision D201, `Documentation/FINDINGS.md`). A re-cook queues below
+every first cook (`GetDirtyPriority`), and on a machine whose first cooks run out within a frame or two (a client, a
+standalone game, the editor's PIE) it runs right after them. A dedicated server process has four task workers and
+generates its window on the CPU (G289). While its player walks, first cooks keep queueing (each waits 11.5 s on average
+on `VoxelDemo`, against 0.01 s on a client), so the server's re-cooks never launch. The server kept, under the walking
+player, cooks that read a missing neighbour as air: at every chunk face the walk crossed, both chunks were cooked once
+with a re-cook waiting, with 3,400 to 4,000 more vertices than the client's cook of the same chunk. The server's floor
+was 2 to 8 uu off the client's there, and it corrected the client at most faces (`Scripts/qa/server_process.py`: 13 to
+18 corrections in a 60 s walk once the scatter launches the nearest chunk first, G299's other part, in
+[SCATTER_SYSTEM.md](SCATTER_SYSTEM.md), "The launch order"). `voxel.Collision.RecookNearChunks N` (0 by default until
+D201 is decided; an A/B switch) queues a re-cook within N chunk widths of a focus at a first cook's priority at its
+distance. At 2 on the server alone, five runs a side alternated with 0 (`Scripts/qa/server_process_ab.py`, 2026-11-28):
+1 to 3 corrections a walk against 13 to 18, none at a chunk face against 12 to 16, and every run passed against none.
+The server cooked 93 to 99 neighbour re-cooks against 44 to 46, and 12 to 17 cooks were left stale at the walk's end
+against 67 to 73. It costs the outer shell on the server. By the walk's end it had 467 first cooks on average against
+516, 120 of them arriving 3 to 5 widths from the player against 235 and 281 at 2 to 3 widths against 214. The first
+collision within 2 widths came the same (66 chunks, at the same times), so no player stood nearer a chunk without
+collision. On a client alone it changes nothing measurable (`stream_probe.py`, four teleports a side alternated in one
+editor: 82 to 93 re-cooks a teleport at 0 against 85 to 94 at 2, the first collision at 3 to 5 widths after 3.64 to
+4.03 s against 3.68 to 4.31, the frame the same): a client's first cooks run out, so its re-cooks ran right after them
+already. D196's wait (`voxel.Collision.NeighborWait 1` on the server) does not help here: 13 to 15 corrections, 11 to
+12 at a face, because the chunks under a walking player are the ones it never holds. Test `Collision.RecookNear` (the
+priorities at 0 and 2).
+
 `voxel.Collision.CookStats` reports the cooks by kind, the skips, the wait's holds, per distance band from the nearest
 focus when the first collision arrived, and where the cooked chunks' drawn meshes stood (the reach lines, G296).
 
