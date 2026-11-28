@@ -414,7 +414,10 @@ The server cooked 93 to 99 neighbour re-cooks against 44 to 46, and 12 to 17 coo
 against 67 to 73. It costs the outer shell on the server. By the walk's end it had 467 first cooks on average against
 516, 120 of them arriving 3 to 5 widths from the player against 235 and 281 at 2 to 3 widths against 214. The first
 collision within 2 widths came the same (66 chunks, at the same times), so no player stood nearer a chunk without
-collision. D196's wait (`voxel.Collision.NeighborWait 1` on the server) does not help here: 13 to 15 corrections, 11 to
+collision. On a client alone it changes nothing measurable (`stream_probe.py`, four teleports a side alternated in one
+editor: 82 to 93 re-cooks a teleport at 0 against 85 to 94 at 2, the first collision at 3 to 5 widths after 3.64 to
+4.03 s against 3.68 to 4.31, the frame the same): a client's first cooks run out, so its re-cooks ran right after them
+already. D196's wait (`voxel.Collision.NeighborWait 1` on the server) does not help here: 13 to 15 corrections, 11 to
 12 at a face, because the chunks under a walking player are the ones it never holds. Test `Collision.RecookNear` (the
 priorities at 0 and 2).
 
